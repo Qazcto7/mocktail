@@ -1,0 +1,820 @@
+// Copyright 2026 Mocktail Project Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+
+// Mocktail's composition root stays intentionally small. During the
+// upstream-first migration it delegates to the isolated legacy runtime; new
+// platform, JNI, loader, and service modules are linked as explicit targets.
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <filesystem>
+#include <iostream>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include "compat/elf_build_id.h"
+#include "compat/host_abi_profile.h"
+#include "compat/payload_compatibility.h"
+#include "legacy/legacy_runtime.h"
+#include "libc_shim/libc_shim.h"
+#include "mocktail/audio/fmod_jni_audio_bridge.h"
+#include "mocktail/audio/roblox_output_device_bridge.h"
+#include "runtime/auth_runtime_composition.h"
+#include "runtime/command_line.h"
+#include "runtime/crash_report_policy.h"
+#include "runtime/environment.h"
+#include "runtime/external_launch_broker.h"
+#include "runtime/failure_dialog.h"
+#include "runtime/game_mode.h"
+#include "runtime/graphics_launch_policy.h"
+#include "runtime/memory_limit.h"
+#include "runtime/payload_update_preflight.h"
+#include "runtime/performance_policy.h"
+#include "runtime/platform_cache_migration.h"
+#include "runtime/roblox_desktop_app_policy.h"
+#include "runtime/roblox_experience_launch_bridge.h"
+#include "runtime/roblox_fullscreen_runtime_bridge.h"
+#include "runtime/runtime_config_bootstrap.h"
+#include "runtime/runtime_config_file.h"
+#include "runtime/runtime_paths.h"
+#include "runtime/single_instance_lock.h"
+#include "runtime/support_bundle.h"
+#include "runtime/supported_launch_policy.h"
+#include "services/auth_service.h"
+#include "services/browser_tracker_service.h"
+#include "services/http_client.h"
+#include "window/window.h"
+
+namespace {
+
+struct AndroidWindowBridgeContext {};
+
+class ExternalLaunchBrokerScope final {
+ public:
+  ~ExternalLaunchBrokerScope() { (void)Shutdown(); }
+
+  std::shared_ptr<mocktail::runtime::ExternalLaunchBroker>& broker() {
+    return broker_;
+  }
+
+  mocktail::Status Shutdown() {
+    if (broker_ == nullptr) {
+      return mocktail::Status::Ok();
+    }
+    mocktail::runtime::ClearActiveExternalLaunchBroker(broker_.get());
+    mocktail::Status status = broker_->Shutdown();
+    broker_.reset();
+    return status;
+  }
+
+ private:
+  std::shared_ptr<mocktail::runtime::ExternalLaunchBroker> broker_;
+};
+
+void SecureErase(char* data, std::size_t size) {
+  volatile char* bytes = data;
+  for (std::size_t index = 0; bytes != nullptr && index < size; ++index) {
+    bytes[index] = '\0';
+  }
+}
+
+void SecureEraseArguments(std::vector<std::string>* arguments) {
+  if (arguments == nullptr) return;
+  for (std::string& argument : *arguments) {
+    SecureErase(argument.data(), argument.size());
+  }
+  arguments->clear();
+}
+
+bool QueueAndroidWindowFlags(void*, int flags, int mask) {
+  return mocktail::window::RequestFullscreenFromAndroidWindowFlags(flags, mask);
+}
+
+mocktail::Status ShutdownPlatformBridges(jnivm::VM* vm) {
+  if (vm == nullptr) {
+    return mocktail::Status::Error(mocktail::StatusCode::kInvalidArgument,
+                                   "platform bridge shutdown requires a VM");
+  }
+  vm->ClearAndroidWindowCallbacks();
+  return mocktail::audio::ShutdownFmodJniAudioBridge(vm);
+}
+
+}  // namespace
+
+int main(int argc, char* argv[]) {
+  mocktail::runtime::CommandLineParseResult command_line =
+      mocktail::runtime::ParseCommandLine(argc, argv);
+  if (!command_line) {
+    std::cerr << command_line.error << "\n\n"
+              << mocktail::runtime::CommandLineUsage(
+                     command_line.options.program_name);
+    return EXIT_FAILURE;
+  }
+  if (command_line.options.mode == mocktail::runtime::CommandMode::kHelp) {
+    std::cout << mocktail::runtime::CommandLineUsage(
+        command_line.options.program_name);
+    return EXIT_SUCCESS;
+  }
+  std::string command_line_error;
+  if (!mocktail::runtime::ApplySupportedLaunchPolicy(
+          command_line.options.mode == mocktail::runtime::CommandMode::kRun,
+          &command_line_error)) {
+    std::cerr << "[FATAL] " << command_line_error << '\n';
+    return EXIT_FAILURE;
+  }
+  if (!mocktail::runtime::ApplyCommandLineEnvironment(command_line.options,
+                                                      &command_line_error)) {
+    std::cerr << command_line_error << '\n';
+    return EXIT_FAILURE;
+  }
+
+  const mocktail::runtime::ProcessEnvironment environment;
+  const std::string built_in_compatibility_manifest = environment.GetOr(
+      "MOCKTAIL_UPDATE_COMPATIBILITY_PATH",
+      environment.GetOr("MOCKTAIL_COMPATIBILITY_MANIFEST",
+                        MOCKTAIL_DEFAULT_COMPATIBILITY_MANIFEST));
+  const mocktail::runtime::RuntimePaths paths =
+      mocktail::runtime::RuntimePaths::FromEnvironment(environment);
+  std::optional<mocktail::runtime::RobloxExperienceLaunchRequest>
+      external_launch_request;
+  if (!command_line.options.launch_request_json.empty()) {
+    external_launch_request.emplace();
+    const mocktail::Status launch_status =
+        mocktail::runtime::ParseRobloxExperienceLaunchJson(
+            command_line.options.launch_request_json,
+            &*external_launch_request);
+    if (!launch_status.ok()) {
+      std::cerr << "[FATAL] Invalid controlled website launch request\n";
+      return EXIT_FAILURE;
+    }
+  }
+  std::vector<std::string> cgroup_reexec_arguments;
+  if (!mocktail::runtime::BuildCommandLineReexecArguments(
+          command_line.options, argc, argv, &cgroup_reexec_arguments,
+          &command_line_error)) {
+    std::cerr << "[FATAL] " << command_line_error << '\n';
+    return EXIT_FAILURE;
+  }
+  mocktail::runtime::ScrubCommandLineLaunchArguments(&command_line.options,
+                                                     argc, argv);
+  mocktail::runtime::FailureSupportBundleGuard support_bundle_guard(
+      environment, paths,
+      command_line.options.mode == mocktail::runtime::CommandMode::kRun);
+  std::optional<mocktail::runtime::SingleInstanceLock> instance_lock;
+  ExternalLaunchBrokerScope external_launch_broker;
+  mocktail::runtime::ExternalLaunchBrokerOptions broker_options;
+  const bool isolated_canary =
+      environment.GetOr("MOCKTAIL_ISOLATED_CANARY", "0") == "1";
+  if (isolated_canary && external_launch_request.has_value()) {
+    std::cerr << "[FATAL] Website launches are unavailable inside isolated "
+                 "canary\n";
+    return EXIT_FAILURE;
+  }
+  if (command_line.options.mode == mocktail::runtime::CommandMode::kRun) {
+    instance_lock.emplace(
+        mocktail::runtime::SingleInstanceLock::AcquireForLaunch(environment,
+                                                                paths));
+    if (!instance_lock->acquired()) {
+      if (!isolated_canary && instance_lock->already_running() &&
+          external_launch_request.has_value()) {
+        const mocktail::Status forward_status =
+            mocktail::runtime::ExternalLaunchBroker::ForwardToOwner(
+                broker_options, *external_launch_request);
+        if (forward_status.ok()) {
+          std::cout << "  [launch] sent website join to running Mocktail\n";
+          support_bundle_guard.SetExitCode(EXIT_SUCCESS);
+          return EXIT_SUCCESS;
+        }
+        std::cerr << "[FATAL] Cannot send website join to running Mocktail: "
+                  << forward_status.message() << '\n';
+        (void)mocktail::runtime::ShowFailureDialog(
+            environment,
+            "Mocktail is already running, but the requested experience "
+            "could not be sent to it.");
+      } else if (instance_lock->already_running()) {
+        std::cerr << "[FATAL] Mocktail is already running for this user\n";
+        (void)mocktail::runtime::ShowFailureDialog(
+            environment, "An instance of Mocktail is already running.");
+      } else {
+        std::cerr << "[FATAL] " << instance_lock->error() << '\n';
+        (void)mocktail::runtime::ShowFailureDialog(
+            environment, "Mocktail could not acquire its launch lock.");
+      }
+      return EXIT_FAILURE;
+    }
+  }
+  const mocktail::runtime::RuntimeConfigBootstrapResult config_bootstrap =
+      mocktail::runtime::EnsureRuntimeConfigFile(paths.config_file());
+  if (!config_bootstrap) {
+    std::cerr << "[FATAL] Cannot prepare " << paths.config_file() << ": "
+              << config_bootstrap.error << '\n';
+    if (command_line.options.mode == mocktail::runtime::CommandMode::kRun) {
+      (void)mocktail::runtime::ShowFailureDialog(
+          environment, "Mocktail could not prepare its configuration.");
+    }
+    return EXIT_FAILURE;
+  }
+  if (config_bootstrap.created()) {
+    std::cout << "  [runtime] created first-run configuration: "
+              << paths.config_file() << '\n';
+  }
+  mocktail::runtime::RuntimeConfigLoadResult runtime_config =
+      mocktail::runtime::LoadRuntimeConfig(environment, paths.config_file());
+  if (!runtime_config) {
+    std::cerr << "[FATAL] Cannot load " << paths.config_file() << ": "
+              << runtime_config.error << '\n';
+    if (command_line.options.mode == mocktail::runtime::CommandMode::kRun) {
+      (void)mocktail::runtime::ShowFailureDialog(
+          environment, "Mocktail could not load its configuration.");
+    }
+    return EXIT_FAILURE;
+  }
+  if (command_line.options.mode == mocktail::runtime::CommandMode::kRun &&
+      runtime_config.config.has_unsafe_detached_thread_overrides()) {
+    std::cerr << "[FATAL] Unsupported detached legacy thread overrides:\n";
+    for (const std::string& name :
+         runtime_config.config.unsafe_detached_thread_overrides()) {
+      std::cerr << "  - " << name << '\n';
+    }
+    std::cerr << "  Supported runtime requires synchronous or owned worker "
+                 "execution.\n";
+    (void)mocktail::runtime::ShowFailureDialog(
+        environment,
+        "Mocktail cannot start with unsupported legacy thread "
+        "overrides enabled.");
+    return EXIT_FAILURE;
+  }
+  if (command_line.options.mode == mocktail::runtime::CommandMode::kRun &&
+      !mocktail::runtime::ApplyGraphicsLaunchPolicy(runtime_config.config,
+                                                     &command_line_error)) {
+    std::cerr << "[FATAL] " << command_line_error << '\n';
+    return EXIT_FAILURE;
+  }
+  mocktail::runtime::FailureDialogMonitor failure_dialog;
+  mocktail::runtime::MemoryLimitWatchdog memory_limit_watchdog;
+  const bool use_memory_limit =
+      command_line.options.mode == mocktail::runtime::CommandMode::kRun &&
+      runtime_config.config.performance().memory_limit_enabled();
+  const std::uint64_t memory_limit_bytes =
+      use_memory_limit
+          ? runtime_config.config.performance().memory_limit_bytes()
+          : 0;
+  if (use_memory_limit) {
+    const mocktail::runtime::CgroupMemoryLimitResult cgroup_limit =
+        mocktail::runtime::MaybeReexecWithCgroupMemoryLimit(
+            argc, argv, memory_limit_bytes, &cgroup_reexec_arguments);
+    if (cgroup_limit.active()) {
+      std::cout << "  [memory] hard process-tree limit active: "
+                << runtime_config.config.performance().memory_limit_mb
+                << " MiB RAM, swap disabled\n";
+    } else {
+      std::cerr << "  [memory] cgroup hard limit unavailable: "
+                << cgroup_limit.detail << "; using the RSS+swap watchdog\n";
+    }
+  }
+  if (command_line.options.mode == mocktail::runtime::CommandMode::kRun) {
+    std::cout << "  [runtime] graphics backend="
+              << runtime_config.config.graphics_backend_name()
+              << (runtime_config.config.graphics_backend() ==
+                          mocktail::runtime::GraphicsBackend::kSystem
+                      ? " (EGL/OpenGL ES)"
+                      : "")
+              << '\n';
+  }
+  if (command_line.options.mode == mocktail::runtime::CommandMode::kRun) {
+    failure_dialog = mocktail::runtime::FailureDialogMonitor::Start(
+        environment,
+        "Mocktail could not start Roblox because of an internal error.");
+  }
+  if (use_memory_limit) {
+    if (!memory_limit_watchdog.Start(memory_limit_bytes, &command_line_error)) {
+      failure_dialog.SetMessage(
+          "Mocktail could not start its memory safety monitor.");
+      std::cerr << "[FATAL] " << command_line_error << '\n';
+      return EXIT_FAILURE;
+    }
+    std::cout << "  [memory] RSS+swap watchdog active at "
+              << runtime_config.config.performance().memory_limit_mb
+              << " MiB\n";
+  }
+  SecureEraseArguments(&cgroup_reexec_arguments);
+  const bool uses_managed_payload =
+      !environment.HasNonEmpty("ROBLOX_LIB_PATH") &&
+      runtime_config.config.roblox_library_path() ==
+          std::filesystem::path("rbx_bin/libroblox.so");
+  if (!uses_managed_payload &&
+      !environment.HasNonEmpty("MOCKTAIL_ASSET_PATH")) {
+    const std::filesystem::path adjacent_assets =
+        mocktail::runtime::ResolveAdjacentRobloxAssetPath(
+            runtime_config.config.roblox_library_path(),
+            paths.working_directory());
+    if (adjacent_assets.empty() ||
+        setenv("MOCKTAIL_ASSET_PATH", adjacent_assets.c_str(), 1) != 0) {
+      std::cerr << "[FATAL] Cannot bind assets to explicit Roblox library\n";
+      return EXIT_FAILURE;
+    }
+    std::cout << "  [runtime] explicit Roblox library uses adjacent assets: "
+              << adjacent_assets << '\n';
+  }
+  if (command_line.options.mode == mocktail::runtime::CommandMode::kRun &&
+      uses_managed_payload) {
+    failure_dialog.SetMessage(
+        "Mocktail could not update or verify the Roblox installation.");
+    const mocktail::runtime::PayloadUpdatePreflightResult update_preflight =
+        mocktail::runtime::RunPayloadUpdatePreflight(environment, paths);
+    if (!update_preflight) {
+      std::cerr << "[FATAL] " << update_preflight.error << '\n';
+      return EXIT_FAILURE;
+    }
+    failure_dialog.SetMessage(
+        "Mocktail could not finish starting Roblox because of an internal "
+        "error.");
+  }
+  if (!mocktail::runtime::ExportRuntimePathEnvironment(paths,
+                                                       &command_line_error)) {
+    std::cerr << "[FATAL] " << command_line_error << '\n';
+    return EXIT_FAILURE;
+  }
+  if (command_line.options.mode == mocktail::runtime::CommandMode::kRun) {
+    const mocktail::Status window_state_status =
+        mocktail::window::ConfigureWindowStatePersistence(paths.state_root() /
+                                                          "window-state.json");
+    if (!window_state_status.ok()) {
+      std::cerr << "[FATAL] Cannot configure window state persistence: "
+                << window_state_status.message() << '\n';
+      return EXIT_FAILURE;
+    }
+  }
+  std::filesystem::path app_storage_file;
+  if (command_line.options.mode == mocktail::runtime::CommandMode::kRun) {
+    const mocktail::runtime::InputCapabilityConfig& input =
+        runtime_config.config.input_capabilities();
+    const std::string platform_profile =
+        mocktail::runtime::BuildPlatformProfileRevision(
+            runtime_config.config.device_profile().cache_key,
+            input.touch_enabled, input.mouse_enabled, input.keyboard_enabled);
+    const mocktail::runtime::PlatformCacheMigrationResult cache_migration =
+        mocktail::runtime::MigratePlatformProfileCaches(environment, paths,
+                                                        platform_profile);
+    if (!cache_migration) {
+      std::cerr << "[FATAL] Platform cache migration failed: "
+                << cache_migration.error << '\n';
+      return EXIT_FAILURE;
+    }
+    app_storage_file = cache_migration.app_storage_file;
+    if (cache_migration.transitioned) {
+      std::cout << "  [runtime] platform cache profile transitioned; "
+                << "refreshable identity and policy caches invalidated="
+                << (cache_migration.app_storage_updated ? 1 : 0) << '\n';
+    }
+  }
+  const bool needs_active_library =
+      !environment.HasNonEmpty("ROBLOX_LIB_PATH") &&
+      runtime_config.config.roblox_library_path() ==
+          std::filesystem::path("rbx_bin/libroblox.so");
+  const bool needs_active_assets =
+      !environment.HasNonEmpty("MOCKTAIL_ASSET_PATH");
+  if (needs_active_library || needs_active_assets) {
+    const mocktail::runtime::ActivePayloadPaths active =
+        paths.ResolveActivePayload();
+    if (!active) {
+      std::cerr << "[FATAL] Cannot resolve " << paths.active_payload_manifest()
+                << ": " << active.error << '\n';
+      return EXIT_FAILURE;
+    }
+    if (active.active) {
+      if (uses_managed_payload &&
+          !mocktail::runtime::PrepareManagedPayloadWorkingDirectory(
+              paths, active, &command_line_error)) {
+        std::cerr << "[FATAL] " << command_line_error << '\n';
+        return EXIT_FAILURE;
+      }
+      if ((needs_active_library &&
+           setenv("ROBLOX_LIB_PATH", active.roblox_library.c_str(), 1) != 0) ||
+          (needs_active_assets &&
+           setenv("MOCKTAIL_ASSET_PATH", active.assets_content.c_str(), 1) !=
+               0)) {
+        std::cerr << "[FATAL] Cannot activate resolved Roblox payload\n";
+        return EXIT_FAILURE;
+      }
+      if (uses_managed_payload) {
+        bool use_external_profile = !active.compatibility_manifest.empty();
+        if (use_external_profile) {
+          const mocktail::compat::BuildIdResult active_build_id =
+              mocktail::compat::ReadElfBuildId(active.roblox_library.string());
+          if (!active_build_id) {
+            std::cerr << "[FATAL] Cannot identify active Roblox payload: "
+                      << active_build_id.error << '\n';
+            return EXIT_FAILURE;
+          }
+          // An old local probation receipt can outlive the point where the
+          // exact Build ID becomes shipped support. Built-in profiles are
+          // immutable and must then use the repository manifest instead of
+          // attempting an external override.
+          use_external_profile = mocktail::compat::FindHostAbiProfile(
+                                     active_build_id.build_id) == nullptr;
+        }
+        if (use_external_profile) {
+          if (setenv("MOCKTAIL_COMPATIBILITY_MANIFEST",
+                     active.compatibility_manifest.c_str(), 1) != 0 ||
+              setenv("MOCKTAIL_HOST_ABI_PROFILE_FILE",
+                     active.host_abi_profile.c_str(), 1) != 0 ||
+              setenv("MOCKTAIL_HOST_ABI_APPROVAL_RECEIPT",
+                     active.host_abi_approval_receipt.c_str(), 1) != 0) {
+            std::cerr
+                << "[FATAL] Cannot activate approved Roblox ABI profile\n";
+            return EXIT_FAILURE;
+          }
+        } else if (setenv("MOCKTAIL_COMPATIBILITY_MANIFEST",
+                          built_in_compatibility_manifest.c_str(), 1) != 0 ||
+                   unsetenv("MOCKTAIL_HOST_ABI_PROFILE_FILE") != 0 ||
+                   unsetenv("MOCKTAIL_HOST_ABI_APPROVAL_RECEIPT") != 0) {
+          std::cerr << "[FATAL] Cannot activate built-in Roblox ABI profile\n";
+          return EXIT_FAILURE;
+        }
+      }
+      runtime_config = mocktail::runtime::LoadRuntimeConfig(
+          environment, paths.config_file());
+      if (!runtime_config) {
+        std::cerr << "[FATAL] Cannot resolve runtime configuration: "
+                  << runtime_config.error << '\n';
+        return EXIT_FAILURE;
+      }
+    }
+  }
+  if (!mocktail::runtime::ExportRuntimeConfigEnvironment(runtime_config.config,
+                                                         &command_line_error)) {
+    std::cerr << command_line_error << '\n';
+    return EXIT_FAILURE;
+  }
+  if (command_line.options.mode == mocktail::runtime::CommandMode::kRun &&
+      !environment.HasNonEmpty("MOCKTAIL_NATIVE_SET_DEFAULT_POLICY_FILE") &&
+      setenv("MOCKTAIL_NATIVE_SET_DEFAULT_POLICY_FILE", "1", 1) != 0) {
+    std::cerr << "[FATAL] Cannot enable Roblox default app-policy file\n";
+    return EXIT_FAILURE;
+  }
+  if (command_line.options.mode == mocktail::runtime::CommandMode::kRun) {
+    std::cout << "  [runtime] device profile="
+              << runtime_config.config.device_profile().name << " class="
+              << mocktail::runtime::DeviceClassName(
+                     runtime_config.config.device_profile().device_class)
+              << " model=\""
+              << runtime_config.config.device_profile().display_name << "\"\n";
+  }
+  if (command_line.options.mode == mocktail::runtime::CommandMode::kRun) {
+    std::string client_settings_overrides;
+    if (!mocktail::runtime::MergeRuntimeClientSettingsOverrides(
+            runtime_config.config.frame_rate(),
+            runtime_config.config.performance(),
+            environment.GetOr("MOCKTAIL_CLIENT_SETTINGS_OVERRIDES_JSON", "{}"),
+            &client_settings_overrides, &command_line_error)) {
+      std::cerr << "[FATAL] Cannot apply runtime client-settings policy: "
+                << command_line_error << '\n';
+      return EXIT_FAILURE;
+    }
+    if (setenv("MOCKTAIL_CLIENT_SETTINGS_OVERRIDES_JSON",
+               client_settings_overrides.c_str(), 1) != 0) {
+      std::cerr << "[FATAL] Cannot export runtime client-settings policy\n";
+      return EXIT_FAILURE;
+    }
+    std::cout << "  [runtime] HttpClient compatibility mode enabled: "
+                 "generic LuaApp retry and RuntimeMutexRv disabled\n";
+    std::string fast_flags_overrides;
+    if (!mocktail::runtime::MergeCrashReportFastFlagsOverrides(
+            environment.GetOr("MOCKTAIL_FAST_FLAGS_JSON", "{}"),
+            &fast_flags_overrides, &command_line_error)) {
+      std::cerr << "[FATAL] Cannot apply crash-report fast-flags policy: "
+                << command_line_error << '\n';
+      return EXIT_FAILURE;
+    }
+    if (setenv("MOCKTAIL_FAST_FLAGS_JSON", fast_flags_overrides.c_str(), 1) !=
+        0) {
+      std::cerr << "[FATAL] Cannot export crash-report fast-flags policy\n";
+      return EXIT_FAILURE;
+    }
+    std::cout << "  [runtime] Roblox crash-report uploads disabled by "
+                 "mandatory policy\n";
+    const auto physics_worker_mode =
+        runtime_config.config.performance().physics_worker_mode;
+    const int physical_core_count =
+        runtime_config.config.performance().physical_core_count;
+    const int engine_worker_count =
+        physics_worker_mode == mocktail::runtime::PhysicsWorkerMode::kThroughput
+            ? mocktail::runtime::CalculateThroughputWorkerCount(
+                  physical_core_count)
+            : physical_core_count;
+    if (physics_worker_mode == mocktail::runtime::PhysicsWorkerMode::kLatency) {
+      std::cout << "  [runtime] physics worker mode=latency: Roblox-managed "
+                   "worker pools, midphase batch=128\n";
+    } else if (physics_worker_mode ==
+               mocktail::runtime::PhysicsWorkerMode::kThroughput) {
+      std::cout << "  [runtime] physics worker mode=throughput: "
+                << engine_worker_count << " scheduler workers, async minimum="
+                << std::min(engine_worker_count, 3) << ", midphase batch=128\n";
+    }
+    if ((runtime_config.config.performance().multithreaded_rendering ||
+         physics_worker_mode ==
+             mocktail::runtime::PhysicsWorkerMode::kThroughput) &&
+        physics_worker_mode != mocktail::runtime::PhysicsWorkerMode::kLatency) {
+      std::cout << "  [runtime] full multithreaded engine queues enabled: "
+                << engine_worker_count << " scheduler workers, "
+                << std::max(1, engine_worker_count / 2)
+                << " occlusion workers\n";
+    } else if (runtime_config.config.performance().multithreaded_rendering &&
+               physics_worker_mode ==
+                   mocktail::runtime::PhysicsWorkerMode::kLatency) {
+      std::cout << "  [runtime] latency mode leaves scheduler/render worker "
+                   "counts under Roblox client-settings control\n";
+    }
+  }
+  if (command_line.options.mode == mocktail::runtime::CommandMode::kRun &&
+      runtime_config.config.frame_rate().mode ==
+          mocktail::runtime::FrameRateLimitMode::kUnlimited) {
+    std::cout << "  [runtime] frame-rate mode=unlimited scheduler_target="
+              << mocktail::runtime::kMaximumSupportedRobloxSchedulerFps
+              << " vsync=" << runtime_config.config.vsync_mode() << '\n';
+  }
+
+  const libc_shim::HostCaBundleResolution ca_bundle =
+      libc_shim::ResolveHostCaBundle();
+  if (ca_bundle.status == libc_shim::HostCaBundleStatus::kInvalidOverride) {
+    std::cerr << "Invalid MOCKTAIL_CA_BUNDLE: expected a readable, non-empty "
+                 "absolute regular file\n";
+    return 2;
+  }
+
+  mocktail::runtime::RobloxFullscreenRuntimeBridge fullscreen_bridge;
+  mocktail::audio::RobloxOutputDeviceBridge output_device_bridge;
+  if (command_line.options.mode == mocktail::runtime::CommandMode::kRun) {
+    const std::string compatibility_manifest =
+        environment.GetOr("MOCKTAIL_COMPATIBILITY_MANIFEST",
+                          MOCKTAIL_DEFAULT_COMPATIBILITY_MANIFEST);
+    const mocktail::compat::PayloadCompatibilityResult compatibility =
+        mocktail::compat::CheckPayloadCompatibility(
+            runtime_config.config.roblox_library_path().string(),
+            compatibility_manifest,
+            command_line.options.allow_unverified_build);
+    if (!compatibility) {
+      std::cerr << "[FATAL] " << compatibility.error << '\n';
+      return EXIT_FAILURE;
+    }
+    const mocktail::Status fullscreen_status =
+        fullscreen_bridge.Install(compatibility.profile);
+    if (!fullscreen_status.ok()) {
+      std::cerr << "[FATAL] Cannot install fullscreen runtime bridge: "
+                << fullscreen_status.message() << '\n';
+      return EXIT_FAILURE;
+    }
+    const mocktail::Status output_device_status =
+        output_device_bridge.Install(compatibility.profile);
+    if (!output_device_status.ok()) {
+      std::cerr << "[FATAL] Cannot install Roblox output-device bridge: "
+                << output_device_status.message() << '\n';
+      return EXIT_FAILURE;
+    }
+  }
+
+  mocktail::legacy::RuntimeDependencies dependencies;
+  if (command_line.options.mode == mocktail::runtime::CommandMode::kRun) {
+    auto http_client = std::make_shared<mocktail::services::CurlHttpClient>();
+    mocktail::services::BrowserTrackerService browser_tracker(*http_client);
+    std::filesystem::path tracker_cookie_file =
+        paths.data_root() / "browser_tracker.cookie";
+    bool tracker_cookie_owned = true;
+    if (environment.HasNonEmpty("MOCKTAIL_COOKIE_FILE")) {
+      tracker_cookie_file = environment.GetOr("MOCKTAIL_COOKIE_FILE", "");
+      tracker_cookie_owned = false;
+    } else if (mocktail::runtime::RuntimePaths::Exists(paths.cookie_file())) {
+      tracker_cookie_file = paths.cookie_file();
+    } else if (mocktail::runtime::RuntimePaths::Exists(
+                   paths.sober_cookie_file())) {
+      tracker_cookie_file = paths.sober_cookie_file();
+      tracker_cookie_owned = false;
+    }
+    const mocktail::services::BrowserTrackerResult browser_tracker_result =
+        browser_tracker.EnsureInitialized(app_storage_file, tracker_cookie_file,
+                                          tracker_cookie_owned);
+    if (!browser_tracker_result) {
+      std::cerr << "  [runtime] BrowserTracker bootstrap skipped: "
+                << browser_tracker_result.error;
+      if (browser_tracker_result.http_status != 0) {
+        std::cerr << " (HTTP " << browser_tracker_result.http_status << ')';
+      }
+      std::cerr << '\n';
+    } else {
+      std::cout << "  [runtime] BrowserTracker identity "
+                << (browser_tracker_result.status ==
+                            mocktail::services::BrowserTrackerStatus::kCreated
+                        ? "initialized"
+                        : "loaded")
+                << " before engine startup\n";
+    }
+    mocktail::services::AuthService auth_service(*http_client);
+    mocktail::runtime::AuthRuntimeComposition composition =
+        mocktail::runtime::ComposeAuthRuntime(environment, paths, auth_service,
+                                              http_client);
+    if (!composition) {
+      std::cerr << "[FATAL] Typed Roblox authentication preflight failed: "
+                << composition.error;
+      if (composition.http_status != 0) {
+        std::cerr << " (HTTP " << composition.http_status << ')';
+      }
+      std::cerr << '\n';
+      return EXIT_FAILURE;
+    }
+    composition.jni_vm->SetPlatformIdentity(jnivm::PlatformIdentity{
+        runtime_config.config.input_capabilities().touch_enabled,
+        runtime_config.config.input_capabilities().mouse_enabled,
+        runtime_config.config.input_capabilities().keyboard_enabled,
+        runtime_config.config.device_profile().pc_hardware,
+        std::string(runtime_config.config.device_profile().platform_name),
+        std::string(runtime_config.config.device_profile().display_name),
+        std::string(runtime_config.config.device_profile().manufacturer),
+        std::string(runtime_config.config.device_profile().model),
+        std::string(runtime_config.config.device_profile().brand),
+        std::string(runtime_config.config.device_profile().device_code),
+        std::string(runtime_config.config.device_profile().device_sku),
+        std::string(runtime_config.config.device_profile().soc_model),
+    });
+    if (composition.status == mocktail::runtime::AuthRuntimeStatus::kGuest &&
+        composition.http_status == 401) {
+      std::cout << "  [auth] rejected saved Roblox credential retired; "
+                   "continuing with native sign-in\n";
+    }
+    if (composition.status ==
+        mocktail::runtime::AuthRuntimeStatus::kAuthenticated) {
+      if (setenv("MOCKTAIL_NATIVE_SET_USER_ID", "1", 1) != 0) {
+        std::cerr << "[FATAL] Cannot enable authenticated NativeSettings "
+                     "identity\n";
+        return EXIT_FAILURE;
+      }
+      std::cout
+          << "  [auth] typed Roblox identity resolved for production VM\n";
+    } else {
+      std::cout
+          << "  [auth] explicit guest identity selected for production VM\n";
+    }
+    if (runtime_config.config.desktop_playability()) {
+      std::filesystem::path assets = paths.DefaultAssetPath();
+      if (environment.HasNonEmpty("MOCKTAIL_ASSET_PATH")) {
+        assets = environment.GetOr("MOCKTAIL_ASSET_PATH", "");
+      }
+      const std::filesystem::path default_app_policy =
+          assets / "guac/defaultConfigs/GuacDefaultPolicy-GlobalDist.json";
+      const std::int64_t app_policy_user_id =
+          composition.status ==
+                  mocktail::runtime::AuthRuntimeStatus::kAuthenticated
+              ? composition.account_identity.user_id
+              : -1;
+      const mocktail::runtime::DesktopAppPolicyResult desktop_policy =
+          mocktail::runtime::ApplyDesktopAppPolicy(
+              app_storage_file, default_app_policy, app_policy_user_id);
+      if (!desktop_policy) {
+        std::cerr << "[FATAL] Desktop Roblox app-policy failed: "
+                  << desktop_policy.error << '\n';
+        return EXIT_FAILURE;
+      }
+      std::string desktop_client_settings;
+      if (!mocktail::runtime::MergeDesktopAppPolicyClientSettingsOverride(
+              desktop_policy.policy_json,
+              environment.GetOr("MOCKTAIL_CLIENT_SETTINGS_OVERRIDES_JSON",
+                                "{}"),
+              &desktop_client_settings, &command_line_error)) {
+        std::cerr << "[FATAL] Cannot activate desktop Roblox app-policy: "
+                  << command_line_error << '\n';
+        return EXIT_FAILURE;
+      }
+      if (setenv("MOCKTAIL_CLIENT_SETTINGS_OVERRIDES_JSON",
+                 desktop_client_settings.c_str(), 1) != 0) {
+        std::cerr << "[FATAL] Cannot export desktop Roblox app-policy\n";
+        return EXIT_FAILURE;
+      }
+      std::cout << "  [runtime] desktop app-policy ready: normalized="
+                << desktop_policy.normalized_policy_count
+                << " updated=" << (desktop_policy.updated ? 1 : 0)
+                << " runtime_override=1\n";
+    }
+    auto android_window_context =
+        std::make_shared<AndroidWindowBridgeContext>();
+    jnivm::AndroidWindowCallbacks android_window_callbacks;
+    android_window_callbacks.set_flags = &QueueAndroidWindowFlags;
+    composition.jni_vm->SetAndroidWindowCallbacks(
+        std::move(android_window_context), android_window_callbacks);
+    const mocktail::Status audio_status =
+        mocktail::audio::InstallFmodJniAudioBridge(composition.jni_vm.get());
+    if (!audio_status.ok()) {
+      std::cerr << "[FATAL] Typed FMOD Java audio composition failed: "
+                << audio_status.message() << '\n';
+      return EXIT_FAILURE;
+    }
+    dependencies = mocktail::legacy::RuntimeDependencies(
+        std::move(composition), &ShutdownPlatformBridges);
+  }
+  const mocktail::runtime::GameModePolicy game_mode_policy =
+      runtime_config.config.performance().game_mode;
+  mocktail::runtime::GameModeSession game_mode_session =
+      command_line.options.mode == mocktail::runtime::CommandMode::kRun
+          ? mocktail::runtime::GameModeSession::Start(game_mode_policy)
+          : mocktail::runtime::GameModeSession();
+  switch (game_mode_session.state()) {
+    case mocktail::runtime::GameModeSessionState::kActive:
+      std::cout << "  [gamemode] performance request active\n";
+      break;
+    case mocktail::runtime::GameModeSessionState::kAlreadyActive:
+      std::cout << "  [gamemode] already active for this process\n";
+      break;
+    case mocktail::runtime::GameModeSessionState::kUnavailable:
+    case mocktail::runtime::GameModeSessionState::kRequestFailed:
+      if (game_mode_policy == mocktail::runtime::GameModePolicy::kOn) {
+        std::cerr << "  [gamemode] requested but unavailable: "
+                  << game_mode_session.detail()
+                  << "; continuing without GameMode\n";
+      } else {
+        std::cout << "  [gamemode] unavailable; continuing normally\n";
+      }
+      break;
+    case mocktail::runtime::GameModeSessionState::kDisabled:
+      if (command_line.options.mode == mocktail::runtime::CommandMode::kRun) {
+        std::cout << "  [gamemode] disabled by runtime policy\n";
+      }
+      break;
+    case mocktail::runtime::GameModeSessionState::kStopped:
+    case mocktail::runtime::GameModeSessionState::kStopFailed:
+      break;
+  }
+  if (command_line.options.mode == mocktail::runtime::CommandMode::kRun &&
+      !isolated_canary) {
+    // Start accepting browser requests only after cgroup re-exec, payload
+    // preflight and host bridge setup have succeeded. An ACK therefore cannot
+    // be invalidated by a known host-side
+    // startup or exec boundary. Isolated canaries cannot receive browser
+    // launches and own no public per-user endpoint.
+    mocktail::Status broker_status =
+        mocktail::runtime::ExternalLaunchBroker::StartOwnerAfterLockAcquired(
+            broker_options, &external_launch_broker.broker(),
+            external_launch_request.has_value() ? &*external_launch_request
+                                                : nullptr);
+    if (broker_status.ok()) external_launch_request.reset();
+    if (broker_status.ok()) {
+      broker_status = mocktail::runtime::InstallActiveExternalLaunchBroker(
+          external_launch_broker.broker());
+    }
+    if (!broker_status.ok()) {
+      std::cerr << "[FATAL] Cannot activate website launch bridge: "
+                << broker_status.message() << '\n';
+      return EXIT_FAILURE;
+    }
+  }
+  failure_dialog.SetMessage(
+      "Roblox closed unexpectedly because of an internal error.");
+  int runtime_status =
+      mocktail::legacy::Run(command_line.options, std::move(dependencies));
+  const mocktail::Status launch_broker_shutdown_status =
+      external_launch_broker.Shutdown();
+  if (!launch_broker_shutdown_status.ok()) {
+    std::cerr << "  [launch] website bridge shutdown failed: "
+              << launch_broker_shutdown_status.message() << '\n';
+    runtime_status = EXIT_FAILURE;
+  }
+  if (runtime_status != EXIT_SUCCESS) {
+    failure_dialog.SetMessage("Roblox stopped with error code " +
+                              std::to_string(runtime_status) + ".");
+  }
+  support_bundle_guard.SetExitCode(runtime_status);
+  output_device_bridge.Shutdown();
+  fullscreen_bridge.Shutdown();
+  memory_limit_watchdog.Stop();
+  const mocktail::Status game_mode_stop_status = game_mode_session.Stop();
+  if (!game_mode_stop_status.ok()) {
+    std::cerr << "  [gamemode] release failed: "
+              << game_mode_stop_status.message() << '\n';
+  }
+  if (runtime_status == EXIT_SUCCESS &&
+      command_line.options.mode == mocktail::runtime::CommandMode::kRun) {
+    failure_dialog.MarkSuccessful();
+    support_bundle_guard.Disarm();
+    // The embedded Android payload registers process-global atexit handlers
+    // for workers that it does not expose for joining. The supported runtime
+    // reaches this boundary only after explicit lifecycle, audio, input, and
+    // SDL shutdown; do not re-enter guest teardown from the host C runtime.
+    std::cout.flush();
+    std::cerr.flush();
+    std::_Exit(EXIT_SUCCESS);
+  }
+  if (runtime_status == EXIT_SUCCESS) {
+    failure_dialog.MarkSuccessful();
+    support_bundle_guard.Disarm();
+  }
+  return runtime_status;
+}

@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Copyright 2026 Mocktail Project Authors
+# SPDX-License-Identifier: Apache-2.0
+
+set -euo pipefail
+
+APPDIR="${APPDIR:-$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)}"
+exec "${APPDIR}/usr/share/mocktail-bundle/run.sh" "$@"

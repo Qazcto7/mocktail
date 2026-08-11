@@ -1,0 +1,56 @@
+// Copyright 2026 Mocktail Project Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#ifndef MOCKTAIL_GRAPHICS_TEXT_OVERLAY_FRAME_H_
+#define MOCKTAIL_GRAPHICS_TEXT_OVERLAY_FRAME_H_
+
+#include <cstddef>
+#include <cstdint>
+
+// Stable process-local ABI between the host input runtime in the executable
+// and libvulkan.so, which is loaded as a separate Android compatibility DSO.
+// Pixels are tightly packed RGBA8. The producer owns and securely clears its
+// storage; consumers must copy a matching revision before returning.
+struct MocktailTextOverlayFrameInfo {
+  static constexpr std::uint32_t kAbiVersion = 2;
+
+  std::uint32_t abi_version = kAbiVersion;
+  std::uint32_t visible = 0;
+  std::uint64_t revision = 0;
+  // x/y/width/height use the host's logical input coordinate space. These
+  // dimensions let a Vulkan consumer map that space to the swapchain's pixel
+  // extent without assuming a 1:1 high-DPI scale.
+  std::uint32_t coordinate_width = 0;
+  std::uint32_t coordinate_height = 0;
+  std::int32_t x = 0;
+  std::int32_t y = 0;
+  std::uint32_t width = 0;
+  std::uint32_t height = 0;
+  std::uint32_t row_bytes = 0;
+  std::uint64_t rgba_bytes = 0;
+};
+
+extern "C" {
+
+// Lock-free conservative hint for the Vulkan present fast path. A false
+// result guarantees that no drawable overlay is currently published. A true
+// result only means that the synchronized query/copy path must decide.
+bool mocktail_text_overlay_may_present();
+bool mocktail_text_overlay_query(MocktailTextOverlayFrameInfo* frame);
+bool mocktail_text_overlay_copy(std::uint64_t revision, void* rgba,
+                                std::size_t rgba_capacity);
+
+}  // extern "C"
+
+#endif  // MOCKTAIL_GRAPHICS_TEXT_OVERLAY_FRAME_H_

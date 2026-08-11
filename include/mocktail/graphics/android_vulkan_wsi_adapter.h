@@ -1,0 +1,126 @@
+// Copyright 2026 Mocktail Project Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#ifndef MOCKTAIL_GRAPHICS_ANDROID_VULKAN_WSI_ADAPTER_H_
+#define MOCKTAIL_GRAPHICS_ANDROID_VULKAN_WSI_ADAPTER_H_
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#include "mocktail/graphics/vulkan_abi.h"
+#include "mocktail/graphics/sdl_vulkan_wsi.h"
+#include "mocktail/status.h"
+
+namespace mocktail {
+namespace graphics {
+
+// Vulkan VkResult values are a stable signed 32-bit ABI. Keeping the Android
+// boundary independent of the optional Vulkan SDK lets capability-only builds
+// continue to compile with SDL's opaque Vulkan handles.
+using AndroidVulkanResult = VkResult;
+
+inline constexpr AndroidVulkanResult kAndroidVulkanSuccess =
+    static_cast<AndroidVulkanResult>(0);
+inline constexpr AndroidVulkanResult kAndroidVulkanErrorInitializationFailed =
+    static_cast<AndroidVulkanResult>(-3);
+inline constexpr std::uint64_t kHostInfiniteWaitDiagnosticSliceNs =
+    1000000000ULL;
+inline constexpr std::uint64_t kHostImageAcquireWatchdogTimeoutNs =
+    kHostInfiniteWaitDiagnosticSliceNs;
+
+inline constexpr char kAndroidSurfaceExtension[] =
+    "VK_KHR_android_surface";
+
+// Desktop compositors can report a valid acquired/presented image as
+// suboptimal while a fullscreen configure settles. The Android client path
+// used by Roblox treats that positive success code as a hard error, so the
+// compatibility boundary exposes it as the equivalent VK_SUCCESS result.
+VkResult NormalizeAndroidSwapchainResult(VkResult result);
+
+// Android requests an infinite image-acquire wait, but a lost Wayland/X11
+// compositor wakeup would then block Roblox's RenderJob forever. Only the
+// infinite guest request is bounded; explicit finite Vulkan timeouts retain
+// their original contract.
+std::uint64_t BoundHostImageAcquireTimeout(std::uint64_t requested_timeout);
+bool IsHostImageAcquireWatchdogTimeout(std::uint64_t requested_timeout,
+                                       VkResult host_result);
+VkResult NormalizeHostImageAcquireResult(std::uint64_t requested_timeout,
+                                         VkResult host_result);
+
+// Infinite fence/timeline waits retain their guest-visible semantics, but are
+// issued to the host in finite slices so a stalled renderer produces evidence
+// while it remains blocked. VK_TIMEOUT from a slice is never returned to the
+// Android client as a completed wait.
+std::uint64_t BoundHostSynchronizationWaitTimeout(
+    std::uint64_t requested_timeout);
+bool ShouldContinueHostSynchronizationWait(std::uint64_t requested_timeout,
+                                           VkResult host_result);
+
+// Rewrites an Android VkInstance extension request for the host WSI. The
+// returned storage owns its strings and can be used to build the
+// ppEnabledExtensionNames array passed to the host vkCreateInstance call.
+Status TranslateAndroidVulkanInstanceExtensions(
+    const std::vector<std::string>& android_extensions,
+    const std::vector<std::string>& host_wsi_extensions,
+    std::vector<std::string>* host_extensions);
+
+// Android WSI boundary. vkCreateAndroidSurfaceKHR-compatible exports can
+// delegate here after vkCreateInstance has used the translated extension list.
+// The Android native-window member is intentionally ignored: SDL owns the real
+// host window and is the only component allowed to create its VkSurfaceKHR.
+class AndroidVulkanWsiAdapter final {
+ public:
+  using PresentCallback = void (*)(void* user_data);
+
+  Status Initialize(SdlVulkanWsi* host_wsi,
+                    PresentCallback present_callback = nullptr,
+                    void* present_callback_data = nullptr);
+  void Shutdown();
+  bool IsInitialized() const { return host_wsi_ != nullptr; }
+
+  Status TranslateInstanceExtensions(
+      const std::vector<std::string>& android_extensions,
+      std::vector<std::string>* host_extensions) const;
+
+  AndroidVulkanResult CreateAndroidSurface(
+      VkInstance instance, const void* android_create_info,
+      const VkAllocationCallbacks* allocator, VkSurfaceKHR* surface) const;
+  void DestroySurface(VkInstance instance, VkSurfaceKHR surface,
+                      const VkAllocationCallbacks* allocator) const;
+
+  VkResult EnumerateInstanceExtensionProperties(
+      const char* layer_name, std::uint32_t* property_count,
+      VkExtensionProperties* properties) const;
+  VkResult CreateInstance(const VkInstanceCreateInfo* create_info,
+                          const VkAllocationCallbacks* allocator,
+                          VkInstance* instance);
+  PFN_vkVoidFunction GetInstanceProcAddress(VkInstance instance,
+                                            const char* name);
+  PFN_vkVoidFunction GetDeviceProcAddress(VkDevice device, const char* name);
+  VkResult QueuePresent(VkQueue queue, const VkPresentInfoKHR* present_info);
+
+ private:
+  SdlVulkanWsi* host_wsi_ = nullptr;
+  PFN_vkGetInstanceProcAddr host_get_instance_proc_address_ = nullptr;
+  PFN_vkGetDeviceProcAddr host_get_device_proc_address_ = nullptr;
+  PFN_vkQueuePresentKHR host_queue_present_ = nullptr;
+  PresentCallback present_callback_ = nullptr;
+  void* present_callback_data_ = nullptr;
+};
+
+}  // namespace graphics
+}  // namespace mocktail
+
+#endif  // MOCKTAIL_GRAPHICS_ANDROID_VULKAN_WSI_ADAPTER_H_

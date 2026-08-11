@@ -1,0 +1,62 @@
+# Maintainer: komaruworld <rtysus228@gmail.com>
+
+pkgname=mocktail
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Android x86-64 Roblox compatibility runtime for Linux'
+arch=('x86_64')
+url='https://github.com/komaruworld/mocktail'
+license=('Apache-2.0')
+depends=(
+  'capstone'
+  'curl'
+  'fontconfig'
+  'gtk4'
+  'libadwaita'
+  'libelf'
+  'libglvnd'
+  'libplacebo'
+  'libutf8proc'
+  'libyaml'
+  'minizip'
+  'nlohmann-json'
+  'openssl'
+  'sdl3>=3.4'
+  'sdl3_ttf'
+  'vulkan-icd-loader'
+  'webkitgtk-6.0'
+  'zlib'
+)
+makedepends=(
+  'cmake>=3.20'
+  'git'
+  'ninja'
+  'pkgconf'
+  'vulkan-headers'
+)
+optdepends=('gamemode: Feral GameMode integration')
+options=('!debug' 'strip')
+source=()
+sha256sums=()
+
+_mocktail_source_dir="${MOCKTAIL_SOURCE_DIR:-${startdir}/../..}"
+
+prepare() {
+  [[ -f "${_mocktail_source_dir}/CMakeLists.txt" ]] ||
+    error 'run makepkg from a complete Mocktail checkout'
+}
+
+build() {
+  cmake -S "${_mocktail_source_dir}" -B build -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DCMAKE_INSTALL_LIBDIR=lib \
+    -DBUILD_TESTING=OFF
+  cmake --build build
+}
+
+package() {
+  DESTDIR="${pkgdir}" cmake --install build
+  install -Dm644 "${_mocktail_source_dir}/LICENSE" \
+    "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}

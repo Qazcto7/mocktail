@@ -1,0 +1,93 @@
+# Mocktail configuration.
+# The file is created once with mode 0600. Mocktail never replaces your edits.
+
+# Integer: configuration schema version. Only version 1 is supported.
+version: 1
+
+# One-line device preset. Short aliases pc, mobile, and console are accepted.
+# Presets: pc-windows-11, mobile-pixel-7, console-ps5.
+# Use the mapping below for a custom profile.
+device: pc-windows-11
+
+# Detailed alternative (replace the scalar device line above):
+# device:
+#   type: mobile
+#   platform: Android
+#   name: Google Pixel 9 Pro
+#   manufacturer: Google
+#   model: Pixel 9 Pro
+#   brand: google
+#   code: komodo
+#   sku: pixel-9-pro
+#   soc_model: Google Tensor G4
+#   touch: true
+#   mouse: false
+#   keyboard: false
+
+runtime:
+  # Boolean (default: false): start without a visible SDL window.
+  headless: false
+  # String (optional): use a specific x86_64 libroblox.so instead of the
+  # active verified payload.
+  # roblox_library: /absolute/path/to/libroblox.so
+
+graphics:
+  # String (default: direct-vulkan): graphics backend. Use opengl on hardware
+  # without a working Vulkan driver; OpenGL ES 3.0 or newer is required.
+  # Recommended values: direct-vulkan, opengl, system, angle-vulkan.
+  backend: direct-vulkan
+  # String or integer (default: display): requested frame-rate policy.
+  # Supported values: display, unlimited, 30, 60, 120, 144, 240. Unlimited
+  # selects Roblox's unmodified 240-FPS scheduler maximum.
+  frame_rate_limit: display
+  # String (default: auto): presentation synchronization: auto, on, or off.
+  vsync: auto
+
+performance:
+  # Boolean (default: false): size Roblox scheduler/render queues from every
+  # physical CPU core. A place's Lua/main thread can still remain serial.
+  multithreaded_rendering: false
+  # String (default: throughput): `throughput` makes every physical core
+  # available to Roblox worker pools; `latency` preserves Roblox-managed pool
+  # sizes and coalesces midphase work. Supported: auto, latency, throughput.
+  physics_worker_mode: throughput
+  # Integer MiB (default: 0): hard RAM cap for the Mocktail process tree.
+  # 0 disables the cap. cgroup v2 also disables swap; other Linux systems use
+  # an RSS+swap watchdog. 6144 is a conservative starting point for 32 GiB RAM.
+  memory_limit_mb: 0
+  # String (default: auto): request Feral GameMode when its host daemon and
+  # client library are available. Supported values: auto, on, off.
+  gamemode: auto
+
+audio:
+  # String (default: default): `default` follows the host system output.
+  # To pin output, copy an exact SDL device name printed during startup.
+  output_device: default
+
+window:
+  # Integer (default: 1280): initial window width in pixels.
+  width: 1280
+  # Integer (default: 720): initial window height in pixels.
+  height: 720
+  # String (default: Roblox): window title.
+  title: Roblox
+
+# Optional host HTTP proxy. Uncomment both values together. The host must not
+# contain a scheme such as http://.
+# network:
+#   # String (optional, default: disabled): proxy host name or IP address.
+#   proxy_host: 127.0.0.1
+#   # Integer (optional, default: disabled): proxy TCP port from 1 to 65535.
+#   proxy_port: 8080
+
+updates:
+  # Boolean (default: true): check the latest Roblox version, derive an exact
+  # HostAbi profile, run two isolated canaries with the selected graphics
+  # backend, and promote only on success. An existing current payload is
+  # preserved when probation fails.
+  automatic: true
+  # String (default: apk-pure): direct x86_64 APK provider.
+  source: apk-pure
+  # Reserved for desktop update integrations. `mocktail_updater` itself never
+  # launches another process after changing the active payload.
+  launch_after_update: false

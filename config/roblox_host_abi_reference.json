@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "elf_build_id": "1686400865ae0e408cd7bd67de7a439625c6fd13",
+  "payload_sha256": "3e9c26c81186f93458ff65d8a8bc240c220974db02b8388b91340b77b336997d",
+  "payload_id": "2628-1686400865ae0e408cd7bd67de7a439625c6fd13",
+  "payload_path": "payloads/2628-1686400865ae0e408cd7bd67de7a439625c6fd13",
+  "reference": {
+    "elf_build_id": "d0cb1fa0deb3d9161b4cd77530cbcd2e50de3a21",
+    "payload_sha256": "92ca0e4d8bc4e1c7a37fc2b52544869299ec8b9a40ea8da96ebac66660e0b1af"
+  },
+  "profile": {
+    "elf_build_id": "1686400865ae0e408cd7bd67de7a439625c6fd13",
+    "bridge_entries": [
+      {
+        "rva": "0x1c39ea2",
+        "kind": "allocate",
+        "label": "small-allocate"
+      },
+      {
+        "rva": "0x1fe4c84",
+        "kind": "usable_size",
+        "label": "usable-size"
+      },
+      {
+        "rva": "0x203daae",
+        "kind": "reallocate",
+        "label": "reallocate"
+      },
+      {
+        "rva": "0x1c39c3a",
+        "kind": "allocate",
+        "label": "allocate"
+      },
+      {
+        "rva": "0x1c8dbf8",
+        "kind": "aligned_allocate",
+        "label": "aligned-allocate-direct"
+      },
+      {
+        "rva": "0x1c3eb72",
+        "kind": "free",
+        "label": "free"
+      }
+    ],
+    "data_seeds": {
+      "allocator_object_slot": "0x7030ae0",
+      "empty_string_slot": "0x703a7e8",
+      "jni_singleton_slot": "0x72a16d0",
+      "jni_singleton_bytes": 1024,
+      "arena_initializer": "0x1c39f1d",
+      "allocator_thread_initializer": "0x2040817",
+      "arena_guard_slot": "0x71e92f0",
+      "arena_table_slot": "0x71e9380",
+      "arena_table_slot_count": 4194304
+    },
+    "native_allocator": {
+      "allocate": "0x1c39c3a",
+      "deallocate": "0x1c3eb72"
+    },
+    "init_array_offset": "0x6c2c9b0",
+    "init_array_count": 3481,
+    "constructor_run_ranges": [
+      {
+        "begin": 2,
+        "end_exclusive": 3
+      },
+      {
+        "begin": 5,
+        "end_exclusive": 3481
+      }
+    ],
+    "native_mimalloc_constructor_run_ranges": [
+      {
+        "begin": 2,
+        "end_exclusive": 3481
+      }
+    ],
+    "native_mimalloc_thread_initializer_after_constructor": 2,
+    "native_pre_jni_bootstrap": {
+      "registry_initializer": "0x1fe72e5",
+      "registry_slot": "0x71ed428"
+    },
+    "default_allocator_strategy": "native_mimalloc"
+  },
+  "derivation_anchors": {
+    "signature_version": 1,
+    "allocator_object_initializer_rva": "0x1fbf1de",
+    "empty_string_initializer_rva": "0x1fc82b0",
+    "jni_singleton_initializer_rva": "0x1c39a34",
+    "constructor_rvas": {
+      "2": "0x1c3c764",
+      "3": "0x1c38c00",
+      "4": "0x1c39884",
+      "5": "0x1c39a34"
+    }
+  }
+}

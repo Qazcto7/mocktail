@@ -1,0 +1,155 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contracts:
+    name: Repository contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Validate shell and JSON files
+        shell: bash
+        run: |
+          find scripts tests -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n
+          find config packaging/flatpak -type f -name '*.json' -print0 \
+            | xargs -0 -n1 python3 -m json.tool >/dev/null
+
+      - name: Verify build and packaging contracts
+        shell: bash
+        run: |
+          bash tests/managed_payload_build_contract_test.sh .
+          bash tests/flatpak_packaging_test.sh .
+          bash tests/native_packaging_test.sh .
+
+  flatpak:
+    name: Flatpak build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Install Flatpak builder
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes flatpak flatpak-builder gnupg
+          flatpak remote-add --user --if-not-exists flathub \
+            https://dl.flathub.org/repo/flathub.flatpakrepo
+
+      - name: Build Flatpak repository and bundle
+        shell: bash
+        env:
+          FLATPAK_GPG_PRIVATE_KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
+          FLATPAK_GPG_KEY_ID: ${{ secrets.FLATPAK_GPG_KEY_ID }}
+        run: |
+          set -Eeuo pipefail
+          git update-ref refs/heads/main "$GITHUB_SHA"
+          builder_signing=()
+          bundle_keys=()
+          publish=false
+          if [[ "$GITHUB_REF" == refs/heads/main && \
+                "$GITHUB_EVENT_NAME" != pull_request ]]; then
+            publish=true
+            [[ -n "$FLATPAK_GPG_PRIVATE_KEY" && \
+               -n "$FLATPAK_GPG_KEY_ID" ]]
+            install -d -m 0700 "$RUNNER_TEMP/mocktail-gnupg"
+            printf '%s' "$FLATPAK_GPG_PRIVATE_KEY" | \
+              gpg --batch --homedir "$RUNNER_TEMP/mocktail-gnupg" --import
+            gpg --batch --homedir "$RUNNER_TEMP/mocktail-gnupg" \
+              --export "$FLATPAK_GPG_KEY_ID" >mocktail-flatpak.gpg
+            builder_signing=(
+              "--gpg-sign=$FLATPAK_GPG_KEY_ID"
+              "--gpg-homedir=$RUNNER_TEMP/mocktail-gnupg"
+            )
+            bundle_keys=(--gpg-keys=mocktail-flatpak.gpg)
+          fi
+          flatpak-builder \
+            --arch=x86_64 \
+            --jobs=4 \
+            --user \
+            --install-deps-from=flathub \
+            --disable-rofiles-fuse \
+            --force-clean \
+            --default-branch=stable \
+            --repo=repo \
+            "${builder_signing[@]}" \
+            build-flatpak-ci \
+            packaging/flatpak/space.bigrat.mocktail.json
+          if [[ "$publish" == true ]]; then
+            flatpak build-update-repo \
+              --generate-static-deltas \
+              --static-delta-jobs=2 \
+              --prune \
+              --gpg-sign="$FLATPAK_GPG_KEY_ID" \
+              --gpg-homedir="$RUNNER_TEMP/mocktail-gnupg" \
+              repo
+          fi
+          flatpak build-bundle \
+            --arch=x86_64 \
+            "${bundle_keys[@]}" \
+            repo \
+            Mocktail-x86_64.flatpak \
+            space.bigrat.mocktail \
+            stable
+          if [[ "$publish" == true ]]; then
+            ./scripts/assemble_flatpak_pages.sh \
+              repo Mocktail-x86_64.flatpak mocktail-flatpak.gpg public
+          fi
+
+      - name: Upload Flatpak
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Mocktail-x86_64-flatpak
+          path: Mocktail-x86_64.flatpak
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Configure GitHub Pages
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+
+      - name: Upload GitHub Pages repository
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: public
+
+  deploy-pages:
+    name: Publish Flatpak repository
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: flatpak
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0

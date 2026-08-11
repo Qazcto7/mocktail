@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "package": "com.roblox.client",
+  "version_name": "2.725.1142",
+  "version_code": 2546,
+  "abi": "x86_64",
+  "elf_build_id": "d0cb1fa0deb3d9161b4cd77530cbcd2e50de3a21",
+  "sha256": {
+    "libroblox": "92ca0e4d8bc4e1c7a37fc2b52544869299ec8b9a40ea8da96ebac66660e0b1af",
+    "base_apk": "eba476fec3020eaceb28436c1d160eb35d6689d8ffb060e09678535584babc7a",
+    "x86_64_split_apk": "5c4193c9700481079cee958b38ba9cbb97768b0a130b7f704ed084753f01ce2b"
+  },
+  "signing_certificates_sha256": [
+    "2bebd189e8d3106401347056c93d045b61e20e22d0c3cbed85474aeb00a3d12a",
+    "44932ea35a17a267372d71b54d1a0cb3da0dca5113e94406ae2fe18090ba1477"
+  ],
+  "assets": {
+    "file_count": 1837
+  },
+  "source": "sober-update-service",
+  "imported_at": "2026-07-09T19:12:54Z",
+  "compatibility_status": "supported"
+}

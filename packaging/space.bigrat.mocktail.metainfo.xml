@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright 2026 Mocktail Project Authors -->
+<!-- SPDX-License-Identifier: CC0-1.0 -->
+<component type="desktop-application">
+  <id>space.bigrat.mocktail</id>
+  <name>Mocktail</name>
+  <summary>Experimental Roblox Android compatibility runtime for Linux</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Apache-2.0</project_license>
+  <developer id="space.bigrat">
+    <name>Mocktail Project Authors</name>
+  </developer>
+  <url type="homepage">https://github.com/komaruworld/mocktail</url>
+  <description>
+    <p>
+      Mocktail is an experimental compatibility runtime for running the
+      Android x86-64 Roblox client on a native Linux desktop. It provides the
+      pseudo-JVM, Android ABI adapters, SDL window/input/audio integration and
+      Vulkan presentation needed by the client.
+    </p>
+    <p>
+      The project is a prototype and is not affiliated with or endorsed by
+      Roblox Corporation. The verified Roblox payload is downloaded on first
+      launch and is not distributed with Mocktail.
+    </p>
+  </description>
+  <launchable type="desktop-id">space.bigrat.mocktail.desktop</launchable>
+  <content_rating type="oars-1.1"/>
+  <provides>
+    <binary>mocktail</binary>
+  </provides>
+  <releases>
+    <release version="0.1.0" date="2026-08-08"/>
+  </releases>
+</component>

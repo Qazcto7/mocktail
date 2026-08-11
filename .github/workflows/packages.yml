@@ -1,0 +1,255 @@
+name: Native packages
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: packages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  appimage:
+    name: AppImage (Ubuntu 26.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Build AppImage
+        shell: bash
+        run: |
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace" \
+            --workdir /workspace \
+            ubuntu:26.04 bash -Eeuo pipefail -c '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install --yes --no-install-recommends \
+                build-essential cmake git ninja-build pkg-config \
+                libsdl3-dev libsdl3-ttf-dev libcurl4-openssl-dev \
+                libssl-dev nlohmann-json3-dev libyaml-dev libelf-dev \
+                libminizip-dev libcapstone-dev libgtk-4-dev \
+                libadwaita-1-dev libwebkitgtk-6.0-dev libutf8proc-dev \
+                libfontconfig1-dev libegl-dev libvulkan-dev zlib1g-dev \
+                libplacebo-dev \
+                bubblewrap xdg-dbus-proxy patchelf jq unzip file curl \
+                ca-certificates default-jdk-headless libgif7 python3 \
+                python3-capstone python3-yaml python3-requests \
+                python3-urllib3 python3-certifi python3-charset-normalizer \
+                python3-idna squashfs-tools
+
+              curl --fail --location --retry 3 \
+                --output /tmp/appimagetool \
+                https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+              echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  /tmp/appimagetool" | \
+                sha256sum --check --strict
+              install -m 0755 /tmp/appimagetool /usr/local/bin/appimagetool
+
+              curl --fail --location --retry 3 \
+                --output /tmp/android-build-tools.zip \
+                https://dl.google.com/android/repository/build-tools_r35_linux.zip
+              echo "bd3a4966912eb8b30ed0d00b0cda6b6543b949d5ffe00bea54c04c81e1561d88  /tmp/android-build-tools.zip" | \
+                sha256sum --check --strict
+              unzip -q /tmp/android-build-tools.zip -d /tmp/android-build-tools
+              android_tools_root="$(dirname -- "$(find /tmp/android-build-tools -type f -name apksigner -print -quit)")"
+              [[ -n "$android_tools_root" ]]
+
+              git config --global --add safe.directory /workspace
+              git config --global --add safe.directory /workspace/third_party/Vulkan-Headers
+              git config --global --add safe.directory /workspace/third_party/libjnivm
+              export APPIMAGE_EXTRACT_AND_RUN=1
+              export MOCKTAIL_ANDROID_BUILD_TOOLS_ROOT="$android_tools_root"
+              make appimage BUILD_DIR=build-appimage JOBS=4 \
+                APPIMAGE=dist/Mocktail-x86_64.AppImage \
+                PORTABLE_MODE=standalone
+              test -x dist/Mocktail-x86_64.AppImage
+            '
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Mocktail-AppImage
+          path: dist/Mocktail-x86_64.AppImage
+          if-no-files-found: error
+          retention-days: 14
+
+  deb:
+    name: DEB (Ubuntu 26.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Build DEB
+        shell: bash
+        run: |
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace" \
+            --workdir /workspace \
+            ubuntu:26.04 bash -Eeuo pipefail -c '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install --yes --no-install-recommends \
+                build-essential cmake git ninja-build pkg-config fakeroot \
+                dpkg-dev file libsdl3-dev libsdl3-ttf-dev \
+                libcurl4-openssl-dev libssl-dev nlohmann-json3-dev \
+                libyaml-dev libelf-dev libminizip-dev libcapstone-dev \
+                libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev \
+                libutf8proc-dev libfontconfig1-dev libegl-dev \
+                libvulkan-dev libplacebo-dev zlib1g-dev
+              cmake -S . -B build-deb -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX=/usr \
+                -DBUILD_TESTING=OFF
+              cmake --build build-deb --parallel 4
+              cpack --config build-deb/CPackConfig.cmake \
+                -G DEB -B dist/deb
+              dpkg-deb --info dist/deb/*.deb >/dev/null
+            '
+
+      - name: Upload DEB
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Mocktail-DEB
+          path: dist/deb/*.deb
+          if-no-files-found: error
+          retention-days: 14
+
+  rpm:
+    name: RPM (Fedora 44)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Build RPM
+        shell: bash
+        run: |
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace" \
+            --workdir /workspace \
+            fedora:44 bash -Eeuo pipefail -c '
+              dnf install --assumeyes \
+                gcc-c++ cmake git ninja-build pkgconf-pkg-config rpm-build \
+                SDL3-devel SDL3_ttf-devel libcurl-devel openssl-devel \
+                nlohmann-json-devel libyaml-devel elfutils-libelf-devel \
+                minizip-ng-compat-devel capstone-devel gtk4-devel libadwaita-devel \
+                webkitgtk6.0-devel utf8proc-devel fontconfig-devel \
+                libglvnd-devel vulkan-headers vulkan-loader-devel \
+                libplacebo-devel zlib-ng-compat-devel
+              cmake -S . -B build-rpm -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX=/usr \
+                -DBUILD_TESTING=OFF
+              cmake --build build-rpm --parallel 4
+              cpack --config build-rpm/CPackConfig.cmake \
+                -G RPM -B dist/rpm
+              rpm --query --package --info dist/rpm/*.rpm >/dev/null
+            '
+
+      - name: Upload RPM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Mocktail-RPM
+          path: dist/rpm/*.rpm
+          if-no-files-found: error
+          retention-days: 14
+
+  arch:
+    name: Pacman package (Arch Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Build pacman package
+        shell: bash
+        run: |
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace" \
+            --workdir /workspace \
+            archlinux:base-devel bash -Eeuo pipefail -c '
+              pacman -Syu --needed --noconfirm \
+                cmake git ninja pkgconf sdl3 sdl3_ttf curl openssl \
+                nlohmann-json libyaml libelf minizip capstone gtk4 \
+                libadwaita webkitgtk-6.0 libutf8proc fontconfig \
+                libplacebo vulkan-headers vulkan-icd-loader libglvnd zlib
+              useradd --create-home builder
+              chown -R builder:builder /workspace
+              runuser -u builder -- env MOCKTAIL_SOURCE_DIR=/workspace \
+                makepkg --dir /workspace/packaging/arch \
+                  --noconfirm --cleanbuild --force
+              install -d dist/arch
+              cp packaging/arch/*.pkg.tar.zst dist/arch/
+              pacman -Qp dist/arch/*.pkg.tar.zst >/dev/null
+            '
+
+      - name: Upload pacman package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Mocktail-Arch
+          path: dist/arch/*.pkg.tar.zst
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish continuous packages
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: [appimage, deb, rpm, arch]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Download packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: Mocktail-*
+          path: release
+          merge-multiple: true
+
+      - name: Update continuous release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          find release -maxdepth 1 -type f -print
+          git config user.name komaruworld
+          git config user.email rtysus228@gmail.com
+          git tag --force continuous "$GITHUB_SHA"
+          git push origin refs/tags/continuous --force
+          if ! gh release view continuous >/dev/null 2>&1; then
+            gh release create continuous \
+              --prerelease \
+              --title "Mocktail continuous" \
+              --notes "Automated development packages from main."
+          fi
+          gh release upload continuous release/* --clobber

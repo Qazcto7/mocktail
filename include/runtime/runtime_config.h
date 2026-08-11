@@ -1,0 +1,132 @@
+// Copyright 2026 Mocktail Project Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#ifndef MOCKTAIL_RUNTIME_RUNTIME_CONFIG_H_
+#define MOCKTAIL_RUNTIME_RUNTIME_CONFIG_H_
+
+#include <filesystem>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include "runtime/device_profile.h"
+#include "runtime/environment.h"
+#include "runtime/frame_rate_policy.h"
+#include "runtime/performance_policy.h"
+
+namespace mocktail {
+namespace runtime {
+
+enum class GraphicsBackend {
+  kAuto,
+  kSystem,
+  kVulkan,
+  kAngleVulkan,
+  kAngleSwiftShader,
+  kUnknown,
+};
+
+struct WindowConfig {
+  int width = 1280;
+  int height = 720;
+  std::string title = "Roblox";
+};
+
+struct InputCapabilityConfig {
+  bool touch_enabled = false;
+  bool mouse_enabled = true;
+  bool keyboard_enabled = true;
+};
+
+struct NetworkProxyConfig {
+  std::string host;
+  int port = 0;
+};
+
+std::optional<NetworkProxyConfig> ParseNetworkProxyConfig(
+    std::string_view host, std::string_view port);
+std::string BuildNetworkProxyUrl(const NetworkProxyConfig& proxy);
+
+// Immutable, supported runtime options. Experimental MOCKTAIL_PATCH_* knobs
+// intentionally do not belong here; they remain isolated in the legacy path.
+class RuntimeConfig {
+ public:
+  static RuntimeConfig FromEnvironment(const Environment& environment);
+
+  bool headless() const { return headless_; }
+  const std::filesystem::path& roblox_library_path() const {
+    return roblox_library_path_;
+  }
+  GraphicsBackend graphics_backend() const { return graphics_backend_; }
+  const std::string& graphics_backend_name() const {
+    return graphics_backend_name_;
+  }
+  const WindowConfig& window() const { return window_; }
+  const InputCapabilityConfig& input_capabilities() const {
+    return input_capabilities_;
+  }
+  const DeviceProfile& device_profile() const { return device_profile_; }
+  bool device_profile_valid() const { return device_profile_valid_; }
+  bool desktop_playability() const {
+    return device_profile_.device_class == DeviceClass::kPc;
+  }
+  const std::optional<std::string>& roblox_http_user_agent() const {
+    return roblox_http_user_agent_;
+  }
+  const FrameRatePolicy& frame_rate() const { return frame_rate_; }
+  const std::string& vsync_mode() const { return vsync_mode_; }
+  const PerformancePolicy& performance() const { return performance_; }
+  const std::string& audio_output_device() const {
+    return audio_output_device_;
+  }
+  bool audio_output_device_valid() const { return audio_output_device_valid_; }
+  const std::optional<NetworkProxyConfig>& network_proxy() const {
+    return network_proxy_;
+  }
+
+  // These legacy opt-ins create workers that do not own their VM/JNI state.
+  // Empty and "0" values are disabled; every other non-empty value is unsafe.
+  bool has_unsafe_detached_thread_overrides() const {
+    return !unsafe_detached_thread_overrides_.empty();
+  }
+  const std::vector<std::string>& unsafe_detached_thread_overrides() const {
+    return unsafe_detached_thread_overrides_;
+  }
+
+  static GraphicsBackend ParseGraphicsBackend(std::string_view name);
+
+ private:
+  bool headless_ = false;
+  std::filesystem::path roblox_library_path_ = "rbx_bin/libroblox.so";
+  GraphicsBackend graphics_backend_ = GraphicsBackend::kVulkan;
+  std::string graphics_backend_name_ = "direct-vulkan";
+  WindowConfig window_;
+  InputCapabilityConfig input_capabilities_;
+  DeviceProfile device_profile_ = *FindDeviceProfile(kDefaultDeviceProfileName);
+  bool device_profile_valid_ = true;
+  std::optional<std::string> roblox_http_user_agent_;
+  FrameRatePolicy frame_rate_;
+  std::string vsync_mode_ = "auto";
+  PerformancePolicy performance_;
+  std::string audio_output_device_ = "default";
+  bool audio_output_device_valid_ = true;
+  std::optional<NetworkProxyConfig> network_proxy_;
+  std::vector<std::string> unsafe_detached_thread_overrides_;
+};
+
+}  // namespace runtime
+}  // namespace mocktail
+
+#endif  // MOCKTAIL_RUNTIME_RUNTIME_CONFIG_H_
