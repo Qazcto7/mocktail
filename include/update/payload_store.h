@@ -53,7 +53,7 @@ class PayloadStore final {
       const std::array<std::filesystem::path, 2>& canary_logs);
   PayloadStoreResult Import(const std::filesystem::path& prepared_payload);
   PayloadStoreResult InspectCurrent() const;
-  PayloadStoreResult VerifyCurrent() const;
+  PayloadStoreResult VerifyCurrent();
   PayloadStoreResult Rollback();
   std::string StatusJson(std::string* error = nullptr) const;
 

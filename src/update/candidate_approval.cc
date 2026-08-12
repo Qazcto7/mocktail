@@ -418,7 +418,6 @@ CandidateApprovalResult CreateCandidateApproval(
 bool ValidateCandidateApproval(const std::filesystem::path& store_root,
                                std::string_view activation_json,
                                const PayloadIntegrityResult& payload,
-                               const std::filesystem::path& runtime_binary,
                                CandidateApprovalResult* approval,
                                std::string* error) {
   const auto activation = ParseJson(activation_json, error);
@@ -466,15 +465,14 @@ bool ValidateCandidateApproval(const std::filesystem::path& store_root,
   }
   const std::string fingerprint = PayloadRuntimeFingerprint(
       store_root / "payloads" / payload.payload_id, payload, error);
-  const std::string runtime_sha256 = HashRegularFile(runtime_binary, error);
-  const compat::BuildIdResult runtime_build_id =
-      compat::ReadElfBuildId(runtime_binary.string());
   const std::string profile_sha256 = HashText(profile_bytes);
   const std::string compatibility_sha256 = HashText(compatibility_bytes);
-  if (!error->empty() || !runtime_build_id) {
-    if (error->empty()) *error = runtime_build_id.error;
-    return false;
-  }
+  if (!error->empty()) return false;
+  const std::string canary_runtime_sha256 =
+      receipt->value("canary_runtime_sha256", "");
+  const std::string runtime_sha256 = receipt->value("runtime_sha256", "");
+  const std::string runtime_build_id =
+      receipt->value("runtime_build_id", "");
   std::error_code filesystem_error;
   const std::filesystem::path canonical_library = std::filesystem::canonical(
       store_root / "payloads" / payload.payload_id / "libroblox.so",
@@ -494,15 +492,15 @@ bool ValidateCandidateApproval(const std::filesystem::path& store_root,
       receipt->value("profile_sha256", "") != profile_sha256 ||
       receipt->value("compatibility_manifest_sha256", "") !=
           compatibility_sha256 ||
-      receipt->value("canary_runtime_sha256", "") != runtime_sha256 ||
-      receipt->value("runtime_sha256", "") != runtime_sha256 ||
-      receipt->value("runtime_build_id", "") != runtime_build_id.build_id ||
+      !IsLowerHex(canary_runtime_sha256, 64) ||
+      runtime_sha256 != canary_runtime_sha256 ||
+      !IsLowerHex(runtime_build_id, 40) ||
       receipt->value("canary_tier", "") != "C" ||
       receipt->value("successful_runs", 0) != 2 ||
       !receipt->contains("canary_attestation_sha256") ||
       !(*receipt)["canary_attestation_sha256"].is_array() ||
       (*receipt)["canary_attestation_sha256"].size() != 2) {
-    *error = "approval receipt does not authorize exact runtime and payload";
+    *error = "approval receipt does not authorize exact payload evidence";
     return false;
   }
   std::array<std::string, 2> attestation_hashes;
@@ -526,9 +524,9 @@ bool ValidateCandidateApproval(const std::filesystem::path& store_root,
         attestation->value("profile_sha256", "") != profile_sha256 ||
         attestation->value("compatibility_manifest_sha256", "") !=
             compatibility_sha256 ||
-        attestation->value("runtime_sha256", "") != runtime_sha256 ||
-        attestation->value("runtime_build_id", "") !=
-            runtime_build_id.build_id ||
+        attestation->value("runtime_sha256", "") !=
+            canary_runtime_sha256 ||
+        attestation->value("runtime_build_id", "") != runtime_build_id ||
         !IsLowerHex(attestation->value("readiness_log_sha256", ""), 64) ||
         !(*receipt)["canary_attestation_sha256"][index].is_string() ||
         (*receipt)["canary_attestation_sha256"][index]
@@ -543,7 +541,7 @@ bool ValidateCandidateApproval(const std::filesystem::path& store_root,
   }
   std::string generation_evidence;
   generation_evidence.append("runtime_build_id=")
-      .append(runtime_build_id.build_id)
+      .append(runtime_build_id)
       .append("\n");
   generation_evidence.append("payload=").append(fingerprint).append("\n");
   generation_evidence.append("profile=").append(profile_sha256).append("\n");

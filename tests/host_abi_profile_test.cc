@@ -646,7 +646,8 @@ TEST_F(ExternalHostAbiProfileLoaderTest, AcceptsExactRepeatedTierCReceipt) {
   EXPECT_EQ(result.profile, FindHostAbiProfile(build_id_));
 }
 
-TEST_F(ExternalHostAbiProfileLoaderTest, RejectsReceiptForDifferentRuntime) {
+TEST_F(ExternalHostAbiProfileLoaderTest,
+       RejectsReceiptWithMismatchedCanaryRuntimeEvidence) {
   ExternalHostAbiProfileRequest request = BaseRequest();
   request.approval_receipt_path = invalid_receipt_path_.string();
 
@@ -654,11 +655,11 @@ TEST_F(ExternalHostAbiProfileLoaderTest, RejectsReceiptForDifferentRuntime) {
       LoadExternalHostAbiProfile(request);
 
   EXPECT_FALSE(result);
-  EXPECT_NE(result.error.find("different runtime"), std::string::npos);
+  EXPECT_NE(result.error.find("canary attestation"), std::string::npos);
 }
 
 TEST_F(ExternalHostAbiProfileLoaderTest,
-       RejectsInternallyConsistentReceiptForDifferentRuntimeBytes) {
+       AcceptsInternallyConsistentReceiptFromPreviousRuntime) {
   std::filesystem::path receipt;
   CopyApprovalSetWithRuntimeSha256(temporary_root_ / "wrong-runtime-sha",
                                    std::string(64, 'f'), &receipt);
@@ -668,8 +669,8 @@ TEST_F(ExternalHostAbiProfileLoaderTest,
   const ExternalHostAbiProfileResult result =
       LoadExternalHostAbiProfile(request);
 
-  EXPECT_FALSE(result);
-  EXPECT_NE(result.error.find("different runtime"), std::string::npos);
+  ASSERT_TRUE(result) << result.error;
+  EXPECT_EQ(result.profile, FindHostAbiProfile(build_id_));
 }
 
 TEST_F(ExternalHostAbiProfileLoaderTest, RejectsMissingCanaryAttestation) {

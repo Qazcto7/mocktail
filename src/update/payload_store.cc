@@ -360,6 +360,7 @@ nlohmann::json ActivationManifest(const PayloadIntegrityResult& payload) {
       {"version_name", payload.metadata.version_name},
       {"version_code", payload.metadata.version_code},
       {"elf_build_id", payload.metadata.build_id},
+      {"payload_sha256", payload.metadata.library_sha256},
       {"activated_at_epoch",
        std::chrono::duration_cast<std::chrono::seconds>(
            std::chrono::system_clock::now().time_since_epoch())
@@ -398,8 +399,19 @@ bool PopulateInspectedResult(
   if (verified_payload != nullptr) *verified_payload = payload;
   const nlohmann::json document =
       nlohmann::json::parse(manifest.contents, nullptr, false, true);
-  if (document.is_discarded()) {
+  if (document.is_discarded() ||
+      document.value("version_name", "") != payload.metadata.version_name ||
+      document.value("version_code", 0ULL) != payload.metadata.version_code ||
+      document.value("elf_build_id", "") != payload.metadata.build_id) {
     result->error = "active payload manifest is invalid";
+    return false;
+  }
+  const auto cached_sha256 = document.find("payload_sha256");
+  if (cached_sha256 != document.end() &&
+      (!cached_sha256->is_string() ||
+       cached_sha256->get_ref<const std::string&>() !=
+           payload.metadata.library_sha256)) {
+    result->error = "active payload manifest hash does not match payload";
     return false;
   }
   const std::string profile = document.value("host_abi_profile_path", "");
@@ -416,6 +428,31 @@ bool PopulateInspectedResult(
     result->approval_receipt = root / receipt;
   }
   return true;
+}
+
+bool PersistPayloadSha256(const std::filesystem::path& root,
+                          const ManifestIdentity& manifest,
+                          const PayloadIntegrityResult& payload,
+                          std::string* error) {
+  nlohmann::json document =
+      nlohmann::json::parse(manifest.contents, nullptr, false, true);
+  if (document.is_discarded() || !document.is_object()) {
+    *error = "active payload manifest is invalid";
+    return false;
+  }
+  const auto cached = document.find("payload_sha256");
+  if (cached != document.end()) {
+    if (!cached->is_string() ||
+        cached->get_ref<const std::string&>() !=
+            payload.metadata.library_sha256) {
+      *error = "active payload manifest hash does not match payload";
+      return false;
+    }
+    return true;
+  }
+  document["payload_sha256"] = payload.metadata.library_sha256;
+  return WriteAtomic(root, root / "current.json", document.dump(2) + "\n",
+                     error);
 }
 
 }  // namespace
@@ -563,8 +600,8 @@ PayloadStoreResult PayloadStore::PromoteProbation(
   const std::string contents =
       ProbationActivationManifest(payload, approval).dump(2) + "\n";
   CandidateApprovalResult verified_approval;
-  if (!ValidateCandidateApproval(root_, contents, payload, runtime_binary_,
-                                 &verified_approval, &result.error)) {
+  if (!ValidateCandidateApproval(root_, contents, payload, &verified_approval,
+                                 &result.error)) {
     return result;
   }
   const ManifestIdentity current = ReadManifest(root_ / "current.json", true);
@@ -596,7 +633,7 @@ PayloadStoreResult PayloadStore::Import(
   return Promote(staged.payload_id);
 }
 
-PayloadStoreResult PayloadStore::VerifyCurrent() const {
+PayloadStoreResult PayloadStore::VerifyCurrent() {
   PayloadStoreResult result;
   StoreLock lock(root_, &result.error);
   if (!lock) return result;
@@ -621,15 +658,17 @@ PayloadStoreResult PayloadStore::VerifyCurrent() const {
   std::string support_error;
   if (ExactSupported(compatibility_manifest_, payload.metadata,
                      &support_error)) {
-    return result;
-  }
-  if (runtime_binary_.empty()) {
-    result.error = "approved payload verification requires runtime identity";
+    if (!PersistPayloadSha256(root_, manifest, payload, &result.error)) {
+      return result;
+    }
     return result;
   }
   CandidateApprovalResult approval;
-  if (!ValidateCandidateApproval(root_, manifest.contents, payload,
-                                 runtime_binary_, &approval, &result.error)) {
+  if (!ValidateCandidateApproval(root_, manifest.contents, payload, &approval,
+                                 &result.error)) {
+    return result;
+  }
+  if (!PersistPayloadSha256(root_, manifest, payload, &result.error)) {
     return result;
   }
   result.host_abi_profile = approval.profile;
@@ -673,13 +712,9 @@ PayloadStoreResult PayloadStore::Rollback() {
   std::string support_error;
   if (!ExactSupported(compatibility_manifest_, payload.metadata,
                       &support_error)) {
-    if (runtime_binary_.empty()) {
-      result.error = "rollback approval requires runtime identity";
-      return result;
-    }
     CandidateApprovalResult approval;
     if (!ValidateCandidateApproval(root_, previous.contents, payload,
-                                   runtime_binary_, &approval, &result.error)) {
+                                   &approval, &result.error)) {
       return result;
     }
   }

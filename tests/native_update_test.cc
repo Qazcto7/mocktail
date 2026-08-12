@@ -296,6 +296,22 @@ TEST(PayloadStoreTest, StagesAndPromotesVerifiedExactPayload) {
   ASSERT_TRUE(current) << current.error;
   EXPECT_EQ(current.payload_id,
             "2628-1686400865ae0e408cd7bd67de7a439625c6fd13");
+  const nlohmann::json activation = nlohmann::json::parse(
+      ReadFile(temporary.root() / "store/current.json"));
+  EXPECT_EQ(activation["version_name"], metadata["version_name"]);
+  EXPECT_EQ(activation["version_code"], metadata["version_code"]);
+  EXPECT_EQ(activation["elf_build_id"], metadata["elf_build_id"]);
+  EXPECT_EQ(activation["payload_sha256"],
+            metadata["sha256"]["libroblox"]);
+
+  nlohmann::json tampered_activation = activation;
+  tampered_activation["payload_sha256"] = std::string(64, '0');
+  Write(temporary.root() / "store/current.json",
+        tampered_activation.dump(2) + "\n");
+  const PayloadStoreResult tampered = store.VerifyCurrent();
+  EXPECT_FALSE(tampered);
+  EXPECT_EQ(tampered.error,
+            "active payload manifest hash does not match payload");
 }
 
 TEST(PayloadStoreTest, RestagesReadOnlyCorruptPayloadCollision) {
@@ -464,6 +480,24 @@ TEST(PayloadStoreTest, RequiresTwoRuntimeBoundCanariesForLatestCandidate) {
   ASSERT_TRUE(current) << current.error;
   EXPECT_EQ(current.payload_id, payload_id);
   EXPECT_EQ(current.approval_receipt, promoted.approval_receipt);
+
+  // A Mocktail rebuild does not invalidate a canary result for unchanged
+  // Roblox bytes. The immutable receipt still binds the two original canary
+  // runs, payload, profile, and compatibility manifest to one evidence set.
+  nlohmann::json legacy_activation = nlohmann::json::parse(
+      ReadFile(temporary.root() / "store/current.json"));
+  legacy_activation.erase("payload_sha256");
+  Write(temporary.root() / "store/current.json",
+        legacy_activation.dump(2) + "\n");
+  PayloadStore rebuilt_runtime_store(temporary.root() / "store", compatibility);
+  const PayloadStoreResult cached = rebuilt_runtime_store.VerifyCurrent();
+  ASSERT_TRUE(cached) << cached.error;
+  EXPECT_EQ(cached.payload_id, payload_id);
+  EXPECT_EQ(cached.approval_receipt, promoted.approval_receipt);
+  const nlohmann::json activation = nlohmann::json::parse(
+      ReadFile(temporary.root() / "store/current.json"));
+  EXPECT_EQ(activation["payload_sha256"],
+            metadata["sha256"]["libroblox"]);
 }
 
 }  // namespace

@@ -52,7 +52,6 @@ CandidateApprovalResult CreateCandidateApproval(
 bool ValidateCandidateApproval(const std::filesystem::path& store_root,
                                std::string_view activation_json,
                                const PayloadIntegrityResult& payload,
-                               const std::filesystem::path& runtime_binary,
                                CandidateApprovalResult* approval,
                                std::string* error);
 

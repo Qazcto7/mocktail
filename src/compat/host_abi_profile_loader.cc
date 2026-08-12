@@ -953,21 +953,14 @@ bool ValidateReceipt(const std::string& receipt_path,
     return false;
   }
 
-  const BuildIdResult runtime_build_id = ReadElfBuildId("/proc/self/exe");
-  const FileSha256Result runtime_hash = ComputeFileSha256("/proc/self/exe");
   const FileSha256Result manifest_hash =
       ComputeFileSha256(compatibility_manifest_path);
-  if (!runtime_build_id || !runtime_hash || !manifest_hash) {
-    *error =
-        "cannot identify runtime or hash compatibility manifest for approval "
-        "receipt";
+  if (!manifest_hash) {
+    *error = "cannot hash compatibility manifest for approval receipt";
     return false;
   }
-  if (receipt_runtime_build_id != runtime_build_id.build_id ||
-      receipt_runtime_sha256 != runtime_hash.sha256 ||
-      receipt_manifest_sha256 != manifest_hash.sha256) {
-    *error =
-        "approval receipt belongs to different runtime or compatibility bytes";
+  if (receipt_manifest_sha256 != manifest_hash.sha256) {
+    *error = "approval receipt belongs to different compatibility bytes";
     return false;
   }
 
@@ -990,7 +983,7 @@ bool ValidateReceipt(const std::string& receipt_path,
     if (!ValidateCanaryAttestation(
             *canonical_attestation, index + 1, payload_id, payload_fingerprint,
             profile_sha256, manifest_hash.sha256, canary_runtime_sha256,
-            runtime_build_id.build_id, &canary_evidence[index], error)) {
+            receipt_runtime_build_id, &canary_evidence[index], error)) {
       return false;
     }
   }
@@ -1018,7 +1011,7 @@ bool ValidateReceipt(const std::string& receipt_path,
 
   std::string generation_evidence;
   generation_evidence.append("runtime_build_id=")
-      .append(runtime_build_id.build_id)
+      .append(receipt_runtime_build_id)
       .append("\n");
   generation_evidence.append("payload=")
       .append(payload_fingerprint)
