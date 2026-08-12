@@ -9,7 +9,7 @@ readonly REPOSITORY="${1:?Flatpak repository path is required}"
 readonly BUNDLE="${2:?Flatpak bundle path is required}"
 readonly PUBLIC_KEY="${3:?GPG public key path is required}"
 readonly OUTPUT="${4:?Pages output path is required}"
-readonly BASE_URL="https://komaruworld.github.io/mocktail"
+readonly BASE_URL="https://mocktail.bigrat.space"
 
 [[ -d "${REPOSITORY}" && ! -L "${REPOSITORY}" ]] || {
   printf 'Flatpak repository is missing or unsafe: %s\n' "${REPOSITORY}" >&2
@@ -92,7 +92,7 @@ cat >"${OUTPUT}/index.html" <<'EOF'
   <p>Signed development Flatpak builds for Linux x86_64.</p>
   <a class="button" href="mocktail.flatpakref">Install with Flatpak</a>
   <a class="button secondary" href="https://github.com/komaruworld/mocktail">Source</a>
-  <code>flatpak install --user https://komaruworld.github.io/mocktail/mocktail.flatpakref</code>
+  <code>flatpak install --user https://mocktail.bigrat.space/mocktail.flatpakref</code>
   <p>Mocktail is experimental and is not affiliated with Roblox Corporation.</p>
 </main></body>
 </html>

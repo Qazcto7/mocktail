@@ -25,7 +25,7 @@ an update fails.
 ## Install with Flatpak
 
 ```bash
-flatpak install --user https://komaruworld.github.io/mocktail/mocktail.flatpakref
+flatpak install --user https://mocktail.bigrat.space/mocktail.flatpakref
 flatpak run space.bigrat.mocktail
 ```
 

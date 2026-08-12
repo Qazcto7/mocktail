@@ -205,7 +205,7 @@ printf 'public-key\n' >"${TEMP_DIR}/mocktail-flatpak.gpg"
   "${TEMP_DIR}/Mocktail-x86_64.flatpak" \
   "${TEMP_DIR}/mocktail-flatpak.gpg" \
   "${TEMP_DIR}/public"
-grep -Fq 'Url=https://komaruworld.github.io/mocktail/repo/' \
+grep -Fq 'Url=https://mocktail.bigrat.space/repo/' \
   "${TEMP_DIR}/public/mocktail.flatpakrepo" ||
   Fail 'published Flatpak repository URL is incorrect'
 grep -Fq 'Name=space.bigrat.mocktail' \
