@@ -86,7 +86,8 @@ class RobloxFreshGameLaunchController final {
   RobloxFreshGameLaunchController(
       JniEnvironmentProvider environment, RobloxGameSessionSymbols symbols,
       RobloxFreshLaunchPresentBoundary present_boundary,
-      RobloxGameSurfaceJniConfig surface_config = {});
+      RobloxGameSurfaceJniConfig surface_config = {},
+      RobloxGamePresentedObserver presented_observer = {});
   ~RobloxFreshGameLaunchController();
 
   RobloxFreshGameLaunchController(const RobloxFreshGameLaunchController&) =
@@ -114,6 +115,7 @@ class RobloxFreshGameLaunchController final {
   const RobloxGameSessionSymbols symbols_;
   const RobloxFreshLaunchPresentBoundary present_boundary_;
   const RobloxGameSurfaceJniConfig surface_config_;
+  const RobloxGamePresentedObserver presented_observer_;
 
   mutable std::mutex mutex_;
   std::unique_ptr<RobloxGameSessionRuntime> runtime_;

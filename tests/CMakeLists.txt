@@ -25,6 +25,12 @@ target_compile_definitions(runtime_config_file_test PRIVATE
   MOCKTAIL_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
 )
 
+add_executable(discord_rpc_test discord_rpc_test.cc)
+target_link_libraries(discord_rpc_test PRIVATE
+  Mocktail::Runtime
+  GTest::gtest_main
+)
+
 add_executable(native_update_helper_fixture native_update_helper_fixture.cc)
 add_executable(native_progress_helper_fixture native_progress_helper_fixture.cc)
 mocktail_apply_compile_options(native_update_helper_fixture)
@@ -97,6 +103,30 @@ target_link_libraries(game_mode_test PRIVATE
   Mocktail::Runtime
   GTest::gtest_main
 )
+
+add_library(game_mode_namespace_fixture SHARED
+  game_mode_namespace_fixture.cc
+)
+set_target_properties(game_mode_namespace_fixture PROPERTIES
+  OUTPUT_NAME gamemode
+  VERSION 0.0.0
+  SOVERSION 0
+  LIBRARY_OUTPUT_DIRECTORY
+    "${CMAKE_CURRENT_BINARY_DIR}/game_mode_namespace_fixture"
+)
+target_link_libraries(game_mode_namespace_fixture PRIVATE ${CMAKE_DL_LIBS})
+
+add_executable(game_mode_link_namespace_test
+  game_mode_link_namespace_test.cc
+)
+target_link_libraries(game_mode_link_namespace_test PRIVATE
+  Mocktail::Runtime
+  GTest::gtest_main
+)
+target_link_options(game_mode_link_namespace_test PRIVATE
+  -Wl,--export-dynamic
+)
+add_dependencies(game_mode_link_namespace_test game_mode_namespace_fixture)
 
 add_executable(memory_limit_test memory_limit_test.cc)
 target_link_libraries(memory_limit_test PRIVATE
@@ -780,6 +810,10 @@ gtest_discover_tests(http_client_policy_test)
 gtest_discover_tests(http_client_spin_guard_test)
 gtest_discover_tests(crash_report_policy_test)
 gtest_discover_tests(game_mode_test)
+gtest_discover_tests(game_mode_link_namespace_test PROPERTIES
+  ENVIRONMENT
+    "LD_LIBRARY_PATH=${CMAKE_CURRENT_BINARY_DIR}/game_mode_namespace_fixture"
+)
 gtest_discover_tests(memory_limit_test)
 gtest_discover_tests(runtime_paths_test)
 gtest_discover_tests(single_instance_lock_test)
@@ -849,6 +883,7 @@ if(MOCKTAIL_ENABLE_UPSTREAM_JNIVM)
   gtest_discover_tests(upstream_jnivm_integration_test)
 endif()
 gtest_discover_tests(libc_shim_test)
+gtest_discover_tests(discord_rpc_test)
 gtest_discover_tests(asset_manager_test)
 gtest_discover_tests(android_native_window_test)
 gtest_discover_tests(headless_graphics_test)

@@ -221,6 +221,16 @@ class RobloxGameSessionNativeAdapter final {
   bool initialized_ = false;
 };
 
+using RobloxGamePresentedCallback = void (*)(void* context,
+                                             uint64_t frame_serial);
+
+struct RobloxGamePresentedObserver {
+  void* context = nullptr;
+  RobloxGamePresentedCallback notify = nullptr;
+
+  bool valid() const { return notify != nullptr; }
+};
+
 // Small production owner that binds the JNI adapter to the policy coordinator.
 // Initial startup always follows the APK sequence:
 // principal -> join request -> SurfaceCreated(foreground) ->
@@ -229,7 +239,8 @@ class RobloxGameSessionRuntime final {
  public:
   RobloxGameSessionRuntime(JniEnvironmentProvider environment,
                            RobloxGameSessionSymbols symbols,
-                           RobloxGameSurfaceJniConfig surface_config = {});
+                           RobloxGameSurfaceJniConfig surface_config = {},
+                           RobloxGamePresentedObserver presented_observer = {});
 
   RobloxGameSessionRuntime(const RobloxGameSessionRuntime&) = delete;
   RobloxGameSessionRuntime& operator=(const RobloxGameSessionRuntime&) = delete;
@@ -256,6 +267,7 @@ class RobloxGameSessionRuntime final {
  private:
   RobloxGameSessionNativeAdapter adapter_;
   GameSessionCoordinator coordinator_;
+  const RobloxGamePresentedObserver presented_observer_;
   // Makes the process-level pause/leave/destroy sequence atomic with respect
   // to surface updates. Present evidence bypasses this mutex
   // because StartGame can report it synchronously from the render callback.

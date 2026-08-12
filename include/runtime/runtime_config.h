@@ -55,6 +55,25 @@ struct NetworkProxyConfig {
   int port = 0;
 };
 
+struct DiscordRpcTextConfig {
+  std::string browsing = "Browsing experiences";
+  std::string joining = "Joining an experience";
+  std::string playing = "{place_name}";
+  std::string state = "Playing Roblox";
+  std::string unknown_place = "Unknown experience";
+};
+
+struct DiscordRpcConfig {
+  bool enabled = false;
+  bool show_place_name = true;
+  bool show_elapsed_time = true;
+  bool join_enabled = true;
+  bool public_servers_only = true;
+  std::string join_button_label = "Join Server";
+  std::string application_id;
+  DiscordRpcTextConfig text;
+};
+
 std::optional<NetworkProxyConfig> ParseNetworkProxyConfig(
     std::string_view host, std::string_view port);
 std::string BuildNetworkProxyUrl(const NetworkProxyConfig& proxy);
@@ -95,6 +114,8 @@ class RuntimeConfig {
   const std::optional<NetworkProxyConfig>& network_proxy() const {
     return network_proxy_;
   }
+  const DiscordRpcConfig& discord_rpc() const { return discord_rpc_; }
+  bool discord_rpc_valid() const { return discord_rpc_valid_; }
 
   // These legacy opt-ins create workers that do not own their VM/JNI state.
   // Empty and "0" values are disabled; every other non-empty value is unsafe.
@@ -123,6 +144,8 @@ class RuntimeConfig {
   std::string audio_output_device_ = "default";
   bool audio_output_device_valid_ = true;
   std::optional<NetworkProxyConfig> network_proxy_;
+  DiscordRpcConfig discord_rpc_;
+  bool discord_rpc_valid_ = true;
   std::vector<std::string> unsafe_detached_thread_overrides_;
 };
 

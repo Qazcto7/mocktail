@@ -35,6 +35,9 @@ install -m 0644 -- "${PUBLIC_KEY}" "${OUTPUT}/mocktail-flatpak.gpg"
 install -m 0644 -- \
   "$(dirname -- "${BASH_SOURCE[0]}")/../packaging/space.bigrat.mocktail.svg" \
   "${OUTPUT}/mocktail.svg"
+install -m 0644 -- \
+  "$(dirname -- "${BASH_SOURCE[0]}")/../packaging/discord-join.html" \
+  "${OUTPUT}/join.html"
 
 readonly GPG_KEY="$(base64 --wrap=0 "${PUBLIC_KEY}")"
 

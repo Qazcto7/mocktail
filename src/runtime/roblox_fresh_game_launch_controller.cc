@@ -361,11 +361,13 @@ Status BuildFreshStartGameParams(JNIEnv* env,
 RobloxFreshGameLaunchController::RobloxFreshGameLaunchController(
     JniEnvironmentProvider environment, RobloxGameSessionSymbols symbols,
     RobloxFreshLaunchPresentBoundary present_boundary,
-    RobloxGameSurfaceJniConfig surface_config)
+    RobloxGameSurfaceJniConfig surface_config,
+    RobloxGamePresentedObserver presented_observer)
     : environment_(environment),
       symbols_(symbols),
       present_boundary_(present_boundary),
-      surface_config_(std::move(surface_config)) {}
+      surface_config_(std::move(surface_config)),
+      presented_observer_(presented_observer) {}
 
 RobloxFreshGameLaunchController::~RobloxFreshGameLaunchController() {
   Shutdown();
@@ -402,8 +404,8 @@ Status RobloxFreshGameLaunchController::Launch(
     return status;
   }
 
-  runtime_ = std::make_unique<RobloxGameSessionRuntime>(environment_, symbols_,
-                                                        surface_config_);
+  runtime_ = std::make_unique<RobloxGameSessionRuntime>(
+      environment_, symbols_, surface_config_, presented_observer_);
   observer_registered_ = present_boundary_.register_observer(
       present_boundary_.context,
       &RobloxGameSessionRuntime::SuccessfulPresentCallback, runtime_.get());

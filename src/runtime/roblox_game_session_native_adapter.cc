@@ -796,9 +796,11 @@ void RobloxGameSessionNativeAdapter::ReleaseGlobalReferenceLocked(
 
 RobloxGameSessionRuntime::RobloxGameSessionRuntime(
     JniEnvironmentProvider environment, RobloxGameSessionSymbols symbols,
-    RobloxGameSurfaceJniConfig surface_config)
+    RobloxGameSurfaceJniConfig surface_config,
+    RobloxGamePresentedObserver presented_observer)
     : adapter_(environment, symbols, std::move(surface_config)),
-      coordinator_(adapter_.Capabilities()) {}
+      coordinator_(adapter_.Capabilities()),
+      presented_observer_(presented_observer) {}
 
 Status RobloxGameSessionRuntime::InitializeAndStart(
     const RobloxGameSessionBinding& binding, GameSessionPrincipal principal,
@@ -910,14 +912,16 @@ void RobloxGameSessionRuntime::SuccessfulPresentCallback(
   if (runtime->present_evidence_recorded_.load(std::memory_order_acquire)) {
     return;
   }
-  const GameSessionUpdateResult result =
-      runtime->RecordPresent(frame_serial);
-  if (result.ok()) {
+  const GameSessionUpdateResult result = runtime->RecordPresent(frame_serial);
+  if (result.changed()) {
     runtime->present_evidence_recorded_.store(true, std::memory_order_release);
   }
+  if (result.changed() && runtime->presented_observer_.valid()) {
+    runtime->presented_observer_.notify(runtime->presented_observer_.context,
+                                        frame_serial);
+  }
   if (result.changed()) {
-    std::fprintf(stderr,
-                 "  [game-session] host present accepted frame=%llu\n",
+    std::fprintf(stderr, "  [game-session] host present accepted frame=%llu\n",
                  static_cast<unsigned long long>(frame_serial));
   }
 }

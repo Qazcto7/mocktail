@@ -45,6 +45,10 @@ class WindowPointerCaptureOwner final {
   // Android's lock-center query does not represent desktop RMB camera drag,
   // so the SDL owner tracks that transient capture source independently.
   bool OnRightButton(bool pressed, bool text_input_active);
+  // Shift can enable Roblox's persistent mouse lock while a transient RMB
+  // camera drag is active. Refresh the native state after dispatching that
+  // key so the subsequent RMB release preserves the intentional lock.
+  bool OnShiftKeyPressed(bool text_input_active);
   bool NeedsRightButtonReleaseRecovery(bool observed_pressed) const;
   // Mirrors Android's captured-pointer listener: the motion that releases a
   // transient capture is consumed instead of leaking one final camera delta.
@@ -70,6 +74,7 @@ class WindowPointerCaptureOwner final {
   bool right_button_held_ = false;
   bool native_lock_observed_ = false;
   bool native_lock_was_active_before_right_drag_ = false;
+  bool shift_key_pressed_during_right_drag_ = false;
   bool wait_for_native_unlock_after_right_drag_ = false;
   bool discard_next_motion_after_right_drag_ = false;
   bool captured_ = false;

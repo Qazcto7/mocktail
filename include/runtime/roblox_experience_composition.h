@@ -21,12 +21,14 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 
 #include "mocktail/status.h"
 #include "runtime/owned_pthread.h"
 #include "runtime/roblox_browser_service_bridge.h"
 #include "runtime/roblox_experience_launch_bridge.h"
+#include "runtime/roblox_experience_presence.h"
 #include "runtime/roblox_fresh_game_launch_controller.h"
 #include "runtime/roblox_web_view_bridge.h"
 #include "runtime/webview_roblox_cookie.h"
@@ -120,7 +122,8 @@ class RobloxExperienceComposition final {
       RobloxFreshLaunchPresentBoundary present_boundary,
       RobloxGameSurfaceJniConfig surface_config = {},
       const SecureRobloxCredential* initial_web_view_credential = nullptr,
-      RobloxExperienceSurfaceProvider surface_provider = {});
+      RobloxExperienceSurfaceProvider surface_provider = {},
+      RobloxExperiencePresenceObserver presence_observer = {});
   ~RobloxExperienceComposition();
 
   RobloxExperienceComposition(const RobloxExperienceComposition&) = delete;
@@ -185,6 +188,7 @@ class RobloxExperienceComposition final {
       void* context, const RobloxBrowserServiceExecuteRequest& request);
   static void WebSurfaceExited(void* context);
   static void NotifyLateLuaAppDidReturn(void* context);
+  static void GamePresented(void* context, uint64_t frame_serial);
   static void* RunLaunchWorker(void* context);
   static Status RouteWebSurfaceEvent(WebSurfaceRoute route,
                                      const WebViewHelperEvent& event,
@@ -205,6 +209,7 @@ class RobloxExperienceComposition final {
   Status Dispatch(const RobloxExperienceLaunchRequest& request);
   Status PromoteAuthenticatedSession();
   Status RefreshLateSurface();
+  void PublishPresentedPresence(uint64_t frame_serial);
   void RunActiveLaunch();
   Status BuildPlatformGlobalObjects();
   Status BuildLuaAppGlobalObjects();
@@ -218,6 +223,8 @@ class RobloxExperienceComposition final {
   Status RestartLuaAppSurface(const GameSurface& surface);
   Status ReleaseLuaAppGlobalObjects();
   Status ReleaseGlobalObjects();
+  void NotifyPresence(RobloxExperiencePresencePhase phase,
+                      const RobloxExperienceLaunchRequest* request) const;
 
   const JniEnvironmentProvider environment_;
   const RobloxExperienceMessageBusSymbols message_bus_symbols_;
@@ -229,6 +236,7 @@ class RobloxExperienceComposition final {
   const RobloxGameSurfaceJniConfig surface_config_;
   const bool consumes_window_surface_events_;
   const RobloxExperienceSurfaceProvider surface_provider_;
+  const RobloxExperiencePresenceObserver presence_observer_;
 
   mutable std::mutex mutex_;
   std::mutex surface_operation_mutex_;
@@ -253,6 +261,7 @@ class RobloxExperienceComposition final {
   bool web_view_cookie_synchronized_ = false;
   std::deque<RobloxExperienceLaunchRequest> pending_launch_requests_;
   std::unique_ptr<LaunchTask> active_launch_;
+  std::optional<RobloxExperienceLaunchRequest> presence_request_;
   std::string active_game_canonical_json_;
   OwnedPthread launch_worker_;
   uint64_t next_request_id_ = 1;
@@ -260,6 +269,7 @@ class RobloxExperienceComposition final {
   bool subscribed_ = false;
   bool launch_in_progress_ = false;
   bool game_active_ = false;
+  bool playing_presence_published_ = false;
   bool lua_app_return_pending_ = false;
   bool controlled_switch_waiting_for_return_ = false;
   bool lua_app_surface_recreation_pending_ = false;

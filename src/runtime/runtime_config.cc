@@ -22,6 +22,10 @@
 #include <cstdlib>
 #include <optional>
 
+#ifndef MOCKTAIL_DISCORD_APPLICATION_ID
+#define MOCKTAIL_DISCORD_APPLICATION_ID ""
+#endif
+
 namespace mocktail {
 namespace runtime {
 namespace {
@@ -39,6 +43,37 @@ constexpr std::array<std::string_view, 7> kUnsafeDetachedThreadOverrides = {
 bool LegacyEnabled(const Environment& environment, std::string_view name) {
   const std::optional<std::string> value = environment.Get(name);
   return value.has_value() && !value->empty() && *value != "0";
+}
+
+bool IsDiscordApplicationId(std::string_view value) {
+  return value.empty() ||
+         (value.size() >= 17 && value.size() <= 20 &&
+          std::all_of(value.begin(), value.end(), [](unsigned char byte) {
+            return byte >= '0' && byte <= '9';
+          }));
+}
+
+bool IsDiscordText(std::string_view value, std::size_t maximum) {
+  return !value.empty() && value.size() <= maximum &&
+         std::none_of(value.begin(), value.end(), [](unsigned char byte) {
+           return byte < 0x20 || byte == 0x7f;
+         });
+}
+
+bool ReadBoolean(const Environment& environment, std::string_view name,
+                 bool default_value, bool* valid) {
+  const std::optional<std::string> value = environment.Get(name);
+  if (!value.has_value()) {
+    return default_value;
+  }
+  if (*value == "1" || *value == "true" || *value == "on") {
+    return true;
+  }
+  if (*value == "0" || *value == "false" || *value == "off") {
+    return false;
+  }
+  *valid = false;
+  return default_value;
 }
 
 std::optional<bool> InputEnabled(const Environment& environment,
@@ -241,6 +276,47 @@ RuntimeConfig RuntimeConfig::FromEnvironment(const Environment& environment) {
   config.audio_output_device_valid_ =
       IsValidDeviceProfileValue(config.audio_output_device_, 512);
   config.network_proxy_ = ReadNetworkProxy(environment);
+  bool discord_booleans_valid = true;
+  config.discord_rpc_.enabled = ReadBoolean(
+      environment, "MOCKTAIL_DISCORD_RPC_ENABLED", false,
+      &discord_booleans_valid);
+  config.discord_rpc_.show_place_name = ReadBoolean(
+      environment, "MOCKTAIL_DISCORD_RPC_SHOW_PLACE_NAME", true,
+      &discord_booleans_valid);
+  config.discord_rpc_.show_elapsed_time = ReadBoolean(
+      environment, "MOCKTAIL_DISCORD_RPC_SHOW_ELAPSED_TIME", true,
+      &discord_booleans_valid);
+  config.discord_rpc_.join_enabled = ReadBoolean(
+      environment, "MOCKTAIL_DISCORD_RPC_JOIN_ENABLED", true,
+      &discord_booleans_valid);
+  config.discord_rpc_.public_servers_only = ReadBoolean(
+      environment, "MOCKTAIL_DISCORD_RPC_PUBLIC_SERVERS_ONLY", true,
+      &discord_booleans_valid);
+  config.discord_rpc_.join_button_label = environment.GetOr(
+      "MOCKTAIL_DISCORD_RPC_JOIN_BUTTON_LABEL",
+      config.discord_rpc_.join_button_label);
+  config.discord_rpc_.application_id = environment.GetOr(
+      "MOCKTAIL_DISCORD_APPLICATION_ID", MOCKTAIL_DISCORD_APPLICATION_ID);
+  config.discord_rpc_.text.browsing = environment.GetOr(
+      "MOCKTAIL_DISCORD_RPC_TEXT_BROWSING",
+      config.discord_rpc_.text.browsing);
+  config.discord_rpc_.text.joining = environment.GetOr(
+      "MOCKTAIL_DISCORD_RPC_TEXT_JOINING", config.discord_rpc_.text.joining);
+  config.discord_rpc_.text.playing = environment.GetOr(
+      "MOCKTAIL_DISCORD_RPC_TEXT_PLAYING", config.discord_rpc_.text.playing);
+  config.discord_rpc_.text.state = environment.GetOr(
+      "MOCKTAIL_DISCORD_RPC_TEXT_STATE", config.discord_rpc_.text.state);
+  config.discord_rpc_.text.unknown_place = environment.GetOr(
+      "MOCKTAIL_DISCORD_RPC_TEXT_UNKNOWN_PLACE",
+      config.discord_rpc_.text.unknown_place);
+  config.discord_rpc_valid_ = discord_booleans_valid &&
+      IsDiscordApplicationId(config.discord_rpc_.application_id) &&
+      IsDiscordText(config.discord_rpc_.join_button_label, 32) &&
+      IsDiscordText(config.discord_rpc_.text.browsing, 128) &&
+      IsDiscordText(config.discord_rpc_.text.joining, 128) &&
+      IsDiscordText(config.discord_rpc_.text.playing, 128) &&
+      IsDiscordText(config.discord_rpc_.text.state, 128) &&
+      IsDiscordText(config.discord_rpc_.text.unknown_place, 128);
   for (const std::string_view name : kUnsafeDetachedThreadOverrides) {
     if (LegacyEnabled(environment, name)) {
       config.unsafe_detached_thread_overrides_.emplace_back(name);

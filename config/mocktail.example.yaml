@@ -64,6 +64,31 @@ audio:
   # To pin output, copy an exact SDL device name printed during startup.
   output_device: default
 
+integrations:
+  discord_rpc:
+    # Boolean (default: false): publish Mocktail activity to Discord Desktop.
+    # This never signs in to Discord and never reads an account token.
+    enabled: false
+    # Boolean (default: true): show the current Roblox experience name.
+    show_place_name: true
+    # Boolean (default: true): show how long the current session has run.
+    show_elapsed_time: true
+    join:
+      # Boolean (default: true): let friends open the same public server.
+      enabled: true
+      # Boolean (default: true): never expose private or reserved joins.
+      public_servers_only: true
+      # button_label: Join Server
+    # English defaults. Uncomment only the lines you want to customize.
+    # text:
+    #   browsing: Browsing experiences
+    #   joining: Joining an experience
+    #   playing: "{place_name}"
+    #   state: Playing Roblox
+    #   unknown_place: Unknown experience
+    # Advanced: overrides the application bundled by the package maintainer.
+    # application_id: 123456789012345678
+
 window:
   # Integer (default: 1280): initial window width in pixels.
   width: 1280

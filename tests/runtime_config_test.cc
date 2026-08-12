@@ -78,6 +78,19 @@ TEST(RuntimeConfigTest, UsesSupportedDefaults) {
   EXPECT_EQ(config.audio_output_device(), "default");
   EXPECT_TRUE(config.audio_output_device_valid());
   EXPECT_FALSE(config.network_proxy().has_value());
+  EXPECT_FALSE(config.discord_rpc().enabled);
+  EXPECT_TRUE(config.discord_rpc().show_place_name);
+  EXPECT_TRUE(config.discord_rpc().show_elapsed_time);
+  EXPECT_TRUE(config.discord_rpc().join_enabled);
+  EXPECT_TRUE(config.discord_rpc().public_servers_only);
+  EXPECT_EQ(config.discord_rpc().join_button_label, "Join Server");
+  EXPECT_EQ(config.discord_rpc().application_id, "1537088975720812655");
+  EXPECT_EQ(config.discord_rpc().text.browsing, "Browsing experiences");
+  EXPECT_EQ(config.discord_rpc().text.joining, "Joining an experience");
+  EXPECT_EQ(config.discord_rpc().text.playing, "{place_name}");
+  EXPECT_EQ(config.discord_rpc().text.state, "Playing Roblox");
+  EXPECT_EQ(config.discord_rpc().text.unknown_place, "Unknown experience");
+  EXPECT_TRUE(config.discord_rpc_valid());
   EXPECT_FALSE(config.has_unsafe_detached_thread_overrides());
   EXPECT_TRUE(config.unsafe_detached_thread_overrides().empty());
 }
@@ -100,6 +113,14 @@ TEST(RuntimeConfigTest, ReadsTypedRuntimeValues) {
       {"MOCKTAIL_AUDIO_OUTPUT_DEVICE", "USB Headset"},
       {"MOCKTAIL_HTTP_PROXY_HOST", "proxy.example.test"},
       {"MOCKTAIL_HTTP_PROXY_PORT", "3128"},
+      {"MOCKTAIL_DISCORD_RPC_ENABLED", "1"},
+      {"MOCKTAIL_DISCORD_RPC_SHOW_PLACE_NAME", "0"},
+      {"MOCKTAIL_DISCORD_RPC_SHOW_ELAPSED_TIME", "0"},
+      {"MOCKTAIL_DISCORD_RPC_JOIN_ENABLED", "0"},
+      {"MOCKTAIL_DISCORD_RPC_PUBLIC_SERVERS_ONLY", "0"},
+      {"MOCKTAIL_DISCORD_RPC_JOIN_BUTTON_LABEL", "Play Together"},
+      {"MOCKTAIL_DISCORD_APPLICATION_ID", "123456789012345678"},
+      {"MOCKTAIL_DISCORD_RPC_TEXT_PLAYING", "In {place_name}"},
   });
   const RuntimeConfig config = RuntimeConfig::FromEnvironment(environment);
 
@@ -128,6 +149,15 @@ TEST(RuntimeConfigTest, ReadsTypedRuntimeValues) {
   EXPECT_EQ(config.network_proxy()->port, 3128);
   EXPECT_EQ(BuildNetworkProxyUrl(*config.network_proxy()),
             "http://proxy.example.test:3128");
+  EXPECT_TRUE(config.discord_rpc().enabled);
+  EXPECT_FALSE(config.discord_rpc().show_place_name);
+  EXPECT_FALSE(config.discord_rpc().show_elapsed_time);
+  EXPECT_FALSE(config.discord_rpc().join_enabled);
+  EXPECT_FALSE(config.discord_rpc().public_servers_only);
+  EXPECT_EQ(config.discord_rpc().join_button_label, "Play Together");
+  EXPECT_EQ(config.discord_rpc().application_id, "123456789012345678");
+  EXPECT_EQ(config.discord_rpc().text.playing, "In {place_name}");
+  EXPECT_TRUE(config.discord_rpc_valid());
 }
 
 TEST(RuntimeConfigTest, BuildsBracketedIpv6ProxyUrl) {
@@ -135,6 +165,17 @@ TEST(RuntimeConfigTest, BuildsBracketedIpv6ProxyUrl) {
       ParseNetworkProxyConfig("::1", "8080");
   ASSERT_TRUE(proxy.has_value());
   EXPECT_EQ(BuildNetworkProxyUrl(*proxy), "http://[::1]:8080");
+}
+
+TEST(RuntimeConfigTest, RejectsMalformedDiscordApplicationId) {
+  const RuntimeConfig config = RuntimeConfig::FromEnvironment(
+      MapEnvironment({{"MOCKTAIL_DISCORD_APPLICATION_ID", "not-a-snowflake"}}));
+
+  EXPECT_FALSE(config.discord_rpc_valid());
+
+  const RuntimeConfig invalid_boolean = RuntimeConfig::FromEnvironment(
+      MapEnvironment({{"MOCKTAIL_DISCORD_RPC_ENABLED", "sometimes"}}));
+  EXPECT_FALSE(invalid_boolean.discord_rpc_valid());
 }
 
 TEST(RuntimeConfigTest, RejectsInvalidEnvironmentProxyValues) {

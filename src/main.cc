@@ -292,6 +292,42 @@ int main(int argc, char* argv[]) {
                       : "")
               << '\n';
   }
+
+  // Register immediately after any cgroup re-exec and before starting helper
+  // processes or loading the Android payload. libgamemode caches its shared
+  // D-Bus connection, so the first use must happen in the final game process.
+  const mocktail::runtime::GameModePolicy game_mode_policy =
+      runtime_config.config.performance().game_mode;
+  mocktail::runtime::GameModeSession game_mode_session =
+      command_line.options.mode == mocktail::runtime::CommandMode::kRun
+          ? mocktail::runtime::GameModeSession::Start(game_mode_policy)
+          : mocktail::runtime::GameModeSession();
+  switch (game_mode_session.state()) {
+    case mocktail::runtime::GameModeSessionState::kActive:
+      std::cout << "  [gamemode] performance request active\n";
+      break;
+    case mocktail::runtime::GameModeSessionState::kAlreadyActive:
+      std::cout << "  [gamemode] already active for this process\n";
+      break;
+    case mocktail::runtime::GameModeSessionState::kUnavailable:
+    case mocktail::runtime::GameModeSessionState::kRequestFailed:
+      if (game_mode_policy == mocktail::runtime::GameModePolicy::kOn) {
+        std::cerr << "  [gamemode] requested but unavailable: "
+                  << game_mode_session.detail()
+                  << "; continuing without GameMode\n";
+      } else {
+        std::cout << "  [gamemode] unavailable; continuing normally\n";
+      }
+      break;
+    case mocktail::runtime::GameModeSessionState::kDisabled:
+      if (command_line.options.mode == mocktail::runtime::CommandMode::kRun) {
+        std::cout << "  [gamemode] disabled by runtime policy\n";
+      }
+      break;
+    case mocktail::runtime::GameModeSessionState::kStopped:
+    case mocktail::runtime::GameModeSessionState::kStopFailed:
+      break;
+  }
   if (command_line.options.mode == mocktail::runtime::CommandMode::kRun) {
     failure_dialog = mocktail::runtime::FailureDialogMonitor::Start(
         environment,
@@ -720,38 +756,6 @@ int main(int argc, char* argv[]) {
     }
     dependencies = mocktail::legacy::RuntimeDependencies(
         std::move(composition), &ShutdownPlatformBridges);
-  }
-  const mocktail::runtime::GameModePolicy game_mode_policy =
-      runtime_config.config.performance().game_mode;
-  mocktail::runtime::GameModeSession game_mode_session =
-      command_line.options.mode == mocktail::runtime::CommandMode::kRun
-          ? mocktail::runtime::GameModeSession::Start(game_mode_policy)
-          : mocktail::runtime::GameModeSession();
-  switch (game_mode_session.state()) {
-    case mocktail::runtime::GameModeSessionState::kActive:
-      std::cout << "  [gamemode] performance request active\n";
-      break;
-    case mocktail::runtime::GameModeSessionState::kAlreadyActive:
-      std::cout << "  [gamemode] already active for this process\n";
-      break;
-    case mocktail::runtime::GameModeSessionState::kUnavailable:
-    case mocktail::runtime::GameModeSessionState::kRequestFailed:
-      if (game_mode_policy == mocktail::runtime::GameModePolicy::kOn) {
-        std::cerr << "  [gamemode] requested but unavailable: "
-                  << game_mode_session.detail()
-                  << "; continuing without GameMode\n";
-      } else {
-        std::cout << "  [gamemode] unavailable; continuing normally\n";
-      }
-      break;
-    case mocktail::runtime::GameModeSessionState::kDisabled:
-      if (command_line.options.mode == mocktail::runtime::CommandMode::kRun) {
-        std::cout << "  [gamemode] disabled by runtime policy\n";
-      }
-      break;
-    case mocktail::runtime::GameModeSessionState::kStopped:
-    case mocktail::runtime::GameModeSessionState::kStopFailed:
-      break;
   }
   if (command_line.options.mode == mocktail::runtime::CommandMode::kRun &&
       !isolated_canary) {

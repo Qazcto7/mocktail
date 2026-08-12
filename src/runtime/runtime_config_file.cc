@@ -19,6 +19,7 @@
 #include <unistd.h>
 #include <yaml.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <charconv>
@@ -97,6 +98,45 @@ bool ReadMapping(yaml_document_t* document, const yaml_node_t* mapping,
   return true;
 }
 
+bool ReadNestedMapping(yaml_document_t* document, const yaml_node_t* mapping,
+                       const std::string& section, int remaining_depth,
+                       ValueMap* values, std::string* error) {
+  if (mapping == nullptr || mapping->type != YAML_MAPPING_NODE) {
+    *error = section + " must be a mapping";
+    return false;
+  }
+  std::unordered_set<std::string> keys;
+  for (yaml_node_pair_t* pair = mapping->data.mapping.pairs.start;
+       pair != mapping->data.mapping.pairs.top; ++pair) {
+    const yaml_node_t* key_node = yaml_document_get_node(document, pair->key);
+    const yaml_node_t* value_node =
+        yaml_document_get_node(document, pair->value);
+    const std::string key = Scalar(key_node);
+    if (key.empty() || value_node == nullptr) {
+      *error = section + " contains a non-scalar or empty key";
+      return false;
+    }
+    if (!keys.insert(key).second) {
+      *error = section + " contains duplicate key: " + key;
+      return false;
+    }
+    const std::string path = section + "." + key;
+    if (value_node->type == YAML_SCALAR_NODE) {
+      (*values)[path] = Scalar(value_node);
+      continue;
+    }
+    if (value_node->type != YAML_MAPPING_NODE || remaining_depth <= 0) {
+      *error = path + " must be a scalar";
+      return false;
+    }
+    if (!ReadNestedMapping(document, value_node, path, remaining_depth - 1,
+                           values, error)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool ParseBoolean(std::string_view value, bool* parsed) {
   if (value == "true") {
     *parsed = true;
@@ -157,6 +197,18 @@ bool ValidateAndMap(const ValueMap& yaml, ValueMap* environment,
       "compatibility.desktop_playability",
       "network.proxy_host",
       "network.proxy_port",
+      "integrations.discord_rpc.enabled",
+      "integrations.discord_rpc.show_place_name",
+      "integrations.discord_rpc.show_elapsed_time",
+      "integrations.discord_rpc.application_id",
+      "integrations.discord_rpc.join.enabled",
+      "integrations.discord_rpc.join.public_servers_only",
+      "integrations.discord_rpc.join.button_label",
+      "integrations.discord_rpc.text.browsing",
+      "integrations.discord_rpc.text.joining",
+      "integrations.discord_rpc.text.playing",
+      "integrations.discord_rpc.text.state",
+      "integrations.discord_rpc.text.unknown_place",
   };
   for (const auto& [key, ignored] : yaml) {
     if (supported.find(key) == supported.end()) {
@@ -387,6 +439,78 @@ bool ValidateAndMap(const ValueMap& yaml, ValueMap* environment,
     (*environment)["MOCKTAIL_HTTP_PROXY_HOST"] = *proxy_host;
     (*environment)["MOCKTAIL_HTTP_PROXY_PORT"] = *proxy_port;
   }
+  for (const auto& [key, variable] : {
+           std::pair<std::string_view, std::string_view>(
+               "integrations.discord_rpc.enabled",
+               "MOCKTAIL_DISCORD_RPC_ENABLED"),
+           {"integrations.discord_rpc.show_place_name",
+            "MOCKTAIL_DISCORD_RPC_SHOW_PLACE_NAME"},
+           {"integrations.discord_rpc.show_elapsed_time",
+            "MOCKTAIL_DISCORD_RPC_SHOW_ELAPSED_TIME"},
+           {"integrations.discord_rpc.join.enabled",
+            "MOCKTAIL_DISCORD_RPC_JOIN_ENABLED"},
+           {"integrations.discord_rpc.join.public_servers_only",
+            "MOCKTAIL_DISCORD_RPC_PUBLIC_SERVERS_ONLY"},
+       }) {
+    const std::optional<std::string> configured = value(key);
+    if (!configured.has_value()) {
+      continue;
+    }
+    bool parsed = false;
+    if (!ParseBoolean(*configured, &parsed)) {
+      *error = std::string(key) + " must be true or false";
+      return false;
+    }
+    (*environment)[std::string(variable)] = parsed ? "1" : "0";
+  }
+  if (const auto application_id =
+          value("integrations.discord_rpc.application_id");
+      application_id.has_value()) {
+    if (application_id->size() < 17 || application_id->size() > 20 ||
+        !std::all_of(application_id->begin(), application_id->end(),
+                     [](unsigned char byte) {
+                       return byte >= '0' && byte <= '9';
+                     })) {
+      *error = "integrations.discord_rpc.application_id must be a Discord "
+               "snowflake";
+      return false;
+    }
+    (*environment)["MOCKTAIL_DISCORD_APPLICATION_ID"] = *application_id;
+  }
+  struct DiscordStringField {
+    std::string_view yaml;
+    std::string_view variable;
+    std::size_t maximum;
+  };
+  for (const DiscordStringField& field : {
+           DiscordStringField{"integrations.discord_rpc.join.button_label",
+                              "MOCKTAIL_DISCORD_RPC_JOIN_BUTTON_LABEL", 32},
+           {"integrations.discord_rpc.text.browsing",
+            "MOCKTAIL_DISCORD_RPC_TEXT_BROWSING", 128},
+           {"integrations.discord_rpc.text.joining",
+            "MOCKTAIL_DISCORD_RPC_TEXT_JOINING", 128},
+           {"integrations.discord_rpc.text.playing",
+            "MOCKTAIL_DISCORD_RPC_TEXT_PLAYING", 128},
+           {"integrations.discord_rpc.text.state",
+            "MOCKTAIL_DISCORD_RPC_TEXT_STATE", 128},
+           {"integrations.discord_rpc.text.unknown_place",
+            "MOCKTAIL_DISCORD_RPC_TEXT_UNKNOWN_PLACE", 128},
+       }) {
+    const std::optional<std::string> configured = value(field.yaml);
+    if (!configured.has_value()) {
+      continue;
+    }
+    if (configured->empty() || configured->size() > field.maximum ||
+        std::any_of(configured->begin(), configured->end(),
+                    [](unsigned char byte) {
+                      return byte < 0x20 || byte == 0x7f;
+                    })) {
+      *error = std::string(field.yaml) +
+               " must be non-empty, bounded, and contain no control bytes";
+      return false;
+    }
+    (*environment)[std::string(field.variable)] = *configured;
+  }
   return true;
 }
 
@@ -496,6 +620,8 @@ bool LoadYaml(const std::filesystem::path& path, ValueMap* values, bool* loaded,
                  key == "performance" || key == "audio" || key == "window" ||
                  key == "input" || key == "compatibility" || key == "network") {
         valid = ReadMapping(&document, value_node, key, values, error);
+      } else if (key == "integrations") {
+        valid = ReadNestedMapping(&document, value_node, key, 2, values, error);
       }
       // Other top-level sections are owned by subsystems such as the
       // updater. This loader ignores rather than misparses them.
@@ -575,6 +701,8 @@ RuntimeConfigLoadResult LoadRuntimeConfig(
     result.error = "GameMode policy is invalid";
   } else if (!result.config.performance().physics_worker_mode_valid) {
     result.error = "physics worker policy is invalid";
+  } else if (!result.config.discord_rpc_valid()) {
+    result.error = "Discord Rich Presence configuration is invalid";
   }
   return result;
 }
@@ -608,6 +736,12 @@ bool ExportRuntimeConfigEnvironment(const RuntimeConfig& config,
   if (!config.performance().physics_worker_mode_valid) {
     if (error != nullptr) {
       *error = "cannot export an invalid physics worker policy";
+    }
+    return false;
+  }
+  if (!config.discord_rpc_valid()) {
+    if (error != nullptr) {
+      *error = "cannot export an invalid Discord Rich Presence policy";
     }
     return false;
   }
@@ -673,7 +807,35 @@ bool ExportRuntimeConfigEnvironment(const RuntimeConfig& config,
                           GameModePolicyName(config.performance().game_mode),
                           error) &&
       SetEnvironmentValue("MOCKTAIL_AUDIO_OUTPUT_DEVICE",
-                          config.audio_output_device(), error);
+                          config.audio_output_device(), error) &&
+      SetEnvironmentValue("MOCKTAIL_DISCORD_RPC_ENABLED",
+                          config.discord_rpc().enabled ? "1" : "0", error) &&
+      SetEnvironmentValue(
+          "MOCKTAIL_DISCORD_RPC_SHOW_PLACE_NAME",
+          config.discord_rpc().show_place_name ? "1" : "0", error) &&
+      SetEnvironmentValue(
+          "MOCKTAIL_DISCORD_RPC_SHOW_ELAPSED_TIME",
+          config.discord_rpc().show_elapsed_time ? "1" : "0", error) &&
+      SetEnvironmentValue("MOCKTAIL_DISCORD_RPC_JOIN_ENABLED",
+                          config.discord_rpc().join_enabled ? "1" : "0",
+                          error) &&
+      SetEnvironmentValue(
+          "MOCKTAIL_DISCORD_RPC_PUBLIC_SERVERS_ONLY",
+          config.discord_rpc().public_servers_only ? "1" : "0", error) &&
+      SetEnvironmentValue("MOCKTAIL_DISCORD_RPC_JOIN_BUTTON_LABEL",
+                          config.discord_rpc().join_button_label, error) &&
+      SetEnvironmentValue("MOCKTAIL_DISCORD_APPLICATION_ID",
+                          config.discord_rpc().application_id, error) &&
+      SetEnvironmentValue("MOCKTAIL_DISCORD_RPC_TEXT_BROWSING",
+                          config.discord_rpc().text.browsing, error) &&
+      SetEnvironmentValue("MOCKTAIL_DISCORD_RPC_TEXT_JOINING",
+                          config.discord_rpc().text.joining, error) &&
+      SetEnvironmentValue("MOCKTAIL_DISCORD_RPC_TEXT_PLAYING",
+                          config.discord_rpc().text.playing, error) &&
+      SetEnvironmentValue("MOCKTAIL_DISCORD_RPC_TEXT_STATE",
+                          config.discord_rpc().text.state, error) &&
+      SetEnvironmentValue("MOCKTAIL_DISCORD_RPC_TEXT_UNKNOWN_PLACE",
+                          config.discord_rpc().text.unknown_place, error);
   if (!base_exported) {
     return false;
   }

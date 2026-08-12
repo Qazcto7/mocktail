@@ -171,6 +171,41 @@ TEST(WindowPointerCaptureOwnerTest,
 }
 
 TEST(WindowPointerCaptureOwnerTest,
+     ShiftLockActivatedDuringRightDragSurvivesButtonRelease) {
+  FakeBackend backend;
+  QueryState query{true, false};
+  WindowPointerCaptureOwner owner(&backend);
+  ASSERT_TRUE(owner.RegisterQuery(Query, &query));
+  ASSERT_TRUE(owner.Pump(false));
+
+  ASSERT_TRUE(owner.OnRightButton(true, false));
+  query.locked_center = true;
+  ASSERT_TRUE(owner.OnShiftKeyPressed(false));
+  ASSERT_TRUE(owner.OnRightButton(false, false));
+
+  EXPECT_TRUE(owner.captured());
+  EXPECT_FALSE(owner.cursor_visible());
+  EXPECT_TRUE(owner.ShouldDispatchMouseMotion());
+}
+
+TEST(WindowPointerCaptureOwnerTest,
+     ShiftDuringRightDragDoesNotInventNativeMouseLock) {
+  FakeBackend backend;
+  QueryState query{true, false};
+  WindowPointerCaptureOwner owner(&backend);
+  ASSERT_TRUE(owner.RegisterQuery(Query, &query));
+  ASSERT_TRUE(owner.Pump(false));
+
+  ASSERT_TRUE(owner.OnRightButton(true, false));
+  ASSERT_TRUE(owner.OnShiftKeyPressed(false));
+  ASSERT_TRUE(owner.OnRightButton(false, false));
+
+  EXPECT_FALSE(owner.captured());
+  EXPECT_FALSE(owner.ShouldDispatchMouseMotion());
+  EXPECT_TRUE(owner.ShouldDispatchMouseMotion());
+}
+
+TEST(WindowPointerCaptureOwnerTest,
      MotionButtonStateRecoversMissingRightRelease) {
   FakeBackend backend;
   QueryState query{true, false};
@@ -187,8 +222,7 @@ TEST(WindowPointerCaptureOwnerTest,
   EXPECT_TRUE(owner.ShouldDispatchMouseMotion());
 }
 
-TEST(WindowPointerCaptureOwnerTest,
-     RightDragDoesNotDependOnNativeLockQuery) {
+TEST(WindowPointerCaptureOwnerTest, RightDragDoesNotDependOnNativeLockQuery) {
   FakeBackend backend;
   QueryState query{false, false};
   WindowPointerCaptureOwner owner(&backend);
@@ -202,8 +236,7 @@ TEST(WindowPointerCaptureOwnerTest,
   EXPECT_TRUE(owner.cursor_visible());
 }
 
-TEST(WindowPointerCaptureOwnerTest,
-     TextAndFocusCancelRightDragCapture) {
+TEST(WindowPointerCaptureOwnerTest, TextAndFocusCancelRightDragCapture) {
   FakeBackend backend;
   QueryState query{true, false};
   WindowPointerCaptureOwner owner(&backend);

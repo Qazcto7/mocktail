@@ -160,6 +160,18 @@ TEST(RuntimeConfigBootstrapTest,
            "auto, on, off.\n  gamemode: auto",
            "# To pin output, copy an exact SDL device name printed during "
            "startup.\n  output_device: default",
+           "# Boolean (default: false): publish Mocktail activity to Discord "
+           "Desktop.\n    # This never signs in to Discord and never reads an "
+           "account token.\n    enabled: false",
+           "# Boolean (default: true): show the current Roblox experience "
+           "name.\n    show_place_name: true",
+           "# Boolean (default: true): show how long the current session has "
+           "run.\n    show_elapsed_time: true",
+           "# Boolean (default: true): let friends open the same public "
+           "server.\n      enabled: true",
+           "# Boolean (default: true): never expose private or reserved "
+           "joins.\n      public_servers_only: true",
+           "#   playing: \"{place_name}\"\n    #   state: Playing Roblox",
            "# Integer (default: 1280): initial window width in pixels.\n  "
            "width: 1280",
            "# Integer (default: 720): initial window height in pixels.\n  "
@@ -295,6 +307,22 @@ input:
 network:
   proxy_host: proxy.example.test
   proxy_port: 3128
+integrations:
+  discord_rpc:
+    enabled: true
+    show_place_name: false
+    show_elapsed_time: false
+    application_id: 123456789012345678
+    join:
+      enabled: true
+      public_servers_only: true
+      button_label: Play Together
+    text:
+      browsing: Looking for games
+      joining: Connecting
+      playing: "Inside {place_name}"
+      state: Playing Roblox on Linux
+      unknown_place: Unknown world
 updates:
   automatic: true
 )yaml");
@@ -327,6 +355,21 @@ updates:
   ASSERT_TRUE(loaded.config.network_proxy().has_value());
   EXPECT_EQ(loaded.config.network_proxy()->host, "proxy.example.test");
   EXPECT_EQ(loaded.config.network_proxy()->port, 3128);
+  EXPECT_TRUE(loaded.config.discord_rpc().enabled);
+  EXPECT_FALSE(loaded.config.discord_rpc().show_place_name);
+  EXPECT_FALSE(loaded.config.discord_rpc().show_elapsed_time);
+  EXPECT_EQ(loaded.config.discord_rpc().application_id,
+            "123456789012345678");
+  EXPECT_TRUE(loaded.config.discord_rpc().join_enabled);
+  EXPECT_TRUE(loaded.config.discord_rpc().public_servers_only);
+  EXPECT_EQ(loaded.config.discord_rpc().join_button_label, "Play Together");
+  EXPECT_EQ(loaded.config.discord_rpc().text.browsing, "Looking for games");
+  EXPECT_EQ(loaded.config.discord_rpc().text.joining, "Connecting");
+  EXPECT_EQ(loaded.config.discord_rpc().text.playing,
+            "Inside {place_name}");
+  EXPECT_EQ(loaded.config.discord_rpc().text.state,
+            "Playing Roblox on Linux");
+  EXPECT_EQ(loaded.config.discord_rpc().text.unknown_place, "Unknown world");
 }
 
 TEST(RuntimeConfigFileTest, EnvironmentOverridesYaml) {

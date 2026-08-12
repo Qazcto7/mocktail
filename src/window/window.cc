@@ -886,8 +886,7 @@ bool Init(int width, int height, const char* title) {
     return true;
   }
 
-  const Status metadata_status =
-      platform::ConfigureSdlApplicationMetadata();
+  const Status metadata_status = platform::ConfigureSdlApplicationMetadata();
   if (!metadata_status.ok()) {
     std::fprintf(stderr, "  [window] SDL application metadata failed: %s\n",
                  metadata_status.message().c_str());
@@ -1006,8 +1005,7 @@ bool Init(int width, int height, const char* title) {
     fprintf(stderr, "  [window] SDL3 direct Vulkan window created (%dx%d)\n",
             width, height);
     if (!g_present_lifecycle.Activate()) {
-      fprintf(stderr,
-              "  [window] host present lifecycle is already active\n");
+      fprintf(stderr, "  [window] host present lifecycle is already active\n");
       g_present_lifecycle.Deactivate();
       SDL_DestroyWindow(g_state.sdl_window);
       g_state.sdl_window = nullptr;
@@ -1631,7 +1629,7 @@ extern "C" std::uint64_t mocktail_window_note_vulkan_call_begin(
 }
 
 extern "C" void mocktail_window_note_vulkan_call_end(std::uint64_t sequence,
-                                                       std::int32_t result) {
+                                                     std::int32_t result) {
   g_vulkan_present_progress_gate.NotifyCallEnd(
       sequence, result, SDL_GetTicksNS(), SDL_GetCurrentThreadID());
 }
@@ -1916,7 +1914,7 @@ void MaybeReportVulkanPresentStall() {
           : 0;
   const uint64_t completed_duration_ms =
       report.last_completed_call_completed_ns >=
-              report.last_completed_call_started_ns &&
+                  report.last_completed_call_started_ns &&
               report.last_completed_call_started_ns != 0
           ? (report.last_completed_call_completed_ns -
              report.last_completed_call_started_ns) /
@@ -1928,40 +1926,36 @@ void MaybeReportVulkanPresentStall() {
   } else if (report.stage == VulkanPresentStallStage::kInsideHostPresent) {
     stage = "inside_host_present";
   }
-  fprintf(stderr,
-          "  [vulkan] progress watchdog: stage=%s stalled_for=%llu ms "
-          "frame=%llu host_presents=%llu render_tid=%llu primary_call=%s "
-          "primary_id=%llu primary_tid=%llu last_snapshot=%s last_call=%s "
-          "last_id=%llu last_tid=%llu last_result=%d last_duration=%llu ms "
-          "completed_ago=%llu ms secondary_call=%s secondary_id=%llu "
-          "secondary_tid=%llu secondary_for=%llu ms\n",
-          stage,
-          static_cast<unsigned long long>(report.elapsed_ns / 1000000ULL),
-          static_cast<unsigned long long>(report.frame_count),
-          static_cast<unsigned long long>(report.host_present_count),
-          static_cast<unsigned long long>(report.last_present_thread_id),
-          report.call_name != nullptr ? report.call_name : "none",
-          static_cast<unsigned long long>(report.call_sequence),
-          static_cast<unsigned long long>(report.thread_id),
-          report.last_completed_call_snapshot_coherent ? "coherent"
-                                                       : "unavailable",
-          report.last_completed_call_name != nullptr
-              ? report.last_completed_call_name
-              : "none",
-          static_cast<unsigned long long>(
-              report.last_completed_call_sequence),
-          static_cast<unsigned long long>(
-              report.last_completed_call_thread_id),
-          report.last_completed_call_result,
-          static_cast<unsigned long long>(completed_duration_ms),
-          static_cast<unsigned long long>(completed_ago_ms),
-          report.oldest_active_call_name != nullptr
-              ? report.oldest_active_call_name
-              : "none",
-          static_cast<unsigned long long>(report.oldest_active_call_sequence),
-          static_cast<unsigned long long>(report.oldest_active_call_thread_id),
-          static_cast<unsigned long long>(
-              report.oldest_active_call_elapsed_ns / 1000000ULL));
+  fprintf(
+      stderr,
+      "  [vulkan] progress watchdog: stage=%s stalled_for=%llu ms "
+      "frame=%llu host_presents=%llu render_tid=%llu primary_call=%s "
+      "primary_id=%llu primary_tid=%llu last_snapshot=%s last_call=%s "
+      "last_id=%llu last_tid=%llu last_result=%d last_duration=%llu ms "
+      "completed_ago=%llu ms secondary_call=%s secondary_id=%llu "
+      "secondary_tid=%llu secondary_for=%llu ms\n",
+      stage, static_cast<unsigned long long>(report.elapsed_ns / 1000000ULL),
+      static_cast<unsigned long long>(report.frame_count),
+      static_cast<unsigned long long>(report.host_present_count),
+      static_cast<unsigned long long>(report.last_present_thread_id),
+      report.call_name != nullptr ? report.call_name : "none",
+      static_cast<unsigned long long>(report.call_sequence),
+      static_cast<unsigned long long>(report.thread_id),
+      report.last_completed_call_snapshot_coherent ? "coherent" : "unavailable",
+      report.last_completed_call_name != nullptr
+          ? report.last_completed_call_name
+          : "none",
+      static_cast<unsigned long long>(report.last_completed_call_sequence),
+      static_cast<unsigned long long>(report.last_completed_call_thread_id),
+      report.last_completed_call_result,
+      static_cast<unsigned long long>(completed_duration_ms),
+      static_cast<unsigned long long>(completed_ago_ms),
+      report.oldest_active_call_name != nullptr ? report.oldest_active_call_name
+                                                : "none",
+      static_cast<unsigned long long>(report.oldest_active_call_sequence),
+      static_cast<unsigned long long>(report.oldest_active_call_thread_id),
+      static_cast<unsigned long long>(report.oldest_active_call_elapsed_ns /
+                                      1000000ULL));
 }
 
 bool PumpEvents() {
@@ -2046,10 +2040,9 @@ bool PumpEvents() {
       g_platform_event_observer.Notify(recovered_release);
       recovered_right_button_release = true;
       if (!g_pointer_capture_owner->OnRightButton(
-              false, g_text_input_owner != nullptr &&
-                         g_text_input_owner->active())) {
-        fprintf(stderr,
-                "  [input] SDL lost-right-release recovery failed\n");
+              false,
+              g_text_input_owner != nullptr && g_text_input_owner->active())) {
+        fprintf(stderr, "  [input] SDL lost-right-release recovery failed\n");
       } else {
         fprintf(stderr,
                 "  [input] recovered missing right-button release from "
@@ -2117,6 +2110,16 @@ bool PumpEvents() {
     if (converted && !fullscreen_shortcut && !recovered_right_button_release &&
         dispatch_mouse_motion) {
       g_platform_event_observer.Notify(platform_event);
+    }
+    if (converted && !fullscreen_shortcut && event.type == SDL_EVENT_KEY_DOWN &&
+        !event.key.repeat &&
+        (event.key.scancode == SDL_SCANCODE_LSHIFT ||
+         event.key.scancode == SDL_SCANCODE_RSHIFT) &&
+        g_pointer_capture_owner != nullptr &&
+        !g_pointer_capture_owner->OnShiftKeyPressed(
+            g_text_input_owner != nullptr && g_text_input_owner->active())) {
+      fprintf(stderr,
+              "  [input] SDL shift-lock pointer capture update failed\n");
     }
     if ((event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
          event.type == SDL_EVENT_MOUSE_BUTTON_UP) &&

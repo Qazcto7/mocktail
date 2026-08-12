@@ -15,6 +15,9 @@
 #include "runtime/game_mode.h"
 
 #include <dlfcn.h>
+#if defined(__GLIBC__)
+#include <link.h>
+#endif
 
 #include <cstring>
 #include <string>
@@ -52,6 +55,19 @@ std::string ClientError(const GameModeClientApi& api,
     }
   }
   return std::string(fallback);
+}
+
+void* OpenClientLibrary(const char* name) {
+#if defined(__GLIBC__)
+  // Mocktail intentionally exports Bionic compatibility symbols for the
+  // Android payload. A normal dlopen() lets host libraries such as libdbus
+  // bind to those ABI-compatible-looking exports instead of glibc, which can
+  // corrupt the GameMode portal exchange. A new link-map namespace keeps the
+  // host client and all of its dependencies on the host ABI.
+  return dlmopen(LM_ID_NEWLM, name, RTLD_NOW | RTLD_LOCAL);
+#else
+  return dlopen(name, RTLD_NOW | RTLD_LOCAL);
+#endif
 }
 
 }  // namespace
@@ -124,9 +140,9 @@ GameModeSession GameModeSession::Start(GameModePolicy policy) {
     return StartBound(policy, {}, nullptr);
   }
 
-  void* library = dlopen("libgamemode.so.0", RTLD_NOW | RTLD_LOCAL);
+  void* library = OpenClientLibrary("libgamemode.so.0");
   if (library == nullptr) {
-    library = dlopen("libgamemode.so", RTLD_NOW | RTLD_LOCAL);
+    library = OpenClientLibrary("libgamemode.so");
   }
   if (library == nullptr) {
     GameModeSession session;

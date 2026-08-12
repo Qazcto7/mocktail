@@ -39,6 +39,7 @@ required_permissions = {
     "--socket=fallback-x11",
     "--socket=pulseaudio",
     "--device=dri",
+    "--filesystem=xdg-run/discord-ipc-0:rw",
 }
 assert required_permissions <= finish_args
 assert not any(argument.startswith("--filesystem=host") for argument in finish_args)
@@ -135,6 +136,8 @@ grep -Fq 'workflow_dispatch:' "${GITHUB_CI}" ||
   Fail 'GitHub Actions cannot be started manually'
 grep -Fq "'assets/screenshots/**'" "${GITHUB_CI}" ||
   Fail 'Flatpak workflow does not react to screenshot changes'
+grep -Fq "'packaging/discord-join.html'" "${GITHUB_CI}" ||
+  Fail 'Flatpak workflow does not publish Discord join-page changes'
 grep -Fq 'contents: read' "${GITHUB_CI}" ||
   Fail 'GitHub Actions permissions are not read-only'
 grep -Fq 'submodules: recursive' "${GITHUB_CI}" ||
@@ -213,5 +216,7 @@ grep -Fq 'Name=space.bigrat.mocktail' \
   Fail 'published Flatpak ref has the wrong application ID'
 grep -Fq 'flatpak install --user' "${TEMP_DIR}/public/index.html" ||
   Fail 'Pages landing page has no direct installation command'
+grep -Fq 'roblox://experiences/start' "${TEMP_DIR}/public/join.html" ||
+  Fail 'Pages output has no Discord join bridge'
 
 printf 'Flatpak packaging contract test passed\n'

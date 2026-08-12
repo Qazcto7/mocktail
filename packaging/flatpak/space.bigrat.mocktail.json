@@ -12,7 +12,17 @@
     "--socket=fallback-x11",
     "--socket=pulseaudio",
     "--device=dri",
-    "--talk-name=com.feralinteractive.GameMode"
+    "--talk-name=com.feralinteractive.GameMode",
+    "--filesystem=xdg-run/discord-ipc-0:rw",
+    "--filesystem=xdg-run/discord-ipc-1:rw",
+    "--filesystem=xdg-run/discord-ipc-2:rw",
+    "--filesystem=xdg-run/discord-ipc-3:rw",
+    "--filesystem=xdg-run/discord-ipc-4:rw",
+    "--filesystem=xdg-run/discord-ipc-5:rw",
+    "--filesystem=xdg-run/discord-ipc-6:rw",
+    "--filesystem=xdg-run/discord-ipc-7:rw",
+    "--filesystem=xdg-run/discord-ipc-8:rw",
+    "--filesystem=xdg-run/discord-ipc-9:rw"
   ],
   "build-options": {
     "strip": true,

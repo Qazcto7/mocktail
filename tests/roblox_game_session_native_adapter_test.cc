@@ -115,6 +115,8 @@ struct Probe {
   bool release_pause_on_pump = false;
   bool pause_released = false;
   std::atomic<int> message_pump_count{0};
+  std::atomic<int> presented_notifications{0};
+  std::atomic<uint64_t> presented_frame{0};
   std::mutex pause_mutex;
   std::condition_variable pause_condition;
   const JNINativeInterface_* base_functions = nullptr;
@@ -122,6 +124,12 @@ struct Probe {
 };
 
 Probe* g_probe = nullptr;
+
+void ObserveGamePresented(void* context, uint64_t frame_serial) {
+  auto* probe = static_cast<Probe*>(context);
+  probe->presented_frame.store(frame_serial);
+  ++probe->presented_notifications;
+}
 
 void Record(JNIEnv* env, const char* call) {
   ASSERT_NE(g_probe, nullptr);
@@ -239,8 +247,16 @@ void PrepareEnvironment(void* context) {
 }
 
 RobloxGameSessionSymbols Symbols() {
-  return {SetBackground, StartGame, UpdateSurface, PauseGame,        ResumeGame,
-          LeaveGame,     PauseApp,  DestroyApp,    UpdateAppSurface, StartApp,
+  return {SetBackground,
+          StartGame,
+          UpdateSurface,
+          PauseGame,
+          ResumeGame,
+          LeaveGame,
+          PauseApp,
+          DestroyApp,
+          UpdateAppSurface,
+          StartApp,
           CallMessagesFromMainThread};
 }
 
@@ -385,11 +401,13 @@ TEST_F(RobloxGameSessionNativeAdapterTest,
 
 TEST_F(RobloxGameSessionNativeAdapterTest,
        PresentObserverLatchesOnlyAfterAcceptedGameEvidence) {
-  RobloxGameSessionRuntime runtime(Environment(), Symbols());
+  RobloxGameSessionRuntime runtime(Environment(), Symbols(), {},
+                                   {&probe_, ObserveGamePresented});
   probe_.runtime = &runtime;
 
   RobloxGameSessionRuntime::SuccessfulPresentCallback(&runtime, 3);
   EXPECT_FALSE(runtime.Snapshot().game_presented);
+  EXPECT_EQ(probe_.presented_notifications.load(), 0);
 
   ASSERT_TRUE(runtime
                   .InitializeAndStart(Binding(), AuthenticatedPrincipal(),
@@ -400,6 +418,8 @@ TEST_F(RobloxGameSessionNativeAdapterTest,
 
   EXPECT_TRUE(runtime.Snapshot().game_presented);
   EXPECT_EQ(runtime.Snapshot().first_presented_frame, 5U);
+  EXPECT_EQ(probe_.presented_notifications.load(), 1);
+  EXPECT_EQ(probe_.presented_frame.load(), 5U);
 }
 
 TEST_F(RobloxGameSessionNativeAdapterTest,
@@ -489,11 +509,10 @@ TEST_F(RobloxGameSessionNativeAdapterTest,
 
   EXPECT_TRUE(shutdown.ok());
   EXPECT_EQ(shutdown.state, GameSessionState::kStopped);
-  EXPECT_EQ(probe_.calls,
-            std::vector<std::string>({"foreground", "start", "pause-game",
-                                      "foreground", "resume", "pause-game",
-                                      "leave", "pause-app", "background",
-                                      "destroy-app"}));
+  EXPECT_EQ(probe_.calls, std::vector<std::string>(
+                              {"foreground", "start", "pause-game",
+                               "foreground", "resume", "pause-game", "leave",
+                               "pause-app", "background", "destroy-app"}));
   EXPECT_EQ(probe_.foreground_reason, "ASMA.stop");
   EXPECT_LT(std::find(probe_.calls.begin(), probe_.calls.end(), "leave"),
             std::find(probe_.calls.begin(), probe_.calls.end(), "pause-app"));
@@ -644,10 +663,10 @@ TEST_F(RobloxGameSessionNativeAdapterTest,
   EXPECT_TRUE(resize_result.ok());
   EXPECT_TRUE(shutdown_result.ok());
   EXPECT_EQ(shutdown_result.state, GameSessionState::kStopped);
-  EXPECT_EQ(probe_.calls, std::vector<std::string>(
-                              {"foreground", "start", "update", "pause-game",
-                               "leave", "pause-app", "background",
-                               "destroy-app"}));
+  EXPECT_EQ(probe_.calls,
+            std::vector<std::string>({"foreground", "start", "update",
+                                      "pause-game", "leave", "pause-app",
+                                      "background", "destroy-app"}));
 }
 
 TEST_F(RobloxGameSessionNativeAdapterTest,

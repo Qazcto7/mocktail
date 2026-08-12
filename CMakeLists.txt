@@ -26,6 +26,18 @@ set(MOCKTAIL_DEFAULT_SIGNING_TRUST_MANIFEST
   CACHE FILEPATH
   "Fallback signing trust manifest used outside an installed runtime"
 )
+set(MOCKTAIL_DISCORD_APPLICATION_ID "1537088975720812655" CACHE STRING
+  "Discord application ID baked into Mocktail Rich Presence releases"
+)
+string(LENGTH "${MOCKTAIL_DISCORD_APPLICATION_ID}"
+  MOCKTAIL_DISCORD_APPLICATION_ID_LENGTH)
+if(NOT MOCKTAIL_DISCORD_APPLICATION_ID STREQUAL "" AND
+   (NOT MOCKTAIL_DISCORD_APPLICATION_ID MATCHES "^[0-9]+$" OR
+    MOCKTAIL_DISCORD_APPLICATION_ID_LENGTH LESS 17 OR
+    MOCKTAIL_DISCORD_APPLICATION_ID_LENGTH GREATER 20))
+  message(FATAL_ERROR
+    "MOCKTAIL_DISCORD_APPLICATION_ID must be empty or a Discord snowflake")
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -221,6 +233,7 @@ target_include_directories(mocktail_legacy_jnivm PUBLIC
 add_library(mocktail_runtime STATIC
   src/runtime/command_line.cc
   src/runtime/crash_report_policy.cc
+  src/runtime/discord_rpc.cc
   src/runtime/device_profile.cc
   src/runtime/environment.cc
   src/runtime/external_launch_broker.cc
@@ -255,6 +268,9 @@ add_library(Mocktail::Runtime ALIAS mocktail_runtime)
 target_include_directories(mocktail_runtime PUBLIC include)
 target_include_directories(mocktail_runtime PUBLIC
   ${MOCKTAIL_JNI_INCLUDE_DIRS}
+)
+target_compile_definitions(mocktail_runtime PRIVATE
+  "MOCKTAIL_DISCORD_APPLICATION_ID=\"${MOCKTAIL_DISCORD_APPLICATION_ID}\""
 )
 mocktail_apply_compile_options(mocktail_runtime)
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND

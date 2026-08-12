@@ -56,8 +56,7 @@ Status FailedPrecondition(std::string message) {
 GameSurface SnapshotProductionSurface(void*) {
   const window::WindowSurfaceSnapshot snapshot =
       window::GetWindowSurfaceSnapshot();
-  return {snapshot.generation,
-          snapshot.available ? snapshot.native_window : 0,
+  return {snapshot.generation, snapshot.available ? snapshot.native_window : 0,
           snapshot.available ? snapshot.width : 0,
           snapshot.available ? snapshot.height : 0};
 }
@@ -278,7 +277,8 @@ RobloxExperienceComposition::RobloxExperienceComposition(
     RobloxFreshLaunchPresentBoundary present_boundary,
     RobloxGameSurfaceJniConfig surface_config,
     const SecureRobloxCredential* initial_web_view_credential,
-    RobloxExperienceSurfaceProvider surface_provider)
+    RobloxExperienceSurfaceProvider surface_provider,
+    RobloxExperiencePresenceObserver presence_observer)
     : environment_(environment),
       message_bus_symbols_(message_bus_symbols),
       web_view_symbols_(web_view_symbols),
@@ -293,6 +293,7 @@ RobloxExperienceComposition::RobloxExperienceComposition(
               ? surface_provider
               : RobloxExperienceSurfaceProvider{nullptr,
                                                 &SnapshotProductionSurface}),
+      presence_observer_(presence_observer),
       web_surface_exit_target_(std::make_shared<WebSurfaceExitTarget>()),
       lifecycle_target_(std::make_shared<LifecycleTarget>()) {
   web_surface_exit_target_->composition = this;
@@ -426,7 +427,9 @@ Status RobloxExperienceComposition::OnLuaAppReady(
   }
 
   auto controller = std::make_shared<RobloxFreshGameLaunchController>(
-      environment_, game_symbols_, present_boundary_, surface_config_);
+      environment_, game_symbols_, present_boundary_, surface_config_,
+      RobloxGamePresentedObserver{this,
+                                  &RobloxExperienceComposition::GamePresented});
   RobloxExperienceMessageBusObjects bridge_objects;
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -931,11 +934,10 @@ Status RobloxExperienceComposition::PromoteAuthenticatedSession() {
     return Status::Ok();
   }
   SecurelyClearString(&credential);
-  const GameSurface surface = surface_provider_.snapshot(
-      surface_provider_.context);
+  const GameSurface surface =
+      surface_provider_.snapshot(surface_provider_.context);
   RobloxLuaAppExperienceReadiness readiness;
-  readiness.principal.kind =
-      GameSessionPrincipalKind::kAuthenticated;
+  readiness.principal.kind = GameSessionPrincipalKind::kAuthenticated;
   readiness.principal.generation = 1;
   readiness.principal.principal_id = std::to_string(identity.user_id);
   readiness.principal.base_url = kRobloxBaseUrl;
@@ -1070,8 +1072,7 @@ Status RobloxExperienceComposition::Dispatch(
   }
   if (!request.canonical_json.empty()) {
     const bool active_game_matches =
-        game_active_ &&
-        request.canonical_json == active_game_canonical_json_;
+        game_active_ && request.canonical_json == active_game_canonical_json_;
     const bool active_launch_matches =
         active_launch_ != nullptr &&
         request.canonical_json == active_launch_->request.canonical_json;
@@ -1143,9 +1144,16 @@ Status RobloxExperienceComposition::DrainLaunchRequests() {
                                   : std::string();
         active_launch_.reset();
       }
-      if (!completed_result.ok()) pending_launch_requests_.clear();
+      if (!completed_result.ok()) {
+        pending_launch_requests_.clear();
+        presence_request_.reset();
+        playing_presence_published_ = false;
+      }
     }
-    if (!completed_result.ok()) return completed_result;
+    if (!completed_result.ok()) {
+      NotifyPresence(RobloxExperiencePresencePhase::kBrowsing, nullptr);
+      return completed_result;
+    }
   }
 
   std::shared_ptr<RobloxFreshGameLaunchController> returned_controller;
@@ -1161,21 +1169,27 @@ Status RobloxExperienceComposition::DrainLaunchRequests() {
   }
   if (returned_controller != nullptr) {
     const Status observed = returned_controller->ObserveLuaAppReturn();
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!observed.ok()) {
-      lua_app_return_pending_ = true;
-      pending_launch_requests_.clear();
-      return observed;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!observed.ok()) {
+        lua_app_return_pending_ = true;
+        pending_launch_requests_.clear();
+        return observed;
+      }
+      game_active_ = false;
+      active_game_canonical_json_.clear();
+      presence_request_.reset();
+      playing_presence_published_ = false;
+      controlled_switch_waiting_for_return_ = false;
     }
-    game_active_ = false;
-    active_game_canonical_json_.clear();
-    controlled_switch_waiting_for_return_ = false;
+    NotifyPresence(RobloxExperiencePresencePhase::kBrowsing, nullptr);
   }
 
   Status external_launch_status = DrainExternalLaunchRequests();
   if (!external_launch_status.ok()) return external_launch_status;
 
   bool switch_active_game = false;
+  std::optional<RobloxExperienceLaunchRequest> joining_request;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!subscribed_ || controller_ == nullptr || objects_ == nullptr) {
@@ -1235,7 +1249,12 @@ Status RobloxExperienceComposition::DrainLaunchRequests() {
                  task->context.join_request_type);
     active_launch_ = std::move(task);
     launch_in_progress_ = true;
+    presence_request_ = active_launch_->request;
+    playing_presence_published_ = false;
+    joining_request = active_launch_->request;
   }
+
+  NotifyPresence(RobloxExperiencePresencePhase::kJoining, &*joining_request);
 
   const int start_error =
       launch_worker_.Start(&RobloxExperienceComposition::RunLaunchWorker, this,
@@ -1245,9 +1264,12 @@ Status RobloxExperienceComposition::DrainLaunchRequests() {
     std::lock_guard<std::mutex> lock(mutex_);
     launch_in_progress_ = false;
     active_launch_.reset();
+    presence_request_.reset();
     active_game_canonical_json_.clear();
+    playing_presence_published_ = false;
     pending_launch_requests_.clear();
   }
+  NotifyPresence(RobloxExperiencePresencePhase::kBrowsing, nullptr);
   return Status::Error(StatusCode::kPlatformError,
                        "could not start experience launch worker: " +
                            std::to_string(start_error));
@@ -1258,6 +1280,34 @@ void* RobloxExperienceComposition::RunLaunchWorker(void* context) {
     static_cast<RobloxExperienceComposition*>(context)->RunActiveLaunch();
   }
   return nullptr;
+}
+
+void RobloxExperienceComposition::GamePresented(void* context,
+                                                uint64_t frame_serial) {
+  if (context != nullptr && frame_serial != 0) {
+    static_cast<RobloxExperienceComposition*>(context)
+        ->PublishPresentedPresence(frame_serial);
+  }
+}
+
+void RobloxExperienceComposition::PublishPresentedPresence(
+    uint64_t frame_serial) {
+  std::optional<RobloxExperienceLaunchRequest> request;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!subscribed_ || playing_presence_published_ ||
+        !presence_request_.has_value()) {
+      return;
+    }
+    playing_presence_published_ = true;
+    request = presence_request_;
+  }
+  std::fprintf(stderr,
+               "  [experience] first game frame published to presence "
+               "frame=%llu place_id=%lld\n",
+               static_cast<unsigned long long>(frame_serial),
+               static_cast<long long>(request->place_id));
+  NotifyPresence(RobloxExperiencePresencePhase::kPlaying, &*request);
 }
 
 void RobloxExperienceComposition::RunActiveLaunch() {
@@ -1401,6 +1451,8 @@ Status RobloxExperienceComposition::Shutdown() {
     subscribed_ = false;
     game_active_ = false;
     active_game_canonical_json_.clear();
+    presence_request_.reset();
+    playing_presence_published_ = false;
     lua_app_return_pending_ = false;
     controlled_switch_waiting_for_return_ = false;
     lua_app_surface_recreation_pending_ = false;
@@ -1479,6 +1531,14 @@ GameSessionSnapshot RobloxExperienceComposition::Snapshot() const {
     controller = controller_;
   }
   return controller != nullptr ? controller->Snapshot() : GameSessionSnapshot{};
+}
+
+void RobloxExperienceComposition::NotifyPresence(
+    RobloxExperiencePresencePhase phase,
+    const RobloxExperienceLaunchRequest* request) const {
+  if (presence_observer_.valid()) {
+    presence_observer_.notify(presence_observer_.context, phase, request);
+  }
 }
 
 Status RobloxExperienceComposition::BuildPlatformGlobalObjects() {
@@ -1863,6 +1923,8 @@ Status RobloxExperienceComposition::ReleaseGlobalObjects() {
     platform_protocols_initialized_ = false;
     readiness_ = {};
     active_game_canonical_json_.clear();
+    presence_request_.reset();
+    playing_presence_published_ = false;
     controlled_switch_waiting_for_return_ = false;
     lua_app_surface_recreation_pending_ = false;
     pending_launch_requests_.clear();
@@ -1894,6 +1956,8 @@ Status RobloxExperienceComposition::ReleaseLuaAppGlobalObjects() {
     }
     readiness_ = {};
     active_game_canonical_json_.clear();
+    presence_request_.reset();
+    playing_presence_published_ = false;
     controlled_switch_waiting_for_return_ = false;
     pending_launch_requests_.clear();
     next_request_id_ = 1;

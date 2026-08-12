@@ -76,6 +76,7 @@
 #include "linker/linker.h"
 #include "mocktail/graphics/bionic_egl_bridge.h"
 #include "runtime/environment.h"
+#include "runtime/discord_rpc.h"
 #include "runtime/jnivm_platform_web_callbacks.h"
 #include "runtime/owned_pthread.h"
 #include "runtime/roblox_app_lifecycle.h"
@@ -31922,6 +31923,17 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
   const mocktail::runtime::ProcessEnvironment process_environment;
   const mocktail::runtime::RuntimeConfig runtime_config =
       mocktail::runtime::RuntimeConfig::FromEnvironment(process_environment);
+  mocktail::runtime::DiscordRpcSession discord_rpc(
+      runtime_config.discord_rpc());
+  if (runtime_config.discord_rpc().enabled) {
+    std::string discord_rpc_detail;
+    if (discord_rpc.Start(&discord_rpc_detail)) {
+      std::cout << "  [discord-rpc] enabled; browsing activity queued\n";
+    } else {
+      std::cerr << "  [discord-rpc] unavailable: " << discord_rpc_detail
+                << "; continuing without Rich Presence\n";
+    }
+  }
   const mocktail::runtime::InputCapabilityConfig& input_capabilities =
       runtime_config.input_capabilities();
   if (!runtime_config.frame_rate().valid()) {
@@ -34052,7 +34064,9 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
               environment, message_bus_symbols, platform_web_symbols.web_view,
               platform_web_symbols.browser_service, *experience_game_symbols,
               jni_factory, present_boundary, std::move(surface_config),
-              &dependencies.roblox_credential());
+              &dependencies.roblox_credential(),
+              mocktail::runtime::RobloxExperienceSurfaceProvider{},
+              discord_rpc.observer());
       const mocktail::Status platform_protocol_status =
           experience_composition->InitializePlatformProtocols();
       if (!platform_protocol_status.ok()) {

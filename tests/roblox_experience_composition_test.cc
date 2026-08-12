@@ -67,6 +67,9 @@ struct Probe {
   std::atomic<bool> start_entered{false};
   std::atomic<bool> release_start{false};
   GameSurface observed_surface;
+  std::vector<RobloxExperiencePresencePhase> presence_phases;
+  std::vector<int64_t> presence_places;
+  std::atomic<int> playing_presence_notifications{0};
 };
 
 Probe* g_probe = nullptr;
@@ -81,10 +84,9 @@ GameSurface SnapshotSurface(void* context) {
 
 jnivm::RobloxCredentialView ProvideCredential(const void* context) {
   const auto* credential = static_cast<const std::string*>(context);
-  return credential != nullptr
-             ? jnivm::RobloxCredentialView{credential->data(),
-                                           credential->size()}
-             : jnivm::RobloxCredentialView{};
+  return credential != nullptr ? jnivm::RobloxCredentialView{credential->data(),
+                                                             credential->size()}
+                               : jnivm::RobloxCredentialView{};
 }
 
 jobject CreateRawCallback(void* context, std::shared_ptr<void> callback_context,
@@ -311,9 +313,6 @@ void Foreground(JNIEnv* env, jclass, jboolean enabled, jstring reason) {
 jint Start(JNIEnv* env, jclass, jobject params) {
   ++g_probe->starts;
   g_probe->start_entered.store(true);
-  while (g_probe->block_start.load() && !g_probe->release_start.load()) {
-    std::this_thread::yield();
-  }
   jclass clazz = env->GetObjectClass(params);
   jfieldID place = env->GetFieldID(clazz, "placeId", "J");
   g_probe->started_place = env->GetLongField(params, place);
@@ -327,6 +326,9 @@ jint Start(JNIEnv* env, jclass, jobject params) {
   env->DeleteLocalRef(clazz);
   if (g_probe->observer != nullptr) {
     g_probe->observer(g_probe->observer_context, 17);
+  }
+  while (g_probe->block_start.load() && !g_probe->release_start.load()) {
+    std::this_thread::yield();
   }
   return 1;
 }
@@ -383,6 +385,16 @@ void NotifyCompositionReturn(void* context) {
   static_cast<RobloxExperienceComposition*>(context)->NotifyLuaAppDidReturn();
 }
 
+void ObservePresence(void* context, RobloxExperiencePresencePhase phase,
+                     const RobloxExperienceLaunchRequest* request) {
+  auto* probe = static_cast<Probe*>(context);
+  probe->presence_phases.push_back(phase);
+  probe->presence_places.push_back(request != nullptr ? request->place_id : 0);
+  if (phase == RobloxExperiencePresencePhase::kPlaying) {
+    ++probe->playing_presence_notifications;
+  }
+}
+
 void DrainUntilPresented(RobloxExperienceComposition* composition) {
   ASSERT_NE(composition, nullptr);
   for (int attempt = 0; attempt < 1000; ++attempt) {
@@ -427,7 +439,8 @@ TEST(RobloxExperienceCompositionTest,
       BrowserServiceSymbols(),
       {Foreground, Start, Update, PauseGame, ResumeGame, Leave, PauseApp,
        DestroyApp, UpdateApp, StartApp, CallMessagesFromMainThread},
-      JniFactory(&probe), {&probe, RegisterObserver, ClearObserver});
+      JniFactory(&probe), {&probe, RegisterObserver, ClearObserver}, {},
+      nullptr, {}, {&probe, ObservePresence});
   RobloxLuaAppExperienceReadiness readiness;
   readiness.principal = {GameSessionPrincipalKind::kAuthenticated, 4, "42",
                          "https://www.roblox.com"};
@@ -471,6 +484,11 @@ TEST(RobloxExperienceCompositionTest,
   EXPECT_EQ(probe.join_request_type, 0);
   EXPECT_EQ(probe.surface_width, 640);
   EXPECT_TRUE(composition.Snapshot().game_presented);
+  ASSERT_EQ(probe.presence_phases.size(), 2u);
+  EXPECT_EQ(probe.presence_phases[0], RobloxExperiencePresencePhase::kJoining);
+  EXPECT_EQ(probe.presence_phases[1], RobloxExperiencePresencePhase::kPlaying);
+  EXPECT_EQ(probe.presence_places,
+            (std::vector<int64_t>{17580461965, 17580461965}));
 
   // ASMA/V2 reports its already-completed native return through the exact
   // NativeGLJavaInterface.gameDidLeave() callback. The host consumes it
@@ -490,6 +508,10 @@ TEST(RobloxExperienceCompositionTest,
   EXPECT_EQ(probe.starts.load(), 1);
   EXPECT_EQ(composition.Snapshot().state, GameSessionState::kReturnedToLuaApp);
   EXPECT_TRUE(composition.Snapshot().returned_to_lua_app);
+  ASSERT_EQ(probe.presence_phases.size(), 3u);
+  EXPECT_EQ(probe.presence_phases.back(),
+            RobloxExperiencePresencePhase::kBrowsing);
+  EXPECT_EQ(probe.presence_places.back(), 0);
   const int updates_before_lua_app_resize = probe.updates;
   const int app_updates_before_lua_app_resize = probe.app_updates;
   const GameSessionUpdateResult lua_app_resize =
@@ -509,9 +531,15 @@ TEST(RobloxExperienceCompositionTest,
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
   ASSERT_EQ(probe.starts.load(), 2);
+  DrainUntilPresented(&composition);
   EXPECT_EQ(probe.started_place, 1962086868);
   EXPECT_EQ(probe.join_request_type, 3);
   EXPECT_EQ(probe.leaves, 0);
+  ASSERT_EQ(probe.presence_phases.size(), 5u);
+  EXPECT_EQ(probe.presence_phases[3], RobloxExperiencePresencePhase::kJoining);
+  EXPECT_EQ(probe.presence_phases[4], RobloxExperiencePresencePhase::kPlaying);
+  EXPECT_EQ(probe.presence_places[3], 1962086868);
+  EXPECT_EQ(probe.presence_places[4], 1962086868);
   EXPECT_TRUE(composition.LeaveGame().ok());
   EXPECT_EQ(probe.leaves, 1);
   EXPECT_EQ(probe.destroys, 0);
@@ -720,7 +748,8 @@ TEST(RobloxExperienceCompositionTest,
       BrowserServiceSymbols(),
       {Foreground, Start, Update, PauseGame, ResumeGame, Leave, PauseApp,
        DestroyApp, UpdateApp, StartApp, CallMessagesFromMainThread},
-      JniFactory(&probe), {&probe, RegisterObserver, ClearObserver});
+      JniFactory(&probe), {&probe, RegisterObserver, ClearObserver}, {},
+      nullptr, {}, {&probe, ObservePresence});
   RobloxLuaAppExperienceReadiness readiness;
   readiness.principal = {GameSessionPrincipalKind::kAuthenticated, 4, "42",
                          "https://www.roblox.com"};
@@ -739,8 +768,21 @@ TEST(RobloxExperienceCompositionTest,
   }
   ASSERT_TRUE(probe.start_entered.load());
   EXPECT_EQ(probe.starts.load(), 1);
+  for (int attempt = 0;
+       attempt < 1000 && probe.playing_presence_notifications.load() == 0;
+       ++attempt) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  const int playing_before_start_return =
+      probe.playing_presence_notifications.load();
   probe.release_start.store(true);
   DrainUntilPresented(&composition);
+  ASSERT_EQ(playing_before_start_return, 1);
+  ASSERT_GE(probe.presence_phases.size(), 2u);
+  EXPECT_EQ(probe.presence_phases.front(),
+            RobloxExperiencePresencePhase::kJoining);
+  EXPECT_EQ(probe.presence_phases.back(),
+            RobloxExperiencePresencePhase::kPlaying);
   EXPECT_TRUE(composition.Shutdown().ok());
   g_probe = nullptr;
 }
