@@ -24,12 +24,26 @@
       launch and is not distributed with Mocktail.
     </p>
   </description>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/komaruworld/mocktail/0.1.0/docs/screenshots/flatpak-home.png</image>
+      <caption>Browse Roblox experiences in the desktop client</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/komaruworld/mocktail/0.1.0/docs/screenshots/flatpak-gameplay-tower.png</image>
+      <caption>Roblox gameplay running through Mocktail</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/komaruworld/mocktail/0.1.0/docs/screenshots/flatpak-gameplay-lobby.png</image>
+      <caption>A Roblox experience running in the Flatpak build</caption>
+    </screenshot>
+  </screenshots>
   <launchable type="desktop-id">space.bigrat.mocktail.desktop</launchable>
   <content_rating type="oars-1.1"/>
   <provides>
     <binary>mocktail</binary>
   </provides>
   <releases>
-    <release version="0.1.0" date="2026-08-08"/>
+    <release version="0.1.0" date="2026-08-12"/>
   </releases>
 </component>

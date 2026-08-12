@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/komaruworld/mocktail/actions/workflows/ci.yml/badge.svg)](https://github.com/komaruworld/mocktail/actions/workflows/ci.yml)
 [![Stars](https://img.shields.io/github/stars/komaruworld/mocktail?style=flat&logo=github)](https://github.com/komaruworld/mocktail/stargazers)
-[![Downloads](https://img.shields.io/github/downloads/komaruworld/mocktail/total?logo=github)](https://github.com/komaruworld/mocktail/releases/tag/continuous)
+[![Downloads](https://img.shields.io/github/downloads/komaruworld/mocktail/total?logo=github)](https://github.com/komaruworld/mocktail/releases/latest)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 Mocktail runs the Android `x86_64` Roblox client on Linux. It provides the
@@ -28,6 +28,34 @@ an update fails.
 flatpak install --user https://komaruworld.github.io/mocktail/mocktail.flatpakref
 flatpak run space.bigrat.mocktail
 ```
+
+## Install from the AUR
+
+Arch Linux users can install either the pinned source release (`mocktail`) or
+the current development version (`mocktail-git`) with an AUR helper:
+
+```bash
+paru -S mocktail-git
+# or
+yay -S mocktail-git
+```
+
+Use `mocktail` instead of `mocktail-git` to build the pinned release from
+source, or install the stable prebuilt package with `paru -S mocktail-bin` or
+`yay -S mocktail-bin`.
+
+## Screenshots
+
+<details>
+<summary>Flatpak build</summary>
+
+![Roblox home in Mocktail](docs/screenshots/flatpak-home.png)
+
+![Roblox gameplay in Mocktail](docs/screenshots/flatpak-gameplay-tower.png)
+
+![Roblox experience in Mocktail](docs/screenshots/flatpak-gameplay-lobby.png)
+
+</details>
 
 ## Other Linux packages
 
@@ -104,3 +132,10 @@ make build
 ## License
 
 [Apache License 2.0](LICENSE). Third-party components keep their own licenses.
+
+## Support
+
+You can support the project by giving it a star or with cryptocurrency:
+
+- USDT (TON): `UQCi6Yzcc9cOctoij6n_r1K90-OdVxAT0D_xo2UzGKkQaJDY`
+- USDT (TRC20): `TNPMG9Vig2xiuo2r1QqnXRChPH7Vu28Jmx`
