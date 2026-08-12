@@ -10,6 +10,7 @@ pkgbase = mocktail-git
 	makedepends = ninja
 	makedepends = nlohmann-json
 	makedepends = pkgconf
+	makedepends = vulkan-headers
 	depends = capstone
 	depends = curl
 	depends = fontconfig
@@ -38,10 +39,6 @@ pkgbase = mocktail-git
 	conflicts = mocktail-bin
 	options = !debug
 	source = mocktail::git+https://github.com/komaruworld/mocktail.git#branch=main
-	source = libjnivm::git+https://github.com/ChristopherHX/libjnivm.git
-	source = vulkan-headers::git+https://github.com/KhronosGroup/Vulkan-Headers.git
-	sha256sums = SKIP
-	sha256sums = SKIP
 	sha256sums = SKIP
 
 pkgname = mocktail-git

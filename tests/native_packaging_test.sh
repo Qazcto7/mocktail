@@ -46,6 +46,8 @@ grep -Fq 'pkgname=mocktail' "${AUR_STABLE_PKGBUILD}" ||
   Fail 'AUR source package name is not stable'
 grep -Fq '#tag=${pkgver}' "${AUR_STABLE_PKGBUILD}" ||
   Fail 'AUR source package does not pin its Git tag'
+grep -Fq "'vulkan-headers'" "${AUR_STABLE_PKGBUILD}" ||
+  Fail 'AUR source package does not use the packaged Vulkan headers'
 grep -Fq 'pkgbase = mocktail' "${AUR_STABLE_SRCINFO}" ||
   Fail 'AUR source package has no generated .SRCINFO metadata'
 grep -Fq 'pkgname=mocktail-bin' "${AUR_BIN_PKGBUILD}" ||
@@ -58,6 +60,17 @@ grep -Fq -- \
   Fail 'AUR package does not build from the upstream Git repository'
 grep -Fq "provides=('mocktail')" "${AUR_PKGBUILD}" ||
   Fail 'AUR VCS package does not provide the stable package name'
+grep -Fq "'vulkan-headers'" "${AUR_PKGBUILD}" ||
+  Fail 'AUR VCS package does not use the packaged Vulkan headers'
+for aur_pkgbuild in "${AUR_STABLE_PKGBUILD}" "${AUR_PKGBUILD}"; do
+  if grep -Eq \
+      'libjnivm::git\+|vulkan-headers::git\+|git submodule (init|update)' \
+      "${aur_pkgbuild}"; then
+    Fail "AUR package downloads build-only submodules: ${aur_pkgbuild}"
+  fi
+  grep -Fq -- '-DMOCKTAIL_ENABLE_UPSTREAM_JNIVM=OFF' "${aur_pkgbuild}" ||
+    Fail "AUR package enables the unused upstream JNI test library: ${aur_pkgbuild}"
+done
 grep -Fq -- \
   '-DMOCKTAIL_DEFAULT_COMPATIBILITY_MANIFEST=/usr/share/mocktail/metadata/' \
   "${AUR_PKGBUILD}" ||
