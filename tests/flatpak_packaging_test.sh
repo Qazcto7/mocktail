@@ -8,7 +8,7 @@ readonly ROOT="${1:?source root is required}"
 readonly MANIFEST="${ROOT}/packaging/flatpak/space.bigrat.mocktail.json"
 readonly BUILD_HELPER="${ROOT}/scripts/build_flatpak.sh"
 readonly PAGES_HELPER="${ROOT}/scripts/assemble_flatpak_pages.sh"
-readonly GITHUB_CI="${ROOT}/.github/workflows/ci.yml"
+readonly GITHUB_CI="${ROOT}/.github/workflows/flatpak.yml"
 readonly TEMP_DIR="$(mktemp -d)"
 trap 'rm -rf -- "${TEMP_DIR}"' EXIT
 
@@ -115,7 +115,7 @@ grep -Fq 'CleanupStaleBuilderMounts' "${BUILD_HELPER}" ||
   Fail 'GitHub Actions configuration is missing or unsafe'
 [[ ! -e "${ROOT}/.gitlab-ci.yml" ]] ||
   Fail 'obsolete GitLab CI configuration is still present'
-grep -Fq 'name: CI' "${GITHUB_CI}" ||
+grep -Fq 'name: Flatpak' "${GITHUB_CI}" ||
   Fail 'GitHub Actions workflow has no stable display name'
 grep -Fq 'branches: [main]' "${GITHUB_CI}" ||
   Fail 'GitHub Actions does not validate the main branch'
@@ -123,6 +123,8 @@ grep -Fq 'pull_request:' "${GITHUB_CI}" ||
   Fail 'GitHub Actions does not validate pull requests'
 grep -Fq 'workflow_dispatch:' "${GITHUB_CI}" ||
   Fail 'GitHub Actions cannot be started manually'
+grep -Fq "'assets/screenshots/**'" "${GITHUB_CI}" ||
+  Fail 'Flatpak workflow does not react to screenshot changes'
 grep -Fq 'contents: read' "${GITHUB_CI}" ||
   Fail 'GitHub Actions permissions are not read-only'
 grep -Fq 'submodules: recursive' "${GITHUB_CI}" ||

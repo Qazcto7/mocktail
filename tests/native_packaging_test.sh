@@ -90,6 +90,13 @@ for expected in \
     Fail "native package workflow is missing: ${expected}"
 done
 
+grep -Fq 'paths-ignore:' "${WORKFLOW}" ||
+  Fail 'native package workflow has no path filters'
+grep -Fq "'assets/screenshots/**'" "${WORKFLOW}" ||
+  Fail 'native packages rebuild for screenshot-only changes'
+grep -Fq "'packaging/flatpak/**'" "${WORKFLOW}" ||
+  Fail 'native packages rebuild for Flatpak-only changes'
+
 grep -Fq 'sudo pacman -U ./mocktail-*-x86_64.pkg.tar.zst' "${README}" ||
   Fail 'README has no direct pacman installation command'
 grep -Fq 'Ubuntu 26.04+' "${README}" ||

@@ -3,7 +3,31 @@ name: Native packages
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '.github/workflows/ci.yml'
+      - '.github/workflows/flatpak.yml'
+      - '.gitignore'
+      - 'README.md'
+      - 'assets/screenshots/**'
+      - 'docs/**'
+      - 'packaging/aur/**'
+      - 'packaging/flatpak/**'
+      - 'scripts/assemble_flatpak_pages.sh'
+      - 'scripts/build_flatpak.sh'
+      - 'tests/**'
   pull_request:
+    paths-ignore:
+      - '.github/workflows/ci.yml'
+      - '.github/workflows/flatpak.yml'
+      - '.gitignore'
+      - 'README.md'
+      - 'assets/screenshots/**'
+      - 'docs/**'
+      - 'packaging/aur/**'
+      - 'packaging/flatpak/**'
+      - 'scripts/assemble_flatpak_pages.sh'
+      - 'scripts/build_flatpak.sh'
+      - 'tests/**'
   workflow_dispatch:
 
 permissions:
