@@ -13,16 +13,11 @@
   <url type="homepage">https://github.com/komaruworld/mocktail</url>
   <description>
     <p>
-      Sign in to Roblox, browse experiences, and play them in a desktop window.
-      Mocktail handles graphics, audio, mouse, and keyboard input on Linux.
-    </p>
-    <p>
-      On first launch, Mocktail downloads the Roblox client and checks its
-      signature. It keeps the last working version in case an update fails.
+      Sign in to Roblox, browse experiences, and play them on Linux.
     </p>
     <p>
       Mocktail is an independent community project. It is not affiliated with
-      or endorsed by Roblox Corporation, and the Roblox client is not included.
+      Roblox Corporation or VinegarHQ, and the Roblox client is not included.
     </p>
   </description>
   <screenshots>
