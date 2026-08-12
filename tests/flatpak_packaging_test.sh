@@ -95,7 +95,17 @@ project_sources = modules["mocktail"]["sources"]
 assert project_sources == [
     {"type": "git", "path": "../..", "branch": "main"}
 ]
-assert "-DBUILD_TESTING=OFF" in modules["mocktail"]["config-opts"]
+mocktail_options = set(modules["mocktail"]["config-opts"])
+assert "-DBUILD_TESTING=OFF" in mocktail_options
+assert "-DCMAKE_INSTALL_LIBDIR=lib" in mocktail_options
+assert (
+    "-DMOCKTAIL_DEFAULT_COMPATIBILITY_MANIFEST="
+    "/app/share/mocktail/metadata/roblox_compatibility.json"
+) in mocktail_options
+assert (
+    "-DMOCKTAIL_DEFAULT_SIGNING_TRUST_MANIFEST="
+    "/app/share/mocktail/metadata/roblox_signing_certificates.json"
+) in mocktail_options
 
 for module in manifest["modules"]:
     for source in module.get("sources", []):
