@@ -16,6 +16,17 @@ project(Mocktail
 include(GNUInstallDirs)
 find_package(Threads REQUIRED)
 
+set(MOCKTAIL_DEFAULT_COMPATIBILITY_MANIFEST
+  "${CMAKE_SOURCE_DIR}/config/roblox_compatibility.json"
+  CACHE FILEPATH
+  "Fallback compatibility manifest used outside an installed runtime"
+)
+set(MOCKTAIL_DEFAULT_SIGNING_TRUST_MANIFEST
+  "${CMAKE_SOURCE_DIR}/config/roblox_signing_certificates.json"
+  CACHE FILEPATH
+  "Fallback signing trust manifest used outside an installed runtime"
+)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -188,8 +199,8 @@ mocktail_apply_compile_options(mocktail_update)
 add_executable(mocktail_updater src/update/main.cc)
 target_link_libraries(mocktail_updater PRIVATE Mocktail::Update)
 target_compile_definitions(mocktail_updater PRIVATE
-  "MOCKTAIL_DEFAULT_COMPATIBILITY_MANIFEST=\"${CMAKE_SOURCE_DIR}/config/roblox_compatibility.json\""
-  "MOCKTAIL_DEFAULT_SIGNING_TRUST_MANIFEST=\"${CMAKE_SOURCE_DIR}/config/roblox_signing_certificates.json\""
+  "MOCKTAIL_DEFAULT_COMPATIBILITY_MANIFEST=\"${MOCKTAIL_DEFAULT_COMPATIBILITY_MANIFEST}\""
+  "MOCKTAIL_DEFAULT_SIGNING_TRUST_MANIFEST=\"${MOCKTAIL_DEFAULT_SIGNING_TRUST_MANIFEST}\""
 )
 mocktail_apply_compile_options(mocktail_updater)
 
@@ -532,14 +543,14 @@ target_link_libraries(mocktail_legacy_runtime PRIVATE
   ${MOCKTAIL_EXECINFO_LINK_LIBRARY}
 )
 target_compile_definitions(mocktail_legacy_runtime PRIVATE
-  "MOCKTAIL_DEFAULT_COMPATIBILITY_MANIFEST=\"${CMAKE_SOURCE_DIR}/config/roblox_compatibility.json\""
+  "MOCKTAIL_DEFAULT_COMPATIBILITY_MANIFEST=\"${MOCKTAIL_DEFAULT_COMPATIBILITY_MANIFEST}\""
 )
 
 add_executable(mocktail src/main.cc)
 target_include_directories(mocktail PRIVATE include src)
 mocktail_apply_compile_options(mocktail)
 target_compile_definitions(mocktail PRIVATE
-  "MOCKTAIL_DEFAULT_COMPATIBILITY_MANIFEST=\"${CMAKE_SOURCE_DIR}/config/roblox_compatibility.json\""
+  "MOCKTAIL_DEFAULT_COMPATIBILITY_MANIFEST=\"${MOCKTAIL_DEFAULT_COMPATIBILITY_MANIFEST}\""
 )
 target_link_libraries(mocktail PRIVATE
   mocktail_legacy_runtime

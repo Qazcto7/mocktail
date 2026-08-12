@@ -1,4 +1,4 @@
-# Maintainer: komaruworld <rtysus228@gmail.com>
+# Maintainer: komaruworld <rtysus228 at gmail dot com>
 
 pkgname=mocktail
 pkgver=0.1.0
@@ -11,15 +11,19 @@ depends=(
   'capstone'
   'curl'
   'fontconfig'
+  'gcc-libs'
+  'glib2'
+  'glibc'
   'gtk4'
+  'hicolor-icon-theme'
   'libadwaita'
   'libelf'
   'libglvnd'
   'libplacebo'
+  'libsoup3'
   'libutf8proc'
   'libyaml'
   'minizip'
-  'nlohmann-json'
   'openssl'
   'sdl3>=3.4'
   'sdl3_ttf'
@@ -31,22 +35,35 @@ makedepends=(
   'cmake>=3.20'
   'git'
   'ninja'
+  'nlohmann-json'
   'pkgconf'
 )
 optdepends=('gamemode: Feral GameMode integration')
-options=('!debug' 'strip')
-source=()
-sha256sums=()
-
-_mocktail_source_dir="${MOCKTAIL_SOURCE_DIR:-${startdir}/../..}"
+conflicts=('mocktail-bin' 'mocktail-git')
+options=('!debug')
+source=(
+  "mocktail::git+https://github.com/komaruworld/mocktail.git#tag=${pkgver}"
+  'libjnivm::git+https://github.com/ChristopherHX/libjnivm.git'
+  'vulkan-headers::git+https://github.com/KhronosGroup/Vulkan-Headers.git'
+)
+sha256sums=(
+  'SKIP'
+  'SKIP'
+  'SKIP'
+)
 
 prepare() {
-  [[ -f "${_mocktail_source_dir}/CMakeLists.txt" ]] ||
-    error 'run makepkg from a complete Mocktail checkout'
+  cd mocktail
+
+  git submodule init
+  git config submodule.third_party/libjnivm.url "${srcdir}/libjnivm"
+  git config submodule.third_party/Vulkan-Headers.url \
+    "${srcdir}/vulkan-headers"
+  git -c protocol.file.allow=always submodule update
 }
 
 build() {
-  cmake -S "${_mocktail_source_dir}" -B build -G Ninja \
+  cmake -S mocktail -B build -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX=/usr \
     -DCMAKE_INSTALL_LIBDIR=lib \
@@ -58,6 +75,6 @@ build() {
 
 package() {
   DESTDIR="${pkgdir}" cmake --install build
-  install -Dm644 "${_mocktail_source_dir}/LICENSE" \
+  install -Dm644 mocktail/LICENSE \
     "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
 }
