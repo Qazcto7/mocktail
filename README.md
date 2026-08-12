@@ -44,16 +44,14 @@ Use `mocktail` instead of `mocktail-git` to build the pinned release from
 source, or install the stable prebuilt package with `paru -S mocktail-bin` or
 `yay -S mocktail-bin`.
 
-## Screenshots
-
 <details>
-<summary>Flatpak build</summary>
+<summary>Screenshots</summary>
 
-![Roblox home in Mocktail](docs/screenshots/flatpak-home.png)
+![Roblox home in Mocktail](assets/screenshots/flatpak-home.png)
 
-![Roblox gameplay in Mocktail](docs/screenshots/flatpak-gameplay-tower.png)
+![Roblox gameplay in Mocktail](assets/screenshots/flatpak-gameplay-tower.png)
 
-![Roblox experience in Mocktail](docs/screenshots/flatpak-gameplay-lobby.png)
+![Roblox experience in Mocktail](assets/screenshots/flatpak-gameplay-lobby.png)
 
 </details>
 

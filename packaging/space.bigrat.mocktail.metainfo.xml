@@ -26,16 +26,16 @@
   </description>
   <screenshots>
     <screenshot type="default">
-      <image>https://raw.githubusercontent.com/komaruworld/mocktail/0.1.0/docs/screenshots/flatpak-home.png</image>
+      <image>https://raw.githubusercontent.com/komaruworld/mocktail/main/assets/screenshots/flatpak-home.png</image>
       <caption>Browse Roblox experiences in the desktop client</caption>
     </screenshot>
     <screenshot>
-      <image>https://raw.githubusercontent.com/komaruworld/mocktail/0.1.0/docs/screenshots/flatpak-gameplay-tower.png</image>
+      <image>https://raw.githubusercontent.com/komaruworld/mocktail/main/assets/screenshots/flatpak-gameplay-tower.png</image>
       <caption>Roblox gameplay running through Mocktail</caption>
     </screenshot>
     <screenshot>
-      <image>https://raw.githubusercontent.com/komaruworld/mocktail/0.1.0/docs/screenshots/flatpak-gameplay-lobby.png</image>
-      <caption>A Roblox experience running in the Flatpak build</caption>
+      <image>https://raw.githubusercontent.com/komaruworld/mocktail/main/assets/screenshots/flatpak-gameplay-lobby.png</image>
+      <caption>A Roblox experience running through Mocktail</caption>
     </screenshot>
   </screenshots>
   <launchable type="desktop-id">space.bigrat.mocktail.desktop</launchable>
