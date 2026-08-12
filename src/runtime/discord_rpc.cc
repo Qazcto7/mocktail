@@ -121,11 +121,14 @@ std::string PercentEncode(std::string_view value) {
 }
 
 bool HasDiscordJoinTarget(const RobloxExperienceLaunchRequest& request) {
-  return request.place_id > 0 && !request.game_instance_id.empty() &&
-         request.game_instance_id.size() <= 128 &&
-         std::none_of(
-             request.game_instance_id.begin(), request.game_instance_id.end(),
-             [](unsigned char byte) { return byte < 0x20 || byte == 0x7f; });
+  return request.place_id > 0 &&
+         (request.game_instance_id.empty() ||
+          (request.game_instance_id.size() <= 128 &&
+           std::none_of(request.game_instance_id.begin(),
+                        request.game_instance_id.end(),
+                        [](unsigned char byte) {
+                          return byte < 0x20 || byte == 0x7f;
+                        })));
 }
 
 bool WriteAll(int descriptor, const void* bytes, std::size_t size) {
@@ -531,8 +534,10 @@ std::string BuildDiscordJoinUrl(const RobloxExperienceLaunchRequest& request) {
     return {};
   }
   std::string url =
-      std::string(kJoinPage) + "#placeId=" + std::to_string(request.place_id) +
-      "&gameInstanceId=" + PercentEncode(request.game_instance_id);
+      std::string(kJoinPage) + "#placeId=" + std::to_string(request.place_id);
+  if (!request.game_instance_id.empty()) {
+    url += "&gameInstanceId=" + PercentEncode(request.game_instance_id);
+  }
   return url.size() <= 512 ? std::move(url) : std::string();
 }
 

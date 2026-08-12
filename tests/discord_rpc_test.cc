@@ -140,6 +140,21 @@ TEST(DiscordRpcTest, ShowsExternalPlaceThumbnailWhenAvailable) {
   EXPECT_EQ(activity.large_text, "Natural Disaster Survival");
 }
 
+TEST(DiscordRpcTest, ShowsPlaceJoinWhenServerIdIsUnavailable) {
+  const DiscordRpcConfig config;
+  RobloxExperienceLaunchRequest request = PublicServer();
+  request.game_instance_id.clear();
+
+  const DiscordRpcActivity activity = BuildDiscordRpcActivity(
+      config, RobloxExperiencePresencePhase::kPlaying, &request,
+      "Natural Disaster Survival", 1);
+
+  EXPECT_EQ(activity.button_label, "Join Server");
+  EXPECT_EQ(activity.button_url,
+            "https://komaruworld.github.io/mocktail/join.html#placeId="
+            "189707");
+}
+
 TEST(DiscordRpcTest, RejectsUnsafePlaceThumbnailUrl) {
   const DiscordRpcConfig config;
   const RobloxExperienceLaunchRequest request = PublicServer();
