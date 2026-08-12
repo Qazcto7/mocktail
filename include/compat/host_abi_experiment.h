@@ -62,7 +62,7 @@ enum class NativePreJniBootstrapStatus {
   kFailed,
 };
 
-// Installs one exact-Build-ID experiment before libroblox constructors run.
+// Installs one exact-Build-ID profile before libroblox constructors run.
 // The caller owns policy: this function never enables itself from environment
 // variables and must only receive a profile selected from the loaded ELF ID.
 HostAbiExperimentResult

@@ -22,13 +22,8 @@
 namespace mocktail {
 namespace graphics {
 
-// Composites the process-local RGBA text surface into application-owned
-// swapchain images. The adapter retains ownership of every Vulkan object it
-// registers. DestroySwapchain and DestroyDevice must be called before the
-// corresponding host Vulkan destroy function.
-//
-// An unsupported device or swapchain remains a valid registration failure:
-// QueuePresent then forwards the unmodified VkPresentInfoKHR to fallback.
+// Registered Vulkan objects remain caller-owned and must be unregistered
+// before host destruction. Unsupported registrations fall back cleanly.
 class VulkanTextOverlayCompositor final {
  public:
   VulkanTextOverlayCompositor();
@@ -38,10 +33,8 @@ class VulkanTextOverlayCompositor final {
   VulkanTextOverlayCompositor& operator=(const VulkanTextOverlayCompositor&) =
       delete;
 
-  // enabled_features describes the features actually enabled by
-  // vkCreateDevice, not merely the features supported by the physical device.
-  // The supplied proc-address callbacks must bypass the Android-facing Vulkan
-  // adapter and resolve host functions directly.
+  // enabled_features must match vkCreateDevice. Proc callbacks resolve host
+  // functions directly, bypassing the Android adapter.
   bool RegisterDevice(VkInstance instance, VkPhysicalDevice physical_device,
                       VkDevice device, std::uint32_t api_version,
                       const char* const* enabled_extensions,
@@ -61,10 +54,7 @@ class VulkanTextOverlayCompositor final {
                          const VkImage* images, std::uint32_t image_count);
   void DestroySwapchain(VkDevice device, VkSwapchainKHR swapchain);
 
-  // Serializes adapter-mediated submit, sparse-bind, present, and idle
-  // operations on the exact queue range imported by libplacebo. Other
-  // VkQueues remain independent, including the inactive-overlay fast path on
-  // a non-imported queue.
+  // Adapter operations serialize only queues imported by libplacebo.
   VkResult QueueSubmit(VkQueue queue, std::uint32_t submit_count,
                        const VkSubmitInfo* submits, VkFence fence,
                        PFN_vkQueueSubmit fallback);
@@ -77,10 +67,7 @@ class VulkanTextOverlayCompositor final {
   VkResult QueueWaitIdle(VkQueue queue, PFN_vkQueueWaitIdle fallback);
   VkResult DeviceWaitIdle(VkDevice device, PFN_vkDeviceWaitIdle fallback);
 
-  // Always invokes fallback when it is non-null. The original wait semaphores
-  // are forwarded unchanged until the compositor successfully submits the
-  // wait-collapse bridge; after that point only compositor-owned semaphores
-  // are passed to fallback.
+  // After wait collapse, fallback receives only compositor-owned semaphores.
   VkResult QueuePresent(VkQueue queue, const VkPresentInfoKHR* present_info,
                         PFN_vkQueuePresentKHR fallback);
 

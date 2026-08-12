@@ -25,7 +25,7 @@ namespace {
 jobject g_query_result = nullptr;
 int g_query_calls = 0;
 
-jobject QueryFixture(JNIEnv* /*env*/, jclass /*native_gl_class*/) {
+jobject QueryFixture(JNIEnv*, jclass) {
   ++g_query_calls;
   return g_query_result;
 }

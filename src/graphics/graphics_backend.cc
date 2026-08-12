@@ -82,7 +82,6 @@ BackendSelection SelectGraphicsBackend(
             reason};
   }
 
-  // Fallback order remains Vulkan-first and deterministic.
   constexpr GraphicsBackendKind kFallbackOrder[] = {
       GraphicsBackendKind::kAngleVulkan,
       GraphicsBackendKind::kDirectVulkan,

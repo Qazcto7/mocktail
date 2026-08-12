@@ -653,9 +653,7 @@ class DiscordRpcSession::Impl final {
     phase_ = phase;
     request_ = {};
     if (request != nullptr) {
-      // Retain only the public join coordinates and private-field presence.
-      // Access codes and canonical launch JSON never cross into the Discord
-      // worker, even when public_servers_only is manually disabled.
+      // Never pass access codes or canonical launch JSON to the Discord worker.
       request_.place_id = request->place_id;
       request_.game_instance_id = request->game_instance_id;
       if (!request->reserved_server_access_code.empty()) {
@@ -743,9 +741,7 @@ class DiscordRpcSession::Impl final {
         place_icon_url = cached.icon_url;
         if ((cached.name.empty() || cached.icon_url.empty()) &&
             std::chrono::steady_clock::now() >= cached.next_attempt) {
-          // Never leave Discord showing "Joining" while a Roblox metadata
-          // request is in flight. Publish the available/fallback activity
-          // first, then refine it when metadata becomes available.
+          // Publish fallback activity while metadata is in flight.
           resolve_metadata_after_publish = true;
         }
       }
@@ -829,8 +825,7 @@ class DiscordRpcSession::Impl final {
           continue;
         }
         if (changed) {
-          // Re-enter the normal rate-limited publication path with the cached
-          // metadata. The fallback activity is already visible during lookup.
+          // Publish cached metadata through the normal rate limiter.
           published_revision = 0;
           continue;
         }

@@ -30,9 +30,8 @@
 namespace mocktail {
 namespace graphics {
 
-// Thin host WSI scaffold. It does not create a VkInstance, device, swapchain,
-// renderer, or allocator. A future Android Vulkan adapter may translate
-// vkCreateAndroidSurfaceKHR into CreateSurface after rewriting extensions.
+// Provides SDL's host WSI entry points. Instance, device, swapchain, renderer,
+// and allocator ownership stays with the caller.
 class SdlVulkanWsi final {
  public:
   SdlVulkanWsi() = default;

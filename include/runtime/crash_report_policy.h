@@ -21,19 +21,12 @@
 namespace mocktail {
 namespace runtime {
 
-// Applies Mocktail's mandatory privacy boundary to the flat Roblox
-// client-settings override object. The policy disables native Crashpad, Java
-// crash/ANR uploads, Lua Backtrace errors, and inferred-crash submission while
-// preserving unrelated caller overrides. Unsafe values are replaced rather
-// than treated as conflicts because crash upload is not a user-configurable
-// runtime capability.
+// Disables Roblox crash uploads while preserving unrelated overrides.
 bool MergeCrashReportClientSettingsOverrides(std::string_view base_json,
                                              std::string* merged_json,
                                              std::string* error);
 
-// Applies the same mandatory values to Roblox's separate AppBridge
-// fastFlagsJson channel. Only FastVariable names are inserted here;
-// Java-only client settings remain on the client-settings boundary above.
+// AppBridge accepts only the FastVariable subset of this policy.
 bool MergeCrashReportFastFlagsOverrides(std::string_view base_json,
                                         std::string* merged_json,
                                         std::string* error);

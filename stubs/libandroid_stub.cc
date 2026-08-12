@@ -1,11 +1,8 @@
 // Copyright 2026 Mocktail Project Authors
 // Apache 2.0 License
 //
-// stubs/libandroid_stub.cc — Stub implementations of Android NDK functions.
-//
-// libroblox.so links against libandroid.so which does not exist on Linux.
-// This stub satisfies the dynamic linker so dlopen() can load libroblox.so.
-// All functions are no-ops or return safe sentinel values.
+// Android NDK compatibility symbols used by libroblox.so on Linux. Asset calls
+// can read from an extracted directory or directly from an APK.
 //
 // Symbols sourced from Android NDK r28 android/native_activity.h,
 // android/asset_manager.h, android/looper.h, android/configuration.h.
@@ -30,7 +27,7 @@
 #include <string>
 #include <vector>
 
-// AAssetManager / AAsset — read-only asset access
+// Read-only asset access
 
 struct AAssetManager {};
 struct AAsset {
@@ -260,7 +257,7 @@ bool MocktailUsesDirectVulkan() {
 extern "C" {
 
 AAsset* AAssetManager_open(AAssetManager* mgr, const char* filename,
-                           int /*mode*/) {
+                           int) {
   if (mgr == nullptr) {
     return nullptr;
   }
@@ -418,7 +415,7 @@ int AAsset_openFileDescriptor64(AAsset* asset, off_t* outStart,
   return AAsset_openFileDescriptor(asset, outStart, outLength);
 }
 
-AAssetManager* AAssetManager_fromJava(void* /*env*/, void* /*assetManager*/) {
+AAssetManager* AAssetManager_fromJava(void*, void*) {
   return &g_asset_manager;
 }
 
@@ -432,36 +429,36 @@ AConfiguration* AConfiguration_new() {
 
 void AConfiguration_delete(AConfiguration* config) { free(config); }
 
-void AConfiguration_fromAssetManager(AConfiguration* /*config*/,
-                                     AAssetManager* /*am*/) {}
+void AConfiguration_fromAssetManager(AConfiguration*,
+                                     AAssetManager*) {}
 
-void AConfiguration_getLanguage(AConfiguration* /*config*/, char* out) {
+void AConfiguration_getLanguage(AConfiguration*, char* out) {
   if (out) {
     out[0] = 'e';
     out[1] = 'n';
   }
 }
 
-void AConfiguration_getCountry(AConfiguration* /*config*/, char* out) {
+void AConfiguration_getCountry(AConfiguration*, char* out) {
   if (out) {
     out[0] = 'U';
     out[1] = 'S';
   }
 }
 
-int32_t AConfiguration_getScreenSize(AConfiguration* /*config*/) {
+int32_t AConfiguration_getScreenSize(AConfiguration*) {
   return 2;  // ACONFIGURATION_SCREENSIZE_NORMAL
 }
 
-int32_t AConfiguration_getScreenWidthDp(AConfiguration* /*config*/) {
+int32_t AConfiguration_getScreenWidthDp(AConfiguration*) {
   return 360;
 }
 
-int32_t AConfiguration_getScreenHeightDp(AConfiguration* /*config*/) {
+int32_t AConfiguration_getScreenHeightDp(AConfiguration*) {
   return 640;
 }
 
-int32_t AConfiguration_getNavHidden(AConfiguration* /*config*/) {
+int32_t AConfiguration_getNavHidden(AConfiguration*) {
   return 1;  // ACONFIGURATION_NAVHIDDEN_YES
 }
 
@@ -469,7 +466,7 @@ int32_t AConfiguration_getNavHidden(AConfiguration* /*config*/) {
 
 struct ALooper {};
 
-ALooper* ALooper_prepare(int /*opts*/) {
+ALooper* ALooper_prepare(int) {
   static ALooper kLooper;
   return &kLooper;
 }
@@ -479,18 +476,18 @@ ALooper* ALooper_forThread() {
   return &kLooper;
 }
 
-void ALooper_acquire(ALooper* /*looper*/) {}
-void ALooper_release(ALooper* /*looper*/) {}
+void ALooper_acquire(ALooper*) {}
+void ALooper_release(ALooper*) {}
 
-int ALooper_addFd(ALooper* /*looper*/, int /*fd*/, int /*ident*/,
-                  int /*events*/, void* /*callback*/, void* /*data*/) {
+int ALooper_addFd(ALooper*, int, int,
+                  int, void*, void*) {
   return 1;
 }
 
-int ALooper_removeFd(ALooper* /*looper*/, int /*fd*/) { return 1; }
+int ALooper_removeFd(ALooper*, int) { return 1; }
 
-int ALooper_pollOnce(int /*timeoutMillis*/, int* /*outFd*/, int* /*outEvents*/,
-                     void** /*outData*/) {
+int ALooper_pollOnce(int, int*, int*,
+                     void**) {
   return -2;  // ALOOPER_POLL_TIMEOUT
 }
 
@@ -498,8 +495,8 @@ int ALooper_pollOnce(int /*timeoutMillis*/, int* /*outFd*/, int* /*outEvents*/,
 
 struct ANativeWindow {};
 
-void ANativeWindow_acquire(ANativeWindow* /*window*/) {}
-void ANativeWindow_release(ANativeWindow* /*window*/) {}
+void ANativeWindow_acquire(ANativeWindow*) {}
+void ANativeWindow_release(ANativeWindow*) {}
 
 ANativeWindow* ANativeWindow_fromSurface(void* env, void* surface) {
   void* native_window = MocktailNativeWindow();

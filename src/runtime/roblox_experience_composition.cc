@@ -33,10 +33,7 @@ namespace runtime {
 namespace {
 
 constexpr size_t kMaxPendingLaunchRequests = 8;
-// Loading libroblox contributes a large static-TLS image. A one-megabyte
-// pthread stack is accepted in unit tests before the guest is loaded, but
-// pthread_create returns EINVAL in production once that TLS image is present.
-// Keep this above the runtime's proven 16 MiB guest-thread floor.
+// libroblox's static TLS requires the proven 16 MiB guest-thread stack floor.
 constexpr size_t kLaunchWorkerStackSize = 64ULL * 1024 * 1024;
 constexpr std::chrono::milliseconds kWebSurfaceReadyTimeout{3000};
 constexpr char kRobloxBaseUrl[] = "https://www.roblox.com/";
@@ -512,9 +509,7 @@ Status RobloxExperienceComposition::OpenWebSurface(
     }
   }
 
-  // Opening and configuring the singleton is one serialized transaction.
-  // Optional fields are normalized before this point, so presentation state
-  // from the previous route can never leak into the new page.
+  // Serialize setup so presentation state cannot leak between routes.
   if (!current->SetTitle(presentation.title) ||
       !current->SetVisible(presentation.visible) ||
       !current->SetBackNavigationDisabled(
@@ -626,9 +621,8 @@ Status RobloxExperienceComposition::DispatchWebViewOpen(
   presentation.visible = request.is_visible.value_or(true);
   presentation.show_domain_as_title =
       request.show_domain_as_title.value_or(false);
-  // The host helper has no Android toolbar. Mapping a hidden Roblox back
-  // button to disabled host back navigation preserves the protocol's only
-  // actionable navigation policy without inventing a replacement header.
+  // The host helper has no toolbar, so a hidden Roblox back button disables
+  // host back navigation too.
   presentation.back_navigation_disabled =
       request.back_button_visible.has_value() && !*request.back_button_visible;
   return composition->OpenWebSurface(request.url, "webview",
@@ -802,11 +796,8 @@ Status RobloxExperienceComposition::RouteWebSurfaceEvent(
     RobloxWebViewBridge* web_view_bridge) {
   switch (event.type) {
     case WebViewHelperEventType::kExecuteRoblox:
-      // EnableAndroidWebViewService4 installs WebViewProtocol's listener on
-      // the shared gi.a fragment regardless of which protocol opened it. The
-      // MemStorage callback in gi.a is only the APK's disabled legacy
-      // fallback. Keeping the raw command intact is required for
-      // RequestGameJob fields such as instanceId and joinAttemptId.
+      // WebViewProtocol listens on the shared gi.a fragment. Preserve the raw
+      // command, including RequestGameJob instance and attempt IDs.
       if (route == WebSurfaceRoute::kNone) {
         return FailedPrecondition(
             "WebView helper event has no active logical route");
@@ -842,9 +833,7 @@ Status RobloxExperienceComposition::RouteCurrentWebSurfaceEvent(
         logical_generation == 0 ||
         logical_generation != web_surface_logical_generation_ ||
         web_surface_route_ == WebSurfaceRoute::kNone) {
-      // A close, helper replacement, or logical page reuse invalidates every
-      // event already buffered for the old surface. This is normal teardown,
-      // not a platform delivery failure.
+      // Closing or replacing the helper invalidates buffered surface events.
       return Status::Ok();
     }
     route = web_surface_route_;
@@ -954,8 +943,7 @@ Status RobloxExperienceComposition::PromoteAuthenticatedSession() {
   if (consumes_window_surface_events_) {
     window::WindowSurfaceEvent stale_event;
     while (window::PollWindowSurfaceEvent(&stale_event)) {
-      // Readiness already captured the latest snapshot. Older events were
-      // queued before a GAME consumer existed and must not replay stale state.
+      // Readiness already captured the latest snapshot; discard older events.
     }
   }
   vm->SetRobloxExperienceLifecycleCallbacks(
@@ -1112,9 +1100,8 @@ Status RobloxExperienceComposition::DrainExternalLaunchRequests() {
   Status status = DrainActiveExternalLaunchRequests(
       ExternalLaunchSink{this, &RobloxExperienceComposition::DispatchLaunch},
       available);
-  // The MessageBus can fill the composition queue after the capacity snapshot
-  // above. Keep the external request at the broker's front and retry on the
-  // next drain instead of turning ordinary backpressure into runtime failure.
+  // A MessageBus race can fill the queue; leave the request at the broker's
+  // front and retry on the next drain.
   return status.code() == StatusCode::kUnavailable ? Status::Ok() : status;
 }
 
@@ -1161,8 +1148,7 @@ Status RobloxExperienceComposition::DrainLaunchRequests() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (lua_app_return_pending_ && !launch_in_progress_ &&
         active_launch_ == nullptr) {
-      // Consume before invoking the controller so a concurrent callback sets
-      // a new pending observation instead of being overwritten on return.
+      // Consume first so a concurrent callback can set a new observation.
       lua_app_return_pending_ = false;
       returned_controller = controller_;
     }
@@ -1198,9 +1184,8 @@ Status RobloxExperienceComposition::DrainLaunchRequests() {
     if (controlled_switch_waiting_for_return_) return Status::Ok();
     if (!launch_in_progress_ && active_launch_ == nullptr && game_active_ &&
         !pending_launch_requests_.empty()) {
-      // Prevent a stale gameDidLeave callback from being applied to the next
-      // controller. The queued launch starts only after the exact LuaApp
-      // return callback for this controlled leave has been consumed.
+      // Start the queued launch only after consuming this leave callback, so
+      // it cannot reach the next controller.
       controlled_switch_waiting_for_return_ = true;
       switch_active_game = true;
     }

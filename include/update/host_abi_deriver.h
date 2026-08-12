@@ -37,7 +37,7 @@ struct HostAbiDerivationResult {
   }
 };
 
-// Derives an exact, experimental HostAbi profile by matching normalized x86-64
+// Derives an exact candidate HostAbi profile by matching normalized x86-64
 // instruction signatures against one already approved reference payload. This
 // is static analysis only; the result still requires two real Tier C canaries
 // before normal runtime activation.

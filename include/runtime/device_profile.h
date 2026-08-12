@@ -28,9 +28,7 @@ enum class DeviceClass {
   kConsole,
 };
 
-// One immutable profile keeps Roblox admission, pseudo-Android hardware
-// identity, and built-in input capabilities consistent. The guest ABI and
-// client-settings group remain Android/GoogleAndroidApp.
+// Admission changes do not change the Android guest ABI.
 struct DeviceProfile {
   std::string name;
   std::string cache_key;
@@ -51,18 +49,14 @@ struct DeviceProfile {
 };
 
 inline constexpr std::string_view kDefaultDeviceProfileName = "pc-windows-11";
-// These identifiers select Roblox server-side admission only. They never
-// replace the Android APK ABI or its GoogleAndroidApp client-settings group.
+// Transport classifier only; the guest remains GoogleAndroidApp.
 inline constexpr std::string_view kRobloxDesktopHttpUserAgent =
     "Roblox/WinInet";
-// The current Android-host playability endpoint recognizes this as console.
-// PlayStation-labelled user agents currently fall back to desktop admission,
-// so the PS5 marketing profile keeps this transport-only classifier.
+// The playability endpoint recognizes this classifier as console.
 inline constexpr std::string_view kRobloxConsoleAdmissionUserAgent =
     "Roblox/XboxOne";
 
-// Accepts canonical names and the convenient pc/mobile/console aliases.
-// Returned profiles have static lifetime.
+// Accepts canonical names and pc/mobile/console aliases; result is static.
 const DeviceProfile* FindDeviceProfile(std::string_view name);
 bool IsValidDeviceProfileValue(std::string_view value, std::size_t maximum);
 std::string BuildCustomDeviceProfileCacheKey(const DeviceProfile& profile);

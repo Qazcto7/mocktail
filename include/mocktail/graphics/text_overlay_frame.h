@@ -18,19 +18,15 @@
 #include <cstddef>
 #include <cstdint>
 
-// Stable process-local ABI between the host input runtime in the executable
-// and libvulkan.so, which is loaded as a separate Android compatibility DSO.
-// Pixels are tightly packed RGBA8. The producer owns and securely clears its
-// storage; consumers must copy a matching revision before returning.
+// Process-local ABI with libvulkan.so. Pixels are RGBA8; consumers must copy a
+// matching revision before the producer clears its storage.
 struct MocktailTextOverlayFrameInfo {
   static constexpr std::uint32_t kAbiVersion = 2;
 
   std::uint32_t abi_version = kAbiVersion;
   std::uint32_t visible = 0;
   std::uint64_t revision = 0;
-  // x/y/width/height use the host's logical input coordinate space. These
-  // dimensions let a Vulkan consumer map that space to the swapchain's pixel
-  // extent without assuming a 1:1 high-DPI scale.
+  // Coordinates are logical, not swapchain pixels.
   std::uint32_t coordinate_width = 0;
   std::uint32_t coordinate_height = 0;
   std::int32_t x = 0;
@@ -43,9 +39,7 @@ struct MocktailTextOverlayFrameInfo {
 
 extern "C" {
 
-// Lock-free conservative hint for the Vulkan present fast path. A false
-// result guarantees that no drawable overlay is currently published. A true
-// result only means that the synchronized query/copy path must decide.
+// false guarantees no overlay; true still requires a synchronized query.
 bool mocktail_text_overlay_may_present();
 bool mocktail_text_overlay_query(MocktailTextOverlayFrameInfo* frame);
 bool mocktail_text_overlay_copy(std::uint64_t revision, void* rgba,

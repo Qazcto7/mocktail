@@ -25,9 +25,7 @@
 
 namespace mocktail::audio {
 
-// SDL documents subsystem initialization and shutdown as main-thread-only.
-// The process composition root owns this lifetime; audio workers only create
-// streams while the subsystem is active.
+// SDL requires subsystem startup and shutdown on the main thread.
 Status InitializeSdlAudioSubsystem();
 Status ShutdownSdlAudioSubsystem();
 
@@ -36,50 +34,37 @@ struct SdlPlaybackDevice {
   std::string name;
 };
 
-// Lists physical SDL playback devices. The abstract `default` target is not a
-// physical entry and is therefore intentionally absent from this vector.
+// The virtual `default` target is not returned.
 Status ListSdlPlaybackDevices(std::vector<SdlPlaybackDevice>* devices);
 
-// Resolves `default` or one exact physical device name. This pure selection
-// step is separate from SDL enumeration so configuration behavior is directly
-// testable.
 Status ResolveSdlPlaybackDevice(
     std::string_view requested,
     const std::vector<SdlPlaybackDevice>& available_devices,
     std::uint32_t* playback_device_id, std::string* resolved_name);
 
-// Sets the process playback target used by every subsequently created FMOD
-// Java and OpenSL sink. It must run after SDL audio initialization and before
-// the first sink is opened.
+// Must run after SDL audio initialization and before the first sink opens.
 Status ConfigureSdlPlaybackDevice(
     std::string_view requested,
     std::vector<SdlPlaybackDevice>* available_devices,
     std::string* resolved_name);
 
-// Returns the process playback target currently used by new sinks. The
-// physical ID is zero for SDL's system-default route.
+// Device ID zero means the system default.
 Status GetConfiguredSdlPlaybackDevice(std::uint32_t* playback_device_id,
                                       std::string* resolved_name);
 
-// Atomically migrates every live FMOD Java and OpenSL stream to one physical
-// SDL device, or to the system default when playback_device_id is zero. New
-// sinks inherit the same target. Existing queued PCM stays in its stream.
+// Migrates live streams without dropping queued PCM. New sinks inherit it.
 Status SwitchSdlPlaybackDevice(std::uint32_t playback_device_id,
                                std::string* resolved_name);
 
 struct SdlAudioSinkOptions {
   PcmSpec source_spec;
 
-  // Zero selects the process playback target configured above (the SDL
-  // default until explicitly configured). A nonzero ID bypasses that target.
+  // Zero selects the configured process target.
   std::uint32_t playback_device_id = 0;
   bool start_paused = true;
 };
 
-// Opens a real SDL 3.4+ playback device and its bound SDL_AudioStream. The SDL
-// audio subsystem must already be owned by InitializeSdlAudioSubsystem(). SDL
-// owns all format conversion, resampling, and borrowed-buffer consumption.
-// On failure, *sink remains null.
+// SDL owns conversion, resampling, and borrowed-buffer consumption.
 Status CreateSdlAudioSink(const SdlAudioSinkOptions& options,
                           std::unique_ptr<AudioSink>* sink);
 

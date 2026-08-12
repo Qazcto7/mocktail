@@ -7,7 +7,7 @@
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
 
-"""Download a provenance-pinned Uptodown XAPK bootstrap archive."""
+"""Download a pinned Uptodown XAPK for Mocktail's first-run setup."""
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ DOWNLOAD_ORIGIN = "https://dw.uptodown.com/dwn/"
 
 
 class ProviderError(RuntimeError):
-    """A safe, user-facing provider failure."""
+    """Raised when a provider response cannot be downloaded or validated."""
 
 
 class DownloadPageParser(HTMLParser):

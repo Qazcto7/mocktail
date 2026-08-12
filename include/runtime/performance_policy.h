@@ -34,8 +34,7 @@ enum class PhysicsWorkerMode {
 bool ParsePhysicsWorkerMode(std::string_view value, PhysicsWorkerMode* mode);
 std::string_view PhysicsWorkerModeName(PhysicsWorkerMode mode);
 
-// Makes every available physical core eligible for Roblox scheduler work.
-// At least one scheduler worker remains on malformed topology input.
+// Malformed topology still yields one worker.
 int CalculateThroughputWorkerCount(int available_physical_cores);
 
 struct PerformancePolicy {
@@ -61,25 +60,16 @@ PerformancePolicy ParsePerformancePolicy(
     std::string_view memory_limit_mb = "0", std::string_view game_mode = "auto",
     std::string_view physics_worker_mode = "auto");
 
-// Counts unique physical cores available to the current process. Linux CPU
-// affinity is respected; systems without readable topology fall back to the
-// available logical CPU count.
+// Respects CPU affinity and falls back to the available logical count.
 int DetectAvailablePhysicalCoreCount();
 
-// Merges the supported Roblox scheduler/rendering mode into the flat
-// client-settings override object. Disabled policy leaves existing overrides
-// intact. Conflicting explicit values fail closed instead of silently
-// replacing the caller's settings.
+// Disabled policy preserves overrides; conflicting values fail.
 bool MergePerformanceClientSettingsOverrides(const PerformancePolicy& policy,
                                              std::string_view base_json,
                                              std::string* merged_json,
                                              std::string* error);
 
-// Applies every runtime policy in a stable order before the resulting
-// override object crosses the legacy startup boundary. The mandatory
-// HttpClient compatibility policy is applied before the mandatory crash-report
-// upload block. Neither policy can be overridden by a caller-provided client
-// setting.
+// Applies mandatory HTTP and crash policies after caller settings.
 bool MergeRuntimeClientSettingsOverrides(const FrameRatePolicy& frame_rate,
                                          const PerformancePolicy& performance,
                                          std::string_view base_json,

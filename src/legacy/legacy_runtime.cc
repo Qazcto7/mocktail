@@ -12,18 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Transitional Sober compatibility runtime. This file preserves the current
-// reverse-engineered startup path while upstream-backed modules replace
-// it one boundary at a time.
-//
-// Implements the preserved 5-stage initialisation pipeline:
-//
-//   Stage 1: Initialise Pseudo-JVM (libjnivm).
-//   Stage 2: Register mandatory Android SDK JNI classes.
-//   Stage 3: Load host system libraries under Bionic alias names.
-//   Stage 4: Map libroblox.so into process address space via the linker.
-//   Stage 5: Invoke JNI_OnLoad and hand control to the game engine.
-
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -400,7 +388,6 @@ extern "C" int mocktail_recover_stack_chk_fail() {
   return 0;
 }
 
-// JNI_OnLoad function pointer type as specified by the JNI standard.
 using JniOnLoadFn = jint (*)(JavaVM*, void*);
 using NativeGameGlobalInitFn = void (*)(JNIEnv*, jclass);
 using NativeInitClientSettingsFn = jint (*)(JNIEnv*, jclass, jstring, jstring,
@@ -2519,10 +2506,7 @@ static void* GetThreadScratchBuffer(pid_t tid) {
   return g_thread_scratch_pool[0].buffer;
 }
 
-// Fallback vtable used when a null/invalid object pointer is dereferenced
-// during a vtable dispatch in Stage 6.  Each slot is a no-op stub that
-// returns 0 so that the caller can continue execution.  The table covers
-// all vtable offsets seen in libroblox (currently up to +0xf8 = slot 31).
+// Covers every libroblox vtable offset observed through slot 31 (+0xf8).
 static uintptr_t NullVtableStub() { return 0; }
 static const uintptr_t kFallbackVtable[32] = {
     reinterpret_cast<uintptr_t>(&NullVtableStub),
@@ -2558,8 +2542,7 @@ static const uintptr_t kFallbackVtable[32] = {
     reinterpret_cast<uintptr_t>(&NullVtableStub),
     reinterpret_cast<uintptr_t>(&NullVtableStub),
 };
-// Fake object whose first 8 bytes point to kFallbackVtable.
-// Used to satisfy `mov rax,[rsi]; call [rax+offset]` when RSI=null.
+// Lets a recovered `mov rax,[rsi]` continue through the fallback vtable.
 static const uintptr_t kFallbackObject[4] = {
     reinterpret_cast<uintptr_t>(kFallbackVtable), 0, 0, 0,
 };
@@ -2810,12 +2793,10 @@ void ApplyRuntimeDefaults() {
   SetEnvDefault("MOCKTAIL_ENGINE_DETACH", "0");
   SetEnvDefault("MOCKTAIL_INIT_CLIENT_SETTINGS", "0");
   SetEnvDefault("MOCKTAIL_POST_CLIENT_SETTINGS", "0");
-  // Sober-compatible fallback: allow unauthenticated startup (LuaApp path)
-  // unless explicitly disabled.
   SetEnvDefault("MOCKTAIL_ALLOW_NO_COOKIE_LUA_APP", "1");
   // Current Roblox Android builds drive app startup through NativeGLInterface's
   // V2 app bridge path. The legacy NativeAppBridgeInterface entry point stays
-  // available for experiments, but running it in parallel can block V2 init.
+  // available by opt-in, but running it in parallel can block V2 init.
   SetEnvDefault("MOCKTAIL_APP_BRIDGE_APP_START", "0");
   SetEnvDefault("MOCKTAIL_APP_BRIDGE_APP_START_THREAD", "0");
   SetEnvDefault("MOCKTAIL_START_LUA_APP_DM", "1");
@@ -5824,8 +5805,8 @@ extern "C" void* mocktail_roblox_allocator_object_alloc_bridge(void*,
   return mocktail_roblox_aligned_alloc_bridge(size, align);
 }
 
-// Retained only for the legacy fixed-offset allocator patch below. Current
-// Build-ID experiments own their seed storage in compat/host_abi_experiment.
+// Retained for the legacy fixed-offset allocator patch. Build-ID profiles keep
+// their seed storage in compat/host_abi_experiment.
 uintptr_t g_mocktail_roblox_allocator_object_vtable[4] = {};
 uintptr_t g_mocktail_roblox_allocator_object[1] = {
     reinterpret_cast<uintptr_t>(g_mocktail_roblox_allocator_object_vtable)};
@@ -5902,7 +5883,7 @@ bool InstallActiveHostAbiExperiment(uintptr_t libroblox_base) {
   }
   g_host_abi_install_attempted = true;
   if (!HostAbiExperimentRequested()) {
-    std::cout << "  [compat] host ABI experiment disabled by policy\n"
+    std::cout << "  [compat] host ABI profile disabled by policy\n"
               << std::flush;
     return false;
   }
@@ -5910,7 +5891,7 @@ bool InstallActiveHostAbiExperiment(uintptr_t libroblox_base) {
   const mocktail::compat::HostAbiProfile* profile =
       g_active_host_abi_profile.load(std::memory_order_acquire);
   if (libroblox_base == 0 || profile == nullptr) {
-    std::cerr << "  [compat] host ABI experiment has no active profile/base\n"
+    std::cerr << "  [compat] host ABI install has no active profile/base\n"
               << std::flush;
     return false;
   }
@@ -6534,7 +6515,7 @@ extern "C" void mocktail_before_soinfo_constructors(const char* realpath,
 
   // Host alloc bridges must be in place before any constructor executes.
   if (HostAbiExperimentRequested() && !InstallActiveHostAbiExperiment(base)) {
-    std::cerr << "  [compat] host ABI experiment failed before constructors\n"
+    std::cerr << "  [compat] host ABI install failed before constructors\n"
               << std::flush;
     return;
   }
@@ -6634,7 +6615,6 @@ extern "C" void mocktail_before_soinfo_constructors(const char* realpath,
   uintptr_t* init_array =
       reinterpret_cast<uintptr_t*>(base + init_array_offset);
 
-  // Make the page writable just in case
   long ctor_page_size = sysconf(_SC_PAGESIZE);
   if (ctor_page_size > 0) {
     uintptr_t addr = reinterpret_cast<uintptr_t>(init_array);
@@ -6648,7 +6628,6 @@ extern "C" void mocktail_before_soinfo_constructors(const char* realpath,
   g_original_ctors.reserve(kCtorCount);
   for (size_t i = 0; i < kCtorCount; ++i) {
     g_original_ctors.push_back(init_array[i]);
-    // Skip the first constructor if env flag is set, otherwise wrap it
     if (i == 0 && IsEnabled("MOCKTAIL_PATCH_FIRST_CONSTRUCTOR")) {
       static void (*noop_fn)() = []() {};
       g_original_ctors[i] = reinterpret_cast<uintptr_t>(noop_fn);
@@ -26926,26 +26905,21 @@ void HeadlessSegvHandler(int signo, siginfo_t* info, void* context) {
     return;
   }
 
-  // libGLdispatch crash recovery (handles Bionic TLS incompatibility in Glibc threads).
-  // Matches any SIGSEGV occurring inside libGLdispatch.so.0.
+  // libGLdispatch may access Bionic TLS keys through glibc thread state.
   if (g_current_stage >= 6 && module_name && std::strstr(module_name, "libGLdispatch") != nullptr) {
-    // If the instruction is a 64-bit store (mov [reg], reg) or load (mov reg, [reg]):
     if (instruction[0] == 0x48 && (instruction[1] == 0x89 || instruction[1] == 0x8b)) {
       int rm = instruction[2] & 7;
       int reg_map[] = { REG_RAX, REG_RCX, REG_RDX, REG_RBX, -1, -1, REG_RSI, REG_RDI };
       if (rm < 8 && reg_map[rm] != -1) {
         uintptr_t old_val = ucontext->uc_mcontext.gregs[reg_map[rm]];
-        // Only redirect if the register is currently NULL, very low, or points to a read-only stub/vtable.
         if (old_val < kStage5LowAddressThreshold) {
-          // Get or allocate a thread-specific writable buffer from our pool.
-          // This avoids calling malloc (which corrupts the heap if interrupted)
-          // and avoids sharing the same static buffer across multiple threads (which causes corruption).
+          // Signal handlers cannot call malloc; each thread gets fixed scratch
+          // storage to avoid sharing writes across recovered threads.
           pid_t tid = static_cast<pid_t>(syscall(SYS_gettid));
           void* thread_scratch = GetThreadScratchBuffer(tid);
           ucontext->uc_mcontext.gregs[reg_map[rm]] = reinterpret_cast<greg_t>(thread_scratch);
         } else if (old_val == reinterpret_cast<uintptr_t>(&NullVtableStub) ||
                    old_val == reinterpret_cast<uintptr_t>(kFallbackVtable)) {
-          // If it was redirected to a read-only stub/vtable, redirect it to a thread-specific writable buffer.
           pid_t tid = static_cast<pid_t>(syscall(SYS_gettid));
           void* thread_scratch = GetThreadScratchBuffer(tid);
           ucontext->uc_mcontext.gregs[reg_map[rm]] = reinterpret_cast<greg_t>(thread_scratch);
@@ -27016,7 +26990,7 @@ void HeadlessSegvHandler(int signo, siginfo_t* info, void* context) {
   }
 skip_stage6_null_object_immediate_store:
 
-  // Broader: any `48 89 ??` store with low dest-addr (catches all register combos).
+  // Catch the remaining `48 89 ??` stores to low addresses.
   if (g_current_stage >= 6 && info &&
       reinterpret_cast<uintptr_t>(info->si_addr) < kStage5LowAddressThreshold &&
       instruction[0] == 0x48 && instruction[1] == 0x89) {
@@ -27026,10 +27000,9 @@ skip_stage6_null_object_immediate_store:
       write(2, msg, sizeof(msg) - 1);
     }
     ++g_skipped_headless_null_writes;
-    // Determine instruction length (modrm) — skip the store.
-    // 48 89 /r  — 3 or 4 bytes depending on displacement.
     uint8_t modrm = instruction[2];
     uint8_t mod = (modrm >> 6) & 0x3;
+    // The ModR/M displacement determines how many instruction bytes to skip.
     int instr_len = (mod == 1) ? 4 : (mod == 2) ? 7 : 3;
     ucontext->uc_mcontext.gregs[REG_RIP] += instr_len;
     return;
@@ -27054,9 +27027,7 @@ skip_stage6_null_object_immediate_store:
       reinterpret_cast<uintptr_t>(info->si_addr) == 0 &&
       instruction[0] == 0x48 && instruction[1] == 0x8b &&
       instruction[2] == 0x06) {
-    // Pattern: mov rax,[rsi] with RSI=null, often followed by call [rax+N].
-    // Point RSI at a fake object whose vtable is kFallbackVtable so that the
-    // load succeeds and subsequent indirect calls land in NullVtableStub.
+    // Redirect the null receiver so a following vtable call reaches the stub.
     if (g_skipped_headless_null_writes == 0) {
       const char msg[] =
           "  [patch] redirected Stage6 mov rax,[rsi] (RSI=null) to fallback object\n";
@@ -27065,13 +27036,11 @@ skip_stage6_null_object_immediate_store:
     ++g_skipped_headless_null_writes;
     ucontext->uc_mcontext.gregs[REG_RSI] =
         reinterpret_cast<greg_t>(kFallbackObject);
-    // Do NOT advance RIP — re-execute the mov against the now-valid RSI.
+    // Re-run the load against the repaired receiver.
     return;
   }
 
-  // Broader fallback: any Stage6 null/low-address load through RSI into RAX
-  // that is the exact 3-byte form `48 8b 06` — recover by pointing RSI at
-  // fallback vtable object so the call chain can continue.
+  // The same recovery applies to nonzero addresses below the valid threshold.
   if (g_current_stage >= 6 && info &&
       reinterpret_cast<uintptr_t>(info->si_addr) < kStage5LowAddressThreshold &&
       instruction[0] == 0x48 && instruction[1] == 0x8b &&
@@ -27107,8 +27076,7 @@ skip_stage6_null_object_immediate_store:
     return;
   }
 
-  // Also handle `mov rax,[rax]` (48 8b 00) / `mov rax,[rax+N]` (48 8b 40 NN)
-  // with low RAX — redirect RAX to kFallbackVtable.
+  // Redirect low `mov rax,[rax+N]` bases to the fallback vtable.
   if (g_current_stage >= 6 && info &&
       reinterpret_cast<uintptr_t>(info->si_addr) < kStage5LowAddressThreshold &&
       instruction[0] == 0x48 && instruction[1] == 0x8b &&
@@ -27280,12 +27248,8 @@ skip_stage6_null_object_immediate_store:
     return;
   }
 
-  // SI_KERNEL SIGTRAP (si_code=128): kernel-generated trap, commonly a
-  // shadow-stack (CET/SHSTK) return-address mismatch on Roblox's internal
-  // threads.  The instruction at RIP is not an int3 — it's the instruction
-  // that would have executed after the bad return.  We cannot safely continue
-  // from here; if a recovery jmp_buf is armed on this thread use it, otherwise
-  // just exit the offending thread so the rest of the engine keeps running.
+  // SI_KERNEL SIGTRAP commonly follows a CET shadow-stack return mismatch.
+  // Use a thread-local recovery target when one is armed.
   if (signo == SIGTRAP && info && info->si_code == SI_KERNEL &&
       g_current_stage >= 6) {
     if (libroblox_base != 0 &&
@@ -27324,17 +27288,11 @@ skip_stage6_null_object_immediate_store:
       write(2, msg, sizeof(msg) - 1);
       siglongjmp(g_start_app_with_params_jmp_buf, 1);
     }
-    // No recovery target on this thread — skip the trap by advancing RIP past
-    // the current instruction and returning.  Killing the thread via
-    // pthread_exit would hang the engine since Roblox waits on these threads.
-    // SI_KERNEL SIGTRAP here is a shadow-stack (CET) mismatch on Roblox's
-    // internal threads; skipping it lets execution continue from the instruction
-    // after the bad return address.
+    // Roblox may wait on this thread, so exiting it can hang the engine.
     const char msg[] =
         "  [patch] SI_KERNEL SIGTRAP: no recovery, skipping instruction\n";
     write(2, msg, sizeof(msg) - 1);
-    // Advance past the current instruction — for SI_KERNEL traps the faulting
-    // instruction is still at RIP (not executed yet), so +1 moves past it.
+    // SI_KERNEL leaves RIP on the instruction that has not run yet.
     ucontext->uc_mcontext.gregs[REG_RIP] += 1;
     return;
   }
@@ -28488,9 +28446,8 @@ bool PatchStartAppDebugTrap(void* native_start_app_with_params) {
     return false;
   }
 
-  // NOTE: We intentionally do NOT patch the function entry point with `ret`.
-  // Doing so would silently kill the real startup path.  Only the known-bad
-  // diagnostic tail block inside the function is bypassed here.
+  // Patch only the diagnostic tail; replacing the entry point would disable
+  // real startup.
   constexpr uintptr_t kNativeStartAppOffset = 0x250436d;
   constexpr uintptr_t kTailPatchOffset = 0x2504567;
   constexpr unsigned char kTailJumpPatch[] = {
@@ -30533,9 +30490,7 @@ void* EngineStartupThread(void* arg) {
               << std::flush;
     mocktail::window::MakeCurrentOnThread();
   }
-  // Force our pseudo-VM function table on the env that EngineStartupThread will use.
-  // libroblox.so replaces env->functions during JNI_OnLoad; we restore it here so
-  // that our NewStringUTF / GetStringUTFChars helpers work correctly in Stage 6.
+  // JNI_OnLoad replaces env->functions; Stage 6 needs the pseudo-VM table.
   if (env && context->vm) {
     context->vm->RestoreFunctions();
     env = context->vm->GetJNIEnv();
@@ -32050,7 +32005,7 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
     std::cerr << "[FATAL] This Roblox build is not enabled for normal runs: "
               << build_profile.reason << '\n'
               << "  Use --allow-unverified-build only for an explicit "
-                 "compatibility experiment.\n";
+                 "compatibility check.\n";
     return EXIT_FAILURE;
   }
 
@@ -32064,10 +32019,8 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
     std::cout << "  [trace] full tracing enabled\n" << std::flush;
   }
 
-  // Disable shadow-stack (CET/SHSTK) for this process before loading
-  // libroblox.  Roblox's internal threads trigger SIGTRAP SI_KERNEL from
-  // return-address mismatches on the shadow stack; disabling it here prevents
-  // those spurious traps.  This is a no-op on kernels that don't support CET.
+  // Roblox internal threads trigger SI_KERNEL traps from CET shadow-stack
+  // return mismatches. Unsupported kernels ignore this request.
   {
     long r = syscall(SYS_arch_prctl, ARCH_SHSTK_DISABLE, ARCH_SHSTK_SHSTK);
     if (r == 0) {
@@ -32086,7 +32039,6 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
     setenv("MOCKTAIL_APP_BRIDGE_HEADLESS_INIT_PARAMS", is_headless ? "1" : "0",
            1);
   }
-  // Stage 1: Initialise the Bionic-compatible ELF linker + Pseudo-JVM.
   PrintStage(1, "Initialising Bionic linker + Pseudo-JVM");
 
 #ifdef MOCKTAIL_USE_BIONIC_LINKER
@@ -32101,8 +32053,7 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
   }
   std::cout << "  Pseudo-JVM instance created successfully.\n";
 
-  // Stage 2: Register mandatory Android SDK JNI classes.
-  // Roblox's JNI_OnLoad will call FindClass for these at startup.
+  // FindClass needs these descriptors before JNI_OnLoad.
   PrintStage(2, "Registering Android SDK JNI classes");
 
   auto context_class = jni_vm->RegisterClass("android/content/Context");
@@ -32116,7 +32067,6 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
         std::cout << "  [JNI callback] nativeInitClientSettings invoked\n";
       });
 
-  // Classes required by Stage 6 startup entry points.
   auto native_gl_interface_class =
       jni_vm->RegisterClass("com/roblox/engine/jni/NativeGLInterface");
   g_native_gl_class_for_main_thread =
@@ -32190,10 +32140,8 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
   std::cout << "  Registered " << jni_vm->GetClassCount()
             << " JNI class(es)\n";
 
-  // Window init (non-headless mode): create the SDL3 + EGL window before
-  // Android/EGL stubs are preloaded, so SDL resolves the real host graphics
-  // backend. By default the window stays hidden until Roblox presents a real
-  // frame.
+  // Create SDL/EGL before loading Android stubs so SDL binds the host graphics
+  // backend. The window stays hidden until the first real frame.
   bool window_initialised = false;
   if (!is_headless) {
     const int win_w = runtime_config.window().width;
@@ -32250,15 +32198,6 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
     }
   }
 
-  // Stage 3: Populate the Bionic symbol table with all stub + system
-  // symbols so that mcpelauncher-linker can resolve libroblox.so's
-  // DT_NEEDED entries without calling the host Glibc dynamic linker.
-  //
-  // Strategy:
-  //   1. dlopen each stub .so with RTLD_GLOBAL (host linker finds them
-  //      via RPATH=$ORIGIN).
-  //   2. Iterate over known stub symbols and register them into the
-  //      Bionic symbol table via linker::RegisterSymbol().
   PrintStage(3, "Building Bionic symbol table from stubs");
 
   libc_shim::Install();
@@ -32299,7 +32238,6 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
     }
   }
 
-  // Stub libraries to preload.  All located via RPATH=$ORIGIN.
   std::vector<const char*> stub_names = {
       "libc.so", "libdl.so", "libm.so", "libz.so",
       "libandroid.so", "liblog.so", "libmediandk.so",
@@ -32343,15 +32281,9 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
     real_gles_handle = OpenRealGlesLibrary();
   }
 
-  // Register every known Android NDK / system symbol into the Bionic
-  // symbol table so mcpelauncher-linker resolves them correctly.
-  //
-  // We prioritize resolving from our loaded stub libraries first.
-  // This ensures Bionic shims (like custom pthread structure handlers
-  // or __sF stdio compatibility) are preferred over host glibc ones,
-  // preventing layout incompatibility and crashes.
+  // Prefer Bionic shims over glibc for guest layouts such as pthread and FILE.
   static const char* kSymbolsToRegister[] = {
-      // Exported stub functions and structures
+      // Symbols exported by the Android compatibility stubs.
       "AAsset_close",
       "AAsset_getBuffer",
       "AAsset_getLength",
@@ -32609,7 +32541,7 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
       "__system_property_get",
       "__write_chk",
 
-      // Binary-compatible standard pthread symbols not explicitly shimmed
+      // pthread functions whose host ABI is already compatible.
       "pthread_once",
       "pthread_self",
       "pthread_equal",
@@ -32626,7 +32558,7 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
       "pthread_sigmask",
       "pthread_setname_np",
 
-      // Standard C library functions needed by libroblox.so
+      // Standard C library functions resolved from host libc.
       "strcmp",
       "strncmp",
       "strcpy",
@@ -32938,13 +32870,8 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
     }
   }
 
-  // Stage 4: Load libroblox.so via the Bionic-compatible linker.
-
-  // Auto-register ALL undefined symbols from the target library BEFORE
-  // loading stub libraries into the Bionic linker. This ensures the stubs'
-  // injected symbol maps include every symbol libroblox.so will need at
-  // relocation time. Auto-registration must run first because load_library
-  // takes a snapshot of g_bionic_symbols at call time.
+  // Register imports before loading synthetic SONAMEs; load_library snapshots
+  // g_bionic_symbols.
   {
     int fd = ::open(library_path.c_str(), O_RDONLY);
     if (fd >= 0) {
@@ -32954,7 +32881,6 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
                            PROT_READ, MAP_PRIVATE, fd, 0);
         if (map != MAP_FAILED) {
           auto* ehdr = reinterpret_cast<Elf64_Ehdr*>(map);
-          // Walk section headers to find .dynsym and .dynstr
           auto* shdr = reinterpret_cast<Elf64_Shdr*>(
               reinterpret_cast<char*>(map) + ehdr->e_shoff);
           Elf64_Shdr* dynsym_hdr = nullptr;
@@ -32975,7 +32901,6 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
               if (syms[si].st_shndx != SHN_UNDEF) continue;
               const char* name = strtab + syms[si].st_name;
               if (!name || name[0] == '\0') continue;
-              // Skip if already registered
               if (linker::GetBionicSymbols().count(name)) continue;
               auto result = ResolveSymbolForBionic(name, has_window,
                                                   real_gles_handle,
@@ -32996,9 +32921,7 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
     }
   }
 
-  // Register stub libraries inside Bionic linker. This must happen AFTER
-  // auto-registration so that every symbol libroblox needs is already in
-  // g_bionic_symbols when load_library snapshots the map.
+  // Load synthetic libraries only after the import map is complete.
   linker::RegisterBionicPthreadKeyRuntimeForLibc();
   linker::RegisterBionicSysconfRuntimeForLibc();
   linker::RegisterBionicSignalRuntimeForLibc();
@@ -33038,12 +32961,11 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
   std::cout << "  [linker] Bionic unwind metadata validated for libroblox\n"
             << std::flush;
 
-  // The pre-constructor linker hook is the only installation phase. A second
-  // arena initialization here would not be idempotent; post-load only verifies
-  // that the experiment completed.
+  // The pre-constructor hook owns installation; repeating arena setup here is
+  // not idempotent.
   if (HostAbiExperimentRequested() &&
       (!g_host_abi_install_attempted || !g_host_abi_install_result)) {
-    std::cerr << "\n[FATAL] Host ABI experiment did not install before "
+    std::cerr << "\n[FATAL] Host ABI profile did not install before "
                  "libroblox constructors: "
               << (g_host_abi_install_result.error != nullptr
                       ? g_host_abi_install_result.error
@@ -33052,7 +32974,6 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
     return EXIT_FAILURE;
   }
 
-  // Stage 5: Invoke JNI_OnLoad — hand control to the game engine.
   PrintStage(5, "Invoking JNI_OnLoad in libroblox.so");
 
   auto* jni_onload =
@@ -33230,9 +33151,7 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
     }
   }
 
-  // libroblox.so may have replaced env->functions during JNI_OnLoad with a
-  // Bionic JNI table.  Restore our pseudo-VM function table so that our Stage 6
-  // helpers (NewStringUTF, GetStringUTFChars, etc.) work correctly.
+  // Restore the pseudo-JNI table if JNI_OnLoad replaced it.
   {
     JNIEnv* main_env = jni_vm->GetJNIEnv();
     if (main_env) {
@@ -33855,13 +33774,8 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
       std::cout << "  [compat] skipped fixed-offset Stage 6 patch set\n"
                 << std::flush;
     }
-    // By default, all startup steps are enabled when MOCKTAIL_START_ENGINE=1.
-    // Real (non-mock) calls to nativeSetAssetPath,
-    // nativeAppBridgeV2InitWithParams and nativeAppBridgeV2StartAppWithParams
-    // are now the default path — the mock/bypass path only activates when the
-    // real call crashes and recovery fires via siglongjmp.  The old
-    // MOCKTAIL_UNSAFE_NATIVE_STARTUP guard is removed so users do not need to
-    // set it explicitly.
+    // Real startup calls run by default; signal recovery falls back to the
+    // Mocktail implementations.
     const bool requested_set_asset_path =
         ShouldRunStartupStep("MOCKTAIL_STEP_SET_ASSET_PATH", true);
     const bool requested_init_with_params =
@@ -33869,8 +33783,6 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
     const bool requested_start_app_with_params =
         ShouldRunStartupStep("MOCKTAIL_STEP_START_APP_WITH_PARAMS", true);
     const bool run_set_asset_path = requested_set_asset_path;
-    // call_real_set_asset_path: enabled by default unless explicitly disabled.
-    // The signal handler will catch any crash and fall back to MocktailSetAssetPath.
     const bool call_real_set_asset_path =
         run_set_asset_path &&
         !IsDisabled("MOCKTAIL_CALL_REAL_NATIVE_SET_ASSET_PATH");
@@ -33888,7 +33800,6 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
                              IsEnabled("MOCKTAIL_APP_BRIDGE_APP_START")) &&
         native_app_bridge_app_start != nullptr;
     const bool run_init_with_params = requested_init_with_params;
-    // call_real_init_with_params: real call is the default; mock only on crash.
     const bool call_real_init_with_params =
         run_init_with_params &&
         !IsDisabled("MOCKTAIL_CALL_REAL_APP_BRIDGE_INIT");
@@ -33934,8 +33845,7 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
         (native_pass_current_display_refresh_rate != nullptr ||
          native_pass_supported_refresh_rates != nullptr);
     const bool run_start_app_with_params = requested_start_app_with_params;
-    // call_real_start_app_with_params: opt-in because the real call can block
-    // startup before any rendering path becomes visible.
+    // Keep the real call opt-in because it can block before rendering starts.
     const bool call_real_start_app_with_params =
         run_start_app_with_params &&
         IsEnabled("MOCKTAIL_CALL_REAL_APP_BRIDGE_START");
@@ -34547,7 +34457,7 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
 
   if (!build_profile.default_allowed) {
     std::cerr
-        << "[FATAL] Compatibility experiment returned, but Build ID "
+        << "[FATAL] Compatibility run returned, but Build ID "
         << build_profile.elf_build_id
         << " has not passed the readiness gates; refusing a success exit.\n";
     return EXIT_FAILURE;

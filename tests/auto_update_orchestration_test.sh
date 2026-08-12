@@ -981,9 +981,8 @@ rm -f -- "${FAKE_CALLS}"
   "8888-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" ]]
 export FAKE_REMOTE_VERSION=9999
 
-# A candidate staged while experimental must be reconsidered after its exact
-# Build-ID profile is approved. It proceeds directly to canary without a
-# second provider download and is still promoted only after smoke succeeds.
+# Reconsider a staged candidate after its exact Build-ID profile is approved,
+# without downloading the same payload again.
 fetch_calls_before_approval="$(wc -l < "${FAKE_FETCH_CALLS}")"
 jq '(.profiles[] | select(.version_code == 9999)) |=
       (.status = "supported" | .default_allowed = true)' \

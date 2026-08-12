@@ -143,11 +143,10 @@ struct RobloxBrowserServiceCallbackFactory {
   }
 };
 
-// equivalent of the current APK's yg.c and gi.a BrowserService bridges.
-// It binds the four exact MemStorage keys and owns every Callback and
-// Connection until a disconnect-and-release shutdown has completed. Outgoing
-// WebView events are queued without JNI and must be drained by the platform
-// main thread.
+// Host counterpart to the APK's yg.c and gi.a BrowserService bridges. It binds
+// the four expected MemStorage keys. Shutdown disconnects before releasing its
+// callbacks and connections. The platform main thread drains outgoing WebView
+// events without holding JNI references.
 class RobloxBrowserServiceBridge final {
 public:
   RobloxBrowserServiceBridge(JniEnvironmentProvider environment,

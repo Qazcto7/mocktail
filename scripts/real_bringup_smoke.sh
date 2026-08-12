@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Progressive real-startup harness for Mocktail.
-# Tiers A, B, and LEGACY are research experiments. Tier C verifies the
+# Tiers A, B, and LEGACY are diagnostic modes. Tier C verifies the
 # supported LuaApp graphics path. GAME verifies the local UGCGame graphics
 # path. INPUT adds a real SDL-to-JNI click to that gate. NETWORK verifies an
 # authenticated public-place join without exposing
@@ -360,7 +360,7 @@ SUPPORT_BUNDLE_DISABLED="${MOCKTAIL_DISABLE_SUPPORT_BUNDLE:-0}"
 export MOCKTAIL_DISABLE_SUPPORT_BUNDLE=1
 set +e
 # Roblox may ignore SIGTERM while a native engine thread is
-# active. Bound the smoke experiment even in that state so the caller gets a
+# active. Bound the smoke run even in that state so the caller gets a
 # deterministic result and no stale window/process is left behind. Tier C with
 # an explicitly disabled present timer is the supported interactive launch,
 # however, and must remain alive until the user closes it.

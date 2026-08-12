@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// src/libc_shim/libc_shim.cc — Bionic libc → Glibc shim implementation.
-
 #include "libc_shim/libc_shim.h"
 
 #include <array>
@@ -33,7 +31,6 @@ namespace libc_shim {
 
 namespace {
 
-// Registered prefix mappings: android_prefix → host_prefix.
 std::unordered_map<std::string, std::string> g_path_mappings;
 
 bool g_installed = false;
@@ -504,10 +501,8 @@ extern "C" ssize_t mocktail_readlink(const char* path, char* buf,
 
 extern "C" ssize_t mocktail___readlink_chk(const char* path, char* buf,
                                             size_t len, size_t buf_len) {
-  // Match Bionic's fortify.cpp contract: both an impossible ssize_t result
-  // and a compiler-proven destination overrun are fatal programming errors,
-  // not recoverable readlink failures. Returning EINVAL here used to let the
-  // guest continue after a detected buffer overflow.
+  // Bionic treats impossible ssize_t results and proven overruns as fatal;
+  // returning EINVAL would continue after a detected buffer overflow.
   if (len > static_cast<size_t>(SSIZE_MAX)) {
     std::fprintf(stderr,
                  "FORTIFY: readlink: size %zu > SSIZE_MAX\n", len);

@@ -10,13 +10,13 @@
 
 namespace {
 
-jint NativeIncrement(JNIEnv* /*env*/, jclass /*clazz*/, jint value) {
+jint NativeIncrement(JNIEnv*, jclass, jint value) {
   return value + 1;
 }
 
 }  // namespace
 
-extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
+extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
   if (vm == nullptr) {
     return JNI_ERR;
   }

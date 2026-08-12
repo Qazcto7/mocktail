@@ -60,7 +60,7 @@ Branch=stable
 Url=${BASE_URL}/repo/
 RuntimeRepo=https://dl.flathub.org/repo/flathub.flatpakrepo
 Homepage=https://github.com/komaruworld/mocktail
-Comment=Experimental Linux compatibility runtime
+Comment=Play Roblox on Linux
 Icon=${BASE_URL}/mocktail.svg
 GPGKey=${GPG_KEY}
 IsRuntime=false
@@ -96,7 +96,7 @@ cat >"${OUTPUT}/index.html" <<'EOF'
   <a class="button" href="mocktail.flatpakref">Install with Flatpak</a>
   <a class="button secondary" href="https://github.com/komaruworld/mocktail">Source</a>
   <code>flatpak install --user https://mocktail.bigrat.space/mocktail.flatpakref</code>
-  <p>Mocktail is experimental and is not affiliated with Roblox Corporation.</p>
+  <p>Mocktail is an independent community project and is not affiliated with Roblox Corporation.</p>
 </main></body>
 </html>
 EOF

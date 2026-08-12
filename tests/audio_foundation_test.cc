@@ -168,7 +168,7 @@ struct CallbackProbe {
   int calls = 0;
 };
 
-void OpenSlQueueCallback(opensl_abi::AndroidSimpleBufferQueue /*queue*/,
+void OpenSlQueueCallback(opensl_abi::AndroidSimpleBufferQueue,
                          void* context) {
   auto* probe = static_cast<CallbackProbe*>(context);
   {
@@ -193,7 +193,7 @@ struct BlockingCallbackProbe {
   bool release = false;
 };
 
-void BlockingOpenSlQueueCallback(opensl_abi::AndroidSimpleBufferQueue /*queue*/,
+void BlockingOpenSlQueueCallback(opensl_abi::AndroidSimpleBufferQueue,
                                  void* context) {
   auto* probe = static_cast<BlockingCallbackProbe*>(context);
   std::unique_lock<std::mutex> lock(probe->mutex);

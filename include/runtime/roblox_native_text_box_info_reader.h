@@ -22,8 +22,7 @@
 namespace mocktail {
 namespace runtime {
 
-// host copy of the current APK's NativeTextBoxInfo Java value. The copy
-// contains no text and remains valid after the JNI local reference is released.
+// Host-owned NativeTextBoxInfo copy that outlives the JNI local reference.
 struct RobloxNativeTextBoxInfoSnapshot {
   float x = 0.0F;
   float y = 0.0F;

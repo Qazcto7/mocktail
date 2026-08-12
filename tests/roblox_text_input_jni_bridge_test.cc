@@ -176,7 +176,7 @@ struct ExistingBindingProbe {
 };
 
 void ExistingShow(void* context,
-                  const jnivm::RobloxTextInputShowRequest& /*request*/) {
+                  const jnivm::RobloxTextInputShowRequest&) {
   ++static_cast<ExistingBindingProbe*>(context)->shows;
 }
 

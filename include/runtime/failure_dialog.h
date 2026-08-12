@@ -22,19 +22,14 @@
 namespace mocktail {
 namespace runtime {
 
-// Returns whether an interactive launch may present a desktop failure dialog.
-// Readiness canaries and headless sessions remain strictly non-interactive.
+// Canaries and headless sessions remain non-interactive.
 bool FailureDialogsEnabled(const Environment& environment);
 
-// Presents one synchronous GTK failure dialog. This is intended for startup
-// failures that happen before the crash monitor can be armed.
 bool ShowFailureDialog(const Environment& environment,
                        std::string_view message);
 
-// Owns a small out-of-process GTK monitor. The helper is started before guest
-// threads exist and receives an explicit success disposition. If Mocktail
-// returns an error, calls _Exit(), or dies from a fatal signal, the helper
-// remains able to present the last safe user-facing message.
+// The helper starts before guest threads, so it can report errors and fatal
+// exits even when the main process can no longer show a dialog.
 class FailureDialogMonitor final {
  public:
   FailureDialogMonitor() = default;

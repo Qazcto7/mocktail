@@ -1,12 +1,8 @@
 // Copyright 2026 Mocktail Project Authors
 // Apache 2.0 License
 //
-// stubs/libopensl_stub.cc — test fixture for libOpenSLES.so/libOpenMAXAL.so.
-//
-// Production audio must use the SDL-backed Mocktail audio foundation. This
-// synthetic object graph is available only when the exact opt-in
-// MOCKTAIL_ENABLE_TEST_AUDIO_STUBS=1 is present; otherwise engine creation
-// fails closed. Audio capture is unsupported in both modes.
+// Test fixture for libOpenSLES.so and libOpenMAXAL.so. Engine creation requires
+// MOCKTAIL_ENABLE_TEST_AUDIO_STUBS=1; audio capture is not implemented.
 
 #include <cstdint>
 #include <cstdlib>
@@ -239,37 +235,37 @@ SLresult SuccessObject(SLObjectItf* object, SLObjectItf fake_object) {
   return SL_RESULT_SUCCESS;
 }
 
-void ObjectDestroy(SLObjectItf /*self*/) {}
+void ObjectDestroy(SLObjectItf) {}
 
-SLresult ObjectRealize(SLObjectItf /*self*/, SLboolean /*async*/) {
+SLresult ObjectRealize(SLObjectItf, SLboolean) {
   return SL_RESULT_SUCCESS;
 }
 
-SLresult ObjectResume(SLObjectItf /*self*/, SLboolean /*async*/) {
+SLresult ObjectResume(SLObjectItf, SLboolean) {
   return SL_RESULT_SUCCESS;
 }
 
-SLresult ObjectGetState(SLObjectItf /*self*/, SLuint32* state) {
+SLresult ObjectGetState(SLObjectItf, SLuint32* state) {
   if (state) {
     *state = SL_OBJECT_STATE_REALIZED;
   }
   return SL_RESULT_SUCCESS;
 }
 
-SLresult ObjectRegisterCallback(SLObjectItf /*self*/,
-                                SLObjectCallback /*callback*/,
-                                void* /*context*/) {
+SLresult ObjectRegisterCallback(SLObjectItf,
+                                SLObjectCallback,
+                                void*) {
   return SL_RESULT_SUCCESS;
 }
 
-void ObjectAbortAsyncOperation(SLObjectItf /*self*/) {}
+void ObjectAbortAsyncOperation(SLObjectItf) {}
 
-SLresult ObjectSetPriority(SLObjectItf /*self*/, SLint32 /*priority*/,
-                           SLboolean /*preemptable*/) {
+SLresult ObjectSetPriority(SLObjectItf, SLint32,
+                           SLboolean) {
   return SL_RESULT_SUCCESS;
 }
 
-SLresult ObjectGetPriority(SLObjectItf /*self*/, SLint32* priority,
+SLresult ObjectGetPriority(SLObjectItf, SLint32* priority,
                            SLboolean* preemptable) {
   if (priority) {
     *priority = 0;
@@ -280,20 +276,20 @@ SLresult ObjectGetPriority(SLObjectItf /*self*/, SLint32* priority,
   return SL_RESULT_SUCCESS;
 }
 
-SLresult ObjectSetLossOfControlInterfaces(SLObjectItf /*self*/,
-                                          SLuint32 /*num_interfaces*/,
-                                          const SLInterfaceID* /*ids*/,
-                                          SLboolean /*enabled*/) {
+SLresult ObjectSetLossOfControlInterfaces(SLObjectItf,
+                                          SLuint32,
+                                          const SLInterfaceID*,
+                                          SLboolean) {
   return SL_RESULT_SUCCESS;
 }
 
 SLresult ObjectGetInterface(SLObjectItf self, SLInterfaceID iid,
                             void* interface_out);
-SLresult CreateUnsupportedObject(SLEngineItf /*self*/, SLObjectItf* object,
-                                 SLuint32 /*device_id*/,
-                                 SLuint32 /*num_interfaces*/,
-                                 const SLInterfaceID* /*ids*/,
-                                 const SLboolean* /*required*/);
+SLresult CreateUnsupportedObject(SLEngineItf, SLObjectItf* object,
+                                 SLuint32,
+                                 SLuint32,
+                                 const SLInterfaceID*,
+                                 const SLboolean*);
 SLresult CreateAudioPlayer(SLEngineItf self, SLObjectItf* player,
                            const void* source, const void* sink,
                            SLuint32 num_interfaces, const SLInterfaceID* ids,
@@ -306,46 +302,46 @@ SLresult CreateOutputMix(SLEngineItf self, SLObjectItf* mix,
                          SLuint32 num_interfaces, const SLInterfaceID* ids,
                          const SLboolean* required);
 
-SLresult CreateMidiPlayer(SLEngineItf /*self*/, SLObjectItf* player,
-                          const void* /*source*/, const void* /*sink*/,
-                          const void* /*bank_source*/,
-                          const void* /*bank_sink*/,
-                          SLuint32 /*num_interfaces*/,
-                          const SLInterfaceID* /*ids*/,
-                          const SLboolean* /*required*/);
-SLresult CreateListener(SLEngineItf /*self*/, SLObjectItf* listener,
-                        SLuint32 /*num_interfaces*/,
-                        const SLInterfaceID* /*ids*/,
-                        const SLboolean* /*required*/);
-SLresult Create3DGroup(SLEngineItf /*self*/, SLObjectItf* group,
-                       SLuint32 /*num_interfaces*/, const SLInterfaceID* /*ids*/,
-                       const SLboolean* /*required*/);
-SLresult CreateMetadataExtractor(SLEngineItf /*self*/, SLObjectItf* extractor,
-                                 const void* /*source*/,
-                                 SLuint32 /*num_interfaces*/,
-                                 const SLInterfaceID* /*ids*/,
-                                 const SLboolean* /*required*/);
-SLresult CreateExtensionObject(SLEngineItf /*self*/, SLObjectItf* object,
-                               void* /*parameters*/, SLuint32 /*object_id*/,
-                               SLuint32 /*num_interfaces*/,
-                               const SLInterfaceID* /*ids*/,
-                               const SLboolean* /*required*/);
-SLresult QueryNumSupportedInterfaces(SLEngineItf /*self*/,
-                                     SLuint32 /*object_id*/, SLuint32* count);
-SLresult QuerySupportedInterfaces(SLEngineItf /*self*/, SLuint32 /*object_id*/,
-                                  SLuint32 /*index*/, SLInterfaceID* iid);
-SLresult QueryNumSupportedExtensions(SLEngineItf /*self*/, SLuint32* count);
-SLresult QuerySupportedExtension(SLEngineItf /*self*/, SLuint32 /*index*/,
+SLresult CreateMidiPlayer(SLEngineItf, SLObjectItf* player,
+                          const void*, const void*,
+                          const void*,
+                          const void*,
+                          SLuint32,
+                          const SLInterfaceID*,
+                          const SLboolean*);
+SLresult CreateListener(SLEngineItf, SLObjectItf* listener,
+                        SLuint32,
+                        const SLInterfaceID*,
+                        const SLboolean*);
+SLresult Create3DGroup(SLEngineItf, SLObjectItf* group,
+                       SLuint32, const SLInterfaceID*,
+                       const SLboolean*);
+SLresult CreateMetadataExtractor(SLEngineItf, SLObjectItf* extractor,
+                                 const void*,
+                                 SLuint32,
+                                 const SLInterfaceID*,
+                                 const SLboolean*);
+SLresult CreateExtensionObject(SLEngineItf, SLObjectItf* object,
+                               void*, SLuint32,
+                               SLuint32,
+                               const SLInterfaceID*,
+                               const SLboolean*);
+SLresult QueryNumSupportedInterfaces(SLEngineItf,
+                                     SLuint32, SLuint32* count);
+SLresult QuerySupportedInterfaces(SLEngineItf, SLuint32,
+                                  SLuint32, SLInterfaceID* iid);
+SLresult QueryNumSupportedExtensions(SLEngineItf, SLuint32* count);
+SLresult QuerySupportedExtension(SLEngineItf, SLuint32,
                                  char* name, SLint32* name_length);
-SLresult IsExtensionSupported(SLEngineItf /*self*/, const char* /*name*/,
+SLresult IsExtensionSupported(SLEngineItf, const char*,
                               SLboolean* supported);
 
-SLresult PlaySetState(SLPlayItf /*self*/, SLuint32 state) {
+SLresult PlaySetState(SLPlayItf, SLuint32 state) {
   g_play_state = state;
   return SL_RESULT_SUCCESS;
 }
 
-SLresult PlayGetState(SLPlayItf /*self*/, SLuint32* state) {
+SLresult PlayGetState(SLPlayItf, SLuint32* state) {
   if (state) {
     *state = g_play_state;
   }
@@ -359,115 +355,115 @@ SLresult ReturnZeroU32(SLuint32* value) {
   return SL_RESULT_SUCCESS;
 }
 
-SLresult PlayGetDuration(SLPlayItf /*self*/, SLuint32* duration) {
+SLresult PlayGetDuration(SLPlayItf, SLuint32* duration) {
   return ReturnZeroU32(duration);
 }
 
-SLresult PlayGetPosition(SLPlayItf /*self*/, SLuint32* position) {
+SLresult PlayGetPosition(SLPlayItf, SLuint32* position) {
   return ReturnZeroU32(position);
 }
 
-SLresult PlayRegisterCallback(SLPlayItf /*self*/, SLPlayCallback /*callback*/,
-                              void* /*context*/) {
+SLresult PlayRegisterCallback(SLPlayItf, SLPlayCallback,
+                              void*) {
   return SL_RESULT_SUCCESS;
 }
 
-SLresult PlaySetEventsMask(SLPlayItf /*self*/, SLuint32 /*mask*/) {
+SLresult PlaySetEventsMask(SLPlayItf, SLuint32) {
   return SL_RESULT_SUCCESS;
 }
 
-SLresult PlayGetEventsMask(SLPlayItf /*self*/, SLuint32* mask) {
+SLresult PlayGetEventsMask(SLPlayItf, SLuint32* mask) {
   return ReturnZeroU32(mask);
 }
 
-SLresult PlaySetMarkerPosition(SLPlayItf /*self*/, SLuint32 /*position*/) {
+SLresult PlaySetMarkerPosition(SLPlayItf, SLuint32) {
   return SL_RESULT_SUCCESS;
 }
 
-SLresult PlayClearMarkerPosition(SLPlayItf /*self*/) {
+SLresult PlayClearMarkerPosition(SLPlayItf) {
   return SL_RESULT_SUCCESS;
 }
 
-SLresult PlayGetMarkerPosition(SLPlayItf /*self*/, SLuint32* position) {
+SLresult PlayGetMarkerPosition(SLPlayItf, SLuint32* position) {
   return ReturnZeroU32(position);
 }
 
-SLresult PlaySetPositionUpdatePeriod(SLPlayItf /*self*/, SLuint32 /*period*/) {
+SLresult PlaySetPositionUpdatePeriod(SLPlayItf, SLuint32) {
   return SL_RESULT_SUCCESS;
 }
 
-SLresult PlayGetPositionUpdatePeriod(SLPlayItf /*self*/, SLuint32* period) {
+SLresult PlayGetPositionUpdatePeriod(SLPlayItf, SLuint32* period) {
   return ReturnZeroU32(period);
 }
 
-SLresult RecordSetState(SLRecordItf /*self*/, SLuint32 state) {
+SLresult RecordSetState(SLRecordItf, SLuint32 state) {
   g_record_state = state;
   return SL_RESULT_SUCCESS;
 }
 
-SLresult RecordGetState(SLRecordItf /*self*/, SLuint32* state) {
+SLresult RecordGetState(SLRecordItf, SLuint32* state) {
   if (state) {
     *state = g_record_state;
   }
   return SL_RESULT_SUCCESS;
 }
 
-SLresult RecordSetDurationLimit(SLRecordItf /*self*/,
-                                SLuint32 /*milliseconds*/) {
+SLresult RecordSetDurationLimit(SLRecordItf,
+                                SLuint32) {
   return SL_RESULT_SUCCESS;
 }
 
-SLresult RecordGetPosition(SLRecordItf /*self*/, SLuint32* position) {
+SLresult RecordGetPosition(SLRecordItf, SLuint32* position) {
   return ReturnZeroU32(position);
 }
 
-SLresult RecordRegisterCallback(SLRecordItf /*self*/,
-                                SLRecordCallback /*callback*/,
-                                void* /*context*/) {
+SLresult RecordRegisterCallback(SLRecordItf,
+                                SLRecordCallback,
+                                void*) {
   return SL_RESULT_SUCCESS;
 }
 
-SLresult RecordSetEventsMask(SLRecordItf /*self*/, SLuint32 /*mask*/) {
+SLresult RecordSetEventsMask(SLRecordItf, SLuint32) {
   return SL_RESULT_SUCCESS;
 }
 
-SLresult RecordGetEventsMask(SLRecordItf /*self*/, SLuint32* mask) {
+SLresult RecordGetEventsMask(SLRecordItf, SLuint32* mask) {
   return ReturnZeroU32(mask);
 }
 
-SLresult RecordSetMarkerPosition(SLRecordItf /*self*/, SLuint32 /*position*/) {
+SLresult RecordSetMarkerPosition(SLRecordItf, SLuint32) {
   return SL_RESULT_SUCCESS;
 }
 
-SLresult RecordClearMarkerPosition(SLRecordItf /*self*/) {
+SLresult RecordClearMarkerPosition(SLRecordItf) {
   return SL_RESULT_SUCCESS;
 }
 
-SLresult RecordGetMarkerPosition(SLRecordItf /*self*/, SLuint32* position) {
+SLresult RecordGetMarkerPosition(SLRecordItf, SLuint32* position) {
   return ReturnZeroU32(position);
 }
 
-SLresult RecordSetPositionUpdatePeriod(SLRecordItf /*self*/,
-                                       SLuint32 /*period*/) {
+SLresult RecordSetPositionUpdatePeriod(SLRecordItf,
+                                       SLuint32) {
   return SL_RESULT_SUCCESS;
 }
 
-SLresult RecordGetPositionUpdatePeriod(SLRecordItf /*self*/, SLuint32* period) {
+SLresult RecordGetPositionUpdatePeriod(SLRecordItf, SLuint32* period) {
   return ReturnZeroU32(period);
 }
 
-SLresult BufferQueueEnqueue(SLBufferQueueItf /*self*/, const void* /*buffer*/,
-                            SLuint32 /*size*/) {
+SLresult BufferQueueEnqueue(SLBufferQueueItf, const void*,
+                            SLuint32) {
   ++g_buffer_queue_state.count;
   return SL_RESULT_SUCCESS;
 }
 
-SLresult BufferQueueClear(SLBufferQueueItf /*self*/) {
+SLresult BufferQueueClear(SLBufferQueueItf) {
   g_buffer_queue_state = {};
   return SL_RESULT_SUCCESS;
 }
 
-SLresult BufferQueueGetState(SLBufferQueueItf /*self*/,
+SLresult BufferQueueGetState(SLBufferQueueItf,
                              SLBufferQueueState* state) {
   if (state) {
     *state = g_buffer_queue_state;
@@ -475,7 +471,7 @@ SLresult BufferQueueGetState(SLBufferQueueItf /*self*/,
   return SL_RESULT_SUCCESS;
 }
 
-SLresult BufferQueueRegisterCallback(SLBufferQueueItf /*self*/,
+SLresult BufferQueueRegisterCallback(SLBufferQueueItf,
                                      SLBufferQueueCallback callback,
                                      void* context) {
   g_buffer_queue_callback = callback;
@@ -483,18 +479,18 @@ SLresult BufferQueueRegisterCallback(SLBufferQueueItf /*self*/,
   return SL_RESULT_SUCCESS;
 }
 
-SLresult SimpleBufferQueueEnqueue(SLAndroidSimpleBufferQueueItf /*self*/,
-                                  const void* /*buffer*/, SLuint32 /*size*/) {
+SLresult SimpleBufferQueueEnqueue(SLAndroidSimpleBufferQueueItf,
+                                  const void*, SLuint32) {
   ++g_simple_queue_state.count;
   return SL_RESULT_SUCCESS;
 }
 
-SLresult SimpleBufferQueueClear(SLAndroidSimpleBufferQueueItf /*self*/) {
+SLresult SimpleBufferQueueClear(SLAndroidSimpleBufferQueueItf) {
   g_simple_queue_state = {};
   return SL_RESULT_SUCCESS;
 }
 
-SLresult SimpleBufferQueueGetState(SLAndroidSimpleBufferQueueItf /*self*/,
+SLresult SimpleBufferQueueGetState(SLAndroidSimpleBufferQueueItf,
                                    SLBufferQueueState* state) {
   if (state) {
     *state = g_simple_queue_state;
@@ -503,40 +499,40 @@ SLresult SimpleBufferQueueGetState(SLAndroidSimpleBufferQueueItf /*self*/,
 }
 
 SLresult SimpleBufferQueueRegisterCallback(
-    SLAndroidSimpleBufferQueueItf /*self*/,
+    SLAndroidSimpleBufferQueueItf,
     SLAndroidSimpleBufferQueueCallback callback, void* context) {
   g_simple_queue_callback = callback;
   g_simple_queue_context = context;
   return SL_RESULT_SUCCESS;
 }
 
-SLresult VolumeSetLevel(SLVolumeItf /*self*/, SLint32 /*level*/) {
+SLresult VolumeSetLevel(SLVolumeItf, SLint32) {
   return SL_RESULT_SUCCESS;
 }
 
-SLresult VolumeGetLevel(SLVolumeItf /*self*/, SLint32* level) {
+SLresult VolumeGetLevel(SLVolumeItf, SLint32* level) {
   if (level) {
     *level = 0;
   }
   return SL_RESULT_SUCCESS;
 }
 
-SLresult VolumeSetMute(SLVolumeItf /*self*/, SLboolean /*mute*/) {
+SLresult VolumeSetMute(SLVolumeItf, SLboolean) {
   return SL_RESULT_SUCCESS;
 }
 
-SLresult VolumeGetMute(SLVolumeItf /*self*/, SLboolean* mute) {
+SLresult VolumeGetMute(SLVolumeItf, SLboolean* mute) {
   if (mute) {
     *mute = 0;
   }
   return SL_RESULT_SUCCESS;
 }
 
-SLresult VolumeEnableStereoPosition(SLVolumeItf /*self*/, SLboolean /*enable*/) {
+SLresult VolumeEnableStereoPosition(SLVolumeItf, SLboolean) {
   return SL_RESULT_SUCCESS;
 }
 
-SLresult VolumeIsStereoPositionEnabled(SLVolumeItf /*self*/,
+SLresult VolumeIsStereoPositionEnabled(SLVolumeItf,
                                        SLboolean* enabled) {
   if (enabled) {
     *enabled = 0;
@@ -544,23 +540,23 @@ SLresult VolumeIsStereoPositionEnabled(SLVolumeItf /*self*/,
   return SL_RESULT_SUCCESS;
 }
 
-SLresult VolumeSetStereoPosition(SLVolumeItf /*self*/, SLint32 /*position*/) {
+SLresult VolumeSetStereoPosition(SLVolumeItf, SLint32) {
   return SL_RESULT_SUCCESS;
 }
 
-SLresult VolumeGetStereoPosition(SLVolumeItf /*self*/, SLint32* position) {
+SLresult VolumeGetStereoPosition(SLVolumeItf, SLint32* position) {
   if (position) {
     *position = 0;
   }
   return SL_RESULT_SUCCESS;
 }
 
-SLresult ConfigSet(SLAndroidConfigurationItf /*self*/, const char* /*key*/,
-                   const void* /*value*/, SLuint32 /*value_size*/) {
+SLresult ConfigSet(SLAndroidConfigurationItf, const char*,
+                   const void*, SLuint32) {
   return SL_RESULT_SUCCESS;
 }
 
-SLresult ConfigGet(SLAndroidConfigurationItf /*self*/, const char* /*key*/,
+SLresult ConfigGet(SLAndroidConfigurationItf, const char*,
                    SLuint32* value_size, void* value) {
   if (value_size) {
     if (value && *value_size > 0) {
@@ -709,7 +705,7 @@ void* SL_IID_VOLUME = reinterpret_cast<void*>(0x1007);
 
 namespace {
 
-SLresult ObjectGetInterface(SLObjectItf /*self*/, SLInterfaceID iid,
+SLresult ObjectGetInterface(SLObjectItf, SLInterfaceID iid,
                             void* interface_out) {
   if (!interface_out) {
     return SL_RESULT_SUCCESS;
@@ -749,107 +745,107 @@ SLresult ObjectGetInterface(SLObjectItf /*self*/, SLInterfaceID iid,
   return SL_RESULT_FEATURE_UNSUPPORTED;
 }
 
-SLresult CreateUnsupportedObject(SLEngineItf /*self*/, SLObjectItf* object,
-                                 SLuint32 /*device_id*/,
-                                 SLuint32 /*num_interfaces*/,
-                                 const SLInterfaceID* /*ids*/,
-                                 const SLboolean* /*required*/) {
+SLresult CreateUnsupportedObject(SLEngineItf, SLObjectItf* object,
+                                 SLuint32,
+                                 SLuint32,
+                                 const SLInterfaceID*,
+                                 const SLboolean*) {
   return SuccessObject(object, GenericObject());
 }
 
-SLresult CreateAudioPlayer(SLEngineItf /*self*/, SLObjectItf* player,
-                           const void* /*source*/, const void* /*sink*/,
-                           SLuint32 /*num_interfaces*/,
-                           const SLInterfaceID* /*ids*/,
-                           const SLboolean* /*required*/) {
+SLresult CreateAudioPlayer(SLEngineItf, SLObjectItf* player,
+                           const void*, const void*,
+                           SLuint32,
+                           const SLInterfaceID*,
+                           const SLboolean*) {
   g_play_state = SL_PLAYSTATE_STOPPED;
   g_buffer_queue_state = {};
   g_simple_queue_state = {};
   return SuccessObject(player, PlayerObject());
 }
 
-SLresult CreateAudioRecorder(SLEngineItf /*self*/, SLObjectItf* recorder,
-                             const void* /*source*/, const void* /*sink*/,
-                             SLuint32 /*num_interfaces*/,
-                             const SLInterfaceID* /*ids*/,
-                             const SLboolean* /*required*/) {
+SLresult CreateAudioRecorder(SLEngineItf, SLObjectItf* recorder,
+                             const void*, const void*,
+                             SLuint32,
+                             const SLInterfaceID*,
+                             const SLboolean*) {
   if (recorder != nullptr) {
     *recorder = nullptr;
   }
   return SL_RESULT_FEATURE_UNSUPPORTED;
 }
 
-SLresult CreateMidiPlayer(SLEngineItf /*self*/, SLObjectItf* player,
-                          const void* /*source*/, const void* /*sink*/,
-                          const void* /*bank_source*/,
-                          const void* /*bank_sink*/,
-                          SLuint32 /*num_interfaces*/,
-                          const SLInterfaceID* /*ids*/,
-                          const SLboolean* /*required*/) {
+SLresult CreateMidiPlayer(SLEngineItf, SLObjectItf* player,
+                          const void*, const void*,
+                          const void*,
+                          const void*,
+                          SLuint32,
+                          const SLInterfaceID*,
+                          const SLboolean*) {
   return SuccessObject(player, PlayerObject());
 }
 
-SLresult CreateListener(SLEngineItf /*self*/, SLObjectItf* listener,
-                        SLuint32 /*num_interfaces*/,
-                        const SLInterfaceID* /*ids*/,
-                        const SLboolean* /*required*/) {
+SLresult CreateListener(SLEngineItf, SLObjectItf* listener,
+                        SLuint32,
+                        const SLInterfaceID*,
+                        const SLboolean*) {
   return SuccessObject(listener, GenericObject());
 }
 
-SLresult Create3DGroup(SLEngineItf /*self*/, SLObjectItf* group,
-                       SLuint32 /*num_interfaces*/,
-                       const SLInterfaceID* /*ids*/,
-                       const SLboolean* /*required*/) {
+SLresult Create3DGroup(SLEngineItf, SLObjectItf* group,
+                       SLuint32,
+                       const SLInterfaceID*,
+                       const SLboolean*) {
   return SuccessObject(group, GenericObject());
 }
 
-SLresult CreateOutputMix(SLEngineItf /*self*/, SLObjectItf* mix,
-                         SLuint32 /*num_interfaces*/,
-                         const SLInterfaceID* /*ids*/,
-                         const SLboolean* /*required*/) {
+SLresult CreateOutputMix(SLEngineItf, SLObjectItf* mix,
+                         SLuint32,
+                         const SLInterfaceID*,
+                         const SLboolean*) {
   return SuccessObject(mix, OutputMixObject());
 }
 
-SLresult CreateMetadataExtractor(SLEngineItf /*self*/, SLObjectItf* extractor,
-                                 const void* /*source*/,
-                                 SLuint32 /*num_interfaces*/,
-                                 const SLInterfaceID* /*ids*/,
-                                 const SLboolean* /*required*/) {
+SLresult CreateMetadataExtractor(SLEngineItf, SLObjectItf* extractor,
+                                 const void*,
+                                 SLuint32,
+                                 const SLInterfaceID*,
+                                 const SLboolean*) {
   return SuccessObject(extractor, GenericObject());
 }
 
-SLresult CreateExtensionObject(SLEngineItf /*self*/, SLObjectItf* object,
-                               void* /*parameters*/, SLuint32 /*object_id*/,
-                               SLuint32 /*num_interfaces*/,
-                               const SLInterfaceID* /*ids*/,
-                               const SLboolean* /*required*/) {
+SLresult CreateExtensionObject(SLEngineItf, SLObjectItf* object,
+                               void*, SLuint32,
+                               SLuint32,
+                               const SLInterfaceID*,
+                               const SLboolean*) {
   return SuccessObject(object, GenericObject());
 }
 
-SLresult QueryNumSupportedInterfaces(SLEngineItf /*self*/,
-                                     SLuint32 /*object_id*/, SLuint32* count) {
+SLresult QueryNumSupportedInterfaces(SLEngineItf,
+                                     SLuint32, SLuint32* count) {
   if (count) {
     *count = 0;
   }
   return SL_RESULT_SUCCESS;
 }
 
-SLresult QuerySupportedInterfaces(SLEngineItf /*self*/, SLuint32 /*object_id*/,
-                                  SLuint32 /*index*/, SLInterfaceID* iid) {
+SLresult QuerySupportedInterfaces(SLEngineItf, SLuint32,
+                                  SLuint32, SLInterfaceID* iid) {
   if (iid) {
     *iid = nullptr;
   }
   return SL_RESULT_FEATURE_UNSUPPORTED;
 }
 
-SLresult QueryNumSupportedExtensions(SLEngineItf /*self*/, SLuint32* count) {
+SLresult QueryNumSupportedExtensions(SLEngineItf, SLuint32* count) {
   if (count) {
     *count = 0;
   }
   return SL_RESULT_SUCCESS;
 }
 
-SLresult QuerySupportedExtension(SLEngineItf /*self*/, SLuint32 /*index*/,
+SLresult QuerySupportedExtension(SLEngineItf, SLuint32,
                                  char* name, SLint32* name_length) {
   if (name_length) {
     *name_length = 0;
@@ -860,7 +856,7 @@ SLresult QuerySupportedExtension(SLEngineItf /*self*/, SLuint32 /*index*/,
   return SL_RESULT_FEATURE_UNSUPPORTED;
 }
 
-SLresult IsExtensionSupported(SLEngineItf /*self*/, const char* /*name*/,
+SLresult IsExtensionSupported(SLEngineItf, const char*,
                               SLboolean* supported) {
   if (supported) {
     *supported = 0;
@@ -872,12 +868,11 @@ SLresult IsExtensionSupported(SLEngineItf /*self*/, const char* /*name*/,
 
 extern "C" {
 
-// Test-only OpenSL ES entry point. Production fails closed.
-SLresult slCreateEngine(void** pEngine, uint32_t /*numOptions*/,
-                         const void* /*pEngineOptions*/,
-                         uint32_t /*numInterfaces*/,
-                         const void* /*pInterfaceIds*/,
-                         const void* /*pInterfaceRequired*/) {
+SLresult slCreateEngine(void** pEngine, uint32_t,
+                         const void*,
+                         uint32_t,
+                         const void*,
+                         const void*) {
   if (pEngine == nullptr) {
     return SL_RESULT_PARAMETER_INVALID;
   }
@@ -890,12 +885,11 @@ SLresult slCreateEngine(void** pEngine, uint32_t /*numOptions*/,
   return SL_RESULT_SUCCESS;
 }
 
-// Test-only OpenMAX AL entry point. Production fails closed.
-SLresult alCreateEngine(void** pEngine, uint32_t /*numOptions*/,
-                         const void* /*pEngineOptions*/,
-                         uint32_t /*numInterfaces*/,
-                         const void* /*pInterfaceIds*/,
-                         const void* /*pInterfaceRequired*/) {
+SLresult alCreateEngine(void** pEngine, uint32_t,
+                         const void*,
+                         uint32_t,
+                         const void*,
+                         const void*) {
   if (pEngine == nullptr) {
     return SL_RESULT_PARAMETER_INVALID;
   }

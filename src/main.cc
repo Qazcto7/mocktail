@@ -6,10 +6,6 @@
 //
 //     http://www.apache.org/licenses/LICENSE-2.0
 
-// Mocktail's composition root stays intentionally small. During the
-// upstream-first migration it delegates to the isolated legacy runtime; new
-// platform, JNI, loader, and service modules are linked as explicit targets.
-
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -454,10 +450,8 @@ int main(int argc, char* argv[]) {
                       << active_build_id.error << '\n';
             return EXIT_FAILURE;
           }
-          // An old local probation receipt can outlive the point where the
-          // exact Build ID becomes shipped support. Built-in profiles are
-          // immutable and must then use the repository manifest instead of
-          // attempting an external override.
+          // Built-in profiles supersede stale probation receipts and never
+          // use external overrides.
           use_external_profile = mocktail::compat::FindHostAbiProfile(
                                      active_build_id.build_id) == nullptr;
         }
@@ -759,11 +753,8 @@ int main(int argc, char* argv[]) {
   }
   if (command_line.options.mode == mocktail::runtime::CommandMode::kRun &&
       !isolated_canary) {
-    // Start accepting browser requests only after cgroup re-exec, payload
-    // preflight and host bridge setup have succeeded. An ACK therefore cannot
-    // be invalidated by a known host-side
-    // startup or exec boundary. Isolated canaries cannot receive browser
-    // launches and own no public per-user endpoint.
+    // Listen only after re-exec, preflight, and bridge setup, so an ACK cannot
+    // precede a known startup failure. Isolated canaries expose no endpoint.
     mocktail::Status broker_status =
         mocktail::runtime::ExternalLaunchBroker::StartOwnerAfterLockAcquired(
             broker_options, &external_launch_broker.broker(),
@@ -808,10 +799,8 @@ int main(int argc, char* argv[]) {
       command_line.options.mode == mocktail::runtime::CommandMode::kRun) {
     failure_dialog.MarkSuccessful();
     support_bundle_guard.Disarm();
-    // The embedded Android payload registers process-global atexit handlers
-    // for workers that it does not expose for joining. The supported runtime
-    // reaches this boundary only after explicit lifecycle, audio, input, and
-    // SDL shutdown; do not re-enter guest teardown from the host C runtime.
+    // Guest atexit handlers target workers that cannot be joined. Host
+    // shutdown is already complete here, so do not re-enter guest teardown.
     std::cout.flush();
     std::cerr.flush();
     std::_Exit(EXIT_SUCCESS);

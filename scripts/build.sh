@@ -6,47 +6,9 @@
 # You may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
-#
-# scripts/build.sh — Mocktail one-shot native build script.
-#
-# Usage:
-#   ./scripts/build.sh [OPTIONS]
-#
-# Options:
-#   --apk <path>        Explicitly extract a local Roblox x86_64 APK.
-#   --apk-url <url>     Explicitly download and extract an APK URL.
-#   --skip-apk          Compatibility alias for the default managed-payload mode.
-#   --build-dir <path>  CMake build directory. Relative paths use project root.
-#                       Default: build.
-#   --cmake-toolchain <file>
-#                       Explicit CMake toolchain file.
-#   --cmake-sysroot <dir>
-#                       Explicit compiler/CMake sysroot.
-#   --build-type <type> CMake build type: Debug | Release | RelWithDebInfo.
-#                       Default: Release.
-#   --jobs <n>          Parallel build jobs. Default: nproc.
-#   --run-tests         Run CTest after build.
-#   --clean             Remove the build/ directory before configuring.
-#   --help              Show this help and exit.
-#
-# Examples:
-#   # Build with a local APK file:
-#   ./scripts/build.sh --apk ~/Downloads/roblox-x86_64.apk
-#
-#   # Build with a direct download URL:
-#   ./scripts/build.sh --apk-url "https://example.com/roblox-x86_64.apk"
-#
-#   # Rebuild the C++ project; the first launch obtains the managed payload:
-#   ./scripts/build.sh --skip-apk --build-type Debug --run-tests
-#
-# With no APK option, Mocktail builds only the native runtime. Its first normal
-# launch downloads, validates, canaries, and activates a supported x86_64
-# payload in the user's XDG data directory. ROBLOX_LIB_PATH remains an explicit
-# research override and disables APK extraction when already set.
 
 set -euo pipefail
 
-# Colour helpers
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -91,7 +53,6 @@ Examples:
 EOF
 }
 
-# Default configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BUILD_DIR="${PROJECT_ROOT}/build"
@@ -107,7 +68,6 @@ CLEAN=false
 CMAKE_TOOLCHAIN_FILE=""
 CMAKE_SYSROOT=""
 
-# Argument parsing
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --apk)
@@ -180,7 +140,6 @@ info "Mocktail build: ${BUILD_TYPE}, -j${JOBS}"
 info "Project root: ${PROJECT_ROOT}"
 info "Build directory: ${BUILD_DIR}"
 
-# Step 1 — Check required tools
 step "1/5 checking dependencies"
 
 check_tool() {
@@ -208,7 +167,6 @@ if [[ "${EXTRACT_APK}" == true && -n "${APK_URL}" ]] &&
   check_tool wget "sudo apt install wget"
 fi
 
-# Step 2 — Download APK (if URL provided)
 if [[ "${EXTRACT_APK}" == true && -n "${APK_URL}" ]]; then
   step "2/5 downloading Roblox APK"
   APK_PATH="${PROJECT_ROOT}/rbx_bin/roblox-x86_64.apk"
@@ -223,7 +181,6 @@ if [[ "${EXTRACT_APK}" == true && -n "${APK_URL}" ]]; then
   success "APK downloaded."
 fi
 
-# Step 3 — Extract libroblox.so from APK
 LIBROBLOX_DST="${RBX_BIN_DIR}/libroblox.so"
 
 if [[ -n "${ROBLOX_LIB_PATH:-}" ]]; then
@@ -251,7 +208,6 @@ else
   success "No APK or libroblox.so is required at build time."
 fi
 
-# Step 4 — Init git submodules
 step "4/5 initialising git submodules"
 cd "${PROJECT_ROOT}"
 if [[ -f ".gitmodules" ]]; then
@@ -262,7 +218,6 @@ else
   info "To add submodules run: ./scripts/add_submodules.sh"
 fi
 
-# Step 5 — CMake configure
 step "5/5 configuring CMake"
 
 if [[ "${CLEAN}" == true && -d "${BUILD_DIR}" ]]; then
@@ -293,21 +248,18 @@ cmake "${cmake_arguments[@]}"
 
 success "CMake configuration complete."
 
-# Step 6 — Build
 step "building Mocktail"
 
 cmake --build "${BUILD_DIR}" -j"${JOBS}"
 
 success "Build complete → ${BUILD_DIR}/mocktail"
 
-# Step 7 — Run tests (optional)
 if [[ "${RUN_TESTS}" == true ]]; then
   step "running unit tests"
   ctest --test-dir "${BUILD_DIR}" --output-on-failure -j"${JOBS}"
   success "All tests passed."
 fi
 
-# Done
 echo
 success "Build successful."
 echo "Run:"

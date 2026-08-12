@@ -12,14 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// tests/jnivm_test.cc — Unit tests for the Pseudo-JVM component.
-//
-// Tests cover:
-//   1. VM construction and JavaVM pointer validity.
-//   2. Class registration and deduplication.
-//   3. Method registration and lookup.
-//   4. Method callback invocation.
-
 #include "jnivm/jnivm.h"
 
 #include <gtest/gtest.h>
@@ -38,7 +30,6 @@
 namespace jnivm {
 namespace {
 
-// Fixture: provides a freshly constructed VM instance for each test.
 class JniVmTest : public ::testing::Test {
 protected:
   void SetUp() override {
@@ -384,14 +375,10 @@ jobject MakeTextBoxInfo(JNIEnv *env) {
   return info;
 }
 
-// VM construction
-
-// A newly constructed VM must expose a non-null JavaVM pointer.
 TEST_F(JniVmTest, JavaVmPointerIsNotNull) {
   EXPECT_NE(vm_->GetJavaVM(), nullptr);
 }
 
-// A newly constructed VM must expose a non-null JNIEnv pointer.
 TEST_F(JniVmTest, JniEnvPointerIsNotNull) {
   EXPECT_NE(vm_->GetJNIEnv(), nullptr);
 }
@@ -422,20 +409,15 @@ TEST_F(JniVmTest, TraceAllNeverPrintsJStringContentOrPrefix) {
   EXPECT_EQ(trace_output.find("SECRET_CANARY_PREFIX"), std::string::npos);
 }
 
-// A newly constructed VM has zero registered classes.
 TEST_F(JniVmTest, InitialClassCountIsZero) {
   EXPECT_EQ(vm_->GetClassCount(), 0u);
 }
 
-// Class registration
-
-// Registering a class returns a non-null shared_ptr.
 TEST_F(JniVmTest, RegisterClassReturnsNonNull) {
   auto cls = vm_->RegisterClass("android/content/Context");
   EXPECT_NE(cls, nullptr);
 }
 
-// The class name is preserved exactly as provided.
 TEST_F(JniVmTest, RegisterClassPreservesName) {
   const std::string kName = "com/roblox/client/RobloxActivity";
   auto cls = vm_->RegisterClass(kName);
@@ -443,44 +425,34 @@ TEST_F(JniVmTest, RegisterClassPreservesName) {
   EXPECT_EQ(cls->GetName(), kName);
 }
 
-// Registering the same class twice returns the same instance (deduplication).
 TEST_F(JniVmTest, RegisterClassIsDeduplicated) {
   auto cls1 = vm_->RegisterClass("rbx/JNIRobloxSettings");
   auto cls2 = vm_->RegisterClass("rbx/JNIRobloxSettings");
   EXPECT_EQ(cls1.get(), cls2.get());
 }
 
-// Class count increments correctly with distinct registrations.
 TEST_F(JniVmTest, ClassCountIncrements) {
   vm_->RegisterClass("android/content/Context");
   vm_->RegisterClass("android/app/Activity");
   EXPECT_EQ(vm_->GetClassCount(), 2u);
 }
 
-// Registering the same class multiple times does not inflate the count.
 TEST_F(JniVmTest, DuplicateRegistrationDoesNotInflateCount) {
   vm_->RegisterClass("android/content/Context");
   vm_->RegisterClass("android/content/Context");
   EXPECT_EQ(vm_->GetClassCount(), 1u);
 }
 
-// Class lookup (FindClass)
-
-// FindClass returns nullptr for an unregistered class.
 TEST_F(JniVmTest, FindClassReturnsNullForUnknownClass) {
   EXPECT_EQ(vm_->FindClass("not/Registered"), nullptr);
 }
 
-// FindClass returns the correct instance for a registered class.
 TEST_F(JniVmTest, FindClassReturnsRegisteredInstance) {
   auto registered = vm_->RegisterClass("android/os/Bundle");
   auto found = vm_->FindClass("android/os/Bundle");
   EXPECT_EQ(registered.get(), found.get());
 }
 
-// Method registration and lookup
-
-// A method registered on a class can be looked up by name + signature.
 TEST_F(JniVmTest, RegisteredMethodIsFound) {
   auto cls = vm_->RegisterClass("rbx/JNIRobloxSettings");
   cls->RegisterMethod("nativeInitClientSettings", "()V",
@@ -488,7 +460,6 @@ TEST_F(JniVmTest, RegisteredMethodIsFound) {
   EXPECT_NE(cls->FindMethod("nativeInitClientSettings", "()V"), nullptr);
 }
 
-// Looking up a method with a wrong signature returns nullptr.
 TEST_F(JniVmTest, MethodLookupWithWrongSignatureReturnsNull) {
   auto cls = vm_->RegisterClass("rbx/JNIRobloxSettings");
   cls->RegisterMethod("nativeInitClientSettings", "()V",
@@ -496,7 +467,6 @@ TEST_F(JniVmTest, MethodLookupWithWrongSignatureReturnsNull) {
   EXPECT_EQ(cls->FindMethod("nativeInitClientSettings", "(I)V"), nullptr);
 }
 
-// Looking up a non-existent method returns nullptr.
 TEST_F(JniVmTest, LookupOfNonExistentMethodReturnsNull) {
   auto cls = vm_->RegisterClass("android/content/Context");
   EXPECT_EQ(cls->FindMethod("getSystemService",
@@ -504,9 +474,6 @@ TEST_F(JniVmTest, LookupOfNonExistentMethodReturnsNull) {
             nullptr);
 }
 
-// Method callback invocation
-
-// The registered callback is actually invoked when called.
 TEST_F(JniVmTest, MethodCallbackIsInvoked) {
   auto cls = vm_->RegisterClass("rbx/JNIRobloxSettings");
   bool invoked = false;
@@ -520,7 +487,6 @@ TEST_F(JniVmTest, MethodCallbackIsInvoked) {
   EXPECT_TRUE(invoked);
 }
 
-// The callback receives the correct JNIEnv pointer.
 TEST_F(JniVmTest, CallbackReceivesCorrectJniEnv) {
   auto cls = vm_->RegisterClass("android/content/Context");
   JNIEnv *received_env = nullptr;
@@ -678,7 +644,7 @@ TEST_F(JniVmTest, NativeUserJavaInterfaceReturnsInjectedIdentityExactly) {
   identity.display_name = "Display Name";
   vm_->SetRobloxAuthIdentity(identity);
 
-  // The identity has priority over research environment fallbacks.
+  // Injected identity takes precedence over environment fallbacks.
   setenv("MOCKTAIL_ROBLOX_USER_ID", "77", 1);
   setenv("MOCKTAIL_ROBLOX_USERNAME", "EnvironmentName", 1);
 
@@ -1543,9 +1509,8 @@ TEST_F(JniVmTest, GameActivityDispatchesTypedAndroidWindowFlags) {
   EXPECT_EQ(probe->flags, 0x800);
   EXPECT_EQ(probe->mask, 0x800);
 
-  // Production LuaApp retains the concrete Android object behind the
-  // android.app.Activity interface. The inherited GameActivity method ID must
-  // still reach the same host boundary.
+  // LuaApp passes the concrete object as android.app.Activity. The inherited
+  // method ID must still dispatch to the host callback.
   env->CallVoidMethod(activity_interface, set_flags, 0x400, 0x400);
   EXPECT_EQ(probe->calls, 4);
   EXPECT_EQ(probe->flags, 0x400);

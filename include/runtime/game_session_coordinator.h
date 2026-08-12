@@ -87,9 +87,9 @@ using ResumeGameFn = Status (*)(void* context, const GameSurface& surface);
 using LeaveGameFn = Status (*)(void* context);
 using ShutdownGameRuntimeFn = Status (*)(void* context);
 
-// native boundary. All callbacks are synchronous and non-throwing. The
-// coordinator serializes lifecycle invocation, matching MainGameActivity's
-// single-thread executor without embedding JNI details in the policy layer.
+// These callbacks form the native boundary. They are synchronous and
+// non-throwing; the coordinator serializes lifecycle calls to match
+// MainGameActivity's single-thread executor.
 struct GameSessionCapabilities {
   void* context = nullptr;
   SetGameForegroundFn set_game_foreground = nullptr;
@@ -171,16 +171,11 @@ struct GameSessionSnapshot {
   std::string failure_reason;
 };
 
-// Fail-closed policy for the MainGameActivity game-session branch.
-//
-// SurfaceCreated must prepare a generation before SurfaceChanged can supply its
-// native window and dimensions. QueueJoinRequest and the prepared surface are
-// independent initial prerequisites; whichever completes last starts the game
-// with the current candidate surface. Initial start never calls ResumeGame.
-// Once running, SurfaceChanged updates the active surface, SurfaceDestroyed
-// pauses, and SurfaceCreated(new generation) plus SurfaceChanged resumes.
-// Candidate surfaces become active only after the corresponding native call
-// succeeds.
+// SurfaceCreated must open a generation before its matching SurfaceChanged can
+// supply a window and size. A join request and the first surface may arrive in
+// either order; initial startup calls StartGame, never ResumeGame. Once running,
+// new generations pause and resume the session. A candidate surface becomes
+// active only after its native callback succeeds.
 class GameSessionCoordinator final {
  public:
   explicit GameSessionCoordinator(GameSessionCapabilities capabilities,

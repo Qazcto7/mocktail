@@ -12,20 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// jnivm/jnivm.h — Pseudo Java Native Interface Virtual Machine.
-//
-// Provides a lightweight C++ implementation of a JVM stub for use with
-// Android-native shared libraries (e.g., libroblox.so) running on Linux.
-// No real Java bytecode is executed; instead, all JNI calls are intercepted
-// and dispatched to registered C++ callbacks.
-//
-// Usage:
-//   auto vm = std::make_shared<jnivm::VM>();
-//   auto cls = vm->RegisterClass("android/content/Context");
-//   cls->RegisterMethod("getSystemService",
-//   "(Ljava/lang/String;)Ljava/lang/Object;",
-//                       [](JNIEnv*, jobject, ...) { return nullptr; });
-
 #ifndef SOBER_TEST_JNIVM_JNIVM_H_
 #define SOBER_TEST_JNIVM_JNIVM_H_
 
@@ -42,28 +28,19 @@
 
 namespace jnivm {
 
-// Forward declarations
-
 class VM;
 class Class;
-
-// Object — base type for all pseudo-Java objects managed by the pseudo-JVM.
-// Analogous to java.lang.Object in the real JVM.
 
 class Object {
 public:
   explicit Object(std::shared_ptr<Class> klass) : klass_(std::move(klass)) {}
   virtual ~Object() = default;
 
-  // Returns the pseudo-class descriptor of this object.
   std::shared_ptr<Class> GetClass() const { return klass_; }
 
 private:
   std::shared_ptr<Class> klass_;
 };
-
-// MethodCallback — signature for registered JNI method stubs.
-// The callback receives the raw JNIEnv pointer and the receiver jobject.
 
 using MethodCallback = std::function<void(JNIEnv *, jobject)>;
 
@@ -75,8 +52,6 @@ struct RobloxAuthIdentity {
   std::string display_name;
 };
 
-// Host device capabilities exposed through the pseudo Android framework.
-// The guest ABI remains Android, while the default profile // describes a Linux desktop with physical mouse and keyboard input.
 struct PlatformIdentity {
   bool touch_enabled = false;
   bool mouse_enabled = true;
@@ -99,23 +74,16 @@ struct RobloxCredentialView {
 
 using RobloxCredentialProvider = RobloxCredentialView (*)(const void *context);
 
-// Creates a Configuration object consistent with the VM's immutable platform
-// identity snapshot. This is the replacement for legacy construction of
-// contradictory Android keyboard/touch fields.
 jobject CreateAndroidConfiguration(JNIEnv *env);
 
-// Narrow write-only boundary for credentials produced by Roblox after the
-// native runtime has started. A successfully persisted value supersedes the
-// bound provider for the remainder of the current VM lifetime so native sign-in
-// can become authoritative without reopening an untrusted credential source.
+// A stored credential replaces the bound provider for the rest of this VM's
+// lifetime.
 struct RobloxCredentialSinkCallbacks {
   bool (*store)(void *context, const char *data, std::size_t size) = nullptr;
 };
 
-// Narrow host callback boundary for org/fmod/AudioDevice. The pseudo-JVM owns
-// only an opaque shared context and never depends on the SDL audio runtime.
-// Each Java receiver is passed as a stable identity so the host can keep
-// independent device lifecycles without retaining a JNI local reference.
+// The VM keeps the host context opaque. Receiver identities let the backend
+// track devices without retaining JNI local references.
 struct FmodAudioDeviceCallbacks {
   bool (*init)(void *context, const void *identity, int channels,
                int sample_rate_hz, int block_size_frames,
@@ -126,17 +94,12 @@ struct FmodAudioDeviceCallbacks {
   void (*shutdown)(void *context) = nullptr;
 };
 
-// Narrow host callback boundary for the activity.setWindowFlags(II)V contract.
-// Production LuaApp retains its activity through the android.app.Activity
-// interface, while GameActivity startup uses the concrete subclass. Guest JNI
-// threads only publish Android flags; the platform callback must marshal any
-// SDL work onto the SDL main thread.
+// Guest JNI threads only publish Android window flags. The host callback must
+// marshal SDL work onto the main thread.
 struct AndroidWindowCallbacks {
   bool (*set_flags)(void *context, int flags, int mask) = nullptr;
 };
 
-// Immutable snapshot of the Android NativeTextBoxInfo payload supplied by
-// Roblox when a native text field receives focus.
 struct RobloxTextBoxInfo {
   float x = 0.0f;
   float y = 0.0f;
@@ -161,8 +124,7 @@ struct RobloxTextInputShowRequest {
   RobloxTextBoxInfo info;
 };
 
-// Narrow callback boundary for the Roblox native text-input callbacks. The
-// pseudo-JVM snapshots all JNI-owned arguments before entering this boundary.
+// JNI-owned arguments are copied before the host callback runs.
 struct RobloxTextInputCallbacks {
   void (*show)(void *context,
                const RobloxTextInputShowRequest &request) = nullptr;
@@ -172,9 +134,8 @@ struct RobloxTextInputCallbacks {
   void (*shutdown)(void *context) = nullptr;
 };
 
-// Narrow boundary for a native MessageBus RawCallback object. The VM
-// retains context while a callback is in flight and dispatches only the exact
-// run(Ljava/lang/String;)V method on the exact created receiver.
+// Dispatch accepts run(String) only on a receiver created by this VM. The
+// context stays alive while the callback runs.
 struct MessageBusRawCallbacks {
   void (*run)(void *context, JNIEnv *env, jstring message) = nullptr;
 };
@@ -183,18 +144,14 @@ struct MessageBusRequestHandlerCallbacks {
   std::string (*run)(void *context, JNIEnv *env, jstring message) = nullptr;
 };
 
-// Narrow boundary for the current APK's legacy BrowserService transport.
-// Dispatch accepts only Callback.onItemSet(Ljava/lang/String;)V on the exact
-// pseudo receiver created by CreateMemStorageCallback.
+// Dispatch accepts Callback.onItemSet(String) only on a receiver created by
+// this VM. The context stays alive while the callback runs.
 struct MemStorageCallbackCallbacks {
   void (*on_item_set)(void *context, JNIEnv *env, jstring value) = nullptr;
 };
 
-// Narrow boundary for the exact APK callbacks that update host web
-// state: NativeGLJavaInterface notifications, web activities, cookie sync,
-// and JNICookieProtocol.OnSetCookieHandler. The VM retains the shared callback
-// context while a callback is in flight; consumers must copy JNI strings
-// before returning.
+// Web callbacks share a retained context while in flight. Consumers must copy
+// JNI strings before returning.
 struct RobloxDataModelNotificationCallbacks {
   void (*on_notification)(void *context, JNIEnv *env, jstring type,
                           jstring data) = nullptr;
@@ -209,37 +166,22 @@ struct RobloxDataModelNotificationCallbacks {
                         jstring url) = nullptr;
 };
 
-// Narrow boundary for the exact NativeHelper lifecycle notification
-// emitted when Roblox returns from an experience to LuaApp.
 struct RobloxExperienceLifecycleCallbacks {
   void (*on_lua_app_did_return)(void *context) = nullptr;
 };
-
-// Class — represents a pseudo Java class registered in the pseudo-JVM.
-// Stores the class name (JNI descriptor format) and a map of method stubs.
 
 class Class {
 public:
   explicit Class(std::string name) : name_(std::move(name)) {}
 
-  // Returns the JNI-style class descriptor, e.g. "android/content/Context".
   const std::string &GetName() const { return name_; }
 
-  // Registers a JNI method stub.
-  //
-  // Args:
-  //   method_name: Simple method name (e.g. "getSystemService").
-  //   signature:   JNI type descriptor (e.g. "(Ljava/lang/String;)V").
-  //   callback:    C++ lambda invoked when the method is called via JNI.
   void RegisterMethod(const std::string &method_name,
                       const std::string &signature, MethodCallback callback);
 
-  // Looks up a method stub by name and signature.
-  // Returns nullptr if not found.
   const MethodCallback *FindMethod(const std::string &method_name,
                                    const std::string &signature) const;
 
-  // Returns all registered methods (name → callback).
   const std::unordered_map<std::string, MethodCallback> &GetMethods() const {
     return methods_;
   }
@@ -247,57 +189,37 @@ public:
 private:
   std::string name_;
 
-  // Key format: "methodName:descriptor"
   std::unordered_map<std::string, MethodCallback> methods_;
 };
-
-// VM — the top-level pseudo Java Virtual Machine.
-//
-// Owns a registry of pseudo-classes and exposes a JavaVM* compatible
-// pointer for passing to JNI_OnLoad in the loaded shared library.
 
 class VM {
 public:
   VM();
   ~VM();
 
-  // Disallow copy and assign.
   VM(const VM &) = delete;
   VM &operator=(const VM &) = delete;
 
-  // Registers a new pseudo-class by its JNI descriptor.
-  // Repeated registration returns the existing instance.
-  //
-  // Args:
-  //   class_name: JNI-style descriptor, e.g.
-  //   "com/roblox/client/RobloxActivity".
-  //
-  // Returns:
-  //   Shared pointer to the registered (or pre-existing) Class object.
+  // Repeated registration returns the existing class.
   std::shared_ptr<Class> RegisterClass(const std::string &class_name);
 
-  // Finds a previously registered class.
   // Returns nullptr if the class has not been registered.
   std::shared_ptr<Class> FindClass(const std::string &class_name) const;
 
-  // Returns the raw JavaVM pointer compatible with JNI_OnLoad signature.
   JavaVM *GetJavaVM() { return java_vm_; }
 
   // Resolves the process pseudo-VM that owns an exact JavaVM pointer. Returns
   // null for foreign VMs and after the owner is destroyed.
   static VM *FromJavaVM(JavaVM *java_vm);
 
-  // Returns the attached JNIEnv pointer for the current host thread.
   JNIEnv *GetJNIEnv();
 
-  // Returns the number of registered classes.
   std::size_t GetClassCount() const { return class_registry_.size(); }
 
   // Replaces the resolved account identity with an independent copy. Invalid
   // (non-positive) identities are normalized to the unresolved state.
   void SetRobloxAuthIdentity(const RobloxAuthIdentity &identity);
 
-  // Returns the VM to its unresolved account state.
   void ClearRobloxAuthIdentity();
 
   // Returns an immutable-by-value snapshot safe for use by JNI callbacks on
@@ -405,12 +327,10 @@ public:
   void ClearRobloxExperienceLifecycleCallbacks();
   bool DispatchRobloxExperienceLuaAppDidReturn();
 
-  // Restores env->functions to &native_interface_ in case libroblox replaced
-  // it.
+  // Restores the pseudo-JNI table after guest code replaces env->functions.
   void RestoreFunctions();
 
 private:
-  // Internal JNI function tables populated with stub implementations.
   JNIInvokeInterface_ invoke_interface_ = {};
   JavaVM java_vm_storage_ = {};
   JavaVM *java_vm_ = nullptr;
@@ -419,7 +339,6 @@ private:
   JNIEnv jni_env_storage_ = {};
   JNIEnv *jni_env_ = nullptr;
 
-  // Registry of pseudo-classes indexed by their JNI descriptor.
   std::unordered_map<std::string, std::shared_ptr<Class>> class_registry_;
 
   mutable std::mutex roblox_auth_identity_mutex_;
@@ -498,8 +417,6 @@ private:
   std::shared_ptr<RobloxExperienceLifecycleBinding>
       roblox_experience_lifecycle_binding_;
 
-  // Initialises the JNIInvokeInterface_ and JNINativeInterface_ function tables
-  // with stub implementations that forward calls to this VM instance.
   void InitJNIFunctionTables();
 };
 

@@ -4,7 +4,7 @@
 <component type="desktop-application">
   <id>space.bigrat.mocktail</id>
   <name>Mocktail</name>
-  <summary>Experimental Roblox Android compatibility runtime for Linux</summary>
+  <summary>Play Roblox on Linux</summary>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>Apache-2.0</project_license>
   <developer id="space.bigrat">
@@ -13,29 +13,30 @@
   <url type="homepage">https://github.com/komaruworld/mocktail</url>
   <description>
     <p>
-      Mocktail is an experimental compatibility runtime for running the
-      Android x86-64 Roblox client on a native Linux desktop. It provides the
-      pseudo-JVM, Android ABI adapters, SDL window/input/audio integration and
-      Vulkan presentation needed by the client.
+      Sign in to Roblox, browse experiences, and play them in a desktop window.
+      Mocktail handles graphics, audio, mouse, and keyboard input on Linux.
     </p>
     <p>
-      The project is a prototype and is not affiliated with or endorsed by
-      Roblox Corporation. The verified Roblox payload is downloaded on first
-      launch and is not distributed with Mocktail.
+      On first launch, Mocktail downloads the Roblox client and checks its
+      signature. It keeps the last working version in case an update fails.
+    </p>
+    <p>
+      Mocktail is an independent community project. It is not affiliated with
+      or endorsed by Roblox Corporation, and the Roblox client is not included.
     </p>
   </description>
   <screenshots>
     <screenshot type="default">
-      <image>https://raw.githubusercontent.com/komaruworld/mocktail/main/assets/screenshots/flatpak-home.png</image>
-      <caption>Browse Roblox experiences in the desktop client</caption>
+      <image>https://raw.githubusercontent.com/komaruworld/mocktail/88b7382577aa138a2d16619b091f69abcdf7da15/assets/screenshots/flatpak-home.png</image>
+      <caption>Browse Roblox experiences</caption>
     </screenshot>
     <screenshot>
-      <image>https://raw.githubusercontent.com/komaruworld/mocktail/main/assets/screenshots/flatpak-gameplay-tower.png</image>
-      <caption>Roblox gameplay running through Mocktail</caption>
+      <image>https://raw.githubusercontent.com/komaruworld/mocktail/88b7382577aa138a2d16619b091f69abcdf7da15/assets/screenshots/flatpak-gameplay-tower.png</image>
+      <caption>Play Tower of Hell on Linux</caption>
     </screenshot>
     <screenshot>
-      <image>https://raw.githubusercontent.com/komaruworld/mocktail/main/assets/screenshots/flatpak-gameplay-lobby.png</image>
-      <caption>A Roblox experience running through Mocktail</caption>
+      <image>https://raw.githubusercontent.com/komaruworld/mocktail/88b7382577aa138a2d16619b091f69abcdf7da15/assets/screenshots/flatpak-gameplay-lobby.png</image>
+      <caption>Play DOORS on Linux</caption>
     </screenshot>
   </screenshots>
   <launchable type="desktop-id">space.bigrat.mocktail.desktop</launchable>

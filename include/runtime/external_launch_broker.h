@@ -28,14 +28,10 @@ namespace runtime {
 inline constexpr std::size_t kMaximumPendingExternalLaunches = 8;
 
 struct ExternalLaunchBrokerOptions {
-  // Empty selects the current user's protected runtime endpoint. Tests and
-  // isolated launchers may provide an explicit socket under a private
-  // directory owned by the current user.
+  // Empty selects the current user's protected endpoint.
   std::filesystem::path socket_path;
   std::size_t maximum_pending_launches = kMaximumPendingExternalLaunches;
-  // The owner crosses configuration/bootstrap and a possible cgroup
-  // re-exec before it can safely ACK. A concurrent browser click waits through
-  // that bounded startup window instead of racing a not-yet-created socket.
+  // Covers bootstrap and a possible cgroup re-exec.
   int forwarding_timeout_ms = 30000;
 };
 
@@ -49,16 +45,11 @@ struct ExternalLaunchSink {
   bool valid() const { return dispatch != nullptr; }
 };
 
-// Resolves the per-user, per-installation endpoint. Owner resolution may
-// create only the private fallback directory; it never removes a stale
-// socket. Socket cleanup belongs exclusively to StartOwnerAfterLockAcquired
-// after the caller owns the matching Mocktail single-instance lock.
+// Resolution never removes stale sockets; only a lock-owning broker may do so.
 Status ResolveExternalLaunchSocketPath(bool owner,
                                        std::filesystem::path* socket_path);
 
-// Owns a bounded process-local launch queue and its same-user AF_UNIX endpoint.
-// Wire requests contain only already-normalized ExperienceProtocol JSON; the
-// raw browser URI and its gameinfo ticket never cross this boundary.
+// The wire format contains normalized requests, never raw browser tickets.
 class ExternalLaunchBroker final {
  public:
   ~ExternalLaunchBroker();
@@ -68,25 +59,20 @@ class ExternalLaunchBroker final {
   ExternalLaunchBroker(ExternalLaunchBroker&&) = delete;
   ExternalLaunchBroker& operator=(ExternalLaunchBroker&&) = delete;
 
-  // The caller must hold the single-instance lock. Only this operation may
-  // remove a stale socket left by a crashed owner. An optional initial request
-  // is normalized and queued before the listener worker can accept later
-  // browser clicks, preserving click order without a startup race.
+  // Requires the single-instance lock. The initial request is queued before
+  // the listener starts, preserving click order.
   static Status StartOwnerAfterLockAcquired(
       ExternalLaunchBrokerOptions options,
       std::shared_ptr<ExternalLaunchBroker>* broker,
       const RobloxExperienceLaunchRequest* initial_request = nullptr);
 
-  // Forwards one normalized request and waits for an explicit owner ACK. The
-  // operation never starts a second runtime and never logs request contents.
+  // Waits for an owner ACK and never logs the request.
   static Status ForwardToOwner(const ExternalLaunchBrokerOptions& options,
                                const RobloxExperienceLaunchRequest& request);
 
   Status QueueInitialRequest(RobloxExperienceLaunchRequest request);
 
-  // Dispatches at most maximum_requests in FIFO order. A failed dispatch is
-  // returned to the front of the queue, so temporary downstream backpressure
-  // never drops a browser launch.
+  // A failed dispatch returns to the front of the FIFO queue.
   Status Drain(const ExternalLaunchSink& sink, std::size_t maximum_requests);
 
   Status Shutdown();
@@ -100,9 +86,7 @@ class ExternalLaunchBroker final {
   std::unique_ptr<Impl> impl_;
 };
 
-// Process-global attachment used by the composition root and the dynamic
-// ExperienceProtocol runtime. shared_ptr acquisition keeps the broker alive
-// while an external request is being drained.
+// shared_ptr acquisition keeps the active broker alive during a drain.
 Status InstallActiveExternalLaunchBroker(
     const std::shared_ptr<ExternalLaunchBroker>& broker);
 void ClearActiveExternalLaunchBroker(const ExternalLaunchBroker* broker);

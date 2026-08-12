@@ -62,7 +62,7 @@ PayloadCompatibilityResult CheckPayloadCompatibility(
     result.error = "This Roblox build is not enabled for normal runs: " +
                    result.profile.reason +
                    "\n  Use --allow-unverified-build only for an explicit "
-                   "compatibility experiment.";
+                   "compatibility run.";
     result.profile = {};
     return result;
   }

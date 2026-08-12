@@ -28,11 +28,8 @@ struct FileSha256Result {
   explicit operator bool() const noexcept { return error.empty(); }
 };
 
-// Computes a lowercase SHA-256 digest without invoking a shell or an external
-// utility. The external ABI approval receipt binds exact profile,
-// compatibility-manifest, and payload bytes through this implementation; the
-// runtime itself is bound by its stable GNU Build ID because installation may
-// rewrite RPATH bytes.
+// Approval receipts bind the profile, manifest, and payload to this digest.
+// Runtime identity uses its Build ID because installation may rewrite RPATH.
 FileSha256Result ComputeFileSha256(const std::string& path);
 
 struct ExternalHostAbiProfileRequest {
@@ -55,27 +52,19 @@ struct ExternalHostAbiProfileResult {
   explicit operator bool() const noexcept { return error.empty(); }
 };
 
-// Loads one exact, payload-bound ABI profile into the process registry. A
-// candidate is accepted only by an explicitly authorized canary process. A
-// normal launch instead requires a separate approval receipt produced after
-// repeated Tier C readiness. Built-in profiles are immutable and always win.
+// Candidates require canary authorization; normal launches require an
+// approval receipt. Built-in profiles always win.
 ExternalHostAbiProfileResult LoadExternalHostAbiProfile(
     const ExternalHostAbiProfileRequest& request);
 
-// Environment integration used by the pre-native compatibility gate. An
-// unset MOCKTAIL_HOST_ABI_PROFILE_FILE is a successful no-op. If it is set,
-// candidate authorization requires MOCKTAIL_HOST_ABI_CANARY=1,
-// MOCKTAIL_ALLOW_CANDIDATE_HOST_ABI=1, and the explicit research command-line
-// marker. Approved profiles require MOCKTAIL_HOST_ABI_APPROVAL_RECEIPT and
-// neither canary environment marker.
+// An unset profile is a no-op. Candidates require both canary flags and the
+// research CLI marker; approved profiles require a receipt and no canary flag.
 ExternalHostAbiProfileResult InitializeHostAbiProfileFromEnvironment(
     const std::string& payload_path,
     const std::string& compatibility_manifest_path,
     const std::string& expected_build_id,
     bool explicit_unverified_authorization);
 
-// Registry lookup used by FindHostAbiProfile after its immutable built-in
-// table. Callers should use FindHostAbiProfile rather than this function.
 const HostAbiProfile* FindLoadedExternalHostAbiProfile(
     std::string_view build_id) noexcept;
 

@@ -81,7 +81,7 @@ struct NativeAllocatorProfile {
 inline constexpr size_t kMaxHostBridgeEntries = 8;
 inline constexpr size_t kMaxConstructorRunRanges = 26;
 
-// Build-ID-scoped native ABI knowledge for supported and experimental payload
+// Build-ID-scoped native ABI knowledge for supported and candidate payload
 // profiles. Keeping these addresses outside the legacy startup graph makes the
 // version boundary reviewable and independently testable.
 struct HostAbiProfile {

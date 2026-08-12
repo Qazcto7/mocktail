@@ -1,8 +1,7 @@
 // Copyright 2026 Mocktail Project Authors
 // Apache 2.0 License
 //
-// stubs/libmediandk_stub.cc — Stub for Android libmediandk.so.
-// AMediaCodec / AMediaFormat are no-ops; Roblox uses them for video decoding.
+// Minimal libmediandk shim for video APIs imported by Roblox.
 
 #include <cstdint>
 #include <cstdlib>
@@ -14,7 +13,6 @@ struct AMediaFormat {
   char mime[64];
 };
 
-// Forward-declared Android media status type.
 using media_status_t = int32_t;
 static constexpr media_status_t AMEDIA_OK = 0;
 static constexpr media_status_t AMEDIA_ERROR_UNKNOWN = -1;
@@ -33,71 +31,69 @@ const char* AMEDIAFORMAT_KEY_SAMPLE_RATE   = "sample-rate";
 const char* AMEDIAFORMAT_KEY_I_FRAME_INTERVAL = "i-frame-interval";
 const char* AMEDIAFORMAT_KEY_STRIDE        = "stride";
 
-// AMediaFormat
 AMediaFormat* AMediaFormat_new() {
   return static_cast<AMediaFormat*>(calloc(1, sizeof(AMediaFormat)));
 }
 void AMediaFormat_delete(AMediaFormat* fmt) { free(fmt); }
-bool AMediaFormat_getInt32(AMediaFormat* /*f*/, const char* /*k*/, int32_t* v) {
+bool AMediaFormat_getInt32(AMediaFormat*, const char*, int32_t* v) {
   if (v) *v = 0;
   return false;
 }
-bool AMediaFormat_getBuffer(AMediaFormat* /*f*/, const char* /*k*/,
-                             void** /*d*/, size_t* /*s*/) { return false; }
-void AMediaFormat_setInt32(AMediaFormat* /*f*/, const char* /*k*/,
-                            int32_t /*v*/) {}
-void AMediaFormat_setFloat(AMediaFormat* /*f*/, const char* /*k*/,
-                            float /*v*/) {}
-void AMediaFormat_setString(AMediaFormat* /*f*/, const char* k,
+bool AMediaFormat_getBuffer(AMediaFormat*, const char*,
+                             void**, size_t*) { return false; }
+void AMediaFormat_setInt32(AMediaFormat*, const char*,
+                            int32_t) {}
+void AMediaFormat_setFloat(AMediaFormat*, const char*,
+                            float) {}
+void AMediaFormat_setString(AMediaFormat*, const char* k,
                              const char* v) {
   (void)k; (void)v;
 }
-void AMediaFormat_setBuffer(AMediaFormat* /*f*/, const char* /*k*/,
-                             const void* /*d*/, size_t /*s*/) {}
-const char* AMediaFormat_toString(AMediaFormat* /*f*/) { return "{}"; }
+void AMediaFormat_setBuffer(AMediaFormat*, const char*,
+                             const void*, size_t) {}
+const char* AMediaFormat_toString(AMediaFormat*) { return "{}"; }
 
-// AMediaCodec
-AMediaCodec* AMediaCodec_createDecoderByType(const char* /*mime*/) {
+AMediaCodec* AMediaCodec_createDecoderByType(const char*) {
   return nullptr;
 }
-AMediaCodec* AMediaCodec_createEncoderByType(const char* /*mime*/) {
+AMediaCodec* AMediaCodec_createEncoderByType(const char*) {
   return nullptr;
 }
-media_status_t AMediaCodec_delete(AMediaCodec* /*codec*/) {
+media_status_t AMediaCodec_delete(AMediaCodec*) {
   return AMEDIA_OK;
 }
-media_status_t AMediaCodec_configure(AMediaCodec* /*codec*/,
-                                      const AMediaFormat* /*format*/,
-                                      void* /*surface*/, void* /*crypto*/,
-                                      uint32_t /*flags*/) {
+media_status_t AMediaCodec_configure(AMediaCodec*,
+                                      const AMediaFormat*,
+                                      void*, void*,
+                                      uint32_t) {
   return AMEDIA_ERROR_UNKNOWN;
 }
-media_status_t AMediaCodec_start(AMediaCodec* /*codec*/) {
+media_status_t AMediaCodec_start(AMediaCodec*) {
   return AMEDIA_ERROR_UNKNOWN;
 }
-media_status_t AMediaCodec_stop(AMediaCodec* /*codec*/) { return AMEDIA_OK; }
-media_status_t AMediaCodec_flush(AMediaCodec* /*codec*/) { return AMEDIA_OK; }
-uint8_t* AMediaCodec_getInputBuffer(AMediaCodec* /*codec*/, size_t /*idx*/,
-                                     size_t* /*sz*/) { return nullptr; }
-uint8_t* AMediaCodec_getOutputBuffer(AMediaCodec* /*codec*/, size_t /*idx*/,
-                                      size_t* /*sz*/) { return nullptr; }
-ssize_t AMediaCodec_dequeueInputBuffer(AMediaCodec* /*codec*/,
-                                        int64_t /*timeoutUs*/) { return -1; }
-ssize_t AMediaCodec_dequeueOutputBuffer(AMediaCodec* /*codec*/,
-                                         void* /*info*/,
-                                         int64_t /*timeoutUs*/) { return -1; }
-media_status_t AMediaCodec_queueInputBuffer(AMediaCodec* /*codec*/,
-                                             size_t /*idx*/, size_t /*offset*/,
-                                             size_t /*size*/, uint64_t /*pts*/,
-                                             uint32_t /*flags*/) {
+media_status_t AMediaCodec_stop(AMediaCodec*) { return AMEDIA_OK; }
+media_status_t AMediaCodec_flush(AMediaCodec*) { return AMEDIA_OK; }
+uint8_t* AMediaCodec_getInputBuffer(AMediaCodec*, size_t,
+                                     size_t*) { return nullptr; }
+uint8_t* AMediaCodec_getOutputBuffer(AMediaCodec*, size_t,
+                                      size_t*) { return nullptr; }
+ssize_t AMediaCodec_dequeueInputBuffer(AMediaCodec*,
+                                        int64_t) { return -1; }
+ssize_t AMediaCodec_dequeueOutputBuffer(AMediaCodec*,
+                                         void*,
+                                         int64_t) { return -1; }
+media_status_t AMediaCodec_queueInputBuffer(AMediaCodec*,
+                                             size_t, size_t,
+                                             size_t, uint64_t,
+                                             uint32_t) {
   return AMEDIA_ERROR_UNKNOWN;
 }
-media_status_t AMediaCodec_releaseOutputBuffer(AMediaCodec* /*codec*/,
-                                                size_t /*idx*/,
-                                                bool /*render*/) {
+media_status_t AMediaCodec_releaseOutputBuffer(AMediaCodec*,
+                                                size_t,
+                                                bool) {
   return AMEDIA_OK;
 }
-AMediaFormat* AMediaCodec_getOutputFormat(AMediaCodec* /*codec*/) {
+AMediaFormat* AMediaCodec_getOutputFormat(AMediaCodec*) {
   return AMediaFormat_new();
 }
 

@@ -12,17 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// libc_shim/libc_shim.h — Bionic libc → Glibc call translation layer.
-//
-// Intercepts calls made by Bionic-compiled code (libroblox.so) to
-// Bionic-specific libc functions and forwards them to their Glibc equivalents
-// on the host Linux system.
-//
-// Key responsibilities:
-//   - pthread_mutex_t size/layout differences between Bionic and Glibc.
-//   - Virtual filesystem path mapping (APK sandbox → Flatpak paths).
-//   - Bionic-only syscall wrappers missing in Glibc.
-
 #ifndef SOBER_TEST_LIBC_SHIM_LIBC_SHIM_H_
 #define SOBER_TEST_LIBC_SHIM_LIBC_SHIM_H_
 
@@ -57,10 +46,8 @@ struct HostCaBundleResolution {
 // boundary as the caller that will later free them.
 void ConfigureGuestAllocator(GuestAllocator allocator) noexcept;
 
-// Installs all shim hooks. Must be called before the target .so is loaded.
-//
-// After this call, dlopen(3) symbol resolution for known Bionic symbols will
-// be intercepted and redirected to the shim implementations.
+// Must run before loading the target library so its Bionic imports resolve to
+// these shims.
 void Install();
 
 // Resolves the host TLS trust bundle without weakening certificate
@@ -76,29 +63,13 @@ HostCaBundleResolution ConfigureHostCaBundlePathMappings();
 
 const char* HostCaBundleStatusName(HostCaBundleStatus status);
 
-// Maps an Android-style virtual path to its Flatpak sandbox equivalent.
-//
-// Example:
-//   "/data/user/0/com.roblox.client/files/logs" →
-//   "/home/user/.var/app/org.vinegarhq.Sober/data/sober/logs"
-//
-// Args:
-//   android_path: Absolute path as seen by the Bionic library.
-//
-// Returns:
-//   Translated host path. Returns android_path unchanged if no mapping
-//   is registered for it.
+// Applies the longest matching Android-to-host path prefix. Unmapped paths are
+// returned unchanged.
 std::string TranslatePath(const std::string& android_path);
 
-// Registers a path prefix mapping used by TranslatePath.
-//
-// Args:
-//   android_prefix: Android path prefix to intercept.
-//   host_prefix:    Replacement prefix on the host filesystem.
 void RegisterPathMapping(const std::string& android_prefix,
                          const std::string& host_prefix);
 
-// Removes all registered path mappings. Primarily for use in tests.
 void ClearPathMappings();
 
 }  // namespace libc_shim

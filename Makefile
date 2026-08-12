@@ -134,7 +134,7 @@ run-angle: ## Run with ANGLE/Vulkan compatibility backend
 update-roblox: ## Validate and import the current x86_64 Roblox bundle cached by Sober
 	@./scripts/update_roblox_payload.sh
 
-update-auto: build ## Download latest Roblox, derive its ABI, canary twice and activate safely
+update-auto: build ## Download latest Roblox, derive its ABI, run two canaries, then activate
 	@./$(BUILD_DIR)/mocktail_updater update
 
 update-auto-launch: build ## Update Roblox and launch the verified current payload

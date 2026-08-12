@@ -26,9 +26,7 @@
 namespace mocktail {
 namespace graphics {
 
-// Vulkan VkResult values are a stable signed 32-bit ABI. Keeping the Android
-// boundary independent of the optional Vulkan SDK lets capability-only builds
-// continue to compile with SDL's opaque Vulkan handles.
+// Stable signed 32-bit ABI, independent of the optional Vulkan SDK.
 using AndroidVulkanResult = VkResult;
 
 inline constexpr AndroidVulkanResult kAndroidVulkanSuccess =
@@ -43,43 +41,29 @@ inline constexpr std::uint64_t kHostImageAcquireWatchdogTimeoutNs =
 inline constexpr char kAndroidSurfaceExtension[] =
     "VK_KHR_android_surface";
 
-// Desktop compositors can report a valid acquired/presented image as
-// suboptimal while a fullscreen configure settles. The Android client path
-// used by Roblox treats that positive success code as a hard error, so the
-// compatibility boundary exposes it as the equivalent VK_SUCCESS result.
+// Roblox treats VK_SUBOPTIMAL_KHR as a hard error, so expose it as success.
 VkResult NormalizeAndroidSwapchainResult(VkResult result);
 
-// Android requests an infinite image-acquire wait, but a lost Wayland/X11
-// compositor wakeup would then block Roblox's RenderJob forever. Only the
-// infinite guest request is bounded; explicit finite Vulkan timeouts retain
-// their original contract.
+// Bounds only infinite acquire waits so a lost compositor wakeup cannot hang.
 std::uint64_t BoundHostImageAcquireTimeout(std::uint64_t requested_timeout);
 bool IsHostImageAcquireWatchdogTimeout(std::uint64_t requested_timeout,
                                        VkResult host_result);
 VkResult NormalizeHostImageAcquireResult(std::uint64_t requested_timeout,
                                          VkResult host_result);
 
-// Infinite fence/timeline waits retain their guest-visible semantics, but are
-// issued to the host in finite slices so a stalled renderer produces evidence
-// while it remains blocked. VK_TIMEOUT from a slice is never returned to the
-// Android client as a completed wait.
+// Infinite guest waits use finite host slices without exposing slice timeouts.
 std::uint64_t BoundHostSynchronizationWaitTimeout(
     std::uint64_t requested_timeout);
 bool ShouldContinueHostSynchronizationWait(std::uint64_t requested_timeout,
                                            VkResult host_result);
 
-// Rewrites an Android VkInstance extension request for the host WSI. The
-// returned storage owns its strings and can be used to build the
-// ppEnabledExtensionNames array passed to the host vkCreateInstance call.
+// Returned storage owns the translated extension names.
 Status TranslateAndroidVulkanInstanceExtensions(
     const std::vector<std::string>& android_extensions,
     const std::vector<std::string>& host_wsi_extensions,
     std::vector<std::string>* host_extensions);
 
-// Android WSI boundary. vkCreateAndroidSurfaceKHR-compatible exports can
-// delegate here after vkCreateInstance has used the translated extension list.
-// The Android native-window member is intentionally ignored: SDL owns the real
-// host window and is the only component allowed to create its VkSurfaceKHR.
+// Ignores the guest native-window field; SDL alone creates the host surface.
 class AndroidVulkanWsiAdapter final {
  public:
   using PresentCallback = void (*)(void* user_data);

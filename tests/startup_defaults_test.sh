@@ -735,7 +735,7 @@ if ! rg -Uq 'SetEnvDefault\(\s*"MOCKTAIL_START_GAME_WITH_PARAM",\s*"0"\s*\)' "${
 fi
 
 if rg -q 'MOCKTAIL_UPDATE_SURFACE_GAME_BEFORE_START_GAME|MOCKTAIL_RESUME_GAME_WITH_PLATFORM_PARAMS_AFTER_START_GAME' "${main_cc}"; then
-  echo "typed GAME startup must not retain pre-Start UpdateSurface or post-Start Resume experiment switches" >&2
+  echo "typed GAME startup must not retain pre-Start UpdateSurface or post-Start Resume diagnostic switches" >&2
   exit 1
 fi
 
@@ -858,7 +858,7 @@ fi
 
 if ! rg -q 'mocktail_stage6_start_lua_return_size_40000' "${main_cc}" ||
    ! rg -q 'MOCKTAIL_STAGE6_START_LUA_TARGET_TABLE_SLOT6_SOURCE' "${main_cc}"; then
-  echo "Stage6 synthetic StartLua target table slot 6 needs an opt-in size-return experiment because resolver treats the slot result as a memory-size request" >&2
+  echo "Stage6 synthetic StartLua target table slot 6 needs an opt-in size-return mode because resolver treats the slot result as a memory-size request" >&2
   exit 1
 fi
 
@@ -898,7 +898,7 @@ if ! rg -q 'MOCKTAIL_PATCH_STAGE6_START_LUA_RESOLVER_RESULT20_CALLBACK' "${main_
    ! rg -Fq 'Stage6 StartLua post-apply task thunk after callback' "${main_cc}" ||
    ! rg -Fq 'Stage6 StartLua resolver result20 split callback context' "${main_cc}" ||
    ! rg -Fq 'Stage6 StartLua resolver result20 callback materialized' "${main_cc}"; then
-  echo "Stage6 resolver experiments must be able to materialize result+0x20 callback pairs under an explicit flag and split callback context/source args at the native call site" >&2
+  echo "Stage6 resolver diagnostics must be able to materialize result+0x20 callback pairs under an explicit flag and split callback context/source args at the native call site" >&2
   exit 1
 fi
 
@@ -943,7 +943,7 @@ fi
 
 if ! rg -q 'MOCKTAIL_PATCH_STAGE6_START_LUA_POST_APPLY_PAIR_ARGUMENT' "${main_cc}" ||
    ! rg -Fq 'force_pair_argument=%d force_null_argument=%d' "${main_cc}"; then
-  echo "Stage6 post-apply callback experiments must keep pair-argument and null-argument paths explicit in trace logs" >&2
+  echo "Stage6 post-apply callback diagnostics must keep pair-argument and null-argument paths explicit in trace logs" >&2
   exit 1
 fi
 

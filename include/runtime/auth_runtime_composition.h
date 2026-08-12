@@ -40,9 +40,7 @@ enum class AuthRuntimeStatus {
   kUnavailable,
 };
 
-// Process-local ownership for the canonical .ROBLOSECURITY header. The class
-// is move-only and clears its backing allocation before release.
-// Callers must never log the value returned by view() or c_str().
+// Move-only credential storage that clears its allocation. Never log its view.
 class SecureRobloxCredential final {
  public:
   SecureRobloxCredential() = default;
@@ -64,14 +62,10 @@ class SecureRobloxCredential final {
   std::vector<char> bytes_;
 };
 
-// Clears a transient string that contained derived credential material.
 void SecurelyClearString(std::string* value);
 
-// Binds the production pseudo-VM to the exact credential resolved by the
-// authentication preflight. The binding is intentionally non-movable:
-// it must be created only after its credential reaches its final address and
-// destroyed before that credential or the VM. Guest credentials block legacy
-// env/disk fallback until the sink durably accepts a native sign-in value.
+// Must be created after the credential reaches its final address and destroyed
+// before the credential or VM. Guest bindings block legacy env/disk fallback.
 class ScopedRobloxCredentialBinding final {
  public:
   ScopedRobloxCredentialBinding(jnivm::VM* jni_vm,
@@ -93,9 +87,7 @@ class ScopedRobloxCredentialBinding final {
   jnivm::VM* jni_vm_ = nullptr;
 };
 
-// Result of resolving host credentials before the Android runtime starts.
-// Credential ownership is retained only so the exact credential validated by
-// AuthService can be moved into native startup without reopening its source.
+// Retains the validated credential without reopening its source.
 struct AuthRuntimeComposition {
   AuthRuntimeStatus status = AuthRuntimeStatus::kUnavailable;
   std::shared_ptr<jnivm::VM> jni_vm;
@@ -107,21 +99,14 @@ struct AuthRuntimeComposition {
   explicit operator bool() const { return jni_vm != nullptr; }
 };
 
-// Resolves the saved Roblox session and constructs the production pseudo-VM.
-// A VM is returned only for an authenticated session or when guest startup is
-// explicitly enabled with MOCKTAIL_ALLOW_NO_COOKIE_LUA_APP. An exact HTTP 401
-// from a managed Mocktail file clears only the rejected .ROBLOSECURITY. A
-// rejected default Sober credential is suppressed by a private fingerprint
-// without modifying Sober's file. The guest policy then allows native sign-in
-// to continue. Explicit overrides, unsafe recovery, other invalid credentials,
-// and unavailable authentication still fail closed before native startup.
+// A VM requires authentication or explicit guest mode. HTTP 401 clears only a
+// managed credential; rejected Sober credentials are suppressed without
+// changing Sober's file.
 AuthRuntimeComposition ComposeAuthRuntime(const Environment& environment,
                                           const RuntimePaths& paths,
                                           services::AuthService& auth_service);
 
-// Production overload retaining the HTTP transport for credentials delivered
-// by native sign-in after startup. A persisted credential is validated before
-// its account identity is promoted into the running pseudo-VM.
+// Retains HTTP transport for native sign-in and validates persisted credentials.
 AuthRuntimeComposition ComposeAuthRuntime(
     const Environment& environment, const RuntimePaths& paths,
     services::AuthService& auth_service,

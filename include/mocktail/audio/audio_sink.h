@@ -22,9 +22,7 @@
 
 namespace mocktail::audio {
 
-// Interleaved PCM formats accepted at the host audio boundary. Endianness is
-// explicit because Android x86-64 producers use little-endian PCM regardless
-// of the host implementation chosen by SDL.
+// Android producers supply little-endian interleaved PCM.
 enum class PcmSampleFormat {
   kUnsigned8,
   kSigned16LittleEndian,
@@ -41,11 +39,9 @@ struct PcmSpec {
 using AudioBufferReleaseCallback = void (*)(void* context, const void* data,
                                             std::size_t size_bytes);
 
-// A PCM submission. With no release callback, Enqueue() copies the bytes
-// before returning. With a release callback, the sink may borrow the buffer;
-// the caller must keep it valid until the callback runs. A successful
-// submission invokes the callback exactly once, including when Clear() or
-// Shutdown() discards queued audio. A failed submission never invokes it.
+// Without a callback Enqueue copies the bytes. With one, a successful Enqueue
+// borrows them until exactly one release callback, including on Clear or
+// Shutdown. On failure the callback is not invoked.
 struct PcmBuffer {
   const void* data = nullptr;
   std::size_t size_bytes = 0;
@@ -57,9 +53,7 @@ Status ValidatePcmSpec(const PcmSpec& spec);
 std::size_t BytesPerSample(PcmSampleFormat format);
 std::size_t BytesPerFrame(const PcmSpec& spec);
 
-// Thread-safe PCM playback contract. Implementations perform device format
-// conversion and resampling through their host audio library; callers always
-// submit data in source_spec().
+// Thread-safe; callers submit source_spec(), and the backend converts it.
 class AudioSink {
  public:
   virtual ~AudioSink() = default;
@@ -68,15 +62,14 @@ class AudioSink {
   virtual Status Enqueue(const PcmBuffer& buffer) = 0;
   virtual Status Pause() = 0;
   virtual Status Resume() = 0;
-  // Linear gain is delegated to the host audio library. Zero mutes, one is
-  // unity gain, and negative or non-finite values are rejected.
+  // Zero mutes; one is unity; negative and non-finite values are invalid.
   virtual Status SetGain(float linear_gain) = 0;
   virtual Status Flush() = 0;
   virtual Status Clear() = 0;
   virtual Status GetQueuedBytes(std::size_t* size_bytes) const = 0;
 
-  // Idempotent. It waits for in-flight API calls and releases all borrowed
-  // buffers before returning. Calls started after shutdown fail closed.
+  // Idempotent. Waits for in-flight calls and borrowed buffers; later calls
+  // fail closed.
   virtual void Shutdown() = 0;
 };
 

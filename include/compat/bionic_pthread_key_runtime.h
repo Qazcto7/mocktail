@@ -31,9 +31,8 @@ constexpr uint32_t kBionicPthreadKeyValidFlag = uint32_t{1} << 31;
 
 using BionicPthreadKeyDestructor = void (*)(void*);
 
-// implementation of Bionic's pthread_key_* ABI. It owns only guest
-// keys registered through the synthetic Android libc.so, while ordinary host
-// code continues to use glibc pthread keys.
+// Implements Bionic's pthread_key_* ABI for keys registered through the
+// synthetic libc.so. Host code continues to use glibc pthread keys.
 class BionicPthreadKeyRuntime {
  public:
   static BionicPthreadKeyRuntime& Instance() noexcept;

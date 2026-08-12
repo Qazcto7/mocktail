@@ -32,9 +32,7 @@ namespace runtime {
 
 class RobloxWindowInputRuntime;
 
-// Narrow seam between the cross-thread JNI queue and its main-thread owners.
-// Production uses RobloxWindowInputRuntime and the SDL window module. Tests
-// provide a deterministic implementation without creating an SDL window.
+// Testable boundary between the JNI queue and its main-thread owners.
 class RobloxTextInputJniBridgeBackend {
  public:
   virtual ~RobloxTextInputJniBridgeBackend() = default;
@@ -59,19 +57,15 @@ class RobloxTextInputJniBridgeBackend {
   virtual bool RequestHideTextInput(uint64_t generation) = 0;
 };
 
-// Connects pseudo-JVM keyboard callbacks to the input runtime without
-// invoking SDL or Roblox native functions from an engine callback thread.
-// Guest callbacks enqueue owned commands; the registered window pre-pump
-// callback drains them on SDL's main thread.
+// Guest callbacks enqueue commands that the SDL pre-pump drains on its main
+// thread.
 class RobloxTextInputJniBridge final {
  public:
   static Status Create(jnivm::VM* vm,
                        std::shared_ptr<RobloxWindowInputRuntime> input_runtime,
                        std::unique_ptr<RobloxTextInputJniBridge>* bridge);
 
-  // Deterministic construction seam. The backend is retained through every
-  // in-flight VM callback and must obey the same main-thread contract as the
-  // production window implementation.
+  // The test backend remains alive through in-flight VM callbacks.
   static Status CreateForTesting(
       jnivm::VM* vm, std::shared_ptr<RobloxTextInputJniBridgeBackend> backend,
       std::unique_ptr<RobloxTextInputJniBridge>* bridge);
@@ -81,8 +75,7 @@ class RobloxTextInputJniBridge final {
   RobloxTextInputJniBridge(const RobloxTextInputJniBridge&) = delete;
   RobloxTextInputJniBridge& operator=(const RobloxTextInputJniBridge&) = delete;
 
-  // Idempotently stops callbacks and clears pending sensitive text before the
-  // input runtime and SDL window are destroyed.
+  // Stops callbacks and clears pending sensitive text before window teardown.
   Status Shutdown();
 
  private:

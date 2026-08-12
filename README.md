@@ -6,11 +6,11 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 Mocktail runs the Android `x86_64` Roblox client on Linux. It provides the
-Android ABI and JNI pieces the client expects, then uses SDL3 and Vulkan or
-OpenGL for the Linux side.
+Android ABI and JNI pieces the client expects, then connects them to SDL3 and
+Vulkan or OpenGL on the Linux side.
 
-Mocktail is still experimental and may break after a Roblox update. It is not
-affiliated with Roblox Corporation or VinegarHQ.
+Mocktail is an independent community project. It is not affiliated with Roblox
+Corporation or VinegarHQ and does not distribute the Roblox client.
 
 ## How it works
 

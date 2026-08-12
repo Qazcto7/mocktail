@@ -1,8 +1,7 @@
 // Copyright 2026 Mocktail Project Authors
 // Apache 2.0 License
 //
-// stubs/liblog_stub.cc — Stub for Android liblog.so.
-// Redirects __android_log_print et al. to stderr on the host.
+// Redirects Android logging calls to stderr on the host.
 
 #include <atomic>
 #include <cstdarg>
@@ -95,7 +94,7 @@ void __android_log_assert(const char* cond, const char* tag,
   __builtin_trap();
 }
 
-int __android_log_buf_write(int /*bufID*/, int prio, const char* tag,
+int __android_log_buf_write(int, int prio, const char* tag,
                              const char* text) {
   return __android_log_write(prio, tag, text);
 }

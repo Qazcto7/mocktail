@@ -28,7 +28,8 @@ inline constexpr std::size_t kMaximumRobloxLaunchUriBytes = 64 * 1024;
 
 // Converts the two Roblox website launch protocols into the owned
 // ExperienceProtocol contract used by the supported game-session pipeline.
-// Browser authentication tickets and tracker identifiers are // discarded: the runtime uses its already validated account identity.
+// Authentication tickets and tracker IDs are discarded; the runtime already
+// has a validated account identity.
 Status ParseRobloxLaunchUri(std::string_view uri,
                             RobloxExperienceLaunchRequest* request);
 

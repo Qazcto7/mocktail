@@ -35,8 +35,8 @@ bool TestVulkanStubEnabled() {
 
 extern "C" {
 
-VkResult vkCreateInstance(const void* /*create_info*/,
-                          const VkAllocationCallbacks* /*allocator*/,
+VkResult vkCreateInstance(const void*,
+                          const VkAllocationCallbacks*,
                           VkInstance* instance) {
   if (!TestVulkanStubEnabled()) {
     if (instance != nullptr) {
@@ -50,12 +50,12 @@ VkResult vkCreateInstance(const void* /*create_info*/,
   return kVkSuccess;
 }
 
-void vkDestroyInstance(VkInstance /*instance*/,
-                       const VkAllocationCallbacks* /*allocator*/) {}
+void vkDestroyInstance(VkInstance,
+                       const VkAllocationCallbacks*) {}
 
-VkResult vkCreateAndroidSurfaceKHR(VkInstance /*instance*/,
-                                   const void* /*create_info*/,
-                                   const VkAllocationCallbacks* /*allocator*/,
+VkResult vkCreateAndroidSurfaceKHR(VkInstance,
+                                   const void*,
+                                   const VkAllocationCallbacks*,
                                    VkSurfaceKHR* surface) {
   if (!TestVulkanStubEnabled()) {
     if (surface != nullptr) {
@@ -69,12 +69,12 @@ VkResult vkCreateAndroidSurfaceKHR(VkInstance /*instance*/,
   return kVkSuccess;
 }
 
-void vkDestroySurfaceKHR(VkInstance /*instance*/, VkSurfaceKHR /*surface*/,
-                         const VkAllocationCallbacks* /*allocator*/) {}
+void vkDestroySurfaceKHR(VkInstance, VkSurfaceKHR,
+                         const VkAllocationCallbacks*) {}
 
-VkResult vkEnumerateInstanceExtensionProperties(const char* /*layer_name*/,
+VkResult vkEnumerateInstanceExtensionProperties(const char*,
                                                 uint32_t* property_count,
-                                                void* /*properties*/) {
+                                                void*) {
   if (property_count != nullptr) {
     *property_count = 0;
   }
@@ -82,19 +82,19 @@ VkResult vkEnumerateInstanceExtensionProperties(const char* /*layer_name*/,
 }
 
 VkResult vkEnumerateInstanceLayerProperties(uint32_t* property_count,
-                                            void* /*properties*/) {
+                                            void*) {
   if (property_count != nullptr) {
     *property_count = 0;
   }
   return kVkSuccess;
 }
 
-PFN_vkVoidFunction vkGetDeviceProcAddr(VkDevice /*device*/,
-                                       const char* /*name*/) {
+PFN_vkVoidFunction vkGetDeviceProcAddr(VkDevice,
+                                       const char*) {
   return nullptr;
 }
 
-PFN_vkVoidFunction vkGetInstanceProcAddr(VkInstance /*instance*/,
+PFN_vkVoidFunction vkGetInstanceProcAddr(VkInstance,
                                          const char* name) {
   if (name == nullptr) {
     return nullptr;

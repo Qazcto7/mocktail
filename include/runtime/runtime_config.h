@@ -78,7 +78,7 @@ std::optional<NetworkProxyConfig> ParseNetworkProxyConfig(
     std::string_view host, std::string_view port);
 std::string BuildNetworkProxyUrl(const NetworkProxyConfig& proxy);
 
-// Immutable, supported runtime options. Experimental MOCKTAIL_PATCH_* knobs
+// Immutable, supported runtime options. Advanced MOCKTAIL_PATCH_* controls
 // intentionally do not belong here; they remain isolated in the legacy path.
 class RuntimeConfig {
  public:

@@ -82,7 +82,7 @@ class ControlledSink final : public AudioSink {
     return Status::Ok();
   }
 
-  Status SetGain(float /*linear_gain*/) override { return Status::Ok(); }
+  Status SetGain(float) override { return Status::Ok(); }
   Status Flush() override { return Status::Ok(); }
 
   Status Clear() override {

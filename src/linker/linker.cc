@@ -6,11 +6,7 @@
 //
 //     http://www.apache.org/licenses/LICENSE-2.0
 //
-// src/linker/linker.cc — ELF loader implementation.
-//
-// Stage A (no mcpelauncher-linker): delegates to host dlopen/dlsym.
-// Stage B (MOCKTAIL_USE_BIONIC_LINKER=1): delegates to mcpelauncher-linker
-//         which loads Bionic-ABI ELF files without Glibc version conflicts.
+// Without the Bionic linker, loading falls back to host dlopen/dlsym.
 
 #include "linker/linker.h"
 
@@ -50,16 +46,13 @@ namespace linker {
 
 namespace {
 
-// Global alias → handle map maintained across all LoadLibrary calls.
 std::unordered_map<std::string, LibraryHandle> g_symbol_table;
 
-// New registrations retain symbol ownership per Android SONAME. The legacy
-// global map remains isolated below until src/main.cc is migrated.
+// Synthetic exports retain ownership per Android SONAME.
 std::unordered_map<std::string, SymbolMap> g_synthetic_symbols;
 std::unordered_map<std::string, LibraryHandle> g_synthetic_libraries;
 std::unordered_set<LibraryHandle> g_synthetic_handles;
 
-// Compatibility symbol map used only by RegisterSymbol/LoadLibrary.
 SymbolMap g_legacy_bionic_symbols;
 
 // Keep string memory alive for Bionic linker sonames to avoid dangling pointers.
@@ -121,11 +114,8 @@ int BionicDlcloseBoundary(void* handle) {
 char* BionicDlerrorBoundary() { return ::linker::dlerror(); }
 #endif
 
-// The legacy startup path still discovers most imports in one untyped map.
-// Bionic libc APIs with host-incompatible signatures or integer values must
-// have exactly one owner, synthetic libc.so. Re-exporting those host functions
-// from an earlier DT_NEEDED SONAME lets the guest bind to glibc before it
-// reaches libc.so.
+// Host-incompatible Bionic APIs belong only to synthetic libc.so. Exporting
+// them from an earlier dependency could bind the guest to glibc instead.
 bool IsBionicLibcOnlySymbol(std::string_view symbol) {
   static constexpr std::string_view kStdioSymbols[] = {
       "__fread_chk", "__fwrite_chk", "__sF",   "clearerr",
@@ -188,8 +178,6 @@ void RemoveHandleFromRegistry(LibraryHandle handle) {
 }
 
 }  // namespace
-
-// Public API
 
 void RegisterSymbol(const std::string& name, void* addr) {
   std::lock_guard<std::mutex> lock(g_registry_mutex);
@@ -351,9 +339,8 @@ void RegisterBionicHostLibcRuntimeForLibc() {
   RegisterSyntheticSymbol(
       "libc.so", "gethostbyname",
       reinterpret_cast<void*>(mocktail_bionic_gethostbyname));
-  // The preserved startup path publishes older DNS wrappers through its
-  // legacy global map. Replace those addresses before libc.so snapshots that
-  // map so every supported payload crosses the upload deny boundary.
+  // Replace legacy DNS wrappers before libc.so snapshots the global map, so
+  // every payload crosses the upload deny boundary.
   RegisterSymbol("getaddrinfo",
                  reinterpret_cast<void*>(mocktail_bionic_getaddrinfo));
   RegisterSymbol("freeaddrinfo",
@@ -375,9 +362,8 @@ void RegisterBionicHostLibcRuntimeForLibc() {
                           reinterpret_cast<void*>(mocktail_bionic_mallinfo));
   RegisterSyntheticSymbol("libc.so", "strerror_r",
                           reinterpret_cast<void*>(mocktail_bionic_strerror_r));
-  // The preserved startup path scans libroblox imports through the legacy
-  // global map before relocation. Publish the same address there so it
-  // cannot auto-register glibc's GNU char*-returning strerror_r instead.
+  // Publish this before relocation to prevent binding glibc's incompatible
+  // GNU char*-returning strerror_r.
   RegisterSymbol("strerror_r",
                  reinterpret_cast<void*>(mocktail_bionic_strerror_r));
   RegisterSyntheticSymbol("libc.so", "strtoll_l",
@@ -643,9 +629,7 @@ LibraryHandle LoadLibrary(const std::string& real_path,
     return OpenAndroidLibrary(real_path, host_alias);
   }
 
-  // The legacy composition already reaches this per-SONAME boundary for
-  // every Android dependency. Register host adapters here so libc.so owns the
-  // guest ABI without adding calls to the preserved legacy startup TU.
+  // Register adapters here so libc.so owns the guest ABI per SONAME.
   if (real_path == "libc.so") {
     RegisterBionicAtForkRuntimeForLibc();
     RegisterBionicHostLibcRuntimeForLibc();

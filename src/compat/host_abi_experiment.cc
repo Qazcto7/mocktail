@@ -200,7 +200,7 @@ InstallHostAbiExperiment(uintptr_t library_base, const HostAbiProfile &profile,
   result.uses_native_mimalloc = !options.install_allocator_bridges;
   if (library_base == 0 || profile.bridge_entry_count == 0 ||
       profile.bridge_entry_count > profile.bridge_entries.size()) {
-    result.error = "invalid host ABI experiment profile";
+    result.error = "invalid host ABI profile";
     return result;
   }
 
@@ -240,7 +240,7 @@ InstallHostAbiExperiment(uintptr_t library_base, const HostAbiProfile &profile,
   std::cout << std::flush;
   result.installed = ok;
   if (!ok) {
-    result.error = "one or more host ABI experiment actions failed";
+    result.error = "one or more host ABI actions failed";
   }
   return result;
 }

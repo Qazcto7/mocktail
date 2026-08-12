@@ -36,7 +36,7 @@ struct QueueCallbackProbe {
   int calls = 0;
 };
 
-void QueueCallback(abi::AndroidSimpleBufferQueue /*queue*/, void* context) {
+void QueueCallback(abi::AndroidSimpleBufferQueue, void* context) {
   auto* probe = static_cast<QueueCallbackProbe*>(context);
   {
     std::lock_guard<std::mutex> lock(probe->mutex);

@@ -264,8 +264,8 @@ std::string CommandLineUsage(const std::string& program_name) {
          "and\n"
       << "  uses its native sign-in flow. New credentials are stored "
          "privately.\n\n"
-      << "Debug and experimental toggles remain available as MOCKTAIL_* env "
-         "vars.\n";
+      << "Additional runtime options are available as MOCKTAIL_* environment "
+         "variables.\n";
   return usage.str();
 }
 

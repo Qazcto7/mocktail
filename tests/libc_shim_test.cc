@@ -12,13 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// tests/libc_shim_test.cc — Unit tests for the Bionic → Glibc path shim.
-//
-// Tests cover:
-//   1. Path translation with registered prefixes.
-//   2. Unchanged return for unregistered paths.
-//   3. Multiple prefix registrations (longest-prefix matching).
-
 #include "libc_shim/libc_shim.h"
 
 #include <atomic>
@@ -39,7 +32,6 @@ void* CountingGuestAllocator(size_t size) {
   return std::malloc(size);
 }
 
-// Fixture: clears all path mappings before and after each test.
 class LibcShimTest : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -79,9 +71,6 @@ class LibcShimTest : public ::testing::Test {
   std::string original_asset_path_override_;
 };
 
-// TranslatePath — basic mapping
-
-// An Android path with a registered prefix is correctly translated.
 TEST_F(LibcShimTest, TranslatesRegisteredPrefix) {
   RegisterPathMapping("/data/user/0/com.roblox.client",
                       "/home/user/.var/app/org.vinegarhq.Sober/data/sober");
@@ -93,7 +82,6 @@ TEST_F(LibcShimTest, TranslatesRegisteredPrefix) {
   EXPECT_EQ(TranslatePath(input), expected);
 }
 
-// A path with no registered prefix is returned unchanged.
 TEST_F(LibcShimTest, UnregisteredPathIsReturnedUnchanged) {
   const std::string input = "/proc/self/maps";
   EXPECT_EQ(TranslatePath(input), input);
@@ -111,14 +99,10 @@ TEST_F(LibcShimTest, TranslatesRelativeRobloxAssetPrefixes) {
             "/payload/assets/shaders/mobile.pack");
 }
 
-// An empty path is returned unchanged.
 TEST_F(LibcShimTest, EmptyPathIsReturnedUnchanged) {
   EXPECT_EQ(TranslatePath(""), "");
 }
 
-// TranslatePath — edge cases
-
-// Exact prefix match (path == prefix, no trailing component) is translated.
 TEST_F(LibcShimTest, ExactPrefixMatchIsTranslated) {
   RegisterPathMapping("/data/user/0/com.roblox.client",
                       "/host/sober");
@@ -126,12 +110,10 @@ TEST_F(LibcShimTest, ExactPrefixMatchIsTranslated) {
   EXPECT_EQ(TranslatePath("/data/user/0/com.roblox.client"), "/host/sober");
 }
 
-// A path that starts with a substring of the registered prefix is NOT
-// translated (e.g. "/data/user" must not match "/data/user/0/...").
+// Prefix matching stops at path-component boundaries.
 TEST_F(LibcShimTest, ShortPathIsNotTranslated) {
   RegisterPathMapping("/data/user/0/com.roblox.client", "/host/sober");
 
-  // Shorter path: no match expected.
   EXPECT_EQ(TranslatePath("/data/user"), "/data/user");
 }
 
@@ -142,9 +124,6 @@ TEST_F(LibcShimTest, SimilarPrefixWithoutPathBoundaryIsNotTranslated) {
             "/data/user/0/com.roblox.client.beta/cache");
 }
 
-// RegisterPathMapping — multiple registrations
-
-// Two different prefixes can coexist and each translates its own paths.
 TEST_F(LibcShimTest, MultipleRegistrationsCoexist) {
   RegisterPathMapping("/data/user/0/com.roblox.client", "/host/sober");
   RegisterPathMapping("/sdcard/Android/data/com.roblox.client",
@@ -305,9 +284,6 @@ TEST_F(LibcShimTest, RealpathUsesConfiguredGuestAllocatorForOwnedResult) {
   std::free(result);
 }
 
-// ClearPathMappings
-
-// After ClearPathMappings, previously registered prefixes no longer match.
 TEST_F(LibcShimTest, ClearRemovesAllMappings) {
   RegisterPathMapping("/data/user/0/com.roblox.client", "/host/sober");
   ClearPathMappings();

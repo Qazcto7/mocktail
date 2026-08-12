@@ -220,7 +220,7 @@ void SetError(EGLint error) {
 
 extern "C" {
 
-EGLDisplay eglGetDisplay(EGLNativeDisplayType /*display_id*/) {
+EGLDisplay eglGetDisplay(EGLNativeDisplayType) {
   EGLDisplay display = ActiveDisplay();
   SetError(display != nullptr ? kEglSuccess : kEglNotInitialized);
   return display;
@@ -250,7 +250,7 @@ EGLBoolean eglBindAPI(EGLenum api) {
   return kEglTrue;
 }
 
-EGLBoolean eglChooseConfig(EGLDisplay display, const EGLint* /*attrib_list*/,
+EGLBoolean eglChooseConfig(EGLDisplay display, const EGLint*,
                            EGLConfig* configs, EGLint config_size,
                            EGLint* num_config) {
   if (!IsActiveDisplay(display)) {
@@ -292,7 +292,7 @@ EGLBoolean eglGetConfigAttrib(EGLDisplay display, EGLConfig config,
 
 EGLSurface eglCreateWindowSurface(EGLDisplay display, EGLConfig config,
                                   EGLNativeWindowType native_window,
-                                  const EGLint* /*attrib_list*/) {
+                                  const EGLint*) {
   if (!IsActiveDisplay(display) || config == nullptr ||
       config != ActiveConfig()) {
     SetError(kEglBadDisplay);
@@ -314,7 +314,7 @@ EGLSurface eglCreateWindowSurface(EGLDisplay display, EGLConfig config,
 }
 
 EGLSurface eglCreatePbufferSurface(EGLDisplay display, EGLConfig config,
-                                   const EGLint* /*attrib_list*/) {
+                                   const EGLint*) {
   if (!IsActiveDisplay(display) || config == nullptr ||
       config != ActiveConfig()) {
     SetError(kEglBadDisplay);
@@ -329,8 +329,8 @@ EGLSurface eglCreatePbufferSurface(EGLDisplay display, EGLConfig config,
 }
 
 EGLContext eglCreateContext(EGLDisplay display, EGLConfig config,
-                            EGLContext /*share_context*/,
-                            const EGLint* /*attrib_list*/) {
+                            EGLContext,
+                            const EGLint*) {
   if (!IsActiveDisplay(display) || config == nullptr ||
       config != ActiveConfig()) {
     SetError(kEglBadDisplay);
@@ -427,7 +427,7 @@ EGLBoolean eglSwapBuffers(EGLDisplay display, EGLSurface surface) {
   return swapped ? kEglTrue : kEglFalse;
 }
 
-EGLBoolean eglSwapInterval(EGLDisplay display, EGLint /*interval*/) {
+EGLBoolean eglSwapInterval(EGLDisplay display, EGLint) {
   if (!IsActiveDisplay(display) || g_current_context == nullptr) {
     SetError(kEglBadDisplay);
     return kEglFalse;

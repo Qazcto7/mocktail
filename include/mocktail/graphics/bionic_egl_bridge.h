@@ -12,14 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Exact-path loader for Mocktail's Bionic libEGL adapter.
-//
-// A host EGL implementation may have the Android SONAME "libEGL.so" too
-// (Chromium ANGLE does). Loading by SONAME after SDL/ANGLE starts can then
-// return the host implementation and make Android code create a second EGL
-// surface for one native window. This adapter opens the Mocktail
-// bridge beside the executable and exposes only its EGL exports for the
-// synthetic Bionic libEGL.so dependency.
+// Loading by SONAME can select host ANGLE instead of the Bionic adapter. This
+// bridge therefore opens the library beside the executable by exact path.
 
 #ifndef MOCKTAIL_GRAPHICS_BIONIC_EGL_BRIDGE_H_
 #define MOCKTAIL_GRAPHICS_BIONIC_EGL_BRIDGE_H_
@@ -37,9 +31,7 @@ public:
   BionicEglBridge(const BionicEglBridge &) = delete;
   BionicEglBridge &operator=(const BionicEglBridge &) = delete;
 
-  // Loads $ORIGIN/libEGL.so by its exact absolute path. On success, the
-  // handle intentionally remains live for the process lifetime because the
-  // Bionic linker retains the exported function addresses.
+  // The handle stays live because the Bionic linker retains its exports.
   bool Load();
 
   bool IsLoaded() const { return handle_ != nullptr; }

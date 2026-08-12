@@ -59,7 +59,7 @@ VERSION_MARKER_PATTERN = re.compile(
 
 
 class ProviderError(RuntimeError):
-    """A safe, user-facing provider failure."""
+    """Raised when a provider response cannot be downloaded or validated."""
 
 
 def _has_version_record(metadata: bytes, version: str) -> bool:

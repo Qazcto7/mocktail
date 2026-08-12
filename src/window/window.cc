@@ -12,13 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// src/window/window.cc — SDL3 window + real EGL context.
-//
-// Creates a real OS window via SDL3 and obtains a real EGL display + context
-// from the selected host EGL/GLES driver (system GLVND or ANGLE/Vulkan).
-// libroblox.so's EGL calls are intercepted in libegl_stub and redirected to
-// these handles so the game engine renders into a real window.
-
 #include "window/window.h"
 
 #include <SDL3/SDL.h>
@@ -55,7 +48,7 @@
 namespace mocktail {
 namespace window {
 
-// EGL type declarations (no system EGL headers to avoid conflicts with stubs)
+// Local EGL declarations avoid conflicts with the stub headers.
 
 using EGLDisplay = void*;
 using EGLConfig = void*;
@@ -98,8 +91,6 @@ static constexpr EGLDisplay EGL_NO_DISPLAY = nullptr;
 static constexpr EGLContext EGL_NO_CONTEXT = nullptr;
 static constexpr EGLSurface EGL_NO_SURFACE = nullptr;
 
-// EGL function pointer types
-
 using PFN_eglGetDisplay = EGLDisplay (*)(EGLNativeDisplayType);
 using PFN_eglInitialize = EGLBoolean (*)(EGLDisplay, EGLint*, EGLint*);
 using PFN_eglBindAPI = EGLBoolean (*)(EGLenum);
@@ -120,8 +111,6 @@ using PFN_eglDestroyContext = EGLBoolean (*)(EGLDisplay, EGLContext);
 using PFN_eglDestroySurface = EGLBoolean (*)(EGLDisplay, EGLSurface);
 using PFN_eglTerminate = EGLBoolean (*)(EGLDisplay);
 using PFN_eglGetProcAddress = __eglMustCastFP (*)(const char*);
-
-// Module state
 
 struct WindowState {
   SDL_Window* sdl_window = nullptr;
@@ -551,10 +540,8 @@ void ConfigureGraphicsBackendBeforeSDL() {
   SDL_SetHint(SDL_HINT_VIDEO_FORCE_EGL, "1");
 
   if (ShouldUseAngleVulkanBackend() || ShouldUseNativeVulkanBackend()) {
-    // Mesa's implicit device-select layer is useful on desktop, but it can
-    // crash when ANGLE/Roblox initialise Vulkan through the Android compat
-    // path.  The layer's JSON advertises NODEVICE_SELECT=1 as the supported
-    // opt-out, so use the real Vulkan loader/ICDs without that implicit layer.
+    // Mesa's implicit device selector can crash in the Android Vulkan path;
+    // its supported opt-out is NODEVICE_SELECT=1.
     setenv("NODEVICE_SELECT", "1", 0);
     setenv("DISABLE_LAYER_MESA_ANTI_LAG", "1", 0);
   }
@@ -563,8 +550,7 @@ void ConfigureGraphicsBackendBeforeSDL() {
       ResolveConfiguredVideoDriverChoice();
   const char* video_driver = VideoDriverChoiceName(video_driver_choice);
   if (video_driver != nullptr) {
-    // ResolveConfiguredVideoDriverChoice already preserves every non-empty
-    // user override. Overwrite only an inherited empty variable here.
+    // Preserve any non-empty user override.
     setenv("SDL_VIDEODRIVER", video_driver, 1);
     SDL_SetHint(SDL_HINT_VIDEO_DRIVER, video_driver);
   }
@@ -654,9 +640,7 @@ void* QueryNativeWindowHandle() {
     return wl_egl_win;
   }
 
-  // Direct Vulkan creates VkSurfaceKHR from SDL_Window rather than an EGL
-  // window. Its SDL object is therefore the stable host-native identity when
-  // the backend exposes no EGL-specific Wayland handle.
+  // Direct Vulkan uses SDL_Window as its stable native identity.
   return g_state.direct_vulkan ? g_state.sdl_window : nullptr;
 }
 
@@ -865,8 +849,6 @@ bool RetryWithAutoAngleFallback(int width, int height, const char* title,
   return Init(width, height, title);
 }
 
-// Init
-
 Status ConfigureWindowStatePersistence(const std::filesystem::path& path) {
   if (g_state.initialised) {
     return Status::Error(
@@ -893,8 +875,7 @@ bool Init(int width, int height, const char* title) {
     return false;
   }
 
-  // The same-surface Vulkan overlay renders SDL_EVENT_TEXT_EDITING
-  // composition text. Candidate lists remain owned by the platform IME.
+  // The Vulkan overlay renders preedit text; the platform IME owns candidates.
   SDL_SetHint(SDL_HINT_IME_IMPLEMENTED_UI, "composition");
 
   g_state.state_persistence_active =
@@ -967,15 +948,12 @@ bool Init(int width, int height, const char* title) {
     g_state.direct_vulkan = true;
     g_state.initialised = true;
     ResolveNativeWindowHandle();
-    // The Android handle is opaque to the guest-facing adapter. Keep it
-    // non-null even when SDL does not expose an EGL-specific Wayland handle;
-    // SDL_Vulkan_CreateSurface uses sdl_window directly.
+    // Direct Vulkan needs a non-null opaque Android handle even without an
+    // EGL-specific Wayland handle.
     if (g_state.native_window == nullptr) {
       g_state.native_window = g_state.sdl_window;
     }
-    // Wayland does not configure a surface (and Vulkan reports undefined
-    // currentExtent) until the window is mapped. Direct Vulkan therefore
-    // cannot use the EGL-era "show on first swap" policy.
+    // Wayland reports undefined currentExtent until the window is mapped.
     if (!SDL_ShowWindow(g_state.sdl_window)) {
       fprintf(stderr, "  [window] SDL_ShowWindow failed: %s\n", SDL_GetError());
       SDL_DestroyWindow(g_state.sdl_window);
@@ -1062,7 +1040,6 @@ bool Init(int width, int height, const char* title) {
             width, height, title ? title : "(null)");
   }
 
-  // ----- SDL3 init -----
   if (!SDL_Init(SDL_INIT_VIDEO)) {
     fprintf(stderr, "  [window] SDL_Init failed: %s\n", SDL_GetError());
     return false;
@@ -1073,10 +1050,9 @@ bool Init(int width, int height, const char* title) {
 
   ConfigureGraphicsBackendAfterSDLInit();
 
-  // Keep the hint set in case SDL rechecks it during context creation.
+  // SDL may recheck this hint during context creation.
   SDL_SetHint(SDL_HINT_VIDEO_FORCE_EGL, "1");
 
-  // Configure SDL3 GL context for OpenGL ES 3.0 / EGL
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
@@ -1088,7 +1064,6 @@ bool Init(int width, int height, const char* title) {
   SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
   SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-  // Create the window
   SDL_WindowFlags window_flags =
       SDL_WINDOW_OPENGL | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_RESIZABLE;
   if (g_state.state_persistence_active && g_state.persisted_window.fullscreen) {
@@ -1119,11 +1094,9 @@ bool Init(int width, int height, const char* title) {
   fprintf(stderr, "  [window] SDL3 window created (%dx%d)\n", width, height);
   ShowWindowAccordingToStartupMode();
 
-  // Create SDL GL/EGL context
   SDL_GLContext sdl_context = SDL_GL_CreateContext(g_state.sdl_window);
   if (!sdl_context && IsEnabledEnv("MOCKTAIL_ALLOW_GLES2_RESEARCH")) {
-    // Current production Roblox client settings reject GLES2. Retain this
-    // only as an explicit research probe for old payloads.
+    // Current Roblox clients reject GLES2; this path supports older payloads.
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
     sdl_context = SDL_GL_CreateContext(g_state.sdl_window);
   }
@@ -1145,7 +1118,6 @@ bool Init(int width, int height, const char* title) {
     return CreateSoftwareWaitingWindow(width, height, title);
   }
 
-  // Make the context current to initialize internal structures
   if (!SDL_GL_MakeCurrent(g_state.sdl_window, sdl_context)) {
     fprintf(stderr, "  [window] SDL_GL_MakeCurrent failed: %s\n",
             SDL_GetError());
@@ -1198,7 +1170,6 @@ bool Init(int width, int height, const char* title) {
     return CreateSoftwareWaitingWindow(width, height, title);
   }
 
-  // Query EGL handles from SDL3
   g_state.egl_display = SDL_EGL_GetCurrentDisplay();
   g_state.egl_config = SDL_EGL_GetCurrentConfig();
   g_state.egl_surface = SDL_EGL_GetWindowSurface(g_state.sdl_window);
@@ -1237,7 +1208,7 @@ bool Init(int width, int height, const char* title) {
 
   ResolveNativeWindowHandle();
 
-  // Unbind context on main thread so that engine thread can bind it
+  // The render thread binds the context after the main thread releases it.
   SDL_GL_MakeCurrent(g_state.sdl_window, nullptr);
   if (WindowTraceEnabled()) {
     fprintf(stderr, "  [window] SDL_GL_MakeCurrent(nullptr) on main thread\n");
@@ -1259,8 +1230,6 @@ bool Init(int width, int height, const char* title) {
   return true;
 }
 
-// MakeCurrentOnThread — call from the engine rendering thread to bind the
-// EGL context on that thread.
 bool MakeCurrentOnThread() {
   if (!g_state.initialised || !g_state.egl_context) {
     if (WindowTraceEnabled()) {
@@ -1298,8 +1267,6 @@ bool ReleaseCurrentOnThread() {
   }
   return true;
 }
-
-// Public accessors
 
 bool IsInitialised() { return g_state.initialised; }
 bool HasPresentedFrame() { return g_real_swap_count.load() > 0; }
@@ -1670,9 +1637,7 @@ void MaybeQueueInputReadinessSequence() {
   SDL_Event focus{};
   focus.type = SDL_EVENT_WINDOW_FOCUS_GAINED;
   focus.window.windowID = window_id;
-  // A non-interactive readiness runner may not receive compositor focus. Send
-  // the same focus event before its opt-in click; production runs never
-  // enter this path unless MOCKTAIL_INPUT_TEST_CLICK is exactly 1.
+  // An opt-in readiness click may need a synthetic focus event.
   const bool needs_focus =
       (SDL_GetWindowFlags(g_state.sdl_window) & SDL_WINDOW_INPUT_FOCUS) == 0;
 
@@ -1759,8 +1724,7 @@ bool RequestFullscreenState(bool fullscreen, const char* reason) {
   const bool current_fullscreen =
       (SDL_GetWindowFlags(g_state.sdl_window) & SDL_WINDOW_FULLSCREEN) != 0;
   if (current_fullscreen != fullscreen) {
-    // Capture the normal restore rectangle before SDL replaces it with the
-    // monitor extent.
+    // Save the restore rectangle before SDL replaces it with monitor bounds.
     CaptureWindowState();
     if (!SDL_SetWindowFullscreen(g_state.sdl_window, fullscreen)) {
       fprintf(stderr, "  [fullscreen] SDL request failed: %s\n",

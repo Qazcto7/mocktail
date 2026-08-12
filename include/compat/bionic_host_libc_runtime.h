@@ -22,11 +22,8 @@
 
 namespace mocktail::compat {
 
-// Android x86-64's malloc.h declares ten size_t fields in this order. This is
-// not the host's struct mallinfo: glibc's legacy type uses int,
-// and musl exposes no allocator-telemetry API. On hosts without a compatible
-// size_t-based telemetry API, BionicMallinfo returns an all-zero "unknown"
-// snapshot. Callers must not interpret that fallback as proof of zero usage.
+// Android uses size_t fields here; glibc uses int and musl has no equivalent.
+// An all-zero fallback means unknown, not zero usage.
 struct BionicMallinfoSnapshot {
   size_t arena = 0;
   size_t ordblks = 0;
@@ -44,10 +41,7 @@ struct BionicLocaleState;
 using BionicLocale = BionicLocaleState*;
 using BionicThreadDestructor = void (*)(void*);
 
-// Do not use the host socket structs here. Although glibc happens to match
-// Android LP64, musl declares cmsg_len and msg_controllen as 32-bit socklen_t.
-// Bionic x86-64 uses size_t for both, as audited from the vendored
-// bionic/libc/include/sys/socket.h.
+// Bionic uses size_t where musl uses 32-bit socklen_t.
 struct BionicMessageHeader {
   void* msg_name = nullptr;
   uint32_t msg_namelen = 0;
@@ -64,35 +58,24 @@ struct BionicControlMessageHeader {
   int cmsg_type = 0;
 };
 
-// Implements Android's exported CMSG_NXTHDR helper over the explicit Bionic
-// x86-64 msghdr/cmsghdr layout above. Malformed or truncated control buffers
-// fail closed with nullptr.
+// Malformed or truncated control buffers return nullptr.
 BionicControlMessageHeader* BionicCmsgNextHeader(
     BionicMessageHeader* message, BionicControlMessageHeader* current) noexcept;
 
-// Registers one destructor for the current thread using libstdc++'s Itanium
-// C++ ABI implementation. That implementation is present on both supported
-// glibc and musl toolchains and preserves destructor execution at thread exit.
+// Uses libstdc++'s Itanium ABI on both supported libc implementations.
 int BionicCxaThreadAtExit(BionicThreadDestructor destructor, void* argument,
                           void* dso_handle) noexcept;
 
-// Fills the complete buffer from the Linux kernel RNG. The implementation
-// falls back to /dev/urandom only when getrandom is unavailable or blocked and
-// aborts rather than returning predictable or partially initialized bytes.
+// Falls back to /dev/urandom; never returns partial or predictable bytes.
 void BionicArc4RandomBuffer(void* buffer, size_t size) noexcept;
 
 BionicMallinfoSnapshot BionicMallinfo() noexcept;
 bool BionicMallinfoHasHostTelemetry() noexcept;
 
-// Formats one Linux errno value using Bionic's POSIX strerror_r contract.
-// Unlike glibc's GNU variant, success is reported as zero; truncation returns
-// -1 and sets errno to ERANGE while preserving the caller's errno on success.
+// POSIX strerror_r contract: zero on success, -1/ERANGE on truncation.
 int BionicStrError(int error_number, char* buffer, size_t buffer_size) noexcept;
 
-// Bionic supports only C and C.UTF-8, whose integer parsing is identical. A
-// host C locale is installed only for the duration of each call, so ambient
-// process locale cannot change guest parsing and a Bionic locale pointer is
-// never mistaken for an incompatible host locale_t.
+// Parses under host C locale without passing an incompatible Bionic locale_t.
 long long BionicStrToLongLongLocale(const char* text, char** end, int base,
                                     BionicLocale locale) noexcept;
 unsigned long long BionicStrToUnsignedLongLongLocale(

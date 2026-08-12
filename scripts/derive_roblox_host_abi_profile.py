@@ -13,12 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Derive a fail-closed HostAbi profile from one exact approved payload.
+"""Build a HostAbi profile for one approved payload without running it.
 
-The analyzer never executes guest code and never marks a payload supported.
-It accepts only an exact reference sidecar bound to the reference ELF digest,
-matches native boundaries structurally, and emits an experimental manifest for
-an isolated updater probation run.
+The reference sidecar must match the reference ELF digest. The resulting
+manifest is meant for an updater probation run; it does not mark the payload as
+supported.
 """
 
 from __future__ import annotations
@@ -40,7 +39,7 @@ from typing import Any, Iterator, Sequence
 try:
     import capstone
     from capstone import x86 as capstone_x86
-except ImportError:  # The CLI turns this into one explicit fail-closed error.
+except ImportError:
     capstone = None
     capstone_x86 = None
 
@@ -107,7 +106,7 @@ PRIMARY_TOOLCHAIN_MARKERS = (
 
 
 class AnalyzerError(RuntimeError):
-    """One deterministic fail-closed analysis error."""
+    """Raised when HostAbi analysis rejects an input."""
 
 
 @dataclass(frozen=True)
@@ -1636,9 +1635,7 @@ def analyze(arguments: argparse.Namespace) -> tuple[dict[str, Any], dict[str, An
 
 def parse_arguments(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description=(
-            "Derive an exact experimental Roblox HostAbi sidecar for isolated probation"
-        )
+        description="Derive a probationary Roblox HostAbi sidecar"
     )
     parser.add_argument("--reference-lib", required=True, metavar="REF")
     parser.add_argument("--reference-profile", required=True, metavar="REFJSON")

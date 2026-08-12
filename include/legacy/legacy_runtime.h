@@ -86,7 +86,7 @@ class RuntimeDependencies final {
   ShutdownBeforePlatformCallback shutdown_before_platform_ = nullptr;
 };
 
-// Transitional reverse-engineering runtime. New subsystems must expose // interfaces and be composed outside this implementation.
+// Transitional runtime kept for the reverse-engineered startup path.
 int Run(const runtime::CommandLineOptions& options,
         RuntimeDependencies dependencies);
 

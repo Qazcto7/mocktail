@@ -22,8 +22,7 @@
 namespace mocktail {
 namespace runtime {
 
-// adapter kept outside the research runtime. The opaque context must be
-// the production jnivm::VM owned by the startup composition.
+// The opaque context must be the jnivm::VM owned by startup composition.
 bool SetJnivmPlatformWebCallbacks(
     void* context, std::shared_ptr<void> callback_context,
     void (*on_data_model_notification)(void*, JNIEnv*, jstring, jstring),

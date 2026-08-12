@@ -15,4 +15,4 @@ __attribute__((constructor)) void FailIfLoaded() {
 
 }  // namespace
 
-extern "C" int JNI_OnLoad(void* /*vm*/, void* /*reserved*/) { return 0x10006; }
+extern "C" int JNI_OnLoad(void*, void*) { return 0x10006; }

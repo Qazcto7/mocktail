@@ -23,14 +23,10 @@
 
 namespace mocktail::audio {
 
-// org.fmod.AudioDevice is an ordinary Java object. The JNI boundary passes
-// its jobject value through this opaque key without making the audio layer
-// depend on JNI headers or retain a JNI reference.
+// Opaque jobject identity; the audio layer never retains a JNI reference.
 using FmodJavaAudioDeviceIdentity = const void*;
 
-// A factory returns a paused sink with exactly source_spec. Production uses
-// SDL3; tests can inject a deterministic sink without opening a host device.
-// factory_context must remain valid until the runtime is shut down.
+// Returns a paused sink. factory_context must outlive the runtime.
 using FmodJavaAudioSinkFactory = Status (*)(
     void* factory_context, const PcmSpec& source_spec,
     std::unique_ptr<AudioSink>* sink);
@@ -44,8 +40,7 @@ struct FmodJavaAudioRuntimeOptions {
   std::size_t max_buffer_bytes_per_device = 64U * 1024U * 1024U;
 };
 
-// Content-free counters suitable for readiness logs. They never expose PCM,
-// JNI identities, or guest pointers.
+// Contains no PCM, JNI identities, or guest pointers.
 struct FmodJavaAudioRuntimeStats {
   std::uint64_t init_attempts = 0;
   std::uint64_t initialized_devices = 0;
@@ -65,18 +60,9 @@ struct FmodJavaAudioRuntimeStats {
   std::size_t pending_bytes = 0;
 };
 
-// Thread-safe implementation of the APK's exact Java playback contract:
-//
-//   AudioDevice.init(channels, sampleRate, blockSize, blockCount)Z
-//   AudioDevice.write(byte[], length)V
-//   AudioDevice.close()V
-//
-// Init() allocates blockCount fixed slots of blockSize frames. Every successful
-// Write() copies guest bytes synchronously into one slot, then lends that stable
-// storage to AudioSink without a second PCM copy. FmodJavaAudioRuntime performs
-// no per-write allocation for buffer storage or release ownership. A producer
-// waits with AudioTrack-style blocking backpressure when all slots are borrowed
-// instead of growing memory or dropping a block.
+// Fixed slots avoid per-write allocation. Write copies into a slot, then lends
+// it to AudioSink; a full pool applies blocking backpressure instead of
+// growing memory or dropping audio.
 class FmodJavaAudioRuntime final {
  public:
   explicit FmodJavaAudioRuntime(
@@ -94,8 +80,7 @@ class FmodJavaAudioRuntime final {
 
   FmodJavaAudioRuntimeStats GetStats() const;
 
-  // Idempotent. Prevents new devices/writes, shuts down every sink, and waits
-  // for every borrowed owned buffer to be released before returning.
+  // Waits for every borrowed buffer to be released.
   void Shutdown();
 
  private:

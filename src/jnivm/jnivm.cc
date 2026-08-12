@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// src/jnivm/jnivm.cc — Implementation of the Pseudo Java Native Interface VM.
-
 #include "jnivm/jnivm.h"
 
 #include <algorithm>
@@ -34,8 +32,6 @@
 #include <unordered_set>
 
 namespace jnivm {
-
-// Class implementation
 
 void Class::RegisterMethod(const std::string& method_name,
                            const std::string& signature,
@@ -71,7 +67,6 @@ thread_local JNIEnv* g_thread_local_env = nullptr;
 thread_local JNIEnv g_thread_env_storage = {};
 thread_local VM* g_thread_vm_instance = nullptr;
 
-// Thread-local pointer to the active VM instance for JNI callback resolution.
 VM* g_vm_instance = nullptr;
 std::recursive_mutex g_jni_state_mutex;
 
@@ -495,8 +490,7 @@ RobloxAuthIdentity ResearchRobloxIdentityFromEnvironment() {
     return identity;
   }
 
-  // Temporary research-only compatibility path. Production startup should
-  // inject a resolved identity through VM::SetRobloxAuthIdentity instead.
+  // Normal startup injects identity through VM::SetRobloxAuthIdentity.
   identity.user_id = static_cast<int64_t>(parsed);
   const char* username = std::getenv("MOCKTAIL_ROBLOX_USERNAME");
   if (username && username[0] != '\0') {
@@ -557,8 +551,7 @@ std::shared_ptr<Class> ClassFromJClass(jclass clazz) {
   return FallbackClassForName(cls->GetName());
 }
 
-// Stores a shared_ptr into my_segment, keeping it alive in g_segment_owners.
-// Returns the encoded segment-table handle cast to jclass.
+// g_segment_owners keeps the encoded class handle alive.
 static jclass StoreClass(std::shared_ptr<Class> cls) {
   std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
   Class* raw_ptr = cls.get();
@@ -593,9 +586,8 @@ PseudoJavaObject* PseudoObjectFromRef(jobject obj) {
     raw_ptr = reinterpret_cast<Object*>(obj);
   }
   if (!raw_ptr) return nullptr;
-  // Perform a static cast instead of dynamic_cast to avoid calling the host
-  // __dynamic_cast against potentially-Bionic RTTI structures. All objects
-  // stored in our segment table are PseudoJavaObjects by construction.
+  // Avoid host __dynamic_cast on potentially Bionic RTTI; segment entries are
+  // PseudoJavaObjects by construction.
   return static_cast<PseudoJavaObject*>(raw_ptr);
 }
 
@@ -840,8 +832,7 @@ std::string JavaStringUtf8Bytes(const std::vector<jchar>& utf16) {
       code_point = 0x10000 + ((code_point - 0xd800) << 10) +
                    (utf16[++index] - 0xdc00);
     } else if (code_point >= 0xd800 && code_point <= 0xdfff) {
-      // java.nio.charset.CharsetEncoder replaces each malformed UTF-16 input
-      // unit with its configured UTF-8 replacement, the single byte '?'.
+      // CharsetEncoder replaces each malformed UTF-16 unit with '?'.
       output.push_back('?');
       continue;
     }
@@ -5082,9 +5073,7 @@ JNIEnv* VM::GetJNIEnv() {
 }
 
 void VM::RestoreFunctions() {
-  // Force env->functions back to our pseudo-VM table on ALL known JNIEnv*.
-  // libroblox.so replaces env->functions with a Bionic JNI table during
-  // JNI_OnLoad; we need to restore it before Stage 6 calls.
+  // JNI_OnLoad replaces env->functions; restore all known environments.
   java_vm_storage_.functions = &invoke_interface_;
   java_vm_ = &java_vm_storage_;
   if (jni_env_) {
@@ -5121,10 +5110,6 @@ std::shared_ptr<Class> VM::FindClass(const std::string& class_name) const {
 }
 
 void VM::InitJNIFunctionTables() {
-  // JNIInvokeInterface_ — the JavaVM function table.
-  // Most functions are no-ops in this pseudo-VM; only AttachCurrentThread
-  // is meaningful for single-threaded prototype use.
-
   invoke_interface_.AttachCurrentThread =
       [](JavaVM* vm, void** env, void* /*args*/) -> jint {
     if (JniVmTraceEnabled()) {
@@ -5206,9 +5191,6 @@ void VM::InitJNIFunctionTables() {
 
   java_vm_storage_.functions = &invoke_interface_;
   java_vm_ = &java_vm_storage_;
-
-  // JNINativeInterface_ — the JNIEnv function table.
-  // Only the minimal subset required by Roblox's JNI_OnLoad is stubbed here.
 
   native_interface_.FindClass =
       [](JNIEnv* /*env*/, const char* name) -> jclass {

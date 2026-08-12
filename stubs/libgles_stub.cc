@@ -176,10 +176,10 @@ void glGenRenderbuffers(GLsizei n, GLuint* renderbuffers) {
   FillObjects(n, renderbuffers);
 }
 
-GLuint glCreateShader(GLenum /*type*/) { return NextObject(); }
+GLuint glCreateShader(GLenum) { return NextObject(); }
 GLuint glCreateProgram() { return NextObject(); }
 
-void glGetShaderiv(GLuint /*shader*/, GLenum pname, GLint* params) {
+void glGetShaderiv(GLuint, GLenum pname, GLint* params) {
   if (params == nullptr) {
     return;
   }
@@ -196,7 +196,7 @@ void glGetShaderiv(GLuint /*shader*/, GLenum pname, GLint* params) {
   }
 }
 
-void glGetProgramiv(GLuint /*program*/, GLenum pname, GLint* params) {
+void glGetProgramiv(GLuint, GLenum pname, GLint* params) {
   if (params == nullptr) {
     return;
   }
@@ -213,7 +213,7 @@ void glGetProgramiv(GLuint /*program*/, GLenum pname, GLint* params) {
   }
 }
 
-void glGetShaderInfoLog(GLuint /*shader*/, GLsizei buf_size, GLsizei* length,
+void glGetShaderInfoLog(GLuint, GLsizei buf_size, GLsizei* length,
                         GLchar* info_log) {
   if (!RequireTestGraphicsStub()) {
     CopyString("real GLES backend unavailable", buf_size, length, info_log);
@@ -222,7 +222,7 @@ void glGetShaderInfoLog(GLuint /*shader*/, GLsizei buf_size, GLsizei* length,
   CopyString("", buf_size, length, info_log);
 }
 
-void glGetProgramInfoLog(GLuint /*program*/, GLsizei buf_size, GLsizei* length,
+void glGetProgramInfoLog(GLuint, GLsizei buf_size, GLsizei* length,
                          GLchar* info_log) {
   if (!RequireTestGraphicsStub()) {
     CopyString("real GLES backend unavailable", buf_size, length, info_log);
@@ -231,7 +231,7 @@ void glGetProgramInfoLog(GLuint /*program*/, GLsizei buf_size, GLsizei* length,
   CopyString("", buf_size, length, info_log);
 }
 
-void glGetActiveUniform(GLuint /*program*/, GLuint /*index*/, GLsizei buf_size,
+void glGetActiveUniform(GLuint, GLuint, GLsizei buf_size,
                         GLsizei* length, GLint* size, GLenum* type,
                         GLchar* name) {
   if (!RequireTestGraphicsStub()) {
@@ -253,11 +253,11 @@ void glGetActiveUniform(GLuint /*program*/, GLuint /*index*/, GLsizei buf_size,
   CopyString("", buf_size, length, name);
 }
 
-GLint glGetUniformLocation(GLuint /*program*/, const GLchar* /*name*/) {
+GLint glGetUniformLocation(GLuint, const GLchar*) {
   return RequireTestGraphicsStub() ? 0 : -1;
 }
 
-GLenum glCheckFramebufferStatus(GLenum /*target*/) {
+GLenum glCheckFramebufferStatus(GLenum) {
   return RequireTestGraphicsStub() ? kGlFramebufferComplete
                                    : kGlFramebufferUnsupported;
 }
@@ -272,119 +272,119 @@ void glViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
   g_viewport[3] = height;
 }
 
-void glActiveTexture(GLenum /*texture*/) { RequireTestGraphicsStub(); }
-void glAttachShader(GLuint /*program*/, GLuint /*shader*/) {
+void glActiveTexture(GLenum) { RequireTestGraphicsStub(); }
+void glAttachShader(GLuint, GLuint) {
   RequireTestGraphicsStub();
 }
-void glBindAttribLocation(GLuint /*program*/, GLuint /*index*/,
-                          const GLchar* /*name*/) {
+void glBindAttribLocation(GLuint, GLuint,
+                          const GLchar*) {
   RequireTestGraphicsStub();
 }
-void glBindBuffer(GLenum /*target*/, GLuint /*buffer*/) {
+void glBindBuffer(GLenum, GLuint) {
   RequireTestGraphicsStub();
 }
-void glBindFramebuffer(GLenum /*target*/, GLuint /*framebuffer*/) {
+void glBindFramebuffer(GLenum, GLuint) {
   RequireTestGraphicsStub();
 }
-void glBindRenderbuffer(GLenum /*target*/, GLuint /*renderbuffer*/) {
+void glBindRenderbuffer(GLenum, GLuint) {
   RequireTestGraphicsStub();
 }
-void glBindTexture(GLenum /*target*/, GLuint /*texture*/) {
+void glBindTexture(GLenum, GLuint) {
   RequireTestGraphicsStub();
 }
-void glBlendFunc(GLenum /*sfactor*/, GLenum /*dfactor*/) {
+void glBlendFunc(GLenum, GLenum) {
   RequireTestGraphicsStub();
 }
-void glBlendFuncSeparate(GLenum /*src_rgb*/, GLenum /*dst_rgb*/,
-                         GLenum /*src_alpha*/, GLenum /*dst_alpha*/) {
+void glBlendFuncSeparate(GLenum, GLenum,
+                         GLenum, GLenum) {
   RequireTestGraphicsStub();
 }
-void glBufferData(GLenum /*target*/, GLsizeiptr /*size*/, const void* /*data*/,
-                  GLenum /*usage*/) {
+void glBufferData(GLenum, GLsizeiptr, const void*,
+                  GLenum) {
   RequireTestGraphicsStub();
 }
-void glBufferSubData(GLenum /*target*/, GLintptr /*offset*/,
-                     GLsizeiptr /*size*/, const void* /*data*/) {
+void glBufferSubData(GLenum, GLintptr,
+                     GLsizeiptr, const void*) {
   RequireTestGraphicsStub();
 }
-void glClear(GLbitfield /*mask*/) { RequireTestGraphicsStub(); }
-void glClearColor(GLfloat /*red*/, GLfloat /*green*/, GLfloat /*blue*/,
-                  GLfloat /*alpha*/) {
+void glClear(GLbitfield) { RequireTestGraphicsStub(); }
+void glClearColor(GLfloat, GLfloat, GLfloat,
+                  GLfloat) {
   RequireTestGraphicsStub();
 }
-void glClearDepthf(GLfloat /*depth*/) { RequireTestGraphicsStub(); }
-void glClearStencil(GLint /*s*/) { RequireTestGraphicsStub(); }
-void glColorMask(GLboolean /*red*/, GLboolean /*green*/, GLboolean /*blue*/,
-                 GLboolean /*alpha*/) {
+void glClearDepthf(GLfloat) { RequireTestGraphicsStub(); }
+void glClearStencil(GLint) { RequireTestGraphicsStub(); }
+void glColorMask(GLboolean, GLboolean, GLboolean,
+                 GLboolean) {
   RequireTestGraphicsStub();
 }
-void glCompileShader(GLuint /*shader*/) { RequireTestGraphicsStub(); }
-void glCompressedTexImage2D(GLenum /*target*/, GLint /*level*/,
-                            GLenum /*internalformat*/, GLsizei /*width*/,
-                            GLsizei /*height*/, GLint /*border*/,
-                            GLsizei /*image_size*/, const void* /*data*/) {
+void glCompileShader(GLuint) { RequireTestGraphicsStub(); }
+void glCompressedTexImage2D(GLenum, GLint,
+                            GLenum, GLsizei,
+                            GLsizei, GLint,
+                            GLsizei, const void*) {
   RequireTestGraphicsStub();
 }
-void glCompressedTexSubImage2D(GLenum /*target*/, GLint /*level*/,
-                               GLint /*xoffset*/, GLint /*yoffset*/,
-                               GLsizei /*width*/, GLsizei /*height*/,
-                               GLenum /*format*/, GLsizei /*image_size*/,
-                               const void* /*data*/) {
+void glCompressedTexSubImage2D(GLenum, GLint,
+                               GLint, GLint,
+                               GLsizei, GLsizei,
+                               GLenum, GLsizei,
+                               const void*) {
   RequireTestGraphicsStub();
 }
-void glCopyTexSubImage2D(GLenum /*target*/, GLint /*level*/, GLint /*xoffset*/,
-                         GLint /*yoffset*/, GLint /*x*/, GLint /*y*/,
-                         GLsizei /*width*/, GLsizei /*height*/) {
+void glCopyTexSubImage2D(GLenum, GLint, GLint,
+                         GLint, GLint, GLint,
+                         GLsizei, GLsizei) {
   RequireTestGraphicsStub();
 }
-void glCullFace(GLenum /*mode*/) { RequireTestGraphicsStub(); }
-void glDeleteBuffers(GLsizei /*n*/, const GLuint* /*buffers*/) {
+void glCullFace(GLenum) { RequireTestGraphicsStub(); }
+void glDeleteBuffers(GLsizei, const GLuint*) {
   RequireTestGraphicsStub();
 }
-void glDeleteFramebuffers(GLsizei /*n*/, const GLuint* /*framebuffers*/) {
+void glDeleteFramebuffers(GLsizei, const GLuint*) {
   RequireTestGraphicsStub();
 }
-void glDeleteProgram(GLuint /*program*/) { RequireTestGraphicsStub(); }
-void glDeleteRenderbuffers(GLsizei /*n*/, const GLuint* /*renderbuffers*/) {
+void glDeleteProgram(GLuint) { RequireTestGraphicsStub(); }
+void glDeleteRenderbuffers(GLsizei, const GLuint*) {
   RequireTestGraphicsStub();
 }
-void glDeleteShader(GLuint /*shader*/) { RequireTestGraphicsStub(); }
-void glDeleteTextures(GLsizei /*n*/, const GLuint* /*textures*/) {
+void glDeleteShader(GLuint) { RequireTestGraphicsStub(); }
+void glDeleteTextures(GLsizei, const GLuint*) {
   RequireTestGraphicsStub();
 }
-void glDepthFunc(GLenum /*func*/) { RequireTestGraphicsStub(); }
-void glDepthMask(GLboolean /*flag*/) { RequireTestGraphicsStub(); }
-void glDisable(GLenum /*cap*/) { RequireTestGraphicsStub(); }
-void glDisableVertexAttribArray(GLuint /*index*/) { RequireTestGraphicsStub(); }
-void glDrawArrays(GLenum /*mode*/, GLint /*first*/, GLsizei /*count*/) {
+void glDepthFunc(GLenum) { RequireTestGraphicsStub(); }
+void glDepthMask(GLboolean) { RequireTestGraphicsStub(); }
+void glDisable(GLenum) { RequireTestGraphicsStub(); }
+void glDisableVertexAttribArray(GLuint) { RequireTestGraphicsStub(); }
+void glDrawArrays(GLenum, GLint, GLsizei) {
   RequireTestGraphicsStub();
 }
-void glDrawElements(GLenum /*mode*/, GLsizei /*count*/, GLenum /*type*/,
-                    const void* /*indices*/) {
+void glDrawElements(GLenum, GLsizei, GLenum,
+                    const void*) {
   RequireTestGraphicsStub();
 }
-void glEnable(GLenum /*cap*/) { RequireTestGraphicsStub(); }
-void glEnableVertexAttribArray(GLuint /*index*/) { RequireTestGraphicsStub(); }
-void glFramebufferRenderbuffer(GLenum /*target*/, GLenum /*attachment*/,
-                               GLenum /*renderbuffertarget*/,
-                               GLuint /*renderbuffer*/) {
+void glEnable(GLenum) { RequireTestGraphicsStub(); }
+void glEnableVertexAttribArray(GLuint) { RequireTestGraphicsStub(); }
+void glFramebufferRenderbuffer(GLenum, GLenum,
+                               GLenum,
+                               GLuint) {
   RequireTestGraphicsStub();
 }
-void glFramebufferTexture2D(GLenum /*target*/, GLenum /*attachment*/,
-                            GLenum /*textarget*/, GLuint /*texture*/,
-                            GLint /*level*/) {
+void glFramebufferTexture2D(GLenum, GLenum,
+                            GLenum, GLuint,
+                            GLint) {
   RequireTestGraphicsStub();
 }
-void glGenerateMipmap(GLenum /*target*/) { RequireTestGraphicsStub(); }
-void glLinkProgram(GLuint /*program*/) { RequireTestGraphicsStub(); }
-void glPixelStorei(GLenum /*pname*/, GLint /*param*/) {
+void glGenerateMipmap(GLenum) { RequireTestGraphicsStub(); }
+void glLinkProgram(GLuint) { RequireTestGraphicsStub(); }
+void glPixelStorei(GLenum, GLint) {
   RequireTestGraphicsStub();
 }
-void glPolygonOffset(GLfloat /*factor*/, GLfloat /*units*/) {
+void glPolygonOffset(GLfloat, GLfloat) {
   RequireTestGraphicsStub();
 }
-void glReadPixels(GLint /*x*/, GLint /*y*/, GLsizei width, GLsizei height,
-                  GLenum /*format*/, GLenum /*type*/, void* pixels) {
+void glReadPixels(GLint, GLint, GLsizei width, GLsizei height,
+                  GLenum, GLenum, void* pixels) {
   if (!RequireTestGraphicsStub()) {
     return;
   }
@@ -394,53 +394,53 @@ void glReadPixels(GLint /*x*/, GLint /*y*/, GLsizei width, GLsizei height,
   }
 }
 void glReleaseShaderCompiler() { RequireTestGraphicsStub(); }
-void glRenderbufferStorage(GLenum /*target*/, GLenum /*internalformat*/,
-                           GLsizei /*width*/, GLsizei /*height*/) {
+void glRenderbufferStorage(GLenum, GLenum,
+                           GLsizei, GLsizei) {
   RequireTestGraphicsStub();
 }
-void glScissor(GLint /*x*/, GLint /*y*/, GLsizei /*width*/,
-               GLsizei /*height*/) {
+void glScissor(GLint, GLint, GLsizei,
+               GLsizei) {
   RequireTestGraphicsStub();
 }
-void glShaderSource(GLuint /*shader*/, GLsizei /*count*/,
-                    const GLchar* const* /*string*/, const GLint* /*length*/) {
+void glShaderSource(GLuint, GLsizei,
+                    const GLchar* const*, const GLint*) {
   RequireTestGraphicsStub();
 }
-void glStencilFunc(GLenum /*func*/, GLint /*ref*/, GLuint /*mask*/) {
+void glStencilFunc(GLenum, GLint, GLuint) {
   RequireTestGraphicsStub();
 }
-void glStencilMask(GLuint /*mask*/) { RequireTestGraphicsStub(); }
-void glStencilOp(GLenum /*fail*/, GLenum /*zfail*/, GLenum /*zpass*/) {
+void glStencilMask(GLuint) { RequireTestGraphicsStub(); }
+void glStencilOp(GLenum, GLenum, GLenum) {
   RequireTestGraphicsStub();
 }
-void glTexImage2D(GLenum /*target*/, GLint /*level*/, GLint /*internalformat*/,
-                  GLsizei /*width*/, GLsizei /*height*/, GLint /*border*/,
-                  GLenum /*format*/, GLenum /*type*/, const void* /*pixels*/) {
+void glTexImage2D(GLenum, GLint, GLint,
+                  GLsizei, GLsizei, GLint,
+                  GLenum, GLenum, const void*) {
   RequireTestGraphicsStub();
 }
-void glTexParameterf(GLenum /*target*/, GLenum /*pname*/, GLfloat /*param*/) {
+void glTexParameterf(GLenum, GLenum, GLfloat) {
   RequireTestGraphicsStub();
 }
-void glTexParameterfv(GLenum /*target*/, GLenum /*pname*/,
-                      const GLfloat* /*params*/) {
+void glTexParameterfv(GLenum, GLenum,
+                      const GLfloat*) {
   RequireTestGraphicsStub();
 }
-void glTexParameteri(GLenum /*target*/, GLenum /*pname*/, GLint /*param*/) {
+void glTexParameteri(GLenum, GLenum, GLint) {
   RequireTestGraphicsStub();
 }
-void glTexSubImage2D(GLenum /*target*/, GLint /*level*/, GLint /*xoffset*/,
-                     GLint /*yoffset*/, GLsizei /*width*/, GLsizei /*height*/,
-                     GLenum /*format*/, GLenum /*type*/,
-                     const void* /*pixels*/) {
+void glTexSubImage2D(GLenum, GLint, GLint,
+                     GLint, GLsizei, GLsizei,
+                     GLenum, GLenum,
+                     const void*) {
   RequireTestGraphicsStub();
 }
-void glUniform1i(GLint /*location*/, GLint /*v0*/) {
+void glUniform1i(GLint, GLint) {
   RequireTestGraphicsStub();
 }
-void glUseProgram(GLuint /*program*/) { RequireTestGraphicsStub(); }
-void glVertexAttribPointer(GLuint /*index*/, GLint /*size*/, GLenum /*type*/,
-                           GLboolean /*normalized*/, GLsizei /*stride*/,
-                           const void* /*pointer*/) {
+void glUseProgram(GLuint) { RequireTestGraphicsStub(); }
+void glVertexAttribPointer(GLuint, GLint, GLenum,
+                           GLboolean, GLsizei,
+                           const void*) {
   RequireTestGraphicsStub();
 }
 
