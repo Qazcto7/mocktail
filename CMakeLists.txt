@@ -16,6 +16,40 @@ project(Mocktail
 include(GNUInstallDirs)
 find_package(Threads REQUIRED)
 
+set(MOCKTAIL_BUILD_GIT_COMMIT "unknown")
+set(MOCKTAIL_BUILD_GIT_DIRTY "unknown")
+find_package(Git QUIET)
+if(Git_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" rev-parse --short=12 HEAD
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    RESULT_VARIABLE MOCKTAIL_GIT_REV_PARSE_RESULT
+    OUTPUT_VARIABLE MOCKTAIL_GIT_REV_PARSE_OUTPUT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+  )
+  if(MOCKTAIL_GIT_REV_PARSE_RESULT EQUAL 0 AND
+     MOCKTAIL_GIT_REV_PARSE_OUTPUT MATCHES "^[0-9a-fA-F]+$")
+    string(TOLOWER "${MOCKTAIL_GIT_REV_PARSE_OUTPUT}"
+      MOCKTAIL_BUILD_GIT_COMMIT)
+    execute_process(
+      COMMAND "${GIT_EXECUTABLE}" status --porcelain --untracked-files=normal
+      WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+      RESULT_VARIABLE MOCKTAIL_GIT_STATUS_RESULT
+      OUTPUT_VARIABLE MOCKTAIL_GIT_STATUS_OUTPUT
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET
+    )
+    if(MOCKTAIL_GIT_STATUS_RESULT EQUAL 0)
+      if(MOCKTAIL_GIT_STATUS_OUTPUT STREQUAL "")
+        set(MOCKTAIL_BUILD_GIT_DIRTY "false")
+      else()
+        set(MOCKTAIL_BUILD_GIT_DIRTY "true")
+      endif()
+    endif()
+  endif()
+endif()
+
 set(MOCKTAIL_DEFAULT_COMPATIBILITY_MANIFEST
   "${CMAKE_SOURCE_DIR}/config/roblox_compatibility.json"
   CACHE FILEPATH
@@ -259,6 +293,7 @@ add_library(mocktail_runtime STATIC
   src/runtime/runtime_config_bootstrap.cc
   src/runtime/runtime_config_file.cc
   src/runtime/runtime_paths.cc
+  src/runtime/session_log.cc
   src/runtime/single_instance_lock.cc
   src/runtime/startup_state_machine.cc
   src/runtime/supported_launch_policy.cc
@@ -271,6 +306,17 @@ target_include_directories(mocktail_runtime PUBLIC
 )
 target_compile_definitions(mocktail_runtime PRIVATE
   "MOCKTAIL_DISCORD_APPLICATION_ID=\"${MOCKTAIL_DISCORD_APPLICATION_ID}\""
+)
+set_property(SOURCE src/runtime/session_log.cc APPEND PROPERTY
+  COMPILE_DEFINITIONS
+  "MOCKTAIL_PROJECT_VERSION=\"${PROJECT_VERSION}\""
+  "MOCKTAIL_BUILD_GIT_COMMIT=\"${MOCKTAIL_BUILD_GIT_COMMIT}\""
+  "MOCKTAIL_BUILD_GIT_DIRTY=\"${MOCKTAIL_BUILD_GIT_DIRTY}\""
+  "MOCKTAIL_BUILD_TYPE=\"$<CONFIG>\""
+  "MOCKTAIL_BUILD_COMPILER_ID=\"${CMAKE_CXX_COMPILER_ID}\""
+  "MOCKTAIL_BUILD_COMPILER_VERSION=\"${CMAKE_CXX_COMPILER_VERSION}\""
+  "MOCKTAIL_BUILD_TARGET_SYSTEM=\"${CMAKE_SYSTEM_NAME}\""
+  "MOCKTAIL_BUILD_TARGET_PROCESSOR=\"${CMAKE_SYSTEM_PROCESSOR}\""
 )
 mocktail_apply_compile_options(mocktail_runtime)
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND

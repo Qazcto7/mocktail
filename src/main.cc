@@ -7,6 +7,7 @@
 //     http://www.apache.org/licenses/LICENSE-2.0
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -44,6 +45,7 @@
 #include "runtime/runtime_config_bootstrap.h"
 #include "runtime/runtime_config_file.h"
 #include "runtime/runtime_paths.h"
+#include "runtime/session_log.h"
 #include "runtime/single_instance_lock.h"
 #include "runtime/support_bundle.h"
 #include "runtime/supported_launch_policy.h"
@@ -109,6 +111,7 @@ mocktail::Status ShutdownPlatformBridges(jnivm::VM* vm) {
 }  // namespace
 
 int main(int argc, char* argv[]) {
+  const auto process_started_at = std::chrono::system_clock::now();
   mocktail::runtime::CommandLineParseResult command_line =
       mocktail::runtime::ParseCommandLine(argc, argv);
   if (!command_line) {
@@ -164,6 +167,7 @@ int main(int argc, char* argv[]) {
   }
   mocktail::runtime::ScrubCommandLineLaunchArguments(&command_line.options,
                                                      argc, argv);
+  mocktail::runtime::SessionLog session_log;
   mocktail::runtime::FailureSupportBundleGuard support_bundle_guard(
       environment, paths,
       command_line.options.mode == mocktail::runtime::CommandMode::kRun);
@@ -221,10 +225,6 @@ int main(int argc, char* argv[]) {
     }
     return EXIT_FAILURE;
   }
-  if (config_bootstrap.created()) {
-    std::cout << "  [runtime] created first-run configuration: "
-              << paths.config_file() << '\n';
-  }
   mocktail::runtime::RuntimeConfigLoadResult runtime_config =
       mocktail::runtime::LoadRuntimeConfig(environment, paths.config_file());
   if (!runtime_config) {
@@ -266,10 +266,29 @@ int main(int argc, char* argv[]) {
       use_memory_limit
           ? runtime_config.config.performance().memory_limit_bytes()
           : 0;
+  mocktail::runtime::CgroupMemoryLimitResult cgroup_limit;
   if (use_memory_limit) {
-    const mocktail::runtime::CgroupMemoryLimitResult cgroup_limit =
-        mocktail::runtime::MaybeReexecWithCgroupMemoryLimit(
-            argc, argv, memory_limit_bytes, &cgroup_reexec_arguments);
+    cgroup_limit = mocktail::runtime::MaybeReexecWithCgroupMemoryLimit(
+        argc, argv, memory_limit_bytes, &cgroup_reexec_arguments);
+  }
+  if (command_line.options.mode == mocktail::runtime::CommandMode::kRun) {
+    session_log = mocktail::runtime::SessionLog::Start(
+        environment, paths, process_started_at);
+    if (session_log) {
+      std::cout << session_log.Header(
+                       environment, paths,
+                       runtime_config.config.graphics_backend_name())
+                << std::flush;
+    } else if (session_log.attempted()) {
+      std::cerr << "  [session] automatic logging unavailable: "
+                << session_log.error() << '\n';
+    }
+  }
+  if (config_bootstrap.created()) {
+    std::cout << "  [runtime] created first-run configuration: "
+              << paths.config_file() << '\n';
+  }
+  if (use_memory_limit) {
     if (cgroup_limit.active()) {
       std::cout << "  [memory] hard process-tree limit active: "
                 << runtime_config.config.performance().memory_limit_mb
