@@ -5,7 +5,7 @@ include_guard(GLOBAL)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(UTF8PROC REQUIRED IMPORTED_TARGET libutf8proc)
-pkg_check_modules(SDL3_TTF REQUIRED IMPORTED_TARGET sdl3-ttf)
+find_package(SDL3_ttf REQUIRED CONFIG)
 pkg_check_modules(FONTCONFIG REQUIRED IMPORTED_TARGET fontconfig)
 
 get_filename_component(MOCKTAIL_INPUT_ROOT "${CMAKE_CURRENT_LIST_DIR}/.."
@@ -35,7 +35,7 @@ target_link_libraries(mocktail_input_runtime PUBLIC
   PkgConfig::UTF8PROC
   PRIVATE
     PkgConfig::FONTCONFIG
-    PkgConfig::SDL3_TTF
+    SDL3_ttf::SDL3_ttf
 )
 target_compile_features(mocktail_input_runtime PUBLIC cxx_std_17)
 mocktail_apply_compile_options(mocktail_input_runtime)
