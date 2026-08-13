@@ -167,8 +167,9 @@ TEST(RuntimeConfigBootstrapTest,
            "name.\n    show_place_name: true",
            "# Boolean (default: true): show how long the current session has "
            "run.\n    show_elapsed_time: true",
-           "# Boolean (default: true): let friends open the same public "
-           "server.\n      enabled: true",
+           "# Boolean (default: true): let friends open the current "
+           "experience. When\n      # Roblox provides a public server ID, the "
+           "button targets that server.\n      enabled: true",
            "# Boolean (default: true): never expose private or reserved "
            "joins.\n      public_servers_only: true",
            "#   playing: \"{place_name}\"\n    #   state: Playing Roblox",
