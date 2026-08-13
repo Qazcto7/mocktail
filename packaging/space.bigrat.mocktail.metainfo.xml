@@ -40,6 +40,14 @@
     <binary>mocktail</binary>
   </provides>
   <releases>
+    <release version="1.0.1" date="2026-08-13">
+      <description>
+        <ul>
+          <li>Fix issues with GameMode</li>
+          <li>Add Discord RPC support</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-08-12"/>
   </releases>
 </component>
