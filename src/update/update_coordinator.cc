@@ -235,7 +235,8 @@ ReferenceProfile ResolveReference(const UpdatePaths& paths,
                                   ApkPureProvider* provider,
                                   PayloadStore* store,
                                   const std::filesystem::path& workspace,
-                                  int progress_fd) {
+                                  int progress_fd,
+                                  bool allow_reference_download) {
   ReferenceProfile result;
   if (installed && !installed.host_abi_profile.empty()) {
     std::error_code filesystem_error;
@@ -260,6 +261,12 @@ ReferenceProfile ResolveReference(const UpdatePaths& paths,
                                        filesystem_error)) {
     result.library = preferred_directory / "libroblox.so";
     result.profile = paths.host_abi_reference_profile;
+    return result;
+  }
+  if (!allow_reference_download) {
+    result.error =
+        "updates.testing_latest_only requires an installed HostAbi reference; "
+        "downloading an older reference payload is disabled";
     return result;
   }
   Candidate downloaded =
@@ -397,7 +404,9 @@ UpdateResult RunUpdate(const UpdatePaths& paths, const UpdateRequest& request) {
   }
   ApkPureProvider provider;
   std::optional<ProviderVersion> latest_version;
-  if (request.check_latest) {
+  const bool check_latest =
+      request.check_latest || configured.config.testing_latest_only;
+  if (check_latest) {
     Progress(request.progress_fd, "Checking Roblox...");
     const ProviderVersion latest = provider.CheckLatest();
     if (latest) {
@@ -414,11 +423,20 @@ UpdateResult RunUpdate(const UpdatePaths& paths, const UpdateRequest& request) {
         result.message = "installed Roblox is newer than provider metadata";
         return result;
       }
-    } else if (current) {
-      result.payload_id = current.payload_id;
-      result.message =
-          "update metadata is temporarily unavailable: " + latest.error;
-      return result;
+    } else {
+      if (current) {
+        result.payload_id = current.payload_id;
+        result.message =
+            "update metadata is temporarily unavailable: " + latest.error;
+        return result;
+      }
+      if (configured.config.testing_latest_only) {
+        result.error =
+            "updates.testing_latest_only requires available provider latest "
+            "metadata: " +
+            latest.error;
+        return result;
+      }
     }
   }
   const std::filesystem::path workspace = UniqueDirectory(
@@ -475,7 +493,8 @@ UpdateResult RunUpdate(const UpdatePaths& paths, const UpdateRequest& request) {
   if (candidate && !candidate.exact_supported && candidate.profile.empty()) {
     const ReferenceProfile reference =
         ResolveReference(paths, installed, *preferred, &provider, &store,
-                         workspace, request.progress_fd);
+                         workspace, request.progress_fd,
+                         !configured.config.testing_latest_only);
     if (!reference) {
       candidate_error = reference.error;
     } else {
@@ -526,6 +545,14 @@ UpdateResult RunUpdate(const UpdatePaths& paths, const UpdateRequest& request) {
     result.payload_id = current.payload_id;
     result.message = "latest Roblox candidate was rejected; kept " +
                      current.version_name + ": " + candidate_error;
+    cleanup();
+    return result;
+  }
+
+  if (configured.config.testing_latest_only) {
+    result.error = "latest Roblox failed probation (" + candidate_error +
+                   "); updates.testing_latest_only forbids activating an "
+                   "older supported fallback";
     cleanup();
     return result;
   }

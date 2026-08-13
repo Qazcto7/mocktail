@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := all
-.PHONY: all build release debug test apk install register-url-handler release-runtime portable portable-test standalone appimage flatpak run-flatpak run run-smoke run-unlimited run-game run-input run-resize run-network auto-run run-gles run-angle update-roblox update-auto update-auto-launch install-updater payload-status payload-rollback support-bundle clean submodules help
+.PHONY: all build release debug test apk install register-url-handler release-runtime portable portable-test standalone appimage flatpak run-flatpak run run-smoke run-unlimited run-game run-input run-resize run-network auto-run run-gles run-angle update-roblox update-auto update-auto-launch payload-status payload-rollback support-bundle clean submodules help
 
 BUILD_DIR  := build
 BINARY     := $(BUILD_DIR)/mocktail
@@ -140,9 +140,6 @@ update-auto: build ## Download latest Roblox, derive its ABI, run two canaries, 
 update-auto-launch: build ## Update Roblox and launch the verified current payload
 	@./$(BUILD_DIR)/mocktail_updater update
 	@./$(BINARY)
-
-install-updater: ## Install and enable the six-hour systemd user update timer
-	@./scripts/install_user_updater.sh
 
 payload-status: build ## Show current and previous-good immutable payloads
 	@./$(BUILD_DIR)/mocktail_updater status

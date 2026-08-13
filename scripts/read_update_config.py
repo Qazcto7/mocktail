@@ -105,13 +105,14 @@ def main() -> None:
         fail("updates must be a mapping")
     allowed = {
         "automatic",
+        "testing_latest_only",
         "source",
         "launch_after_update",
     }
     unknown = set(updates) - allowed
     if unknown:
         fail(f"unknown updates key: {sorted(unknown)[0]}")
-    for key in ("automatic", "launch_after_update"):
+    for key in ("automatic", "testing_latest_only", "launch_after_update"):
         if key in updates and not isinstance(updates[key], bool):
             fail(f"updates.{key} must be true or false")
     if "source" in updates and updates["source"] not in SUPPORTED_SOURCES:

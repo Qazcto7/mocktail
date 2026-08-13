@@ -86,6 +86,7 @@ LAUNCH="${MOCKTAIL_UPDATE_LAUNCH:-false}"
 SKIP_BUILD=false
 SCHEDULED=false
 STARTUP_PREFLIGHT=false
+TESTING_LATEST_ONLY=true
 UPDATE_CONFIG_JSON="{}"
 STAGED_PAYLOAD_ID=""
 DOWNLOAD_STAGING_ROOT="${CACHE_ROOT}/downloads/apk-staging"
@@ -113,7 +114,8 @@ Options:
   --skip-build        Reuse the existing Release binary for the canary.
   --scheduled         Run only when updates.automatic is true in YAML.
   --startup-preflight Validate a runnable local payload without checking for
-                      remote updates; provision one when none is available.
+                      remote updates, unless updates.testing_latest_only is
+                      enabled; provision one when none is available.
   -h, --help          Show this help.
 EOF
 }
@@ -188,6 +190,8 @@ ParseArguments() {
 LoadYamlDefaults() {
   UPDATE_CONFIG_JSON="$(python3 "${SCRIPT_DIR}/read_update_config.py" "${CONFIG_FILE}")"
   [[ -n "${SOURCE}" ]] || SOURCE="$(jq -r '.source // "apk-pure"' <<<"${UPDATE_CONFIG_JSON}")"
+  TESTING_LATEST_ONLY="$(jq -r '.testing_latest_only // true' \
+    <<<"${UPDATE_CONFIG_JSON}")"
   if [[ "${LAUNCH}" != true &&
         "$(jq -r '.launch_after_update // false' <<<"${UPDATE_CONFIG_JSON}")" == true ]]; then
     LAUNCH=true
@@ -562,6 +566,9 @@ SkipDownloadWhenCurrent() {
       Log "latest-version API check failed; preserving the runnable local payload"
       return 0
     fi
+    if [[ "${TESTING_LATEST_ONLY}" == true ]]; then
+      Die "updates.testing_latest_only requires available provider latest metadata"
+    fi
     Log "latest-version API check failed and no runnable local payload exists; using the compatibility bootstrap profile"
     SelectSupportedBootstrapFallback
     return 1
@@ -571,6 +578,9 @@ SkipDownloadWhenCurrent() {
     if [[ "${local_version}" =~ ^[0-9]+$ ]]; then
       Log "latest-version API returned invalid metadata; preserving the runnable local payload"
       return 0
+    fi
+    if [[ "${TESTING_LATEST_ONLY}" == true ]]; then
+      Die "updates.testing_latest_only requires valid provider latest metadata"
     fi
     Log "provider returned invalid version metadata and no runnable local payload exists; using the compatibility bootstrap profile"
     SelectSupportedBootstrapFallback
@@ -603,6 +613,11 @@ SkipRemoteUpdateForStartup() {
   RefreshApprovedCurrentForRuntime || refresh_status=$?
   if (( refresh_status >= 2 )); then
     Die "current payload is not runnable by this Mocktail runtime and rollback failed"
+  fi
+
+  if [[ "${TESTING_LATEST_ONLY}" == true ]]; then
+    Log "testing latest-only track enabled; checking provider latest during startup"
+    return 1
   fi
 
   local current_payload_id
@@ -1551,6 +1566,9 @@ Main() {
   LoadYamlDefaults
   ParseArguments "$@"
   [[ "${SOURCE}" == apk-pure ]] || Die "update source must be apk-pure"
+  if [[ "${TESTING_LATEST_ONLY}" == true && -n "${VERSION}" ]]; then
+    Die "--version cannot be combined with updates.testing_latest_only"
+  fi
   if [[ "${SCHEDULED}" == true &&
         "$(jq -r 'if has("automatic") then .automatic else true end' \
           <<<"${UPDATE_CONFIG_JSON}")" != true ]]; then
@@ -1585,6 +1603,10 @@ Main() {
     PreserveCurrentAfterUpdateFailure "latest payload acquisition failed" \
       "${pre_stage_payload_id}" &&
       return 0
+    if [[ "${TESTING_LATEST_ONLY}" == true ]]; then
+      Log "latest payload acquisition failed; testing latest-only track forbids a supported fallback"
+      return "${stage_status}"
+    fi
     local bootstrap_ceiling=""
     if [[ "${BOOTSTRAP_SELECTED_VERSION_CODE}" =~ ^[0-9]+$ ]]; then
       (( 10#${BOOTSTRAP_SELECTED_VERSION_CODE} > 1 )) ||
@@ -1617,6 +1639,16 @@ Main() {
       LaunchCurrent
     fi
     return 0
+  fi
+  if [[ "${TESTING_LATEST_ONLY}" == true ]]; then
+    if [[ "${had_current}" == true ]]; then
+      PreserveCurrentAfterUpdateFailure \
+        "latest candidate ${latest_payload_id} failed probation" \
+        "${LAST_ATTEMPT_BASELINE_PAYLOAD_ID}"
+      return 0
+    fi
+    Log "latest candidate ${latest_payload_id} failed probation; testing latest-only track forbids a supported fallback"
+    return "${attempt_status}"
   fi
   if [[ "${latest_needs_reference}" != true && "${had_current}" == true ]]; then
     PreserveCurrentAfterUpdateFailure \

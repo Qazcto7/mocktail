@@ -552,10 +552,12 @@ DiscordRpcActivity BuildDiscordRpcActivity(
       activity.details = TruncateUtf8(config.text.browsing, 128);
       break;
     case RobloxExperiencePresencePhase::kJoining:
-      activity.details = TruncateUtf8(config.text.joining, 128);
-      break;
     case RobloxExperiencePresencePhase::kPlaying: {
       if (place_name.empty()) {
+        if (phase == RobloxExperiencePresencePhase::kJoining) {
+          activity.details = TruncateUtf8(config.text.joining, 128);
+          break;
+        }
         place_name = config.text.unknown_place;
       }
       if (config.show_place_name) {
@@ -564,14 +566,16 @@ DiscordRpcActivity BuildDiscordRpcActivity(
         activity.details = activity.state;
         activity.state.clear();
       }
-      if (config.show_elapsed_time && session_started_at > 0) {
+      if (phase == RobloxExperiencePresencePhase::kPlaying &&
+          config.show_elapsed_time && session_started_at > 0) {
         activity.start_timestamp = session_started_at;
       }
       if (IsSafeExternalImageUrl(place_icon_url)) {
         activity.large_image = std::move(place_icon_url);
         activity.large_text = TruncateUtf8(place_name, 128);
       }
-      if (config.join_enabled && request != nullptr &&
+      if (phase == RobloxExperiencePresencePhase::kPlaying &&
+          config.join_enabled && request != nullptr &&
           (!config.public_servers_only || IsPublicDiscordJoin(*request))) {
         activity.button_url = BuildDiscordJoinUrl(*request);
         if (!activity.button_url.empty()) {
@@ -733,7 +737,8 @@ class DiscordRpcSession::Impl final {
       std::string place_name;
       std::string place_icon_url;
       bool resolve_metadata_after_publish = false;
-      if (desired.phase == RobloxExperiencePresencePhase::kPlaying &&
+      if ((desired.phase == RobloxExperiencePresencePhase::kJoining ||
+           desired.phase == RobloxExperiencePresencePhase::kPlaying) &&
           desired.request.place_id > 0) {
         CachedPlaceMetadata& cached =
             place_metadata_[desired.request.place_id];
@@ -741,7 +746,6 @@ class DiscordRpcSession::Impl final {
         place_icon_url = cached.icon_url;
         if ((cached.name.empty() || cached.icon_url.empty()) &&
             std::chrono::steady_clock::now() >= cached.next_attempt) {
-          // Publish fallback activity while metadata is in flight.
           resolve_metadata_after_publish = true;
         }
       }
@@ -761,7 +765,12 @@ class DiscordRpcSession::Impl final {
         std::fprintf(stderr, "  [discord-rpc] connected to Discord Desktop\n");
         published_revision = 0;
       }
-      if (published_revision != desired.revision) {
+      const bool wait_for_place_metadata =
+          (desired.phase == RobloxExperiencePresencePhase::kJoining ||
+           desired.phase == RobloxExperiencePresencePhase::kPlaying) &&
+          desired.request.place_id > 0 && place_name.empty();
+      if (published_revision != desired.revision &&
+          !wait_for_place_metadata) {
         const auto now = std::chrono::steady_clock::now();
         while (!activity_updates.empty() &&
                now - activity_updates.front() >= kDiscordActivityRateWindow) {
@@ -824,7 +833,9 @@ class DiscordRpcSession::Impl final {
         if (Snapshot().revision != desired.revision) {
           continue;
         }
-        if (changed) {
+        if (changed &&
+            (desired.phase == RobloxExperiencePresencePhase::kJoining ||
+             desired.phase == RobloxExperiencePresencePhase::kPlaying)) {
           // Publish cached metadata through the normal rate limiter.
           published_revision = 0;
           continue;

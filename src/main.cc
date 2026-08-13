@@ -293,9 +293,6 @@ int main(int argc, char* argv[]) {
       std::cout << "  [memory] hard process-tree limit active: "
                 << runtime_config.config.performance().memory_limit_mb
                 << " MiB RAM, swap disabled\n";
-    } else {
-      std::cerr << "  [memory] cgroup hard limit unavailable: "
-                << cgroup_limit.detail << "; using the RSS+swap watchdog\n";
     }
   }
   if (command_line.options.mode == mocktail::runtime::CommandMode::kRun) {
@@ -308,8 +305,8 @@ int main(int argc, char* argv[]) {
               << '\n';
   }
 
-  // Register immediately after any cgroup re-exec and before starting helper
-  // processes or loading the Android payload. libgamemode caches its shared
+  // Register before starting helper processes or loading the Android payload.
+  // libgamemode caches its shared
   // D-Bus connection, so the first use must happen in the final game process.
   const mocktail::runtime::GameModePolicy game_mode_policy =
       runtime_config.config.performance().game_mode;

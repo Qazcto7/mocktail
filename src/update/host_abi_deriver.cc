@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <iterator>
 #include <map>
 #include <nlohmann/json.hpp>
 #include <optional>
@@ -906,10 +907,10 @@ bool ValidateSemantics(const std::vector<Instruction>& reference,
   return true;
 }
 
-std::optional<SignatureMatch> FindSignatureMatch(
+std::optional<std::vector<SignatureMatch>> FindSignatureMatches(
     const ElfImage& reference, const ElfImage& candidate,
     const Disassembler& disassembler, const SignatureSpec& spec,
-    std::string* error) {
+    bool allow_multiple_candidates, std::string* error) {
   const auto reference_instructions = disassembler.Decode(
       reference, spec.reference_rva, spec.instruction_count, 4096, error);
   if (!reference_instructions.has_value()) return std::nullopt;
@@ -995,21 +996,68 @@ std::optional<SignatureMatch> FindSignatureMatch(
     }
     search = found + 1;
   }
-  if (matches.size() != 1) {
+  if (matches.empty()) {
+    *error = "signature " + spec.name + " matched " +
+             "0 candidate locations";
+    return std::nullopt;
+  }
+  if (!allow_multiple_candidates && matches.size() != 1U) {
     *error = "signature " + spec.name + " matched " +
              std::to_string(matches.size()) + " candidate locations";
     return std::nullopt;
   }
-  const std::uint64_t match_rva = text->address + matches[0];
-  const auto candidate_instructions = disassembler.Decode(
-      candidate, match_rva, spec.instruction_count, 4096, error);
-  if (!candidate_instructions.has_value() ||
-      !ValidateSemantics(*reference_instructions, *candidate_instructions,
-                         spec.registry_size_may_change, error)) {
+  std::vector<SignatureMatch> semantic_matches;
+  std::string first_semantic_error;
+  for (const std::size_t match : matches) {
+    const std::uint64_t match_rva = text->address + match;
+    std::string semantic_error;
+    const auto candidate_instructions = disassembler.Decode(
+        candidate, match_rva, spec.instruction_count, 4096, &semantic_error);
+    if (!candidate_instructions.has_value() ||
+        !ValidateSemantics(*reference_instructions, *candidate_instructions,
+                           spec.registry_size_may_change, &semantic_error)) {
+      if (first_semantic_error.empty()) {
+        first_semantic_error = std::move(semantic_error);
+      }
+      continue;
+    }
+    semantic_matches.push_back(SignatureMatch{
+        match_rva, *reference_instructions, *candidate_instructions});
+  }
+  if (semantic_matches.empty() && matches.size() == 1U &&
+      !first_semantic_error.empty()) {
+    *error = std::move(first_semantic_error);
     return std::nullopt;
   }
-  return SignatureMatch{match_rva, *reference_instructions,
-                        *candidate_instructions};
+  return semantic_matches;
+}
+
+std::optional<SignatureMatch> FindSignatureMatch(
+    const ElfImage& reference, const ElfImage& candidate,
+    const Disassembler& disassembler, const SignatureSpec& spec,
+    std::string* error) {
+  auto matches =
+      FindSignatureMatches(reference, candidate, disassembler, spec, false,
+                           error);
+  if (!matches.has_value()) return std::nullopt;
+  if (matches->size() != 1U) {
+    *error = "signature " + spec.name + " matched " +
+             std::to_string(matches->size()) + " candidate locations";
+    return std::nullopt;
+  }
+  return std::move(matches->front());
+}
+
+std::optional<std::uint64_t> DirectCallTarget(
+    const Instruction& instruction, std::string_view description,
+    std::string* error) {
+  if (instruction.mnemonic != "call" || instruction.operands.size() != 1U ||
+      instruction.operands[0].type != Operand::Type::kImmediate ||
+      instruction.operands[0].value < 0) {
+    *error = std::string(description) + " is not one direct call";
+    return std::nullopt;
+  }
+  return static_cast<std::uint64_t>(instruction.operands[0].value);
 }
 
 std::vector<std::uint64_t> RipTargets(const Instruction& instruction) {
@@ -1182,7 +1230,9 @@ std::optional<std::vector<SignatureSpec>> SignatureSpecs(const Json& sidecar,
   for (const auto& [label, count] :
        std::array<std::pair<std::string_view, std::size_t>, 6>{
            {{"small-allocate", 24},
-            {"usable-size", 24},
+            // usable-size is an 18-instruction leaf. Do not include bytes from
+            // the adjacent function or alignment padding in its signature.
+            {"usable-size", 18},
             {"reallocate", 24},
             {"allocate", 24},
             {"aligned-allocate-direct", 24},
@@ -1193,7 +1243,7 @@ std::optional<std::vector<SignatureSpec>> SignatureSpecs(const Json& sidecar,
   }
   if (!add("arena-initializer", seeds["arena_initializer"], 24) ||
       !add("allocator-thread-initializer",
-           seeds["allocator_thread_initializer"], 24) ||
+           seeds["allocator_thread_initializer"], 19) ||
       !add("registry-initializer", bootstrap["registry_initializer"], 20,
            true) ||
       !add("allocator-object-initializer",
@@ -1290,12 +1340,58 @@ std::optional<std::pair<Json, Json>> DeriveDocuments(const ElfImage& reference,
   const auto specs = SignatureSpecs(sidecar, error);
   if (!specs.has_value()) return std::nullopt;
   std::map<std::string, SignatureMatch> matches;
+  std::vector<SignatureMatch> allocate_matches;
   for (const SignatureSpec& spec : *specs) {
+    if (spec.name == "allocate") {
+      auto candidates = FindSignatureMatches(reference, candidate,
+                                             disassembler, spec, true, error);
+      if (!candidates.has_value()) return std::nullopt;
+      allocate_matches = std::move(*candidates);
+      continue;
+    }
     auto match =
         FindSignatureMatch(reference, candidate, disassembler, spec, error);
     if (!match.has_value()) return std::nullopt;
     matches.emplace(spec.name, std::move(*match));
   }
+  // 2904 contains two semantically equivalent allocate wrappers. Select the
+  // one independently referenced by the registry initializer instead of
+  // weakening signature uniqueness globally.
+  const SignatureMatch& registry_match = matches.at("registry-initializer");
+  if (allocate_matches.empty() || registry_match.reference.size() <= 9U ||
+      registry_match.candidate.size() <= 9U) {
+    *error = "allocator signatures are incomplete";
+    return std::nullopt;
+  }
+  const auto reference_allocate = DirectCallTarget(
+      registry_match.reference[9], "reference registry allocator call", error);
+  if (!reference_allocate.has_value() ||
+      *reference_allocate !=
+          allocate_matches.front().reference.front().address) {
+    if (error->empty()) {
+      *error =
+          "reference registry initializer does not call its allocator bridge";
+    }
+    return std::nullopt;
+  }
+  const auto candidate_allocate = DirectCallTarget(
+      registry_match.candidate[9], "candidate registry allocator call", error);
+  if (!candidate_allocate.has_value()) return std::nullopt;
+  auto selected_allocate = std::find_if(
+      allocate_matches.begin(), allocate_matches.end(),
+      [&](const SignatureMatch& match) {
+        return match.rva == *candidate_allocate;
+      });
+  if (selected_allocate == allocate_matches.end() ||
+      std::find_if(std::next(selected_allocate), allocate_matches.end(),
+                   [&](const SignatureMatch& match) {
+                     return match.rva == *candidate_allocate;
+                   }) != allocate_matches.end()) {
+    *error = "signature allocate candidates do not identify exactly one "
+             "registry allocator call";
+    return std::nullopt;
+  }
+  matches.emplace("allocate", std::move(*selected_allocate));
   const auto reference_init = reference.InitArray(error);
   const auto candidate_init = candidate.InitArray(error);
   if (!reference_init.has_value() || !candidate_init.has_value()) {

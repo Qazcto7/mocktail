@@ -1088,9 +1088,13 @@ def validate_semantic_match(
             raise AnalyzerError("registry initializer object size is inconsistent")
 
 
-def find_signature_match(
-    reference: ElfImage, candidate: ElfImage, spec: SignatureSpec
-) -> SignatureMatch:
+def find_signature_matches(
+    reference: ElfImage,
+    candidate: ElfImage,
+    spec: SignatureSpec,
+    *,
+    allow_multiple_candidates: bool = False,
+) -> tuple[SignatureMatch, ...]:
     reference_instructions = disassemble(
         reference, spec.reference_rva, spec.instruction_count
     )
@@ -1131,18 +1135,59 @@ def find_signature_match(
                 ):
                     matches.append(signature_offset)
         search_offset = anchor_position + 1
+    if not matches:
+        raise AnalyzerError(
+            f"signature {spec.name} matched 0 candidate locations"
+        )
+    if not allow_multiple_candidates and len(matches) != 1:
+        raise AnalyzerError(
+            f"signature {spec.name} matched {len(matches)} candidate locations"
+        )
+    semantic_matches = []
+    semantic_errors = []
+    for match in matches:
+        match_rva = text.address + match - text.offset
+        candidate_instructions = disassemble(
+            candidate, match_rva, spec.instruction_count
+        )
+        try:
+            validate_semantic_match(
+                reference_instructions,
+                candidate_instructions,
+                spec.allow_registry_object_size_change,
+            )
+        except AnalyzerError as error:
+            semantic_errors.append(error)
+            continue
+        semantic_matches.append(
+            SignatureMatch(
+                match_rva, reference_instructions, candidate_instructions
+            )
+        )
+    if not semantic_matches and len(matches) == 1 and semantic_errors:
+        raise semantic_errors[0]
+    return tuple(semantic_matches)
+
+
+def find_signature_match(
+    reference: ElfImage, candidate: ElfImage, spec: SignatureSpec
+) -> SignatureMatch:
+    matches = find_signature_matches(reference, candidate, spec)
     if len(matches) != 1:
         raise AnalyzerError(
             f"signature {spec.name} matched {len(matches)} candidate locations"
         )
-    match_rva = text.address + matches[0] - text.offset
-    candidate_instructions = disassemble(candidate, match_rva, spec.instruction_count)
-    validate_semantic_match(
-        reference_instructions,
-        candidate_instructions,
-        spec.allow_registry_object_size_change,
-    )
-    return SignatureMatch(match_rva, reference_instructions, candidate_instructions)
+    return matches[0]
+
+
+def direct_call_target(instruction: Any, description: str) -> int:
+    if (
+        instruction.mnemonic != "call"
+        or len(instruction.operands) != 1
+        or instruction.operands[0].type != capstone_x86.X86_OP_IMM
+    ):
+        raise AnalyzerError(f"{description} is not one direct call")
+    return instruction.operands[0].imm
 
 
 def rip_targets(instruction: Any) -> tuple[int, ...]:
@@ -1256,7 +1301,13 @@ def create_signature_specs(
             24,
         ),
         SignatureSpec(
-            "usable-size", parse_rva(bridges["usable-size"]["rva"], "usable size"), 24
+            # This bridge is an 18-instruction leaf.  Keeping the signature
+            # bounded to the leaf avoids coupling it to padding or the next
+            # function, which changed from executable code to INT3 padding in
+            # Roblox versionCode 2904.
+            "usable-size",
+            parse_rva(bridges["usable-size"]["rva"], "usable size"),
+            18,
         ),
         SignatureSpec(
             "reallocate", parse_rva(bridges["reallocate"]["rva"], "reallocate"), 24
@@ -1277,8 +1328,12 @@ def create_signature_specs(
         ),
         SignatureSpec(
             "allocator-thread-initializer",
-            parse_rva(data_seeds["allocator_thread_initializer"], "thread initializer"),
-            24,
+            parse_rva(
+                data_seeds["allocator_thread_initializer"], "thread initializer"
+            ),
+            # The wrapper ends at instruction 19. Later instructions belong
+            # to an unrelated adjacent initializer.
+            19,
         ),
         SignatureSpec(
             "registry-initializer",
@@ -1362,10 +1417,47 @@ def derive_profile(
 
     reference_profile = reference_sidecar["profile"]
     anchors = reference_sidecar["derivation_anchors"]
-    matches = {
-        spec.name: find_signature_match(reference, candidate, spec)
-        for spec in create_signature_specs(reference_profile, anchors)
-    }
+    matches = {}
+    allocate_matches = ()
+    for spec in create_signature_specs(reference_profile, anchors):
+        if spec.name == "allocate":
+            allocate_matches = find_signature_matches(
+                reference, candidate, spec, allow_multiple_candidates=True
+            )
+        else:
+            matches[spec.name] = find_signature_match(reference, candidate, spec)
+
+    # The allocate signature alone is intentionally ambiguous in 2904. Resolve
+    # it through an independent invariant: the registry initializer directly
+    # calls the allocator wrapper that Mocktail must publish in the profile.
+    registry_match = matches["registry-initializer"]
+    reference_allocate = parse_rva(
+        bridge_map(reference_profile)["allocate"]["rva"],
+        "reference allocate",
+    )
+    if (
+        direct_call_target(
+            registry_match.reference_instructions[9],
+            "reference registry allocator call",
+        )
+        != reference_allocate
+    ):
+        raise AnalyzerError(
+            "reference registry initializer does not call its allocator bridge"
+        )
+    candidate_allocate = direct_call_target(
+        registry_match.candidate_instructions[9],
+        "candidate registry allocator call",
+    )
+    selected_allocate = tuple(
+        match for match in allocate_matches if match.rva == candidate_allocate
+    )
+    if len(selected_allocate) != 1:
+        raise AnalyzerError(
+            "signature allocate candidates do not identify exactly one "
+            "registry allocator call"
+        )
+    matches["allocate"] = selected_allocate[0]
     reference_init = reference.init_array_relocations()
     candidate_init = candidate.init_array_relocations()
     if len(reference_init) != reference_profile["init_array_count"]:

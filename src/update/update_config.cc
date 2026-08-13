@@ -155,6 +155,11 @@ UpdateConfigResult LoadUpdateConfig(const std::filesystem::path& path) {
         result.error = "updates.automatic must be true or false";
         break;
       }
+    } else if (key == "testing_latest_only") {
+      if (!ParseBoolean(value, &result.config.testing_latest_only)) {
+        result.error = "updates.testing_latest_only must be true or false";
+        break;
+      }
     } else if (key == "launch_after_update") {
       if (!ParseBoolean(value, &result.config.launch_after_update)) {
         result.error = "updates.launch_after_update must be true or false";

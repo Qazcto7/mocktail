@@ -18,7 +18,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <limits>
 #include <new>
+
+#if defined(__GLIBC__)
+#include <dlfcn.h>
+#endif
 
 namespace mocktail::compat {
 namespace {
@@ -30,6 +35,34 @@ struct ThreadStartContext {
 };
 
 std::atomic<NativeThreadInitializer> g_thread_initializer{nullptr};
+
+size_t HostStackSizeForGuest(size_t guest_stack_size) noexcept {
+#if defined(__GLIBC__)
+  using GetStaticTlsInfo = void (*)(size_t*, size_t*);
+  static const auto get_static_tls_info =
+      reinterpret_cast<GetStaticTlsInfo>(
+          dlsym(RTLD_DEFAULT, "_dl_get_tls_static_info"));
+  size_t tls_size = 0;
+  size_t tls_alignment = 0;
+  if (get_static_tls_info != nullptr) {
+    get_static_tls_info(&tls_size, &tls_alignment);
+  }
+
+  // glibc places static TLS inside the requested mapping. Compensate only
+  // unusually large blocks; Mocktail's compatibility TLS is several MiB.
+  constexpr size_t kLargeStaticTlsThreshold = 1U * 1024U * 1024U;
+  if (tls_size > kLargeStaticTlsThreshold && tls_alignment != 0 &&
+      (tls_alignment & (tls_alignment - 1)) == 0 &&
+      tls_size <= std::numeric_limits<size_t>::max() - (tls_alignment - 1)) {
+    const size_t reserve =
+        (tls_size + tls_alignment - 1) & ~(tls_alignment - 1);
+    if (guest_stack_size <= std::numeric_limits<size_t>::max() - reserve) {
+      return guest_stack_size + reserve;
+    }
+  }
+#endif
+  return guest_stack_size;
+}
 
 int CopySupportedThreadAttributes(const pthread_attr_t& source,
                                   pthread_attr_t* destination) noexcept {
@@ -62,7 +95,8 @@ int CopySupportedThreadAttributes(const pthread_attr_t& source,
   if (result != 0) {
     return result;
   }
-  result = pthread_attr_setstacksize(destination, stack_size);
+  result = pthread_attr_setstacksize(destination,
+                                     HostStackSizeForGuest(stack_size));
   if (result != 0) {
     return result;
   }
@@ -112,7 +146,8 @@ int CopyRequiredThreadAttributes(const pthread_attr_t& source,
   if (result != 0) {
     return result;
   }
-  return pthread_attr_setstacksize(destination, stack_size);
+  return pthread_attr_setstacksize(destination,
+                                   HostStackSizeForGuest(stack_size));
 }
 
 int ConfigureHostSafeStackFallback(const pthread_attr_t* source,
@@ -139,9 +174,11 @@ int ConfigureHostSafeStackFallback(const pthread_attr_t* source,
   if (result != 0) {
     return result;
   }
+  const size_t guest_floor =
+      std::max(guest_stack_size, kBionicLp64FallbackThreadStackSize);
   return pthread_attr_setstacksize(
-      destination, std::max({guest_stack_size, host_default_stack_size,
-                             kBionicLp64FallbackThreadStackSize}));
+      destination,
+      std::max(host_default_stack_size, HostStackSizeForGuest(guest_floor)));
 }
 
 void* RunGuestThread(void* raw_context) noexcept {
@@ -183,8 +220,9 @@ int CreateBionicPthread(pthread_t* thread, const pthread_attr_t* attr,
   if (result == 0) {
     normalized_attr_initialized = true;
     if (attr == nullptr) {
-      result = pthread_attr_setstacksize(&normalized_attr,
-                                         kBionicLp64DefaultThreadStackSize);
+      result = pthread_attr_setstacksize(
+          &normalized_attr,
+          HostStackSizeForGuest(kBionicLp64DefaultThreadStackSize));
     } else {
       result = CopySupportedThreadAttributes(*attr, &normalized_attr);
     }

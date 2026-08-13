@@ -53,10 +53,8 @@ struct CgroupMemoryLimitResult {
   bool active() const { return status == CgroupMemoryLimitStatus::kActive; }
 };
 
-// Replaces the current process with the same command inside a transient
-// systemd user scope when cgroup v2 delegation is available. A successful
-// re-exec does not return. Systems without systemd continue with the watchdog
-// fallback and receive kUnavailable.
+// Compatibility hook for the former cgroup re-exec path. Automatic cgroup
+// scope creation is disabled, so callers continue with the watchdog fallback.
 CgroupMemoryLimitResult MaybeReexecWithCgroupMemoryLimit(
     int argc, char* const argv[], std::uint64_t limit_bytes,
     const std::vector<std::string>* reexec_arguments = nullptr);
