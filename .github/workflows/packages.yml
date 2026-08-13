@@ -265,6 +265,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -Eeuo pipefail
+          mv -- release/*.AppImage release/mocktail-nightly.AppImage
+          mv -- release/*.deb release/mocktail-nightly.deb
+          mv -- release/*.rpm release/mocktail-nightly.rpm
+          mv -- release/*.pkg.tar.zst release/mocktail-nightly.pkg.tar.zst
           find release -maxdepth 1 -type f -print
           git config user.name komaruworld
           git config user.email rtysus228@gmail.com
@@ -277,3 +281,12 @@ jobs:
               --notes "Automated development packages from main."
           fi
           gh release upload continuous release/* --clobber
+          while IFS= read -r asset; do
+            case "$asset" in
+              mocktail-nightly.AppImage|mocktail-nightly.deb|mocktail-nightly.rpm|mocktail-nightly.pkg.tar.zst)
+                ;;
+              Mocktail-*.AppImage|mocktail_*.deb|mocktail-*.deb|mocktail-*.rpm|mocktail-*.pkg.tar.zst)
+                gh release delete-asset continuous "$asset" --yes
+                ;;
+            esac
+          done < <(gh release view continuous --json assets --jq '.assets[].name')
