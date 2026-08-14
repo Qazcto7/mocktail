@@ -128,7 +128,15 @@ grep -Fq 'CleanupStaleBuilderMounts' "${BUILD_HELPER}" ||
   Fail 'obsolete GitLab CI configuration is still present'
 grep -Fq 'name: Flatpak' "${GITHUB_CI}" ||
   Fail 'GitHub Actions workflow has no stable display name'
-grep -Fq 'branches: [main]' "${GITHUB_CI}" ||
+validates_main=false
+if grep -Fq 'branches: [main]' "${GITHUB_CI}"; then
+  validates_main=true
+elif grep -Fq 'workflow_run:' "${GITHUB_CI}" &&
+     grep -Fq 'workflows: [Native packages]' "${GITHUB_CI}" &&
+     grep -Fq "head_branch == 'main'" "${GITHUB_CI}"; then
+  validates_main=true
+fi
+[[ "${validates_main}" == true ]] ||
   Fail 'GitHub Actions does not validate the main branch'
 grep -Fq 'pull_request:' "${GITHUB_CI}" ||
   Fail 'GitHub Actions does not validate pull requests'
@@ -201,13 +209,20 @@ grep -Fq 'flatpak-builder is unavailable' "${TEMP_DIR}/stderr" ||
   Fail 'helper did not explain how to install flatpak-builder'
 
 mkdir -p -- "${TEMP_DIR}/repo/objects"
+mkdir -p -- \
+  "${TEMP_DIR}/native-repositories/apt" \
+  "${TEMP_DIR}/native-repositories/rpm" \
+  "${TEMP_DIR}/native-repositories/downloads"
 printf 'bundle\n' >"${TEMP_DIR}/Mocktail-x86_64.flatpak"
 printf 'public-key\n' >"${TEMP_DIR}/mocktail-flatpak.gpg"
+printf 'public-key\n' \
+  >"${TEMP_DIR}/native-repositories/mocktail-packages.gpg"
 "${PAGES_HELPER}" \
   "${TEMP_DIR}/repo" \
   "${TEMP_DIR}/Mocktail-x86_64.flatpak" \
   "${TEMP_DIR}/mocktail-flatpak.gpg" \
-  "${TEMP_DIR}/public"
+  "${TEMP_DIR}/public" \
+  "${TEMP_DIR}/native-repositories"
 grep -Fq 'Url=https://mocktail.bigrat.space/repo/' \
   "${TEMP_DIR}/public/mocktail.flatpakrepo" ||
   Fail 'published Flatpak repository URL is incorrect'
@@ -218,5 +233,9 @@ grep -Fq 'flatpak install --user' "${TEMP_DIR}/public/index.html" ||
   Fail 'Pages landing page has no direct installation command'
 grep -Fq 'roblox://experiences/start' "${TEMP_DIR}/public/join.html" ||
   Fail 'Pages output has no Discord join bridge'
+[[ -d "${TEMP_DIR}/public/apt" &&
+   -d "${TEMP_DIR}/public/rpm" &&
+   -d "${TEMP_DIR}/public/downloads" ]] ||
+  Fail 'Pages output has no native package repositories'
 
 printf 'Flatpak packaging contract test passed\n'

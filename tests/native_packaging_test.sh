@@ -107,11 +107,17 @@ grep -Fq 'paths-ignore:' "${WORKFLOW}" ||
   Fail 'native package workflow has no path filters'
 grep -Fq "'assets/screenshots/**'" "${WORKFLOW}" ||
   Fail 'native packages rebuild for screenshot-only changes'
-grep -Fq "'packaging/flatpak/**'" "${WORKFLOW}" ||
-  Fail 'native packages rebuild for Flatpak-only changes'
+if grep -Fq "'packaging/flatpak/**'" "${WORKFLOW}"; then
+  Fail 'native packages ignore Flatpak changes required by Pages publication'
+fi
+if grep -Fq "'site/**'" "${WORKFLOW}"; then
+  Fail 'native packages ignore website changes required by Pages publication'
+fi
 
-grep -Fq 'sudo pacman -U ./mocktail-*-x86_64.pkg.tar.zst' "${README}" ||
-  Fail 'README has no direct pacman installation command'
+grep -Fq 'sudo dnf install mocktail-nightly' "${README}" ||
+  Fail 'README has no nightly DNF installation command'
+grep -Fq 'sudo apt install mocktail-nightly' "${README}" ||
+  Fail 'README has no nightly APT installation command'
 grep -Fq 'Ubuntu 26.04+' "${README}" ||
   Fail 'README has no Ubuntu source dependency guide'
 grep -Fq 'Arch Linux' "${README}" ||
