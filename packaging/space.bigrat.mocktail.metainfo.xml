@@ -55,6 +55,15 @@
     <binary>mocktail</binary>
   </provides>
   <releases>
+    <release version="1.0.2" date="2026-08-14">
+      <description>
+        <ul>
+          <li>Fixed the “Roblox is out of date” bug</li>
+          <li>Improved logging</li>
+          <li>Fixed issues with Discord RPC where the game you were playing wasn’t displayed</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.0.1" date="2026-08-13">
       <description>
         <ul>
