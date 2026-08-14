@@ -1,27 +1,9 @@
 name: Flatpak
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/flatpak.yml'
-      - '.gitmodules'
-      - 'CMakeLists.txt'
-      - 'LICENSE'
-      - 'assets/screenshots/**'
-      - 'cmake/**'
-      - 'config/**'
-      - 'include/**'
-      - 'packaging/flatpak/**'
-      - 'packaging/discord-join.html'
-      - 'packaging/icons/**'
-      - 'packaging/space.bigrat.mocktail.desktop'
-      - 'packaging/space.bigrat.mocktail.metainfo.xml'
-      - 'packaging/space.bigrat.mocktail.svg'
-      - 'scripts/assemble_flatpak_pages.sh'
-      - 'src/**'
-      - 'stubs/**'
-      - 'third_party/**'
+  workflow_run:
+    workflows: [Native packages]
+    types: [completed]
   pull_request:
     paths:
       - '.github/workflows/flatpak.yml'
@@ -39,29 +21,68 @@ on:
       - 'packaging/space.bigrat.mocktail.metainfo.xml'
       - 'packaging/space.bigrat.mocktail.svg'
       - 'scripts/assemble_flatpak_pages.sh'
+      - 'scripts/assemble_native_repositories.sh'
+      - 'site/**'
       - 'src/**'
       - 'stubs/**'
       - 'third_party/**'
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
-  group: flatpak-${{ github.ref }}
+  group: flatpak-${{ github.event.workflow_run.head_sha || github.ref }}
   cancel-in-progress: true
 
 jobs:
   flatpak:
     name: Flatpak build
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event != 'pull_request' &&
+      github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    env:
+      MOCKTAIL_PUBLISH: ${{ (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event != 'pull_request' && github.event.workflow_run.head_branch == 'main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+      MOCKTAIL_SOURCE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           submodules: recursive
+
+      - name: Download package repositories
+        if: env.MOCKTAIL_PUBLISH == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          run_id="${{ github.event.workflow_run.id }}"
+          if [[ -z "$run_id" ]]; then
+            run_id="$(gh run list \
+              --workflow packages.yml \
+              --branch main \
+              --event push \
+              --status success \
+              --limit 1 \
+              --json databaseId \
+              --jq '.[0].databaseId')"
+          fi
+          [[ -n "$run_id" ]]
+          gh run download "$run_id" \
+            --name Mocktail-native-repositories \
+            --dir native-repositories
+          [[ -d native-repositories/apt && \
+             -d native-repositories/rpm && \
+             -d native-repositories/downloads && \
+             -s native-repositories/mocktail-packages.gpg ]]
 
       - name: Install Flatpak builder
         shell: bash
@@ -78,13 +99,10 @@ jobs:
           FLATPAK_GPG_KEY_ID: ${{ secrets.FLATPAK_GPG_KEY_ID }}
         run: |
           set -Eeuo pipefail
-          git update-ref refs/heads/main "$GITHUB_SHA"
+          git update-ref refs/heads/main "$MOCKTAIL_SOURCE_SHA"
           builder_signing=()
           bundle_keys=()
-          publish=false
-          if [[ "$GITHUB_REF" == refs/heads/main && \
-                "$GITHUB_EVENT_NAME" != pull_request ]]; then
-            publish=true
+          if [[ "$MOCKTAIL_PUBLISH" == true ]]; then
             [[ -n "$FLATPAK_GPG_PRIVATE_KEY" && \
                -n "$FLATPAK_GPG_KEY_ID" ]]
             install -d -m 0700 "$RUNNER_TEMP/mocktail-gnupg"
@@ -110,7 +128,7 @@ jobs:
             "${builder_signing[@]}" \
             build-flatpak-ci \
             packaging/flatpak/space.bigrat.mocktail.json
-          if [[ "$publish" == true ]]; then
+          if [[ "$MOCKTAIL_PUBLISH" == true ]]; then
             flatpak build-update-repo \
               --generate-static-deltas \
               --static-delta-jobs=2 \
@@ -126,9 +144,10 @@ jobs:
             Mocktail-x86_64.flatpak \
             space.bigrat.mocktail \
             stable
-          if [[ "$publish" == true ]]; then
+          if [[ "$MOCKTAIL_PUBLISH" == true ]]; then
             ./scripts/assemble_flatpak_pages.sh \
-              repo Mocktail-x86_64.flatpak mocktail-flatpak.gpg public
+              repo Mocktail-x86_64.flatpak mocktail-flatpak.gpg \
+              public native-repositories
           fi
 
       - name: Upload Flatpak
@@ -140,18 +159,24 @@ jobs:
           retention-days: 14
 
       - name: Configure GitHub Pages
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        if: env.MOCKTAIL_PUBLISH == 'true'
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
 
       - name: Upload GitHub Pages repository
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        if: env.MOCKTAIL_PUBLISH == 'true'
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: public
 
   deploy-pages:
     name: Publish Flatpak repository
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    if: >-
+      (github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event != 'pull_request' &&
+      github.event.workflow_run.head_branch == 'main') ||
+      (github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main')
     needs: flatpak
     runs-on: ubuntu-24.04
     timeout-minutes: 10

@@ -24,6 +24,15 @@ an update fails.
 
 ## Install with Flatpak
 
+Install the stable release from Flathub:
+
+```bash
+flatpak install flathub space.bigrat.mocktail
+flatpak run space.bigrat.mocktail
+```
+
+Nightly builds are produced automatically from the latest `main` branch:
+
 ```bash
 flatpak install --user https://mocktail.bigrat.space/mocktail.flatpakref
 flatpak run space.bigrat.mocktail
@@ -44,6 +53,42 @@ Use `mocktail` instead of `mocktail-git` to build the pinned release from
 source, or install the stable prebuilt package with `paru -S mocktail-bin` or
 `yay -S mocktail-bin`.
 
+## Install with DNF
+
+Fedora 44 users can install either the stable `mocktail` package or the
+`mocktail-nightly` package built from `main`:
+
+```bash
+sudo curl -fsSL https://mocktail.bigrat.space/rpm/mocktail.repo \
+  -o /etc/yum.repos.d/mocktail.repo
+sudo dnf install mocktail
+# or
+sudo dnf install mocktail-nightly
+```
+
+## Install with APT
+
+Ubuntu 26.04 users can install either the stable `mocktail` package or the
+`mocktail-nightly` package built from `main`:
+
+```bash
+sudo install -d -m 0755 /etc/apt/keyrings
+sudo curl -fsSL https://mocktail.bigrat.space/mocktail-packages.gpg \
+  -o /etc/apt/keyrings/mocktail.gpg
+echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/mocktail.gpg] https://mocktail.bigrat.space/apt mocktail main" | \
+  sudo tee /etc/apt/sources.list.d/mocktail.list >/dev/null
+sudo apt update
+sudo apt install mocktail
+# or
+sudo apt install mocktail-nightly
+```
+
+## Direct downloads
+
+Direct AppImage, DEB, and RPM downloads are available from the
+[Website](https://mocktail.bigrat.space/) and
+[GitHub Releases](https://github.com/komaruworld/mocktail/releases).
+
 <details>
 <summary>Screenshots</summary>
 
@@ -54,26 +99,6 @@ source, or install the stable prebuilt package with `paru -S mocktail-bin` or
 ![Roblox experience in Mocktail](assets/screenshots/flatpak-gameplay-lobby.png)
 
 </details>
-
-## Other Linux packages
-
-The latest AppImage, DEB, RPM, and Arch packages are attached to the
-[continuous release](https://github.com/komaruworld/mocktail/releases/tag/continuous).
-
-```bash
-# AppImage
-chmod +x Mocktail-x86_64.AppImage
-./Mocktail-x86_64.AppImage
-
-# Ubuntu/Debian
-sudo apt install ./mocktail_*_amd64.deb
-
-# Fedora
-sudo dnf install ./mocktail-*.x86_64.rpm
-
-# Arch Linux
-sudo pacman -U ./mocktail-*-x86_64.pkg.tar.zst
-```
 
 ## Building
 

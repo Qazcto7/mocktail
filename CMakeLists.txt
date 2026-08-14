@@ -717,7 +717,20 @@ install(CODE "
   endif()
 ")
 
-set(CPACK_PACKAGE_NAME "mocktail")
+set(MOCKTAIL_PACKAGE_NAME "mocktail" CACHE STRING
+  "Native package name"
+)
+set(MOCKTAIL_PACKAGE_VERSION_SUFFIX "" CACHE STRING
+  "Native package version suffix"
+)
+if(NOT MOCKTAIL_PACKAGE_NAME STREQUAL "mocktail" AND
+   NOT MOCKTAIL_PACKAGE_NAME STREQUAL "mocktail-nightly")
+  message(FATAL_ERROR
+    "MOCKTAIL_PACKAGE_NAME must be mocktail or mocktail-nightly")
+endif()
+
+set(CPACK_PACKAGE_NAME "${MOCKTAIL_PACKAGE_NAME}")
+set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}${MOCKTAIL_PACKAGE_VERSION_SUFFIX}")
 set(CPACK_PACKAGE_VENDOR "Mocktail Project")
 set(CPACK_PACKAGE_CONTACT "komaruworld <rtysus228@gmail.com>")
 set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/komaruworld/mocktail")
@@ -739,6 +752,16 @@ set(CPACK_RPM_FILE_NAME RPM-DEFAULT)
 set(CPACK_RPM_PACKAGE_LICENSE "Apache-2.0")
 set(CPACK_RPM_PACKAGE_GROUP "Amusements/Games")
 set(CPACK_RPM_PACKAGE_AUTOREQPROV ON)
+
+if(MOCKTAIL_PACKAGE_NAME STREQUAL "mocktail-nightly")
+  set(CPACK_DEBIAN_PACKAGE_CONFLICTS "mocktail")
+  set(CPACK_DEBIAN_PACKAGE_REPLACES "mocktail")
+  set(CPACK_RPM_PACKAGE_CONFLICTS "mocktail")
+else()
+  set(CPACK_DEBIAN_PACKAGE_CONFLICTS "mocktail-nightly")
+  set(CPACK_DEBIAN_PACKAGE_REPLACES "mocktail-nightly")
+  set(CPACK_RPM_PACKAGE_CONFLICTS "mocktail-nightly")
+endif()
 include(CPack)
 
 add_dependencies(mocktail all_stubs)

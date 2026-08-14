@@ -5,27 +5,21 @@ on:
     branches: [main]
     paths-ignore:
       - '.github/workflows/ci.yml'
-      - '.github/workflows/flatpak.yml'
       - '.gitignore'
       - 'README.md'
       - 'assets/screenshots/**'
       - 'docs/**'
       - 'packaging/aur/**'
-      - 'packaging/flatpak/**'
-      - 'scripts/assemble_flatpak_pages.sh'
       - 'scripts/build_flatpak.sh'
       - 'tests/**'
   pull_request:
     paths-ignore:
       - '.github/workflows/ci.yml'
-      - '.github/workflows/flatpak.yml'
       - '.gitignore'
       - 'README.md'
       - 'assets/screenshots/**'
       - 'docs/**'
       - 'packaging/aur/**'
-      - 'packaging/flatpak/**'
-      - 'scripts/assemble_flatpak_pages.sh'
       - 'scripts/build_flatpak.sh'
       - 'tests/**'
   workflow_dispatch:
@@ -121,9 +115,11 @@ jobs:
       - name: Build DEB
         shell: bash
         run: |
+          nightly_suffix=".nightly.$(git show -s --format=%cd --date=format:%Y%m%d%H%M%S "$GITHUB_SHA").g${GITHUB_SHA:0:8}"
           docker run --rm \
             --volume "$GITHUB_WORKSPACE:/workspace" \
             --workdir /workspace \
+            --env MOCKTAIL_PACKAGE_VERSION_SUFFIX="$nightly_suffix" \
             ubuntu:26.04 bash -Eeuo pipefail -c '
               export DEBIAN_FRONTEND=noninteractive
               apt-get update
@@ -138,6 +134,8 @@ jobs:
               cmake -S . -B build-deb -G Ninja \
                 -DCMAKE_BUILD_TYPE=Release \
                 -DCMAKE_INSTALL_PREFIX=/usr \
+                -DMOCKTAIL_PACKAGE_NAME=mocktail-nightly \
+                -DMOCKTAIL_PACKAGE_VERSION_SUFFIX="$MOCKTAIL_PACKAGE_VERSION_SUFFIX" \
                 -DBUILD_TESTING=OFF
               cmake --build build-deb --parallel 4
               cpack --config build-deb/CPackConfig.cmake \
@@ -167,9 +165,11 @@ jobs:
       - name: Build RPM
         shell: bash
         run: |
+          nightly_suffix=".nightly.$(git show -s --format=%cd --date=format:%Y%m%d%H%M%S "$GITHUB_SHA").g${GITHUB_SHA:0:8}"
           docker run --rm \
             --volume "$GITHUB_WORKSPACE:/workspace" \
             --workdir /workspace \
+            --env MOCKTAIL_PACKAGE_VERSION_SUFFIX="$nightly_suffix" \
             fedora:44 bash -Eeuo pipefail -c '
               dnf install --assumeyes \
                 gcc-c++ cmake git ninja-build pkgconf-pkg-config rpm-build \
@@ -182,6 +182,8 @@ jobs:
               cmake -S . -B build-rpm -G Ninja \
                 -DCMAKE_BUILD_TYPE=Release \
                 -DCMAKE_INSTALL_PREFIX=/usr \
+                -DMOCKTAIL_PACKAGE_NAME=mocktail-nightly \
+                -DMOCKTAIL_PACKAGE_VERSION_SUFFIX="$MOCKTAIL_PACKAGE_VERSION_SUFFIX" \
                 -DBUILD_TESTING=OFF
               cmake --build build-rpm --parallel 4
               cpack --config build-rpm/CPackConfig.cmake \
@@ -243,7 +245,7 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     needs: [appimage, deb, rpm, arch]
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     permissions:
       contents: write
     steps:
@@ -259,10 +261,8 @@ jobs:
           path: release
           merge-multiple: true
 
-      - name: Update continuous release
+      - name: Prepare continuous packages
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -Eeuo pipefail
           mv -- release/*.AppImage release/mocktail-nightly.AppImage
@@ -270,6 +270,43 @@ jobs:
           mv -- release/*.rpm release/mocktail-nightly.rpm
           mv -- release/*.pkg.tar.zst release/mocktail-nightly.pkg.tar.zst
           find release -maxdepth 1 -type f -print
+
+      - name: Build package repositories
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FLATPAK_GPG_PRIVATE_KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
+          FLATPAK_GPG_KEY_ID: ${{ secrets.FLATPAK_GPG_KEY_ID }}
+        run: |
+          set -Eeuo pipefail
+          [[ -n "$FLATPAK_GPG_PRIVATE_KEY" && -n "$FLATPAK_GPG_KEY_ID" ]]
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            apt-utils createrepo-c gnupg rpm
+          install -d stable/deb stable/rpm
+          stable_tag="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"
+          gh release download "$stable_tag" --pattern '*.deb' --dir stable/deb
+          gh release download "$stable_tag" --pattern '*.rpm' --dir stable/rpm
+          mapfile -t stable_debs < <(find stable/deb -maxdepth 1 -type f -name '*.deb' -print)
+          mapfile -t stable_rpms < <(find stable/rpm -maxdepth 1 -type f -name '*.rpm' -print)
+          [[ "${#stable_debs[@]}" -eq 1 && "${#stable_rpms[@]}" -eq 1 ]]
+          install -d -m 0700 "$RUNNER_TEMP/mocktail-native-gnupg"
+          printf '%s' "$FLATPAK_GPG_PRIVATE_KEY" | \
+            gpg --batch --homedir "$RUNNER_TEMP/mocktail-native-gnupg" --import
+          gpg --batch --homedir "$RUNNER_TEMP/mocktail-native-gnupg" \
+            --export "$FLATPAK_GPG_KEY_ID" >mocktail-packages.gpg
+          ./scripts/assemble_native_repositories.sh \
+            "${stable_debs[0]}" release/mocktail-nightly.deb \
+            "${stable_rpms[0]}" release/mocktail-nightly.rpm \
+            mocktail-packages.gpg "$FLATPAK_GPG_KEY_ID" \
+            "$RUNNER_TEMP/mocktail-native-gnupg" native-repositories
+
+      - name: Update continuous release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
           git config user.name komaruworld
           git config user.email rtysus228@gmail.com
           git tag --force continuous "$GITHUB_SHA"
@@ -290,3 +327,11 @@ jobs:
                 ;;
             esac
           done < <(gh release view continuous --json assets --jq '.assets[].name')
+
+      - name: Upload package repositories
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Mocktail-native-repositories
+          path: native-repositories
+          if-no-files-found: error
+          retention-days: 14
