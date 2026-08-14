@@ -10,6 +10,10 @@
   <developer id="space.bigrat">
     <name>Mocktail Project Authors</name>
   </developer>
+  <branding>
+    <color type="primary" scheme_preference="light">#CEB3EF</color>
+    <color type="primary" scheme_preference="dark">#2F2A6B</color>
+  </branding>
   <url type="homepage">https://github.com/komaruworld/mocktail</url>
   <description>
     <p>
@@ -35,7 +39,18 @@
     </screenshot>
   </screenshots>
   <launchable type="desktop-id">space.bigrat.mocktail.desktop</launchable>
-  <content_rating type="oars-1.1"/>
+  <content_rating type="oars-1.1">
+    <content_attribute id="violence-cartoon">moderate</content_attribute>
+    <content_attribute id="violence-fantasy">moderate</content_attribute>
+    <content_attribute id="violence-realistic">moderate</content_attribute>
+    <content_attribute id="social-chat">moderate</content_attribute>
+    <content_attribute id="social-info">moderate</content_attribute>
+    <content_attribute id="social-audio">moderate</content_attribute>
+    <content_attribute id="social-contacts">intense</content_attribute>
+    <content_attribute id="money-purchasing">intense</content_attribute>
+    <content_attribute id="money-advertising">intense</content_attribute>
+    <content_attribute id="money-gambling">moderate</content_attribute>
+  </content_rating>
   <provides>
     <binary>mocktail</binary>
   </provides>
