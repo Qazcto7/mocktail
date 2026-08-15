@@ -15,8 +15,10 @@
 #ifndef MOCKTAIL_SERVICES_CLIENT_SETTINGS_SERVICE_H_
 #define MOCKTAIL_SERVICES_CLIENT_SETTINGS_SERVICE_H_
 
+#include <cstddef>
 #include <filesystem>
 #include <string>
+#include <string_view>
 
 #include "services/http_client.h"
 
@@ -53,6 +55,19 @@ struct ClientSettingsResult {
   bool cache_updated = false;
   std::string error;
 };
+
+struct FflagsMergeResult {
+  std::string json;
+  bool loaded = false;
+  std::size_t count = 0;
+  std::string error;
+};
+
+// Loads a flat, optional fflags JSON file underneath caller-provided values.
+// count is the number of file entries added after caller values take
+// precedence.
+FflagsMergeResult LoadAndMergeFflagsFile(const std::filesystem::path& path,
+                                         std::string_view base_json);
 
 class ClientSettingsService {
  public:

@@ -51,6 +51,7 @@
 #include "runtime/supported_launch_policy.h"
 #include "services/auth_service.h"
 #include "services/browser_tracker_service.h"
+#include "services/client_settings_service.h"
 #include "services/http_client.h"
 #include "window/window.h"
 
@@ -519,11 +520,24 @@ int main(int argc, char* argv[]) {
               << runtime_config.config.device_profile().display_name << "\"\n";
   }
   if (command_line.options.mode == mocktail::runtime::CommandMode::kRun) {
+    const std::filesystem::path fflags_path =
+        paths.config_root() / "fflags.json";
+    const auto fflags = mocktail::services::LoadAndMergeFflagsFile(
+        fflags_path,
+        environment.GetOr("MOCKTAIL_CLIENT_SETTINGS_OVERRIDES_JSON", "{}"));
+    if (!fflags.error.empty()) {
+      std::cerr << "[FATAL] Cannot load FFlag overrides from " << fflags_path
+                << ": " << fflags.error << '\n';
+      return EXIT_FAILURE;
+    }
+    if (fflags.loaded) {
+      std::cout << "  [runtime] loaded " << fflags.count
+                << " FFlag overrides from " << fflags_path << '\n';
+    }
     std::string client_settings_overrides;
     if (!mocktail::runtime::MergeRuntimeClientSettingsOverrides(
             runtime_config.config.frame_rate(),
-            runtime_config.config.performance(),
-            environment.GetOr("MOCKTAIL_CLIENT_SETTINGS_OVERRIDES_JSON", "{}"),
+            runtime_config.config.performance(), fflags.json,
             &client_settings_overrides, &command_line_error)) {
       std::cerr << "[FATAL] Cannot apply runtime client-settings policy: "
                 << command_line_error << '\n';
