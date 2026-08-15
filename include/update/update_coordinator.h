@@ -17,6 +17,7 @@
 
 #include <filesystem>
 #include <string>
+#include <vector>
 
 #include "update/readiness_canary.h"
 
@@ -46,6 +47,7 @@ struct UpdateResult {
   bool changed = false;
   std::string payload_id;
   std::string message;
+  std::vector<std::string> warnings;
   std::string error;
 
   explicit operator bool() const { return error.empty(); }

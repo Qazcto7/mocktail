@@ -193,6 +193,7 @@ TEST(RuntimeConfigBootstrapTest,
     EXPECT_NE(defaults.find(documented_setting), std::string::npos)
         << documented_setting;
   }
+  EXPECT_EQ(defaults.find("testing_latest_only"), std::string::npos);
 }
 
 TEST(RuntimeConfigBootstrapTest, PreservesExistingRegularFile) {

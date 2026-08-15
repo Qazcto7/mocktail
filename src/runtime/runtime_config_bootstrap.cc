@@ -144,11 +144,6 @@ updates:
   # backend, and promote only on success. An existing current payload is
   # preserved when probation fails.
   automatic: true
-  # Boolean (default: true): testing track. Always try provider latest, even
-  # when it has no verified payload profile, and do not download or activate
-  # an older supported payload in its place. Exact HostAbi derivation and two
-  # canaries are still required before latest can become current.
-  testing_latest_only: true
   # String (default: apk-pure): direct x86_64 APK provider.
   source: apk-pure
   # Reserved for desktop update integrations. `mocktail_updater` itself never

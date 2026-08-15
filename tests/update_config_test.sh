@@ -17,6 +17,22 @@ example="$(python3 "${READER}" "${EXAMPLE}")"
 [[ "$(jq -r .automatic <<<"${example}")" == true ]]
 [[ "$(jq -r .source <<<"${example}")" == apk-pure ]]
 [[ "$(jq -r .launch_after_update <<<"${example}")" == false ]]
+[[ "$(jq -r 'has("testing_latest_only")' <<<"${example}")" == false ]]
+
+cat > "${TEMP_DIR}/config.yaml" <<'EOF'
+version: 1
+updates:
+  automatic: true
+  testing_latest_only: false
+EOF
+deprecated_stderr="${TEMP_DIR}/deprecated.stderr"
+deprecated="$(python3 "${READER}" "${TEMP_DIR}/config.yaml" \
+  2>"${deprecated_stderr}")"
+[[ "$(jq -r 'has("testing_latest_only")' <<<"${deprecated}")" == false ]]
+grep -Fq \
+  'updates.testing_latest_only is no longer supported and is ignored' \
+  "${deprecated_stderr}"
+
 printf '%s\n' 'version: 1' >"${TEMP_DIR}/symlink-target.yaml"
 ln -s "${TEMP_DIR}/symlink-target.yaml" "${TEMP_DIR}/symlink.yaml"
 if python3 "${READER}" "${TEMP_DIR}/symlink.yaml" >/dev/null 2>&1; then

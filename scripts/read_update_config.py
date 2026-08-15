@@ -117,6 +117,14 @@ def main() -> None:
             fail(f"updates.{key} must be true or false")
     if "source" in updates and updates["source"] not in SUPPORTED_SOURCES:
         fail("updates.source must be apk-pure")
+    updates = dict(updates)
+    if "testing_latest_only" in updates:
+        print(
+            "update config: warning: updates.testing_latest_only is no longer "
+            "supported and is ignored",
+            file=sys.stderr,
+        )
+        del updates["testing_latest_only"]
     print(json.dumps(updates, separators=(",", ":")))
 
 

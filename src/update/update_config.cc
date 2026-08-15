@@ -156,10 +156,13 @@ UpdateConfigResult LoadUpdateConfig(const std::filesystem::path& path) {
         break;
       }
     } else if (key == "testing_latest_only") {
-      if (!ParseBoolean(value, &result.config.testing_latest_only)) {
+      bool ignored = false;
+      if (!ParseBoolean(value, &ignored)) {
         result.error = "updates.testing_latest_only must be true or false";
         break;
       }
+      result.warnings.emplace_back(
+          "updates.testing_latest_only is no longer supported and is ignored");
     } else if (key == "launch_after_update") {
       if (!ParseBoolean(value, &result.config.launch_after_update)) {
         result.error = "updates.launch_after_update must be true or false";

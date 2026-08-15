@@ -17,12 +17,12 @@
 
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace mocktail::update {
 
 struct UpdateConfig {
   bool automatic = true;
-  bool testing_latest_only = true;
   bool launch_after_update = false;
   std::string source = "apk-pure";
 };
@@ -30,6 +30,7 @@ struct UpdateConfig {
 struct UpdateConfigResult {
   UpdateConfig config;
   bool file_loaded = false;
+  std::vector<std::string> warnings;
   std::string error;
 
   explicit operator bool() const { return error.empty(); }
