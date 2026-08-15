@@ -394,7 +394,7 @@ TEST(WebViewHelperLauncherTest, SendsBoundedTypedControlsToRunningHelper) {
                                   ready.string() +
                                   "'\n"
                                   "index=0\n"
-                                  "while [ \"$index\" -lt 9 ]; do\n"
+                                  "while [ \"$index\" -lt 10 ]; do\n"
                                   "  dd bs=65548 count=1 status=none <&198 >'" +
                                   packet_prefix +
                                   "'\"$index\" || exit 21\n"
@@ -420,6 +420,7 @@ TEST(WebViewHelperLauncherTest, SendsBoundedTypedControlsToRunningHelper) {
   EXPECT_TRUE(result.process->SetShowDomainAsTitle(true));
   EXPECT_TRUE(result.process->SetRobloxCookie("_|signed-token"));
   EXPECT_TRUE(result.process->SetRobloxCookie({}));
+  EXPECT_TRUE(result.process->ClearRobloxCookie());
   EXPECT_TRUE(result.process->RequestClose());
   ASSERT_TRUE(
       WaitForProcessToBeReaped(result.process_id, std::chrono::seconds(2)));
@@ -433,6 +434,7 @@ TEST(WebViewHelperLauncherTest, SendsBoundedTypedControlsToRunningHelper) {
       WebViewHelperControlOperation::kSetShowDomainAsTitle,
       WebViewHelperControlOperation::kSetRobloxCookie,
       WebViewHelperControlOperation::kRetainPersistentRobloxCookie,
+      WebViewHelperControlOperation::kClearRobloxCookie,
       WebViewHelperControlOperation::kClose,
   };
   const std::vector<std::string> expected_payloads = {
@@ -443,6 +445,7 @@ TEST(WebViewHelperLauncherTest, SendsBoundedTypedControlsToRunningHelper) {
       std::string(1, '\1'),
       std::string(1, '\1'),
       "_|signed-token",
+      "",
       "",
       "",
   };

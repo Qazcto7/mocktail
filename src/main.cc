@@ -707,10 +707,14 @@ int main(int argc, char* argv[]) {
         std::string(runtime_config.config.device_profile().device_sku),
         std::string(runtime_config.config.device_profile().soc_model),
     });
-    if (composition.status == mocktail::runtime::AuthRuntimeStatus::kGuest &&
-        composition.http_status == 401) {
-      std::cout << "  [auth] rejected saved Roblox credential retired; "
-                   "continuing with native sign-in\n";
+    if (composition.rejected_credential_retired) {
+      constexpr std::string_view kSignedOutMessage =
+          "Your saved Roblox session is no longer valid. Sign in again to "
+          "continue.";
+      std::cout << "  [auth] saved Roblox session expired; continuing with "
+                   "native sign-in\n";
+      (void)mocktail::runtime::ShowWarningDialog(environment,
+                                                 kSignedOutMessage);
     }
     if (composition.status ==
         mocktail::runtime::AuthRuntimeStatus::kAuthenticated) {

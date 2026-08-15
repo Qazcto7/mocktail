@@ -108,6 +108,7 @@ class WebViewHelperProcess final {
   // An empty value leaves WebKit's persistent cookie store authoritative so a
   // browser login survives a process restart.
   bool SetRobloxCookie(std::string_view value) const;
+  bool ClearRobloxCookie() const;
   bool WaitUntilReady(std::chrono::milliseconds timeout) const;
   bool DrainEvents(std::vector<WebViewHelperEvent>* events) const;
   bool RequestClose() const;

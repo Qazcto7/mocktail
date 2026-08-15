@@ -113,11 +113,12 @@ void WaitForHelper(int helper_pid) {
 }
 
 bool SpawnOneShot(const std::filesystem::path& helper,
+                  std::string_view option,
                   std::string_view message) {
   std::string helper_string = helper.string();
+  std::string option_string(option);
   std::string message_string(message.substr(0, kMaximumMessageBytes));
-  char message_option[] = "--message";
-  char* arguments[] = {helper_string.data(), message_option,
+  char* arguments[] = {helper_string.data(), option_string.data(),
                        message_string.data(), nullptr};
   pid_t child = -1;
   const int spawn_status =
@@ -199,7 +200,16 @@ bool ShowFailureDialog(const Environment& environment,
     return false;
   }
   const std::filesystem::path helper = DialogHelper(environment);
-  return !helper.empty() && SpawnOneShot(helper, message);
+  return !helper.empty() && SpawnOneShot(helper, "--message", message);
+}
+
+bool ShowWarningDialog(const Environment& environment,
+                       std::string_view message) {
+  if (!FailureDialogsEnabled(environment)) {
+    return false;
+  }
+  const std::filesystem::path helper = DialogHelper(environment);
+  return !helper.empty() && SpawnOneShot(helper, "--warning", message);
 }
 
 FailureDialogMonitor::FailureDialogMonitor(int socket, int helper_pid)

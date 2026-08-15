@@ -200,18 +200,20 @@ void OnDialogClosed(AdwDialog*, gpointer user_data) {
   g_main_loop_quit(static_cast<GMainLoop*>(user_data));
 }
 
-int ShowDialog(std::string_view requested_message) {
+int ShowDialog(std::string_view requested_message,
+               const char* heading = "Crash",
+               const char* response_label = "Close") {
   if (!InitializeUi(UiStyle::kDialog)) {
     return EXIT_FAILURE;
   }
 
   const std::string message = ValidMessage(requested_message);
   GMainLoop* loop = g_main_loop_new(nullptr, FALSE);
-  AdwDialog* dialog = adw_alert_dialog_new("Crash", message.c_str());
+  AdwDialog* dialog = adw_alert_dialog_new(heading, message.c_str());
   g_object_ref_sink(dialog);
   adw_dialog_set_content_width(dialog, 270);
   AdwAlertDialog* alert = ADW_ALERT_DIALOG(dialog);
-  adw_alert_dialog_add_response(alert, "close", "Close");
+  adw_alert_dialog_add_response(alert, "close", response_label);
   adw_alert_dialog_set_close_response(alert, "close");
   adw_alert_dialog_set_default_response(alert, "close");
   g_signal_connect(dialog, "closed", G_CALLBACK(OnDialogClosed), loop);
@@ -377,6 +379,9 @@ int main(int argc, char* argv[]) {
   }
   if (argc == 3 && std::string_view(argv[1]) == "--message") {
     return ShowDialog(argv[2]);
+  }
+  if (argc == 3 && std::string_view(argv[1]) == "--warning") {
+    return ShowDialog(argv[2], "Signed out", "Continue");
   }
   return EXIT_FAILURE;
 }

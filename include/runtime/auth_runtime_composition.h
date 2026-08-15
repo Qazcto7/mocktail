@@ -94,14 +94,15 @@ struct AuthRuntimeComposition {
   jnivm::RobloxAuthIdentity account_identity;
   SecureRobloxCredential credential;
   long http_status = 0;
+  bool rejected_credential_retired = false;
   std::string error;
 
   explicit operator bool() const { return jni_vm != nullptr; }
 };
 
-// A VM requires authentication or explicit guest mode. HTTP 401 clears only a
-// managed credential; rejected Sober credentials are suppressed without
-// changing Sober's file.
+// A VM requires authentication or explicit guest mode. HTTP 401/403 clears
+// only a managed credential; rejected Sober credentials are suppressed
+// without changing Sober's file.
 AuthRuntimeComposition ComposeAuthRuntime(const Environment& environment,
                                           const RuntimePaths& paths,
                                           services::AuthService& auth_service);

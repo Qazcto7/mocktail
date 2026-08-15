@@ -1029,7 +1029,7 @@ AuthRuntimeComposition ComposeAuthRuntime(
       allow_guest);
 
   if (session.status == services::AuthSessionStatus::kInvalid &&
-      session.http_status == 401 &&
+      (session.http_status == 401 || session.http_status == 403) &&
       IsAutomaticallyRecoverableSource(cookie.source)) {
     std::string rejected_value =
         services::AuthService::ExtractRoblosecurityValue(cookie.value);
@@ -1063,6 +1063,7 @@ AuthRuntimeComposition ComposeAuthRuntime(
     ClearSensitiveString(&cookie.value);
     ClearSensitiveString(&rejected_value);
     credential.Clear();
+    composition.rejected_credential_retired = true;
     if (!allow_guest) {
       composition.status = AuthRuntimeStatus::kInvalidCredentials;
       composition.http_status = session.http_status;

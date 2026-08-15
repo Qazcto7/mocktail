@@ -728,6 +728,11 @@ bool WebViewHelperProcess::SetRobloxCookie(std::string_view value) const {
       value);
 }
 
+bool WebViewHelperProcess::ClearRobloxCookie() const {
+  return SendControlCommand(
+      state_, WebViewHelperControlOperation::kClearRobloxCookie, {});
+}
+
 bool WebViewHelperProcess::WaitUntilReady(
     std::chrono::milliseconds timeout) const {
   if (state_ == nullptr || timeout.count() < 0) {

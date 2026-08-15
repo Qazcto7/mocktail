@@ -27,6 +27,8 @@ bool FailureDialogsEnabled(const Environment& environment);
 
 bool ShowFailureDialog(const Environment& environment,
                        std::string_view message);
+bool ShowWarningDialog(const Environment& environment,
+                       std::string_view message);
 
 // The helper starts before guest threads, so it can report errors and fatal
 // exits even when the main process can no longer show a dialog.

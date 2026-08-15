@@ -123,7 +123,8 @@ class RobloxExperienceComposition final {
       RobloxGameSurfaceJniConfig surface_config = {},
       const SecureRobloxCredential* initial_web_view_credential = nullptr,
       RobloxExperienceSurfaceProvider surface_provider = {},
-      RobloxExperiencePresenceObserver presence_observer = {});
+      RobloxExperiencePresenceObserver presence_observer = {},
+      bool clear_persisted_web_view_cookie = false);
   ~RobloxExperienceComposition();
 
   RobloxExperienceComposition(const RobloxExperienceComposition&) = delete;
@@ -259,6 +260,7 @@ class RobloxExperienceComposition final {
   SecureWebViewRobloxCookie web_view_cookie_;
   std::string web_view_cookie_initialization_error_;
   bool web_view_cookie_synchronized_ = false;
+  bool clear_persisted_web_view_cookie_ = false;
   std::deque<RobloxExperienceLaunchRequest> pending_launch_requests_;
   std::unique_ptr<LaunchTask> active_launch_;
   std::optional<RobloxExperienceLaunchRequest> presence_request_;

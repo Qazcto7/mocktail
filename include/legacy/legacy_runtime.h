@@ -33,6 +33,8 @@ class RuntimeDependencies final {
       : jni_vm_(std::move(composition.jni_vm)),
         account_identity_(std::move(composition.account_identity)),
         roblox_credential_(std::move(composition.credential)),
+        clear_persisted_web_view_cookie_(
+            composition.rejected_credential_retired),
         shutdown_before_platform_(shutdown_before_platform) {}
   ~RuntimeDependencies() {
     if (jni_vm_ != nullptr && shutdown_before_platform_ != nullptr) {
@@ -46,6 +48,8 @@ class RuntimeDependencies final {
       : jni_vm_(std::move(other.jni_vm_)),
         account_identity_(std::move(other.account_identity_)),
         roblox_credential_(std::move(other.roblox_credential_)),
+        clear_persisted_web_view_cookie_(std::exchange(
+            other.clear_persisted_web_view_cookie_, false)),
         shutdown_before_platform_(
             std::exchange(other.shutdown_before_platform_, nullptr)) {}
   RuntimeDependencies& operator=(RuntimeDependencies&& other) noexcept {
@@ -58,6 +62,8 @@ class RuntimeDependencies final {
     jni_vm_ = std::move(other.jni_vm_);
     account_identity_ = std::move(other.account_identity_);
     roblox_credential_ = std::move(other.roblox_credential_);
+    clear_persisted_web_view_cookie_ =
+        std::exchange(other.clear_persisted_web_view_cookie_, false);
     shutdown_before_platform_ =
         std::exchange(other.shutdown_before_platform_, nullptr);
     return *this;
@@ -69,6 +75,9 @@ class RuntimeDependencies final {
   }
   const runtime::SecureRobloxCredential& roblox_credential() const {
     return roblox_credential_;
+  }
+  bool clear_persisted_web_view_cookie() const {
+    return clear_persisted_web_view_cookie_;
   }
 
   // Transitional teardown boundary. Runtime-owned subsystems release
@@ -83,6 +92,7 @@ class RuntimeDependencies final {
   std::shared_ptr<jnivm::VM> jni_vm_;
   jnivm::RobloxAuthIdentity account_identity_;
   runtime::SecureRobloxCredential roblox_credential_;
+  bool clear_persisted_web_view_cookie_ = false;
   ShutdownBeforePlatformCallback shutdown_before_platform_ = nullptr;
 };
 

@@ -961,7 +961,7 @@ TEST(AuthRuntimeCompositionTest,
   EXPECT_EQ(restart_http.request_count, 0);
 }
 
-TEST(AuthRuntimeCompositionTest, Http403DoesNotClearOrStartGuest) {
+TEST(AuthRuntimeCompositionTest, Http403ClearsManagedCookieAndStartsGuest) {
   TempDirectory directory;
   MapEnvironment environment;
   environment.Set("HOME", directory.path().string());
@@ -978,14 +978,19 @@ TEST(AuthRuntimeCompositionTest, Http403DoesNotClearOrStartGuest) {
   const AuthRuntimeComposition composition =
       ComposeAuthRuntime(environment, paths, auth_service);
 
-  EXPECT_FALSE(composition);
-  EXPECT_EQ(composition.status, AuthRuntimeStatus::kInvalidCredentials);
+  ASSERT_TRUE(composition) << composition.error;
+  EXPECT_EQ(composition.status, AuthRuntimeStatus::kGuest);
   EXPECT_EQ(composition.http_status, 403);
-  EXPECT_EQ(ReadFile(paths.cookie_file()), cookies);
+  EXPECT_TRUE(composition.rejected_credential_retired);
+  const std::string rejected_cookie =
+      std::string(".ROBLOSECURITY=") + kCredential;
+  EXPECT_EQ(ReadFile(paths.cookie_file()),
+            std::string(rejected_cookie.size(), ' ') +
+                "\nRBXEventTrackerV2=browserid=123456\n");
 }
 
 TEST(AuthRuntimeCompositionTest,
-     DefaultSoberHttp403DoesNotCreateRejectionMarker) {
+     DefaultSoberHttp403SuppressesRejectedCredentialAndStartsGuest) {
   TempDirectory directory;
   MapEnvironment environment;
   environment.Set("HOME", directory.path().string());
@@ -1001,12 +1006,14 @@ TEST(AuthRuntimeCompositionTest,
   const AuthRuntimeComposition composition =
       ComposeAuthRuntime(environment, paths, auth_service);
 
-  EXPECT_FALSE(composition);
-  EXPECT_EQ(composition.status, AuthRuntimeStatus::kInvalidCredentials);
+  ASSERT_TRUE(composition) << composition.error;
+  EXPECT_EQ(composition.status, AuthRuntimeStatus::kGuest);
   EXPECT_EQ(composition.http_status, 403);
+  EXPECT_TRUE(composition.rejected_credential_retired);
   EXPECT_EQ(http.request_count, 1);
   EXPECT_EQ(ReadFile(paths.sober_cookie_file()), cookies);
-  EXPECT_FALSE(std::filesystem::exists(SoberRejectionPathFor(paths)));
+  EXPECT_EQ(ReadFile(SoberRejectionPathFor(paths)),
+            SoberRejectionMarkerFor(kCredential));
 }
 
 TEST(AuthRuntimeCompositionTest,

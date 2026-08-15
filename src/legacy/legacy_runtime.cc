@@ -33984,7 +33984,8 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
               jni_factory, present_boundary, std::move(surface_config),
               &dependencies.roblox_credential(),
               mocktail::runtime::RobloxExperienceSurfaceProvider{},
-              discord_rpc.observer());
+              discord_rpc.observer(),
+              dependencies.clear_persisted_web_view_cookie());
       const mocktail::Status platform_protocol_status =
           experience_composition->InitializePlatformProtocols();
       if (!platform_protocol_status.ok()) {
