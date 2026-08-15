@@ -26,7 +26,8 @@ long BionicSysconf(int name) noexcept {
   case BionicSysconfName::kChildMax:
     return ::sysconf(_SC_CHILD_MAX);
   case BionicSysconfName::kClockTicks:
-    return ::sysconf(_SC_CLK_TCK);
+    // Android/Linux USER_HZ is 100.
+    return 100;
   case BionicSysconfName::kOpenMax:
     return ::sysconf(_SC_OPEN_MAX);
   case BionicSysconfName::kIovMax:
@@ -48,7 +49,7 @@ long BionicSysconf(int name) noexcept {
   return -1;
 }
 
-}  // namespace mocktail::compat
+} // namespace mocktail::compat
 
 extern "C" long mocktail_bionic_sysconf(int name) {
   return mocktail::compat::BionicSysconf(name);

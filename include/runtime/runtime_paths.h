@@ -27,6 +27,8 @@ struct ActivePayloadPaths {
   bool active = false;
   std::filesystem::path root;
   std::filesystem::path roblox_library;
+  std::filesystem::path base_apk;
+  std::filesystem::path x86_64_split_apk;
   std::filesystem::path assets_content;
   std::filesystem::path compatibility_manifest;
   std::filesystem::path host_abi_profile;
@@ -127,9 +129,7 @@ class RuntimePaths {
 bool ExportRuntimePathEnvironment(const RuntimePaths& paths,
                                   std::string* error = nullptr);
 
-// Selects the writable XDG data root as the managed payload working directory
-// and exposes its immutable assets at the relative path still used by a small
-// number of guest filesystem probes.
+// Publishes the managed payload under the guest's rbx_bin paths.
 bool PrepareManagedPayloadWorkingDirectory(const RuntimePaths& paths,
                                            const ActivePayloadPaths& active,
                                            std::string* error = nullptr);

@@ -33,8 +33,8 @@ TEST(LinkerRegistryTest, KeepsSyntheticExportsOwnedBySoname) {
   linker::RegisterSyntheticSymbol("libmocktail_test_log.so", "sharedName",
                                   &log_export);
 
-  linker::SymbolMap android_symbols = linker::GetSyntheticLibrarySymbols(
-      "libmocktail_test_android.so");
+  linker::SymbolMap android_symbols =
+      linker::GetSyntheticLibrarySymbols("libmocktail_test_android.so");
   linker::SymbolMap log_symbols =
       linker::GetSyntheticLibrarySymbols("libmocktail_test_log.so");
 
@@ -64,31 +64,31 @@ TEST(LinkerRegistryTest, KeepsBionicPthreadKeyAbiOwnedByLibc) {
   const linker::SymbolMap symbols =
       linker::GetSyntheticLibrarySymbols("libc.so");
   EXPECT_EQ(symbols.at("pthread_key_create"),
-            reinterpret_cast<void*>(mocktail_bionic_pthread_key_create));
+            reinterpret_cast<void *>(mocktail_bionic_pthread_key_create));
   EXPECT_EQ(symbols.at("pthread_key_delete"),
-            reinterpret_cast<void*>(mocktail_bionic_pthread_key_delete));
+            reinterpret_cast<void *>(mocktail_bionic_pthread_key_delete));
   EXPECT_EQ(symbols.at("pthread_getspecific"),
-            reinterpret_cast<void*>(mocktail_bionic_pthread_getspecific));
+            reinterpret_cast<void *>(mocktail_bionic_pthread_getspecific));
   EXPECT_EQ(symbols.at("pthread_setspecific"),
-            reinterpret_cast<void*>(mocktail_bionic_pthread_setspecific));
+            reinterpret_cast<void *>(mocktail_bionic_pthread_setspecific));
   EXPECT_EQ(symbols.at("sem_init"),
-            reinterpret_cast<void*>(mocktail_bionic_sem_init));
+            reinterpret_cast<void *>(mocktail_bionic_sem_init));
   EXPECT_EQ(symbols.at("sem_destroy"),
-            reinterpret_cast<void*>(mocktail_bionic_sem_destroy));
+            reinterpret_cast<void *>(mocktail_bionic_sem_destroy));
   EXPECT_EQ(symbols.at("sem_wait"),
-            reinterpret_cast<void*>(mocktail_bionic_sem_wait));
+            reinterpret_cast<void *>(mocktail_bionic_sem_wait));
   EXPECT_EQ(symbols.at("sem_post"),
-            reinterpret_cast<void*>(mocktail_bionic_sem_post));
+            reinterpret_cast<void *>(mocktail_bionic_sem_post));
   EXPECT_EQ(symbols.at("pthread_rwlock_init"),
-            reinterpret_cast<void*>(mocktail_bionic_pthread_rwlock_init));
+            reinterpret_cast<void *>(mocktail_bionic_pthread_rwlock_init));
   EXPECT_EQ(symbols.at("pthread_rwlock_destroy"),
-            reinterpret_cast<void*>(mocktail_bionic_pthread_rwlock_destroy));
+            reinterpret_cast<void *>(mocktail_bionic_pthread_rwlock_destroy));
   EXPECT_EQ(symbols.at("pthread_rwlock_rdlock"),
-            reinterpret_cast<void*>(mocktail_bionic_pthread_rwlock_rdlock));
+            reinterpret_cast<void *>(mocktail_bionic_pthread_rwlock_rdlock));
   EXPECT_EQ(symbols.at("pthread_rwlock_wrlock"),
-            reinterpret_cast<void*>(mocktail_bionic_pthread_rwlock_wrlock));
+            reinterpret_cast<void *>(mocktail_bionic_pthread_rwlock_wrlock));
   EXPECT_EQ(symbols.at("pthread_rwlock_unlock"),
-            reinterpret_cast<void*>(mocktail_bionic_pthread_rwlock_unlock));
+            reinterpret_cast<void *>(mocktail_bionic_pthread_rwlock_unlock));
 }
 
 TEST(LinkerRegistryTest, KeepsBionicAtForkAbiOwnedByLibc) {
@@ -97,7 +97,7 @@ TEST(LinkerRegistryTest, KeepsBionicAtForkAbiOwnedByLibc) {
   const linker::SymbolMap symbols =
       linker::GetSyntheticLibrarySymbols("libc.so");
   EXPECT_EQ(symbols.at("__register_atfork"),
-            reinterpret_cast<void*>(mocktail_bionic_register_atfork));
+            reinterpret_cast<void *>(mocktail_bionic_register_atfork));
 }
 
 TEST(LinkerRegistryTest, KeepsHostIndependentBionicAbiOwnedByLibc) {
@@ -106,36 +106,51 @@ TEST(LinkerRegistryTest, KeepsHostIndependentBionicAbiOwnedByLibc) {
   const linker::SymbolMap symbols =
       linker::GetSyntheticLibrarySymbols("libc.so");
   EXPECT_EQ(symbols.at("getaddrinfo"),
-            reinterpret_cast<void*>(mocktail_bionic_getaddrinfo));
+            reinterpret_cast<void *>(mocktail_bionic_getaddrinfo));
   EXPECT_EQ(symbols.at("freeaddrinfo"),
-            reinterpret_cast<void*>(mocktail_bionic_freeaddrinfo));
+            reinterpret_cast<void *>(mocktail_bionic_freeaddrinfo));
   EXPECT_EQ(symbols.at("gethostbyname"),
-            reinterpret_cast<void*>(mocktail_bionic_gethostbyname));
+            reinterpret_cast<void *>(mocktail_bionic_gethostbyname));
   EXPECT_EQ(symbols.at("__cmsg_nxthdr"),
-            reinterpret_cast<void*>(mocktail_bionic_cmsg_nxthdr));
-  EXPECT_EQ(
-      symbols.at("__cxa_thread_atexit_impl"),
-      reinterpret_cast<void*>(mocktail_bionic_cxa_thread_atexit_impl));
+            reinterpret_cast<void *>(mocktail_bionic_cmsg_nxthdr));
+  EXPECT_EQ(symbols.at("__cxa_thread_atexit_impl"),
+            reinterpret_cast<void *>(mocktail_bionic_cxa_thread_atexit_impl));
   EXPECT_EQ(symbols.at("__readlink_chk"),
-            reinterpret_cast<void*>(mocktail___readlink_chk));
+            reinterpret_cast<void *>(mocktail___readlink_chk));
   EXPECT_EQ(symbols.at("arc4random_buf"),
-            reinterpret_cast<void*>(mocktail_bionic_arc4random_buf));
+            reinterpret_cast<void *>(mocktail_bionic_arc4random_buf));
   EXPECT_EQ(symbols.at("mallinfo"),
-            reinterpret_cast<void*>(mocktail_bionic_mallinfo));
+            reinterpret_cast<void *>(mocktail_bionic_mallinfo));
+  EXPECT_EQ(symbols.at("sysinfo"),
+            reinterpret_cast<void *>(mocktail_bionic_sysinfo));
+  EXPECT_EQ(symbols.at("uname"),
+            reinterpret_cast<void *>(mocktail_bionic_uname));
+  EXPECT_EQ(symbols.at("getuid"),
+            reinterpret_cast<void *>(mocktail_bionic_getuid));
+  EXPECT_EQ(symbols.at("geteuid"),
+            reinterpret_cast<void *>(mocktail_bionic_geteuid));
   EXPECT_EQ(symbols.at("strerror_r"),
-            reinterpret_cast<void*>(mocktail_bionic_strerror_r));
+            reinterpret_cast<void *>(mocktail_bionic_strerror_r));
   EXPECT_EQ(symbols.at("strtoll_l"),
-            reinterpret_cast<void*>(mocktail_bionic_strtoll_l));
+            reinterpret_cast<void *>(mocktail_bionic_strtoll_l));
   EXPECT_EQ(symbols.at("strtoull_l"),
-            reinterpret_cast<void*>(mocktail_bionic_strtoull_l));
+            reinterpret_cast<void *>(mocktail_bionic_strtoull_l));
   EXPECT_EQ(linker::GetBionicSymbols().at("strerror_r"),
-            reinterpret_cast<void*>(mocktail_bionic_strerror_r));
+            reinterpret_cast<void *>(mocktail_bionic_strerror_r));
   EXPECT_EQ(linker::GetBionicSymbols().at("getaddrinfo"),
-            reinterpret_cast<void*>(mocktail_bionic_getaddrinfo));
+            reinterpret_cast<void *>(mocktail_bionic_getaddrinfo));
   EXPECT_EQ(linker::GetBionicSymbols().at("freeaddrinfo"),
-            reinterpret_cast<void*>(mocktail_bionic_freeaddrinfo));
+            reinterpret_cast<void *>(mocktail_bionic_freeaddrinfo));
   EXPECT_EQ(linker::GetBionicSymbols().at("gethostbyname"),
-            reinterpret_cast<void*>(mocktail_bionic_gethostbyname));
+            reinterpret_cast<void *>(mocktail_bionic_gethostbyname));
+  EXPECT_EQ(linker::GetBionicSymbols().at("getuid"),
+            reinterpret_cast<void *>(mocktail_bionic_getuid));
+  EXPECT_EQ(linker::GetBionicSymbols().at("geteuid"),
+            reinterpret_cast<void *>(mocktail_bionic_geteuid));
+  EXPECT_EQ(linker::GetBionicSymbols().at("sysinfo"),
+            reinterpret_cast<void *>(mocktail_bionic_sysinfo));
+  EXPECT_EQ(linker::GetBionicSymbols().at("uname"),
+            reinterpret_cast<void *>(mocktail_bionic_uname));
 }
 
 TEST(LinkerRegistryTest, KeepsBionicLargeFileAbiOwnedByLibc) {
@@ -144,11 +159,11 @@ TEST(LinkerRegistryTest, KeepsBionicLargeFileAbiOwnedByLibc) {
   const linker::SymbolMap symbols =
       linker::GetSyntheticLibrarySymbols("libc.so");
   EXPECT_EQ(symbols.at("pread64"),
-            reinterpret_cast<void*>(mocktail_bionic_pread64));
+            reinterpret_cast<void *>(mocktail_bionic_pread64));
   EXPECT_EQ(symbols.at("pwrite64"),
-            reinterpret_cast<void*>(mocktail_bionic_pwrite64));
+            reinterpret_cast<void *>(mocktail_bionic_pwrite64));
   EXPECT_EQ(symbols.at("lseek64"),
-            reinterpret_cast<void*>(mocktail_bionic_lseek64));
+            reinterpret_cast<void *>(mocktail_bionic_lseek64));
 }
 
 TEST(LinkerRegistryTest, KeepsBionicSysconfAbiOwnedByLibc) {
@@ -157,7 +172,7 @@ TEST(LinkerRegistryTest, KeepsBionicSysconfAbiOwnedByLibc) {
   const linker::SymbolMap symbols =
       linker::GetSyntheticLibrarySymbols("libc.so");
   EXPECT_EQ(symbols.at("sysconf"),
-            reinterpret_cast<void*>(mocktail_bionic_sysconf));
+            reinterpret_cast<void *>(mocktail_bionic_sysconf));
 }
 
 TEST(LinkerRegistryTest, KeepsBionicStdioAbiOwnedByLibc) {
@@ -167,18 +182,15 @@ TEST(LinkerRegistryTest, KeepsBionicStdioAbiOwnedByLibc) {
       linker::GetSyntheticLibrarySymbols("libc.so");
   EXPECT_EQ(symbols.at("__sF"),
             mocktail::compat::BionicFileArraySymbolAddress());
-  EXPECT_EQ(symbols.at("stdin"),
-            mocktail::compat::BionicStdinSymbolAddress());
+  EXPECT_EQ(symbols.at("stdin"), mocktail::compat::BionicStdinSymbolAddress());
   EXPECT_EQ(symbols.at("stdout"),
             mocktail::compat::BionicStdoutSymbolAddress());
   EXPECT_EQ(symbols.at("stderr"),
             mocktail::compat::BionicStderrSymbolAddress());
-  EXPECT_EQ(symbols.at("fflush"),
-            reinterpret_cast<void*>(mocktail_fflush));
-  EXPECT_EQ(symbols.at("fscanf"),
-            reinterpret_cast<void*>(mocktail_fscanf));
+  EXPECT_EQ(symbols.at("fflush"), reinterpret_cast<void *>(mocktail_fflush));
+  EXPECT_EQ(symbols.at("fscanf"), reinterpret_cast<void *>(mocktail_fscanf));
   EXPECT_EQ(symbols.at("__fwrite_chk"),
-            reinterpret_cast<void*>(mocktail___fwrite_chk));
+            reinterpret_cast<void *>(mocktail___fwrite_chk));
 }
 
 TEST(LinkerRegistryTest, KeepsBionicDynamicLoaderOwnedByLibdl) {
@@ -211,4 +223,4 @@ TEST(LinkerRegistryTest, WithholdsEveryCrashpadJniEntrypoint) {
       "nativeAppBridgeV2InitWithParams"));
 }
 
-}  // namespace
+} // namespace

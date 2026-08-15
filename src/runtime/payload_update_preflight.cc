@@ -63,8 +63,14 @@ std::filesystem::path UpdateHelper(const Environment& environment) {
     if (!root.is_absolute()) {
       return {};
     }
-    const std::filesystem::path helper = root / "build" / "mocktail_updater";
-    return IsExecutableRegularFile(helper) ? helper : std::filesystem::path{};
+    for (const std::filesystem::path& helper :
+         {root / "build" / "mocktail_updater",
+          root / "bin" / "mocktail_updater"}) {
+      if (IsExecutableRegularFile(helper)) {
+        return helper;
+      }
+    }
+    return {};
   }
 
   std::error_code error;

@@ -52,7 +52,9 @@
 #include <jni.h>
 
 #include "compat/bionic_abi_exports.h"
+#include "compat/bionic_prctl_runtime.h"
 #include "compat/bionic_pthread_create_runtime.h"
+#include "compat/bionic_socket_runtime.h"
 #include "compat/build_profile.h"
 #include "compat/elf_build_id.h"
 #include "compat/host_abi_experiment.h"
@@ -32804,6 +32806,12 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
   }
   RegisterBionicDnsWrappers();
   RegisterBionicPathWrappers();
+  linker::RegisterSymbol("prctl",
+                         reinterpret_cast<void*>(mocktail_bionic_prctl));
+  linker::RegisterSymbol(
+      "setsockopt", reinterpret_cast<void*>(mocktail_bionic_setsockopt));
+  linker::RegisterSymbol("sendmsg",
+                         reinterpret_cast<void*>(mocktail_bionic_sendmsg));
   linker::RegisterSymbol("mprotect", reinterpret_cast<void*>(mocktail_mprotect));
   linker::RegisterSymbol("pthread_condattr_init",
                          reinterpret_cast<void*>(mocktail_pthread_condattr_init));

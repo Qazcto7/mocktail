@@ -53,7 +53,7 @@ jobs:
               export DEBIAN_FRONTEND=noninteractive
               apt-get update
               apt-get install --yes --no-install-recommends \
-                build-essential cmake git ninja-build pkg-config \
+                build-essential cmake git ninja-build pkg-config lld \
                 libsdl3-dev libsdl3-ttf-dev libcurl4-openssl-dev \
                 libssl-dev nlohmann-json3-dev libyaml-dev libelf-dev \
                 libminizip-dev libcapstone-dev libgtk-4-dev \
@@ -124,7 +124,7 @@ jobs:
               export DEBIAN_FRONTEND=noninteractive
               apt-get update
               apt-get install --yes --no-install-recommends \
-                build-essential cmake git ninja-build pkg-config fakeroot \
+                build-essential cmake git ninja-build pkg-config lld fakeroot \
                 dpkg-dev file libsdl3-dev libsdl3-ttf-dev \
                 libcurl4-openssl-dev libssl-dev nlohmann-json3-dev \
                 libyaml-dev libelf-dev libminizip-dev libcapstone-dev \
@@ -172,7 +172,7 @@ jobs:
             --env MOCKTAIL_PACKAGE_VERSION_SUFFIX="$nightly_suffix" \
             fedora:44 bash -Eeuo pipefail -c '
               dnf install --assumeyes \
-                gcc-c++ cmake git ninja-build pkgconf-pkg-config rpm-build \
+                gcc-c++ cmake git ninja-build pkgconf-pkg-config lld rpm-build \
                 SDL3-devel SDL3_ttf-devel libcurl-devel openssl-devel \
                 nlohmann-json-devel libyaml-devel elfutils-libelf-devel \
                 minizip-ng-compat-devel capstone-devel gtk4-devel libadwaita-devel \
@@ -218,7 +218,7 @@ jobs:
             --workdir /workspace \
             archlinux:base-devel bash -Eeuo pipefail -c '
               pacman -Syu --needed --noconfirm \
-                cmake git ninja pkgconf sdl3 sdl3_ttf curl openssl \
+                cmake git ninja pkgconf lld sdl3 sdl3_ttf curl openssl \
                 nlohmann-json libyaml libelf minizip capstone gtk4 \
                 libadwaita webkitgtk-6.0 libutf8proc fontconfig \
                 libplacebo vulkan-headers vulkan-icd-loader libglvnd zlib

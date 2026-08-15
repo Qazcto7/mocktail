@@ -29,8 +29,10 @@ fi
 RUNTIME_ROOT="${BUNDLE_ROOT}/mocktail"
 BIN_DIR="${RUNTIME_ROOT}/bin"
 MAIN_BINARY="${BIN_DIR}/mocktail"
+UPDATE_HELPER="${BIN_DIR}/mocktail_updater"
 FAILURE_DIALOG_HELPER="${BIN_DIR}/mocktail_failure_dialog"
 WEBVIEW_HELPER="${BIN_DIR}/mocktail_webview_helper"
+FREEBSD_SOCKET_HELPER="${BIN_DIR}/mocktail_freebsd_socket_helper"
 ANDROID_BUILD_TOOLS="${RUNTIME_ROOT}/runtime/android-tools/bin"
 METADATA_DIR="${RUNTIME_ROOT}/metadata"
 ABI_MANIFEST="${METADATA_DIR}/ABI.txt"
@@ -40,6 +42,7 @@ SUPPORT_ROOT="${RUNTIME_ROOT}/runtime"
 SUPPORT_BIN="${SUPPORT_ROOT}/bin"
 export PATH="${SUPPORT_BIN}:${ANDROID_BUILD_TOOLS}:${PATH}"
 export LD_LIBRARY_PATH="${RUNTIME_ROOT}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+export MOCKTAIL_FREEBSD_SOCKET_HELPER="${FREEBSD_SOCKET_HELPER}"
 
 Die() {
   printf 'mocktail: %s\n' "$*" >&2
@@ -346,6 +349,7 @@ CheckBundleAbi() {
   [[ "${main_interpreter}" == "${ABI_INTERPRETER}" ]] ||
     Die "mocktail ELF interpreter does not match ABI.txt (expected ${ABI_INTERPRETER}, found ${main_interpreter:-none})"
   ValidateBundledElfAbi "${MAIN_BINARY}" "mocktail"
+  ValidateBundledElfAbi "${UPDATE_HELPER}" "Mocktail updater"
   ValidateBundledElfAbi "${WEBVIEW_HELPER}" "WebView helper"
   [[ -x "${ANDROID_BUILD_TOOLS}/aapt" ]] ||
     Die "Android APK metadata tool is unavailable"
@@ -475,6 +479,7 @@ CheckSystem() {
 [[ -d "${RUNTIME_ROOT}" && ! -L "${RUNTIME_ROOT}" ]] ||
   Die "missing regular runtime directory: ${RUNTIME_ROOT}"
 [[ -x "${MAIN_BINARY}" ]] || Die "missing executable: ${MAIN_BINARY}"
+[[ -x "${UPDATE_HELPER}" ]] || Die "missing executable: ${UPDATE_HELPER}"
 [[ -x "${FAILURE_DIALOG_HELPER}" ]] ||
   Die "missing executable: ${FAILURE_DIALOG_HELPER}"
 [[ -x "${WEBVIEW_HELPER}" ]] || Die "missing WebView helper: ${WEBVIEW_HELPER}"
@@ -513,6 +518,7 @@ export MOCKTAIL_UPDATE_COMPATIBILITY_PATH="${METADATA_DIR}/roblox_compatibility.
 export MOCKTAIL_UPDATE_SIGNING_TRUST_PATH="${METADATA_DIR}/roblox_signing_certificates.json"
 export MOCKTAIL_UPDATE_HOST_ABI_REFERENCE="${METADATA_DIR}/roblox_host_abi_reference.json"
 export MOCKTAIL_BOOTSTRAP_SOURCES_PATH="${METADATA_DIR}/roblox_bootstrap_sources.json"
+export MOCKTAIL_UPDATE_HELPER="${UPDATE_HELPER}"
 export MOCKTAIL_UPDATE_CANARY_BIN="${MAIN_BINARY}"
 export MOCKTAIL_UPDATE_SMOKE_SCRIPT="${RUNTIME_ROOT}/scripts/real_bringup_smoke.sh"
 export MOCKTAIL_BIN="${MAIN_BINARY}"

@@ -104,6 +104,27 @@ TEST(PayloadUpdatePreflightTest, RunsNativeUpdater) {
   EXPECT_TRUE(result.attempted);
 }
 
+TEST(PayloadUpdatePreflightTest, RunsPackagedUpdaterFromProjectBin) {
+  TemporaryDirectory temporary;
+  const std::filesystem::path project_root = temporary.root() / "portable";
+  const std::filesystem::path helper = project_root / "bin/mocktail_updater";
+  ASSERT_TRUE(std::filesystem::create_directories(helper.parent_path()));
+  ASSERT_TRUE(std::filesystem::copy_file(MOCKTAIL_TEST_UPDATE_HELPER, helper));
+  std::filesystem::permissions(
+      helper,
+      std::filesystem::perms::owner_exec | std::filesystem::perms::group_exec |
+          std::filesystem::perms::others_exec,
+      std::filesystem::perm_options::add);
+  const MapEnvironment environment(
+      {{"MOCKTAIL_PROJECT_ROOT", project_root.string()}});
+  const RuntimePaths paths = RuntimePaths::FromEnvironment(environment);
+
+  const auto result = RunPayloadUpdatePreflight(environment, paths);
+
+  ASSERT_TRUE(result) << result.error;
+  EXPECT_TRUE(result.attempted);
+}
+
 TEST(PayloadUpdatePreflightTest, StreamsUpdaterStagesToNativeDialog) {
   TemporaryDirectory temporary;
   const std::filesystem::path capture = temporary.root() / "progress";

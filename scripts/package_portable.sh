@@ -31,6 +31,7 @@ ANDROID_TOOLS_ABI=""
 
 readonly -a PROJECT_ARTIFACTS=(
   mocktail
+  mocktail_updater
   mocktail_failure_dialog
   mocktail_webview_helper
   libmocktail_audio_sdl.so
@@ -47,6 +48,7 @@ readonly -a PROJECT_ARTIFACTS=(
   libGLESv2.so
   libvulkan.so
 )
+readonly FREEBSD_SOCKET_HELPER="mocktail_freebsd_socket_helper"
 
 readonly -a RUNTIME_SCRIPTS=(
   auto_update_roblox.sh
@@ -267,6 +269,21 @@ ValidateArtifacts() {
   TARGET_INTERPRETER="$(ReadElfInterpreter "${BUILD_DIR}/mocktail")"
   [[ -n "${TARGET_INTERPRETER}" ]] ||
     Die "mocktail must be a dynamically linked ${TARGET_LIBC} executable"
+
+  local freebsd_helper="${BUILD_DIR}/${FREEBSD_SOCKET_HELPER}"
+  [[ -f "${freebsd_helper}" && ! -L "${freebsd_helper}" &&
+     -x "${freebsd_helper}" ]] ||
+    Die "missing executable FreeBSD socket helper: ${freebsd_helper}"
+  LC_ALL=C readelf -h "${freebsd_helper}" 2>/dev/null |
+    grep -Eq 'OS/ABI:[[:space:]]+UNIX - FreeBSD' ||
+    Die "socket helper is not branded for FreeBSD"
+  LC_ALL=C readelf -h "${freebsd_helper}" 2>/dev/null |
+    grep -Eq 'Machine:[[:space:]]+.*X86-64' ||
+    Die "socket helper is not an x86-64 ELF"
+  [[ -z "$(ReadElfInterpreter "${freebsd_helper}")" ]] ||
+    Die "FreeBSD socket helper must be statically linked"
+  LC_ALL=C readelf -n "${freebsd_helper}" 2>/dev/null |
+    grep -Fq FreeBSD || Die "socket helper has no FreeBSD ABI note"
 }
 
 ResolveAndroidBuildTools() {
@@ -468,6 +485,8 @@ CopyRuntimeTree() {
     install -m "${mode}" -- "${BUILD_DIR}/${artifact}" \
       "${runtime_root}/bin/${artifact}"
   done
+  install -m 0755 -- "${BUILD_DIR}/${FREEBSD_SOCKET_HELPER}" \
+    "${runtime_root}/bin/${FREEBSD_SOCKET_HELPER}"
 
   install -m 0755 -- "${PROJECT_ROOT}/packaging/run.sh" "${STAGING}/run.sh"
   install -m 0755 -- "${PROJECT_ROOT}/packaging/mocktail-launcher.sh" \
@@ -625,6 +644,7 @@ QueuePackagedRuntimeDependencies() {
   while IFS= read -r -d '' source; do
     IsElfFile "${source}" || continue
     case "${source#${STAGING}/mocktail/}" in
+      bin/${FREEBSD_SOCKET_HELPER}) continue ;;
       runtime/android-tools/*) continue ;;
     esac
     QueueDependencies "${source}"

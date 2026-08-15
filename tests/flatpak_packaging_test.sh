@@ -98,6 +98,7 @@ assert project_sources == [
 ]
 mocktail_options = set(modules["mocktail"]["config-opts"])
 assert "-DBUILD_TESTING=OFF" in mocktail_options
+assert "-DMOCKTAIL_BUILD_FREEBSD_SOCKET_HELPER=OFF" in mocktail_options
 assert "-DCMAKE_INSTALL_LIBDIR=lib" in mocktail_options
 assert (
     "-DMOCKTAIL_DEFAULT_COMPATIBILITY_MANIFEST="

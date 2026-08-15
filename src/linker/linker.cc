@@ -134,11 +134,13 @@ bool IsBionicLibcOnlySymbol(std::string_view symbol) {
   }
   return symbol == "__cmsg_nxthdr" || symbol == "__cxa_thread_atexit_impl" ||
          symbol == "__readlink_chk" || symbol == "__register_atfork" ||
-         symbol == "arc4random_buf" || symbol == "lseek64" ||
+         symbol == "arc4random_buf" || symbol == "geteuid" ||
+         symbol == "getuid" || symbol == "lseek64" ||
          symbol == "mallinfo" || symbol == "pread64" || symbol == "pwrite64" ||
          symbol == "sigaction" || symbol == "strerror_r" ||
          symbol == "strtoll_l" || symbol == "strtoull_l" ||
-         symbol == "sysconf" || HasPrefix(symbol, "pthread_") ||
+         symbol == "sysconf" || symbol == "sysinfo" || symbol == "uname" ||
+         HasPrefix(symbol, "pthread_") ||
          HasPrefix(symbol, "__pthread_") || HasPrefix(symbol, "sem_");
 }
 
@@ -360,6 +362,18 @@ void RegisterBionicHostLibcRuntimeForLibc() {
                               mocktail_bionic_arc4random_buf));
   RegisterSyntheticSymbol("libc.so", "mallinfo",
                           reinterpret_cast<void*>(mocktail_bionic_mallinfo));
+  RegisterSyntheticSymbol("libc.so", "sysinfo",
+                          reinterpret_cast<void*>(mocktail_bionic_sysinfo));
+  RegisterSyntheticSymbol("libc.so", "uname",
+                          reinterpret_cast<void*>(mocktail_bionic_uname));
+  RegisterSyntheticSymbol("libc.so", "getuid",
+                          reinterpret_cast<void*>(mocktail_bionic_getuid));
+  RegisterSyntheticSymbol("libc.so", "geteuid",
+                          reinterpret_cast<void*>(mocktail_bionic_geteuid));
+  RegisterSymbol("sysinfo", reinterpret_cast<void*>(mocktail_bionic_sysinfo));
+  RegisterSymbol("uname", reinterpret_cast<void*>(mocktail_bionic_uname));
+  RegisterSymbol("getuid", reinterpret_cast<void*>(mocktail_bionic_getuid));
+  RegisterSymbol("geteuid", reinterpret_cast<void*>(mocktail_bionic_geteuid));
   RegisterSyntheticSymbol("libc.so", "strerror_r",
                           reinterpret_cast<void*>(mocktail_bionic_strerror_r));
   // Publish this before relocation to prevent binding glibc's incompatible

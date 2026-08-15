@@ -18,6 +18,7 @@
 #include <limits.h>
 #include <locale.h>
 #include <sys/random.h>
+#include <sys/utsname.h>
 #include <unistd.h>
 
 #include <array>
@@ -73,6 +74,35 @@ bool FillFromGetRandom(unsigned char* output, size_t size) noexcept {
     EntropyFailure();
   }
   return true;
+}
+
+bool ReadTextFile(const char* path, char* output, size_t capacity) noexcept {
+  if (path == nullptr || output == nullptr || capacity < 2) return false;
+
+  int descriptor;
+  do {
+    descriptor = ::open(path, O_RDONLY | O_CLOEXEC);
+  } while (descriptor < 0 && errno == EINTR);
+  if (descriptor < 0) return false;
+
+  ssize_t length;
+  do {
+    length = ::read(descriptor, output, capacity - 1);
+  } while (length < 0 && errno == EINTR);
+  const int read_errno = errno;
+  static_cast<void>(::close(descriptor));
+  if (length <= 0) {
+    errno = read_errno;
+    return false;
+  }
+
+  size_t size = static_cast<size_t>(length);
+  while (size != 0 &&
+         (output[size - 1] == '\n' || output[size - 1] == '\r')) {
+    --size;
+  }
+  output[size] = '\0';
+  return size != 0;
 }
 
 void FillFromUrandom(unsigned char* output, size_t size) noexcept {
@@ -238,6 +268,62 @@ bool BionicMallinfoHasHostTelemetry() noexcept {
   return false;
 }
 
+void NormalizeBionicSysInfo(struct sysinfo* info) noexcept {
+  if (info == nullptr) return;
+  constexpr unsigned long kHighBit =
+      1UL << (sizeof(unsigned long) * CHAR_BIT - 1U);
+  if ((info->totalswap & kHighBit) != 0 ||
+      (info->freeswap & kHighBit) != 0 || info->freeswap > info->totalswap) {
+    info->totalswap = 0;
+    info->freeswap = 0;
+  }
+}
+
+int BionicSysInfo(struct sysinfo* info) noexcept {
+  const int result = ::sysinfo(info);
+  if (result == 0) NormalizeBionicSysInfo(info);
+  return result;
+}
+
+bool NormalizeLinuxulatorUnameVersion(struct utsname* name,
+                                      const char* linux_version) noexcept {
+  if (name == nullptr || linux_version == nullptr || linux_version[0] == '\0' ||
+      std::strcmp(name->sysname, "Linux") != 0 ||
+      (std::strstr(name->version, "FreeBSD") == nullptr &&
+       std::strstr(name->version, "freebsd.org") == nullptr)) {
+    return false;
+  }
+  const int length = std::snprintf(name->version, sizeof(name->version), "%s",
+                                   linux_version);
+  return length >= 0 && static_cast<size_t>(length) < sizeof(name->version);
+}
+
+int BionicUname(struct utsname* name) noexcept {
+  const int result = ::uname(name);
+  if (result != 0 || name == nullptr) return result;
+
+  const int host_errno = errno;
+  std::array<char, sizeof(name->version)> linux_version{};
+  if (ReadTextFile("/proc/sys/kernel/version", linux_version.data(),
+                   linux_version.size())) {
+    NormalizeLinuxulatorUnameVersion(name, linux_version.data());
+  }
+  errno = host_errno;
+  return result;
+}
+
+uid_t NormalizeBionicApplicationUid(uid_t host_uid) noexcept {
+  return host_uid == 0 ? 1000 : host_uid;
+}
+
+uid_t BionicGetUid() noexcept {
+  return NormalizeBionicApplicationUid(::getuid());
+}
+
+uid_t BionicGetEffectiveUid() noexcept {
+  return NormalizeBionicApplicationUid(::geteuid());
+}
+
 int BionicStrError(int error_number, char* buffer,
                    size_t buffer_size) noexcept {
   const int entry_errno = errno;
@@ -303,6 +389,22 @@ extern "C" void mocktail_bionic_arc4random_buf(void* buffer, size_t size) {
 
 extern "C" mocktail::compat::BionicMallinfoSnapshot mocktail_bionic_mallinfo() {
   return mocktail::compat::BionicMallinfo();
+}
+
+extern "C" int mocktail_bionic_sysinfo(struct sysinfo* info) {
+  return mocktail::compat::BionicSysInfo(info);
+}
+
+extern "C" int mocktail_bionic_uname(struct utsname* name) {
+  return mocktail::compat::BionicUname(name);
+}
+
+extern "C" uid_t mocktail_bionic_getuid() {
+  return mocktail::compat::BionicGetUid();
+}
+
+extern "C" uid_t mocktail_bionic_geteuid() {
+  return mocktail::compat::BionicGetEffectiveUid();
 }
 
 extern "C" int mocktail_bionic_strerror_r(int error_number, char* buffer,

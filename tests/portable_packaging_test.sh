@@ -23,7 +23,7 @@ grep -q '^artifact_name=mocktail-linux-x86_64-glibc-standalone$' \
   <<<"${dry_run}"
 grep -q '^interpreter=.*/ld-linux-x86-64\.so\.2$' <<<"${dry_run}"
 grep -q '^android_tools_libc=glibc$' <<<"${dry_run}"
-grep -q '^project_artifacts=16$' <<<"${dry_run}"
+grep -q '^project_artifacts=17$' <<<"${dry_run}"
 grep -q 'host=libc\.so\.6 reason=glibc' <<<"${dry_run}"
 grep -q 'host=libEGL\.so\.1 reason=gpu-driver-stack' <<<"${dry_run}"
 ! grep -q 'host=libwebkitgtk-6\.0\.so\.4' <<<"${dry_run}"
@@ -114,8 +114,10 @@ RefreshBundleChecksums() {
 for path in \
     run.sh \
     mocktail/bin/mocktail \
+    mocktail/bin/mocktail_updater \
     mocktail/bin/mocktail_failure_dialog \
     mocktail/bin/mocktail_webview_helper \
+    mocktail/bin/mocktail_freebsd_socket_helper \
     mocktail/bin/libEGL.so \
     mocktail/bin/libvulkan.so \
     mocktail/runtime \
@@ -164,6 +166,11 @@ runtime_entries="$(find "${runtime}" -mindepth 1 -maxdepth 1 \
   mocktail/metadata/SHA256SUMS.txt)
 "${runtime}/runtime/android-tools/bin/aapt" version >/dev/null
 "${runtime}/runtime/android-tools/bin/apksigner" version >/dev/null
+LC_ALL=C readelf -h "${runtime}/bin/mocktail_freebsd_socket_helper" |
+  grep -Fq 'UNIX - FreeBSD'
+[[ -z "$(LC_ALL=C readelf -l \
+  "${runtime}/bin/mocktail_freebsd_socket_helper" |
+  sed -n 's/.*Requesting program interpreter: \([^]]*\).*/\1/p')" ]]
 [[ "$(stat -c '%a' "${bundle}")" == 755 ]]
 packaged_root_entries="$(find "${bundle}" -mindepth 1 -maxdepth 1 \
   -printf '%f\n' | LC_ALL=C sort)"
@@ -262,6 +269,8 @@ int main(void) {
 EOF
   cp -- "${musl_runtime}/bin/mocktail" \
     "${musl_runtime}/bin/mocktail_failure_dialog"
+  cp -- "${musl_runtime}/bin/mocktail" \
+    "${musl_runtime}/bin/mocktail_updater"
   cp -- "${musl_runtime}/bin/mocktail" \
     "${musl_runtime}/bin/mocktail_webview_helper"
   for tool in aapt apkanalyzer apksigner; do

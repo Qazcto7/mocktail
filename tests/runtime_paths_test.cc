@@ -102,6 +102,15 @@ class ScopedCurrentPath {
   std::filesystem::path original_;
 };
 
+void WriteManagedPayloadFiles(const std::filesystem::path& payload) {
+  ASSERT_TRUE(RuntimePaths::EnsureDirectory(payload / "assets/content"));
+  ASSERT_TRUE(RuntimePaths::EnsureDirectory(payload / "sober_apk"));
+  std::ofstream(payload / "libroblox.so") << "ELF fixture";
+  std::ofstream(payload / "sober_apk/base.apk") << "base APK fixture";
+  std::ofstream(payload / "sober_apk/split_config.x86_64.apk")
+      << "x86_64 split APK fixture";
+}
+
 TEST(RuntimePathsTest, DerivesXdgDefaults) {
   const MapEnvironment environment({{"HOME", "/home/mocktail"}});
   const RuntimePaths paths =
@@ -162,8 +171,7 @@ TEST(RuntimePathsTest, ResolvesValidatedActivePayload) {
   const std::string payload_id =
       "2546-d0cb1fa0deb3d9161b4cd77530cbcd2e50de3a21";
   const std::filesystem::path payload = data / "payloads" / payload_id;
-  ASSERT_TRUE(RuntimePaths::EnsureDirectory(payload / "assets/content"));
-  std::ofstream(payload / "libroblox.so") << "ELF fixture";
+  WriteManagedPayloadFiles(payload);
   std::ofstream(data / "current.json")
       << "{\"schema_version\":1,\"payload_id\":\"" << payload_id
       << "\",\"payload_path\":\"payloads/" << payload_id
@@ -182,8 +190,39 @@ TEST(RuntimePathsTest, ResolvesValidatedActivePayload) {
   ASSERT_TRUE(active.active);
   EXPECT_EQ(active.root, std::filesystem::canonical(payload));
   EXPECT_EQ(active.roblox_library, active.root / "libroblox.so");
+  EXPECT_EQ(active.base_apk, active.root / "sober_apk/base.apk");
+  EXPECT_EQ(active.x86_64_split_apk,
+            active.root / "sober_apk/split_config.x86_64.apk");
   EXPECT_EQ(active.assets_content, active.root / "assets/content");
   EXPECT_EQ(paths.DefaultAssetPath(), active.assets_content);
+}
+
+TEST(RuntimePathsTest, RejectsIncompleteActiveAndroidPackage) {
+  TemporaryDirectory temporary;
+  ASSERT_FALSE(temporary.path().empty());
+  const std::filesystem::path data = temporary.path() / "data";
+  const std::string payload_id =
+      "2546-d0cb1fa0deb3d9161b4cd77530cbcd2e50de3a21";
+  const std::filesystem::path payload = data / "payloads" / payload_id;
+  WriteManagedPayloadFiles(payload);
+  ASSERT_TRUE(std::filesystem::remove(
+      payload / "sober_apk/split_config.x86_64.apk"));
+  std::ofstream(data / "current.json")
+      << "{\"schema_version\":1,\"payload_id\":\"" << payload_id
+      << "\",\"payload_path\":\"payloads/" << payload_id
+      << "\",\"version_name\":\"2.725.1142\",\"version_code\":2546,"
+         "\"elf_build_id\":\"d0cb1fa0deb3d9161b4cd77530cbcd2e50de3a21\"}";
+  const MapEnvironment environment({
+      {"HOME", temporary.path().string()},
+      {"MOCKTAIL_DATA_ROOT", data.string()},
+  });
+
+  const ActivePayloadPaths active =
+      RuntimePaths::FromEnvironment(environment, temporary.path())
+          .ResolveActivePayload();
+
+  EXPECT_FALSE(active);
+  EXPECT_NE(active.error.find("split_config.x86_64.apk"), std::string::npos);
 }
 
 TEST(RuntimePathsTest, ResolvesCompleteApprovedProfileReferences) {
@@ -197,11 +236,10 @@ TEST(RuntimePathsTest, ResolvesCompleteApprovedProfileReferences) {
   const std::string approval_filename =
       payload_id + "-" + approval_generation + ".json";
   const std::filesystem::path payload = data / "payloads" / payload_id;
-  ASSERT_TRUE(RuntimePaths::EnsureDirectory(payload / "assets/content"));
+  WriteManagedPayloadFiles(payload);
   ASSERT_TRUE(RuntimePaths::EnsureDirectory(data / "compatibility_profiles"));
   ASSERT_TRUE(RuntimePaths::EnsureDirectory(data / "host_abi_profiles"));
   ASSERT_TRUE(RuntimePaths::EnsureDirectory(data / "approvals"));
-  std::ofstream(payload / "libroblox.so") << "ELF fixture";
   std::ofstream(data / "compatibility_profiles" / approval_filename) << "{}";
   std::ofstream(data / "host_abi_profiles" / approval_filename) << "{}";
   std::ofstream(data / "approvals" / approval_filename) << "{}";
@@ -247,8 +285,7 @@ TEST(RuntimePathsTest, RejectsPartialOrEscapingApprovedProfileReferences) {
   const std::string approval_filename =
       payload_id + "-" + approval_generation + ".json";
   const std::filesystem::path payload = data / "payloads" / payload_id;
-  ASSERT_TRUE(RuntimePaths::EnsureDirectory(payload / "assets/content"));
-  std::ofstream(payload / "libroblox.so") << "ELF fixture";
+  WriteManagedPayloadFiles(payload);
   const MapEnvironment environment({
       {"HOME", temporary.path().string()},
       {"MOCKTAIL_DATA_ROOT", data.string()},
@@ -468,7 +505,7 @@ TEST(RuntimePathsTest, PreparesManagedPayloadRelativeAssetRoot) {
   ScopedCurrentPath restore_current_path;
   const std::filesystem::path data = temporary.path() / "data";
   const std::filesystem::path payload = data / "payloads/fixture";
-  ASSERT_TRUE(RuntimePaths::EnsureDirectory(payload / "assets/content"));
+  WriteManagedPayloadFiles(payload);
   const MapEnvironment environment({
       {"HOME", temporary.path().string()},
       {"MOCKTAIL_DATA_ROOT", data.string()},
@@ -478,6 +515,10 @@ TEST(RuntimePathsTest, PreparesManagedPayloadRelativeAssetRoot) {
   ActivePayloadPaths active;
   active.active = true;
   active.root = payload;
+  active.roblox_library = payload / "libroblox.so";
+  active.base_apk = payload / "sober_apk/base.apk";
+  active.x86_64_split_apk =
+      payload / "sober_apk/split_config.x86_64.apk";
   active.assets_content = payload / "assets/content";
 
   std::string error;
@@ -487,6 +528,74 @@ TEST(RuntimePathsTest, PreparesManagedPayloadRelativeAssetRoot) {
   EXPECT_TRUE(std::filesystem::is_symlink(data / "rbx_bin/assets"));
   EXPECT_EQ(std::filesystem::canonical(data / "rbx_bin/assets"),
             std::filesystem::canonical(payload / "assets"));
+  EXPECT_TRUE(std::filesystem::is_symlink(data / "rbx_bin/sober_apk"));
+  EXPECT_EQ(std::filesystem::canonical(data / "rbx_bin/sober_apk"),
+            std::filesystem::canonical(payload / "sober_apk"));
+  EXPECT_TRUE(std::filesystem::is_symlink(data / "rbx_bin/libroblox.so"));
+  EXPECT_EQ(std::filesystem::canonical(data / "rbx_bin/libroblox.so"),
+            std::filesystem::canonical(payload / "libroblox.so"));
+}
+
+TEST(RuntimePathsTest, ReplacesAllStaleManagedPayloadLinksTogether) {
+  TemporaryDirectory temporary;
+  ASSERT_FALSE(temporary.path().empty());
+  ScopedCurrentPath restore_current_path;
+  const std::filesystem::path data = temporary.path() / "data";
+  const std::filesystem::path old_payload = data / "payloads/old";
+  const std::filesystem::path new_payload = data / "payloads/new";
+  WriteManagedPayloadFiles(old_payload);
+  WriteManagedPayloadFiles(new_payload);
+  const MapEnvironment environment({
+      {"HOME", temporary.path().string()},
+      {"MOCKTAIL_DATA_ROOT", data.string()},
+  });
+  const RuntimePaths paths =
+      RuntimePaths::FromEnvironment(environment, temporary.path());
+  ActivePayloadPaths active;
+  active.active = true;
+  active.root = old_payload;
+
+  std::string error;
+  ASSERT_TRUE(PrepareManagedPayloadWorkingDirectory(paths, active, &error))
+      << error;
+  active.root = new_payload;
+  ASSERT_TRUE(PrepareManagedPayloadWorkingDirectory(paths, active, &error))
+      << error;
+
+  EXPECT_EQ(std::filesystem::canonical(data / "rbx_bin/assets"),
+            std::filesystem::canonical(new_payload / "assets"));
+  EXPECT_EQ(std::filesystem::canonical(data / "rbx_bin/sober_apk"),
+            std::filesystem::canonical(new_payload / "sober_apk"));
+  EXPECT_EQ(std::filesystem::canonical(data / "rbx_bin/libroblox.so"),
+            std::filesystem::canonical(new_payload / "libroblox.so"));
+}
+
+TEST(RuntimePathsTest, PreservesUnexpectedManagedPayloadFiles) {
+  TemporaryDirectory temporary;
+  ASSERT_FALSE(temporary.path().empty());
+  ScopedCurrentPath restore_current_path;
+  const std::filesystem::path data = temporary.path() / "data";
+  const std::filesystem::path payload = data / "payloads/fixture";
+  WriteManagedPayloadFiles(payload);
+  ASSERT_TRUE(RuntimePaths::EnsureDirectory(data / "rbx_bin/sober_apk"));
+  std::ofstream(data / "rbx_bin/sober_apk/user-file") << "preserve me";
+  const MapEnvironment environment({
+      {"HOME", temporary.path().string()},
+      {"MOCKTAIL_DATA_ROOT", data.string()},
+  });
+  const RuntimePaths paths =
+      RuntimePaths::FromEnvironment(environment, temporary.path());
+  ActivePayloadPaths active;
+  active.active = true;
+  active.root = payload;
+
+  std::string error;
+  EXPECT_FALSE(PrepareManagedPayloadWorkingDirectory(paths, active, &error));
+  EXPECT_NE(error.find("refusing to replace non-symlink"), std::string::npos);
+  EXPECT_TRUE(std::filesystem::is_regular_file(
+      data / "rbx_bin/sober_apk/user-file"));
+  EXPECT_FALSE(std::filesystem::exists(data / "rbx_bin/assets"));
+  EXPECT_FALSE(std::filesystem::exists(data / "rbx_bin/libroblox.so"));
 }
 
 TEST(RuntimePathsTest, ExportsXdgBackedAndroidPathsAndCreatesParents) {

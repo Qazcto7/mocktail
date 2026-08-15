@@ -15,6 +15,8 @@
 #include "runtime/runtime_paths.h"
 
 #define JSON_NOEXCEPTION 1
+#include <array>
+#include <atomic>
 #include <cctype>
 #include <cstdint>
 #include <cstdlib>
@@ -22,6 +24,8 @@
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
+#include <unistd.h>
+#include <utility>
 
 namespace mocktail {
 namespace runtime {
@@ -168,6 +172,129 @@ bool SetEnvironmentDefault(const char* name,
     *error = std::string("cannot export resolved runtime path: ") + name;
   }
   return false;
+}
+
+struct ManagedPayloadBinding {
+  std::filesystem::path target;
+  std::filesystem::path link;
+  const char* name;
+  bool directory;
+};
+
+bool ResolveManagedPayloadBinding(ManagedPayloadBinding* binding,
+                                  std::string* error) {
+  std::error_code filesystem_error;
+  const std::filesystem::file_status target_status =
+      std::filesystem::symlink_status(binding->target, filesystem_error);
+  const bool expected_type =
+      binding->directory ? std::filesystem::is_directory(target_status)
+                         : std::filesystem::is_regular_file(target_status);
+  if (filesystem_error || !expected_type ||
+      std::filesystem::is_symlink(target_status)) {
+    if (error != nullptr) {
+      *error = "managed payload " + std::string(binding->name) +
+               " target is missing, invalid, or a symlink: " +
+               binding->target.string();
+    }
+    return false;
+  }
+  binding->target =
+      std::filesystem::canonical(binding->target, filesystem_error);
+  if (filesystem_error) {
+    if (error != nullptr) {
+      *error = "cannot canonicalize managed payload " +
+               std::string(binding->name) + " target: " +
+               binding->target.string();
+    }
+    return false;
+  }
+
+  const std::filesystem::file_status link_status =
+      std::filesystem::symlink_status(binding->link, filesystem_error);
+  if (filesystem_error == std::errc::no_such_file_or_directory) {
+    filesystem_error.clear();
+    return true;
+  }
+  if (!filesystem_error &&
+      link_status.type() == std::filesystem::file_type::not_found) {
+    return true;
+  }
+  if (filesystem_error) {
+    if (error != nullptr) {
+      *error = "cannot inspect managed payload " +
+               std::string(binding->name) + " path: " +
+               binding->link.string();
+    }
+    return false;
+  }
+  if (!std::filesystem::is_symlink(link_status)) {
+    if (error != nullptr) {
+      *error = "refusing to replace non-symlink managed payload " +
+               std::string(binding->name) + " path: " +
+               binding->link.string();
+    }
+    return false;
+  }
+  return true;
+}
+
+bool PublishManagedPayloadBinding(const ManagedPayloadBinding& binding,
+                                  std::string* error) {
+  std::error_code filesystem_error;
+  const std::filesystem::path current_target =
+      std::filesystem::read_symlink(binding.link, filesystem_error);
+  if (!filesystem_error && current_target == binding.target) {
+    return true;
+  }
+  if (filesystem_error == std::errc::no_such_file_or_directory) {
+    filesystem_error.clear();
+  } else if (filesystem_error) {
+    if (error != nullptr) {
+      *error = "cannot read managed payload " + std::string(binding.name) +
+               " link: " + binding.link.string();
+    }
+    return false;
+  }
+
+  static std::atomic_uint64_t sequence{0};
+  const std::filesystem::path temporary_link =
+      binding.link.string() + ".mocktail-next-" +
+      std::to_string(static_cast<unsigned long long>(getpid())) + "-" +
+      std::to_string(sequence.fetch_add(1, std::memory_order_relaxed));
+  const std::filesystem::file_status temporary_status =
+      std::filesystem::symlink_status(temporary_link, filesystem_error);
+  if (filesystem_error == std::errc::no_such_file_or_directory ||
+      (!filesystem_error && temporary_status.type() ==
+                                std::filesystem::file_type::not_found)) {
+    filesystem_error.clear();
+  } else {
+    if (error != nullptr) {
+      *error = "managed payload temporary link already exists: " +
+               temporary_link.string();
+    }
+    return false;
+  }
+
+  if (binding.directory) {
+    std::filesystem::create_directory_symlink(binding.target, temporary_link,
+                                              filesystem_error);
+  } else {
+    std::filesystem::create_symlink(binding.target, temporary_link,
+                                    filesystem_error);
+  }
+  if (!filesystem_error) {
+    std::filesystem::rename(temporary_link, binding.link, filesystem_error);
+  }
+  if (filesystem_error) {
+    std::error_code cleanup_error;
+    std::filesystem::remove(temporary_link, cleanup_error);
+    if (error != nullptr) {
+      *error = "cannot publish managed payload " + std::string(binding.name) +
+               " link: " + binding.link.string();
+    }
+    return false;
+  }
+  return true;
 }
 
 }  // namespace
@@ -329,6 +456,10 @@ ActivePayloadPaths RuntimePaths::ResolveActivePayload() const {
   }
 
   const std::filesystem::path library = canonical_root / "libroblox.so";
+  const std::filesystem::path package_root = canonical_root / "sober_apk";
+  const std::filesystem::path base_apk = package_root / "base.apk";
+  const std::filesystem::path x86_64_split_apk =
+      package_root / "split_config.x86_64.apk";
   const std::filesystem::path assets_root = canonical_root / "assets";
   const std::filesystem::path assets = canonical_root / "assets/content";
   const std::filesystem::file_status library_status =
@@ -337,6 +468,27 @@ ActivePayloadPaths RuntimePaths::ResolveActivePayload() const {
       std::filesystem::is_symlink(library_status)) {
     result.error = "active payload libroblox.so is missing or invalid";
     return result;
+  }
+  const std::filesystem::file_status package_root_status =
+      std::filesystem::symlink_status(package_root, filesystem_error);
+  if (filesystem_error ||
+      !std::filesystem::is_directory(package_root_status) ||
+      std::filesystem::is_symlink(package_root_status)) {
+    result.error = "active payload sober_apk root is missing or invalid";
+    return result;
+  }
+  for (const auto& [path, name] :
+       std::array<std::pair<std::filesystem::path, const char*>, 2>{
+           std::pair{base_apk, "base.apk"},
+           std::pair{x86_64_split_apk, "split_config.x86_64.apk"}}) {
+    const std::filesystem::file_status status =
+        std::filesystem::symlink_status(path, filesystem_error);
+    if (filesystem_error || !std::filesystem::is_regular_file(status) ||
+        std::filesystem::is_symlink(status)) {
+      result.error = "active payload " + std::string(name) +
+                     " is missing or invalid";
+      return result;
+    }
   }
   const std::filesystem::file_status assets_root_status =
       std::filesystem::symlink_status(assets_root, filesystem_error);
@@ -356,6 +508,8 @@ ActivePayloadPaths RuntimePaths::ResolveActivePayload() const {
   result.active = true;
   result.root = canonical_root;
   result.roblox_library = library;
+  result.base_apk = base_apk;
+  result.x86_64_split_apk = x86_64_split_apk;
   result.assets_content = assets;
 
   const auto compatibility_manifest =
@@ -488,45 +642,37 @@ bool PrepareManagedPayloadWorkingDirectory(const RuntimePaths& paths,
     }
     return false;
   }
-
-  const std::filesystem::path assets_link = rbx_root / "assets";
-  const std::filesystem::file_status link_status =
-      std::filesystem::symlink_status(assets_link, filesystem_error);
-  if (filesystem_error == std::errc::no_such_file_or_directory) {
-    filesystem_error.clear();
-  } else if (filesystem_error) {
+  const std::filesystem::file_status rbx_root_status =
+      std::filesystem::symlink_status(rbx_root, filesystem_error);
+  if (filesystem_error || !std::filesystem::is_directory(rbx_root_status) ||
+      std::filesystem::is_symlink(rbx_root_status)) {
     if (error != nullptr) {
-      *error =
-          "cannot inspect managed payload asset link: " + assets_link.string();
-    }
-    return false;
-  } else if (std::filesystem::is_symlink(link_status)) {
-    std::filesystem::remove(assets_link, filesystem_error);
-  } else if (!std::filesystem::is_directory(link_status)) {
-    if (error != nullptr) {
-      *error = "managed payload asset path is not a directory: " +
-               assets_link.string();
-    }
-    return false;
-  } else {
-    std::filesystem::current_path(paths.data_root(), filesystem_error);
-    if (!filesystem_error) {
-      return true;
-    }
-  }
-  if (filesystem_error) {
-    if (error != nullptr) {
-      *error =
-          "cannot replace managed payload asset link: " + assets_link.string();
+      *error = "managed payload rbx_bin root is invalid or a symlink: " +
+               rbx_root.string();
     }
     return false;
   }
 
-  std::filesystem::create_directory_symlink(active.root / "assets", assets_link,
-                                            filesystem_error);
-  if (!filesystem_error) {
-    std::filesystem::current_path(paths.data_root(), filesystem_error);
+  std::array<ManagedPayloadBinding, 3> bindings{{
+      {active.root / "assets", rbx_root / "assets", "assets", true},
+      {active.root / "sober_apk", rbx_root / "sober_apk", "APK directory",
+       true},
+      {active.root / "libroblox.so", rbx_root / "libroblox.so",
+       "native library", false},
+  }};
+  // Validate all destinations before publishing any of them.
+  for (ManagedPayloadBinding& binding : bindings) {
+    if (!ResolveManagedPayloadBinding(&binding, error)) {
+      return false;
+    }
   }
+  for (const ManagedPayloadBinding& binding : bindings) {
+    if (!PublishManagedPayloadBinding(binding, error)) {
+      return false;
+    }
+  }
+
+  std::filesystem::current_path(paths.data_root(), filesystem_error);
   if (filesystem_error) {
     if (error != nullptr) {
       *error = "cannot activate managed payload working directory: " +

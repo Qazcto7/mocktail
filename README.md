@@ -5,9 +5,10 @@
 [![Downloads](https://img.shields.io/github/downloads/komaruworld/mocktail/total?logo=github)](https://github.com/komaruworld/mocktail/releases/latest)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-Mocktail runs the Android `x86_64` Roblox client on Linux. It provides the
-Android ABI and JNI pieces the client expects, then connects them to SDL3 and
-Vulkan or OpenGL on the Linux side.
+Mocktail runs the Android `x86_64` Roblox client on Linux, including a Linux
+userspace hosted by FreeBSD's Linuxulator. It provides the Android ABI and JNI
+pieces the client expects, then connects them to SDL3 and Vulkan or OpenGL on
+the Linux side.
 
 Mocktail is an independent community project. It is not affiliated with Roblox
 Corporation or VinegarHQ and does not distribute the Roblox client.
@@ -102,17 +103,21 @@ Direct AppImage, DEB, and RPM downloads are available from the
 
 ## Building
 
-Only Linux `x86_64` is supported. Building requires CMake 3.20+, Git,
-pkg-config, a C++17 compiler, SDL 3.4+, SDL3_ttf, Vulkan, EGL, libplacebo,
-fontconfig, libcurl, OpenSSL, libelf, libyaml, minizip, Capstone 5, utf8proc,
-nlohmann/json, GTK4, libadwaita 1.6+, and WebKitGTK 6.0.
+Linux `x86_64` is supported. Experimental FreeBSD 15.1 Linuxulator support has
+been tested with an `x86_64` Fedora 44 userspace. On FreeBSD, Mocktail runs
+inside Linuxulator; it is not a native FreeBSD binary. Building requires CMake
+3.20+, Git, pkg-config, LLD, binutils, a C++17 compiler, SDL 3.4+, SDL3_ttf,
+Vulkan, EGL, libplacebo, fontconfig, libcurl, OpenSSL, libelf, libyaml, minizip,
+Capstone 5, utf8proc, nlohmann/json, GTK4, libadwaita 1.6+, and WebKitGTK 6.0.
+
+See the [FreeBSD Guide](packaging/freebsd/README.md) for setup and launch instructions.
 
 <details>
 <summary>Ubuntu 26.04+</summary>
 
 ```bash
 sudo apt update
-sudo apt install build-essential cmake git ninja-build pkg-config \
+sudo apt install build-essential cmake git ninja-build pkg-config lld \
   libsdl3-dev libsdl3-ttf-dev libcurl4-openssl-dev libssl-dev \
   nlohmann-json3-dev libyaml-dev libelf-dev libminizip-dev \
   libcapstone-dev libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev \
@@ -125,7 +130,7 @@ sudo apt install build-essential cmake git ninja-build pkg-config \
 <summary>Arch Linux</summary>
 
 ```bash
-sudo pacman -S --needed base-devel cmake git ninja pkgconf sdl3 sdl3_ttf \
+sudo pacman -S --needed base-devel cmake git ninja pkgconf lld sdl3 sdl3_ttf \
   curl openssl nlohmann-json libyaml libelf minizip capstone gtk4 \
   libadwaita webkitgtk-6.0 libutf8proc fontconfig libglvnd \
   libplacebo vulkan-headers vulkan-icd-loader zlib
@@ -136,7 +141,7 @@ sudo pacman -S --needed base-devel cmake git ninja pkgconf sdl3 sdl3_ttf \
 <summary>Fedora 44+</summary>
 
 ```bash
-sudo dnf install gcc-c++ cmake git ninja-build pkgconf-pkg-config \
+sudo dnf install gcc-c++ cmake git ninja-build pkgconf-pkg-config lld \
   SDL3-devel SDL3_ttf-devel libcurl-devel openssl-devel \
   nlohmann-json-devel libyaml-devel elfutils-libelf-devel minizip-ng-compat-devel \
   capstone-devel gtk4-devel libadwaita-devel webkitgtk6.0-devel \

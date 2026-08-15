@@ -964,7 +964,7 @@ add_test(
 )
 
 find_program(MOCKTAIL_PATCHELF_EXECUTABLE patchelf)
-if(MOCKTAIL_PATCHELF_EXECUTABLE)
+if(MOCKTAIL_BUILD_FREEBSD_SOCKET_HELPER AND MOCKTAIL_PATCHELF_EXECUTABLE)
   add_test(
     NAME PortablePackagingTest.RelocatableReadOnlyBundle
     COMMAND ${CMAKE_COMMAND} -E env
@@ -1003,8 +1003,10 @@ add_test(
           ${CMAKE_SOURCE_DIR}
 )
 
+if(MOCKTAIL_BUILD_FREEBSD_SOCKET_HELPER)
 add_test(
   NAME SystemInstallTest.DynamicRuntimeLayout
   COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/system_install_test.sh
           ${CMAKE_BINARY_DIR}
 )
+endif()

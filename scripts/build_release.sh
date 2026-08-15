@@ -277,6 +277,8 @@ Main() {
   ParseArguments "$@"
   RequireCommand cmake
   RequireCommand find
+  RequireCommand ld.lld
+  RequireCommand elfedit
   RequireCommand readelf
   RequireCommand readlink
   RequireCommand sort

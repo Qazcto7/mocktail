@@ -158,6 +158,8 @@ if [[ -z "${CMAKE_TOOLCHAIN_FILE}" ]]; then
 fi
 check_tool git     "sudo apt install git"
 check_tool java    "sudo apt install default-jdk"
+check_tool ld.lld  "install LLD"
+check_tool elfedit "install binutils"
 
 if [[ "${EXTRACT_APK}" == true ]]; then
   check_tool unzip "sudo apt install unzip"

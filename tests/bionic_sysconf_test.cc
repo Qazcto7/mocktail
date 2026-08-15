@@ -16,21 +16,20 @@ TEST(BionicSysconfTest, TranslatesPageSizeAliases) {
 
   EXPECT_EQ(BionicSysconf(static_cast<int>(BionicSysconfName::kPageSize)),
             host_page_size);
-  EXPECT_EQ(
-      BionicSysconf(static_cast<int>(BionicSysconfName::kPageSizeAlias)),
-      host_page_size);
+  EXPECT_EQ(BionicSysconf(static_cast<int>(BionicSysconfName::kPageSizeAlias)),
+            host_page_size);
   EXPECT_GT(host_page_size, 0);
   EXPECT_EQ(host_page_size & (host_page_size - 1), 0);
 }
 
 TEST(BionicSysconfTest, TranslatesObservedCapacityNames) {
   EXPECT_EQ(BionicSysconf(static_cast<int>(BionicSysconfName::kClockTicks)),
-            ::sysconf(_SC_CLK_TCK));
+            100);
   EXPECT_EQ(BionicSysconf(static_cast<int>(BionicSysconfName::kIovMax)),
             ::sysconf(_SC_IOV_MAX));
-  EXPECT_EQ(BionicSysconf(
-                static_cast<int>(BionicSysconfName::kProcessorsConfigured)),
-            ::sysconf(_SC_NPROCESSORS_CONF));
+  EXPECT_EQ(
+      BionicSysconf(static_cast<int>(BionicSysconfName::kProcessorsConfigured)),
+      ::sysconf(_SC_NPROCESSORS_CONF));
   EXPECT_EQ(
       BionicSysconf(static_cast<int>(BionicSysconfName::kProcessorsOnline)),
       ::sysconf(_SC_NPROCESSORS_ONLN));
@@ -45,5 +44,5 @@ TEST(BionicSysconfTest, RejectsUnknownBionicName) {
   EXPECT_EQ(errno, EINVAL);
 }
 
-}  // namespace
-}  // namespace mocktail::compat
+} // namespace
+} // namespace mocktail::compat

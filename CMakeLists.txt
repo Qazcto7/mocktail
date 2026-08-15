@@ -630,6 +630,40 @@ target_link_options(mocktail PRIVATE
   -Wl,--export-dynamic
 )
 
+# Native FreeBSD helper for Linuxulator's unsupported DF socket option.
+option(MOCKTAIL_BUILD_FREEBSD_SOCKET_HELPER
+  "Build the native FreeBSD Linuxulator socket helper" ON)
+if(MOCKTAIL_BUILD_FREEBSD_SOCKET_HELPER)
+find_program(MOCKTAIL_LLD_EXECUTABLE NAMES ld.lld REQUIRED)
+find_program(MOCKTAIL_ELFEDIT_EXECUTABLE NAMES elfedit REQUIRED)
+get_filename_component(MOCKTAIL_LLD_DIRECTORY
+  "${MOCKTAIL_LLD_EXECUTABLE}" DIRECTORY)
+set(MOCKTAIL_FREEBSD_SOCKET_HELPER
+  "${CMAKE_BINARY_DIR}/mocktail_freebsd_socket_helper")
+add_custom_command(
+  OUTPUT "${MOCKTAIL_FREEBSD_SOCKET_HELPER}"
+  COMMAND "${CMAKE_CXX_COMPILER}"
+    -x assembler-with-cpp
+    -nostdlib
+    -static
+    -no-pie
+    "-B${MOCKTAIL_LLD_DIRECTORY}/"
+    -fuse-ld=lld
+    -Wl,-e,_start,--build-id=none,-z,noexecstack
+    -o "${MOCKTAIL_FREEBSD_SOCKET_HELPER}"
+    "${CMAKE_SOURCE_DIR}/src/compat/freebsd_socket_helper.S"
+  COMMAND "${MOCKTAIL_ELFEDIT_EXECUTABLE}"
+    --output-osabi FreeBSD "${MOCKTAIL_FREEBSD_SOCKET_HELPER}"
+  DEPENDS "${CMAKE_SOURCE_DIR}/src/compat/freebsd_socket_helper.S"
+  COMMENT "Building native FreeBSD Linuxulator socket helper"
+  VERBATIM
+)
+add_custom_target(mocktail_freebsd_socket_helper_build ALL
+  DEPENDS "${MOCKTAIL_FREEBSD_SOCKET_HELPER}"
+)
+add_dependencies(mocktail mocktail_freebsd_socket_helper_build)
+endif()
+
 set_target_properties(mocktail PROPERTIES
   BUILD_RPATH   "\$ORIGIN"
   INSTALL_RPATH "\$ORIGIN;\$ORIGIN/../${CMAKE_INSTALL_LIBDIR}/mocktail"
@@ -662,6 +696,11 @@ install(TARGETS
   RUNTIME DESTINATION "${MOCKTAIL_INSTALL_RUNTIME_DIR}"
   LIBRARY DESTINATION "${MOCKTAIL_INSTALL_RUNTIME_DIR}"
 )
+if(MOCKTAIL_BUILD_FREEBSD_SOCKET_HELPER)
+install(PROGRAMS "${MOCKTAIL_FREEBSD_SOCKET_HELPER}"
+  DESTINATION "${MOCKTAIL_INSTALL_RUNTIME_DIR}"
+)
+endif()
 install(FILES
     config/roblox_compatibility.json
     config/roblox_bootstrap_sources.json

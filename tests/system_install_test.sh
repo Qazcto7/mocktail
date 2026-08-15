@@ -23,6 +23,9 @@ readonly icon="${install_root}/usr/share/icons/hicolor/scalable/apps/space.bigra
 [[ -x "${runtime}/mocktail_updater" ]]
 [[ -x "${runtime}/mocktail_failure_dialog" ]]
 [[ -x "${runtime}/mocktail_webview_helper" ]]
+[[ -x "${runtime}/mocktail_freebsd_socket_helper" ]]
+LC_ALL=C readelf -h "${runtime}/mocktail_freebsd_socket_helper" |
+  grep -Fq 'UNIX - FreeBSD'
 readelf -h "${binary}" | grep -Fq 'ELF64'
 readelf -h "${runtime}/mocktail_updater" | grep -Fq 'ELF64'
 readelf -d "${binary}" | grep -Fq '$ORIGIN/../lib/mocktail'

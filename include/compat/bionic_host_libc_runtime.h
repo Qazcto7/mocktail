@@ -15,7 +15,10 @@
 #ifndef MOCKTAIL_COMPAT_BIONIC_HOST_LIBC_RUNTIME_H_
 #define MOCKTAIL_COMPAT_BIONIC_HOST_LIBC_RUNTIME_H_
 
+#include <sys/sysinfo.h>
+#include <sys/types.h>
 #include <sys/uio.h>
+#include <sys/utsname.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -72,6 +75,15 @@ void BionicArc4RandomBuffer(void* buffer, size_t size) noexcept;
 BionicMallinfoSnapshot BionicMallinfo() noexcept;
 bool BionicMallinfoHasHostTelemetry() noexcept;
 
+void NormalizeBionicSysInfo(struct sysinfo* info) noexcept;
+int BionicSysInfo(struct sysinfo* info) noexcept;
+bool NormalizeLinuxulatorUnameVersion(struct utsname* name,
+                                      const char* linux_version) noexcept;
+int BionicUname(struct utsname* name) noexcept;
+uid_t NormalizeBionicApplicationUid(uid_t host_uid) noexcept;
+uid_t BionicGetUid() noexcept;
+uid_t BionicGetEffectiveUid() noexcept;
+
 // POSIX strerror_r contract: zero on success, -1/ERANGE on truncation.
 int BionicStrError(int error_number, char* buffer, size_t buffer_size) noexcept;
 
@@ -93,6 +105,10 @@ int mocktail_bionic_cxa_thread_atexit_impl(
     void* dso_handle);
 void mocktail_bionic_arc4random_buf(void* buffer, size_t size);
 mocktail::compat::BionicMallinfoSnapshot mocktail_bionic_mallinfo();
+int mocktail_bionic_sysinfo(struct sysinfo* info);
+int mocktail_bionic_uname(struct utsname* name);
+uid_t mocktail_bionic_getuid();
+uid_t mocktail_bionic_geteuid();
 int mocktail_bionic_strerror_r(int error_number, char* buffer,
                                size_t buffer_size);
 long long mocktail_bionic_strtoll_l(const char* text, char** end, int base,

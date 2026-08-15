@@ -53,8 +53,8 @@ struct DestructorProbe {
   std::atomic<int> calls{0};
 };
 
-void RecordThreadDestructor(void* argument) {
-  auto* probe = static_cast<DestructorProbe*>(argument);
+void RecordThreadDestructor(void *argument) {
+  auto *probe = static_cast<DestructorProbe *>(argument);
   probe->calls.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -68,10 +68,10 @@ TEST(BionicHostLibcRuntimeTest, WalksValidControlMessages) {
   message.msg_control = control.data();
   message.msg_controllen = control.size();
 
-  auto* first = reinterpret_cast<Header*>(control.data());
+  auto *first = reinterpret_cast<Header *>(control.data());
   first->cmsg_len = ControlMessageLength(kPayloadSize);
-  auto* second = reinterpret_cast<Header*>(control.data() +
-                                           ControlMessageSpace(kPayloadSize));
+  auto *second = reinterpret_cast<Header *>(control.data() +
+                                            ControlMessageSpace(kPayloadSize));
   second->cmsg_len = ControlMessageLength(kPayloadSize);
 
   EXPECT_EQ(mocktail_bionic_cmsg_nxthdr(&message, first), second);
@@ -84,7 +84,7 @@ TEST(BionicHostLibcRuntimeTest, RejectsMalformedControlMessages) {
   mocktail::compat::BionicMessageHeader message{};
   message.msg_control = control.data();
   message.msg_controllen = control.size();
-  auto* header = reinterpret_cast<Header*>(control.data());
+  auto *header = reinterpret_cast<Header *>(control.data());
 
   header->cmsg_len = sizeof(Header) - 1;
   EXPECT_EQ(mocktail_bionic_cmsg_nxthdr(&message, header), nullptr);
@@ -145,6 +145,80 @@ TEST(BionicHostLibcRuntimeTest, ReturnsAbiSizedAllocatorSnapshot) {
   }
 }
 
+TEST(BionicHostLibcRuntimeTest, PreservesValidSysInfoCounters) {
+  struct sysinfo info{};
+  info.totalram = 8UL * 1024UL * 1024UL * 1024UL;
+  info.freeram = 2UL * 1024UL * 1024UL * 1024UL;
+  info.totalswap = 4UL * 1024UL * 1024UL * 1024UL;
+  info.freeswap = 1UL * 1024UL * 1024UL * 1024UL;
+
+  mocktail::compat::NormalizeBionicSysInfo(&info);
+
+  EXPECT_EQ(info.totalram, 8UL * 1024UL * 1024UL * 1024UL);
+  EXPECT_EQ(info.freeram, 2UL * 1024UL * 1024UL * 1024UL);
+  EXPECT_EQ(info.totalswap, 4UL * 1024UL * 1024UL * 1024UL);
+  EXPECT_EQ(info.freeswap, 1UL * 1024UL * 1024UL * 1024UL);
+}
+
+TEST(BionicHostLibcRuntimeTest, ClearsLinuxulatorUnderflowedSwapCounters) {
+  struct sysinfo info{};
+  info.totalram = 8UL * 1024UL * 1024UL * 1024UL;
+  info.freeram = 2UL * 1024UL * 1024UL * 1024UL;
+  info.totalswap = std::numeric_limits<unsigned long>::max() - 40959UL;
+  info.freeswap = std::numeric_limits<unsigned long>::max() - 11550719UL;
+
+  mocktail::compat::NormalizeBionicSysInfo(&info);
+
+  EXPECT_EQ(info.totalram, 8UL * 1024UL * 1024UL * 1024UL);
+  EXPECT_EQ(info.freeram, 2UL * 1024UL * 1024UL * 1024UL);
+  EXPECT_EQ(info.totalswap, 0UL);
+  EXPECT_EQ(info.freeswap, 0UL);
+}
+
+TEST(BionicHostLibcRuntimeTest, CallsHostSysInfoThroughBionicAdapter) {
+  struct sysinfo info{};
+  ASSERT_EQ(mocktail_bionic_sysinfo(&info), 0);
+  EXPECT_GT(info.totalram, 0UL);
+  EXPECT_LE(info.freeswap, info.totalswap);
+}
+
+TEST(BionicHostLibcRuntimeTest, NormalizesContradictoryLinuxulatorUname) {
+  struct utsname name{};
+  std::snprintf(name.sysname, sizeof(name.sysname), "Linux");
+  std::snprintf(name.release, sizeof(name.release), "5.15.0");
+  std::snprintf(name.version, sizeof(name.version),
+                "FreeBSD 15.1-RELEASE-p2 GENERIC");
+
+  EXPECT_TRUE(mocktail::compat::NormalizeLinuxulatorUnameVersion(
+      &name, "#4 SMP PREEMPT_DYNAMIC"));
+  EXPECT_STREQ(name.sysname, "Linux");
+  EXPECT_STREQ(name.release, "5.15.0");
+  EXPECT_STREQ(name.version, "#4 SMP PREEMPT_DYNAMIC");
+}
+
+TEST(BionicHostLibcRuntimeTest, PreservesNativeLinuxUname) {
+  struct utsname name{};
+  std::snprintf(name.sysname, sizeof(name.sysname), "Linux");
+  std::snprintf(name.version, sizeof(name.version), "#1 SMP PREEMPT_DYNAMIC");
+
+  EXPECT_FALSE(mocktail::compat::NormalizeLinuxulatorUnameVersion(
+      &name, "#4 SMP PREEMPT_DYNAMIC"));
+  EXPECT_STREQ(name.version, "#1 SMP PREEMPT_DYNAMIC");
+
+  ASSERT_EQ(mocktail_bionic_uname(&name), 0);
+  EXPECT_STREQ(name.sysname, "Linux");
+}
+
+TEST(BionicHostLibcRuntimeTest, HidesPrivilegedHostIdentityFromAndroidGuest) {
+  EXPECT_EQ(mocktail::compat::NormalizeBionicApplicationUid(0), 1000U);
+  EXPECT_EQ(mocktail::compat::NormalizeBionicApplicationUid(1000), 1000U);
+  EXPECT_EQ(mocktail::compat::NormalizeBionicApplicationUid(12345), 12345U);
+  EXPECT_EQ(mocktail_bionic_getuid(),
+            mocktail::compat::NormalizeBionicApplicationUid(::getuid()));
+  EXPECT_EQ(mocktail_bionic_geteuid(),
+            mocktail::compat::NormalizeBionicApplicationUid(::geteuid()));
+}
+
 TEST(BionicHostLibcRuntimeTest, UsesBionicPosixStrErrorContract) {
   std::array<char, 128> buffer{};
 
@@ -175,7 +249,7 @@ TEST(BionicHostLibcRuntimeTest, ParsesIntegersInScopedCLocale) {
   auto guest_locale =
       reinterpret_cast<mocktail::compat::BionicLocale>(uintptr_t{1});
 
-  char* signed_end = nullptr;
+  char *signed_end = nullptr;
   errno = EDOM;
   EXPECT_EQ(
       mocktail_bionic_strtoll_l("-0x7f-rest", &signed_end, 0, guest_locale),
@@ -183,7 +257,7 @@ TEST(BionicHostLibcRuntimeTest, ParsesIntegersInScopedCLocale) {
   EXPECT_STREQ(signed_end, "-rest");
   EXPECT_EQ(errno, EDOM);
 
-  char* unsigned_end = nullptr;
+  char *unsigned_end = nullptr;
   errno = 0;
   EXPECT_EQ(mocktail_bionic_strtoull_l("18446744073709551616!", &unsigned_end,
                                        10, guest_locale),
@@ -215,12 +289,11 @@ TEST(BionicHostLibcRuntimeTest, FortifiedReadlinkAbortsAboveSsizeLimit) {
   EXPECT_DEATH(
       {
         char buffer{};
-        mocktail___readlink_chk(
-            "/proc/self/exe", &buffer,
-            static_cast<size_t>(SSIZE_MAX) + size_t{1},
-            std::numeric_limits<size_t>::max());
+        mocktail___readlink_chk("/proc/self/exe", &buffer,
+                                static_cast<size_t>(SSIZE_MAX) + size_t{1},
+                                std::numeric_limits<size_t>::max());
       },
       "FORTIFY: readlink");
 }
 
-}  // namespace
+} // namespace
