@@ -1,6 +1,3 @@
-// Copyright 2026 Mocktail Project Authors
-// Apache 2.0 License
-//
 // Android NDK compatibility symbols used by libroblox.so on Linux. Asset calls
 // can read from an extracted directory or directly from an APK.
 //
