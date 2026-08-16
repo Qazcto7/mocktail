@@ -410,9 +410,6 @@ target_link_libraries(mocktail_auth_runtime_composition PUBLIC
   mocktail_runtime
   mocktail_services
 )
-target_link_libraries(mocktail_auth_runtime_composition PRIVATE
-  Mocktail::CryptoFoundation
-)
 mocktail_apply_compile_options(mocktail_auth_runtime_composition)
 
 add_library(mocktail_linker STATIC

@@ -81,12 +81,6 @@ class RuntimePaths {
     return active_payload_manifest_;
   }
   const std::filesystem::path& cookie_file() const { return cookie_file_; }
-  const std::filesystem::path& sober_cookie_file() const {
-    return sober_cookie_file_;
-  }
-  const std::filesystem::path& default_sober_rejection_file() const {
-    return default_sober_rejection_file_;
-  }
   bool use_real_sober_paths() const { return use_real_sober_paths_; }
 
   std::filesystem::path DefaultAssetPath() const;
@@ -119,8 +113,6 @@ class RuntimePaths {
   std::filesystem::path config_file_;
   std::filesystem::path active_payload_manifest_;
   std::filesystem::path cookie_file_;
-  std::filesystem::path sober_cookie_file_;
-  std::filesystem::path default_sober_rejection_file_;
   bool use_real_sober_paths_ = false;
 };
 

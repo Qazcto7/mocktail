@@ -358,13 +358,6 @@ RuntimePaths RuntimePaths::FromEnvironment(
   paths.active_payload_manifest_ = paths.data_root_ / "current.json";
 
   paths.cookie_file_ = paths.auth_root_ / "roblox.cookie";
-  paths.default_sober_rejection_file_ =
-      paths.auth_root_ / "default-sober-rejection";
-  paths.sober_cookie_file_ =
-      environment.HasNonEmpty("MOCKTAIL_SOBER_COOKIE_FILE")
-          ? std::filesystem::path(
-                environment.GetOr("MOCKTAIL_SOBER_COOKIE_FILE", ""))
-          : paths.sober_data_root_ / "cookies";
   paths.use_real_sober_paths_ =
       LegacyEnabled(environment, "MOCKTAIL_USE_REAL_SOBER_PATHS");
   return paths;

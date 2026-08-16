@@ -142,9 +142,6 @@ TEST(RuntimePathsTest, DerivesXdgDefaults) {
   EXPECT_EQ(paths.auth_root(), "/home/mocktail/.local/share/mocktail/auth");
   EXPECT_EQ(paths.cookie_file(),
             "/home/mocktail/.local/share/mocktail/auth/roblox.cookie");
-  EXPECT_EQ(paths.default_sober_rejection_file(),
-            "/home/mocktail/.local/share/mocktail/auth/"
-            "default-sober-rejection");
 }
 
 TEST(RuntimePathsTest, IgnoresRelativeXdgHomes) {
@@ -410,7 +407,6 @@ TEST(RuntimePathsTest, HonorsExplicitAndXdgOverrides) {
       {"MOCKTAIL_DATA_ROOT", "/data"},
       {"MOCKTAIL_STATE_ROOT", "/state"},
       {"MOCKTAIL_AUTH_ROOT", "/auth"},
-      {"MOCKTAIL_SOBER_COOKIE_FILE", "/cookies/sober"},
   });
   const RuntimePaths explicit_paths =
       RuntimePaths::FromEnvironment(explicit_environment, "/workspace");
@@ -419,9 +415,6 @@ TEST(RuntimePathsTest, HonorsExplicitAndXdgOverrides) {
   EXPECT_EQ(explicit_paths.data_root(), "/data");
   EXPECT_EQ(explicit_paths.state_root(), "/state");
   EXPECT_EQ(explicit_paths.auth_root(), "/auth");
-  EXPECT_EQ(explicit_paths.default_sober_rejection_file(),
-            "/auth/default-sober-rejection");
-  EXPECT_EQ(explicit_paths.sober_cookie_file(), "/cookies/sober");
 
   const MapEnvironment xdg_environment({
       {"HOME", "/home/mocktail"},

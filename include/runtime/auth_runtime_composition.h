@@ -101,8 +101,7 @@ struct AuthRuntimeComposition {
 };
 
 // A VM requires authentication or explicit guest mode. HTTP 401/403 clears
-// only a managed credential; rejected Sober credentials are suppressed
-// without changing Sober's file.
+// only Mocktail's managed credential.
 AuthRuntimeComposition ComposeAuthRuntime(const Environment& environment,
                                           const RuntimePaths& paths,
                                           services::AuthService& auth_service);

@@ -1103,14 +1103,6 @@ std::string MocktailConfigRoot() {
   return HomePath("/.config/mocktail");
 }
 
-std::string SoberDataRoot() {
-  const char* root = std::getenv("MOCKTAIL_SOBER_DATA_ROOT");
-  if (root && root[0] != '\0') {
-    return root;
-  }
-  return HomePath("/.var/app/org.vinegarhq.Sober/data/sober");
-}
-
 void EnsureCookieStoreLoadedLocked() {
   if (g_cookie_store_loaded) {
     return;
@@ -1128,10 +1120,6 @@ void EnsureCookieStoreLoadedLocked() {
   if (g_cookie_header.empty()) {
     g_cookie_header =
         NormalizeCookieHeader(ReadTextFile(MocktailConfigRoot() + "/cookie"));
-  }
-  if (g_cookie_header.empty()) {
-    g_cookie_header =
-        NormalizeCookieHeader(ReadTextFile(SoberDataRoot() + "/cookies"));
   }
   if (TraceEnabled()) {
     std::cout << "  [JNI] cookie store loaded bytes="

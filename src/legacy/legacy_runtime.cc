@@ -28793,11 +28793,6 @@ std::string MocktailCookiePath() {
   return MocktailConfigRoot() + "/cookie";
 }
 
-std::string SoberCookiePath() {
-  return GetEnvString("MOCKTAIL_SOBER_COOKIE_FILE",
-                      (SoberDataRoot() + "/cookies").c_str());
-}
-
 bool CookieHasAttribute(const std::string& cookie, const char* attribute) {
   std::string lower_cookie = cookie;
   std::string lower_attribute = attribute ? attribute : "";
@@ -29583,9 +29578,8 @@ void ConfigureNativeSettings(JNIEnv* env, jclass settings_class,
     std::cout << "  [engine] no Roblox cookie found; proceeding without login\n"
               << std::flush;
   } else {
-    std::cout << "  [engine] WARNING: no Roblox cookie found; checked "
-              << MocktailCookiePath() << " and " << SoberCookiePath()
-              << '\n'
+    std::cout << "  [engine] WARNING: no Roblox cookie found at "
+              << MocktailCookiePath() << '\n'
               << std::flush;
   }
   std::string android_id =

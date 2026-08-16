@@ -657,10 +657,6 @@ int main(int argc, char* argv[]) {
       tracker_cookie_owned = false;
     } else if (mocktail::runtime::RuntimePaths::Exists(paths.cookie_file())) {
       tracker_cookie_file = paths.cookie_file();
-    } else if (mocktail::runtime::RuntimePaths::Exists(
-                   paths.sober_cookie_file())) {
-      tracker_cookie_file = paths.sober_cookie_file();
-      tracker_cookie_owned = false;
     }
     const mocktail::services::BrowserTrackerResult browser_tracker_result =
         browser_tracker.EnsureInitialized(app_storage_file, tracker_cookie_file,
