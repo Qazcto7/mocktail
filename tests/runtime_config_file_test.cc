@@ -481,9 +481,24 @@ network:
   EXPECT_NE(loaded.error.find("1 to 65535"), std::string::npos);
 }
 
+TEST(RuntimeConfigFileTest, LoadsSystemProxyFlagWithoutFixedEndpoint) {
+  TemporaryDirectory temporary;
+  const std::filesystem::path path = temporary.Write(R"yaml(
+version: 1
+network:
+  use_system_proxy: true
+)yaml");
+  const RuntimeConfigLoadResult loaded =
+      LoadRuntimeConfig(MapEnvironment(), path);
+  ASSERT_TRUE(loaded) << loaded.error;
+  EXPECT_TRUE(loaded.config.use_system_proxy());
+  EXPECT_FALSE(loaded.config.network_proxy().has_value());
+}
+
 TEST(RuntimeConfigFileTest, ExportsProxyVariablesOnlyWhenConfigured) {
   unsetenv("MOCKTAIL_HTTP_PROXY_HOST");
   unsetenv("MOCKTAIL_HTTP_PROXY_PORT");
+  unsetenv("MOCKTAIL_HTTP_PROXY_SCHEME");
   unsetenv("MOCKTAIL_NATIVE_SET_HTTP_CLIENT_PROXY");
   std::string error;
   ASSERT_TRUE(ExportRuntimeConfigEnvironment(
@@ -499,12 +514,15 @@ TEST(RuntimeConfigFileTest, ExportsProxyVariablesOnlyWhenConfigured) {
   ASSERT_TRUE(ExportRuntimeConfigEnvironment(configured, &error)) << error;
   ASSERT_NE(getenv("MOCKTAIL_HTTP_PROXY_HOST"), nullptr);
   ASSERT_NE(getenv("MOCKTAIL_HTTP_PROXY_PORT"), nullptr);
+  ASSERT_NE(getenv("MOCKTAIL_HTTP_PROXY_SCHEME"), nullptr);
   ASSERT_NE(getenv("MOCKTAIL_NATIVE_SET_HTTP_CLIENT_PROXY"), nullptr);
   EXPECT_STREQ(getenv("MOCKTAIL_HTTP_PROXY_HOST"), "127.0.0.1");
   EXPECT_STREQ(getenv("MOCKTAIL_HTTP_PROXY_PORT"), "7890");
+  EXPECT_STREQ(getenv("MOCKTAIL_HTTP_PROXY_SCHEME"), "http");
   EXPECT_STREQ(getenv("MOCKTAIL_NATIVE_SET_HTTP_CLIENT_PROXY"), "1");
   unsetenv("MOCKTAIL_HTTP_PROXY_HOST");
   unsetenv("MOCKTAIL_HTTP_PROXY_PORT");
+  unsetenv("MOCKTAIL_HTTP_PROXY_SCHEME");
   unsetenv("MOCKTAIL_NATIVE_SET_HTTP_CLIENT_PROXY");
 }
 

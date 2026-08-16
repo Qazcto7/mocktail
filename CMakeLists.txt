@@ -207,6 +207,7 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBYAML REQUIRED IMPORTED_TARGET yaml-0.1)
 pkg_check_modules(MINIZIP REQUIRED IMPORTED_TARGET minizip)
 pkg_check_modules(CAPSTONE REQUIRED IMPORTED_TARGET capstone)
+pkg_check_modules(GIO REQUIRED IMPORTED_TARGET gio-2.0)
 pkg_check_modules(GTK4 REQUIRED IMPORTED_TARGET gtk4)
 pkg_check_modules(LIBADWAITA REQUIRED IMPORTED_TARGET "libadwaita-1>=1.6")
 pkg_check_modules(WEBKITGTK6 REQUIRED IMPORTED_TARGET webkitgtk-6.0)
@@ -298,6 +299,7 @@ add_library(mocktail_runtime STATIC
   src/runtime/startup_state_machine.cc
   src/runtime/supported_launch_policy.cc
   src/runtime/support_bundle.cc
+  src/runtime/system_proxy.cc
 )
 add_library(Mocktail::Runtime ALIAS mocktail_runtime)
 target_include_directories(mocktail_runtime PUBLIC include)
@@ -331,6 +333,7 @@ target_link_libraries(mocktail_runtime PRIVATE
   Mocktail::CryptoFoundation
   CURL::libcurl
   nlohmann_json::nlohmann_json
+  PkgConfig::GIO
   PkgConfig::LIBYAML
   ${CMAKE_DL_LIBS}
 )

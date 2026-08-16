@@ -1,4 +1,5 @@
 #include "runtime/runtime_config.h"
+#include "runtime/system_proxy.h"
 
 #include <gtest/gtest.h>
 
@@ -63,6 +64,7 @@ TEST(RuntimeConfigTest, UsesSupportedDefaults) {
   EXPECT_TRUE(config.performance().physics_worker_mode_valid);
   EXPECT_EQ(config.audio_output_device(), "default");
   EXPECT_TRUE(config.audio_output_device_valid());
+  EXPECT_FALSE(config.use_system_proxy());
   EXPECT_FALSE(config.network_proxy().has_value());
   EXPECT_FALSE(config.discord_rpc().enabled);
   EXPECT_TRUE(config.discord_rpc().show_place_name);
@@ -151,6 +153,20 @@ TEST(RuntimeConfigTest, BuildsBracketedIpv6ProxyUrl) {
       ParseNetworkProxyConfig("::1", "8080");
   ASSERT_TRUE(proxy.has_value());
   EXPECT_EQ(BuildNetworkProxyUrl(*proxy), "http://[::1]:8080");
+}
+
+TEST(SystemProxyTest, SelectsHttpAndSocksProxies) {
+  const SystemProxyResult https =
+      SelectSystemProxy({"https://127.0.0.1:7890"});
+  ASSERT_TRUE(https) << https.error;
+  ASSERT_TRUE(https.proxy.has_value());
+  EXPECT_EQ(BuildNetworkProxyUrl(*https.proxy), "http://127.0.0.1:7890");
+
+  const SystemProxyResult socks =
+      SelectSystemProxy({"socks://127.0.0.1:1080"});
+  ASSERT_TRUE(socks) << socks.error;
+  ASSERT_TRUE(socks.proxy.has_value());
+  EXPECT_EQ(BuildNetworkProxyUrl(*socks.proxy), "socks5h://127.0.0.1:1080");
 }
 
 TEST(RuntimeConfigTest, RejectsMalformedDiscordApplicationId) {

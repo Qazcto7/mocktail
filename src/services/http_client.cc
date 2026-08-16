@@ -121,13 +121,15 @@ HttpResponse PerformRequest(const HttpRequest& request,
   std::string proxy_url;
   const char* proxy_host = std::getenv("MOCKTAIL_HTTP_PROXY_HOST");
   const char* proxy_port = std::getenv("MOCKTAIL_HTTP_PROXY_PORT");
+  const char* proxy_scheme = std::getenv("MOCKTAIL_HTTP_PROXY_SCHEME");
   if (proxy_host != nullptr && proxy_port != nullptr) {
     const std::optional<runtime::NetworkProxyConfig> proxy =
-        runtime::ParseNetworkProxyConfig(proxy_host, proxy_port);
+        runtime::ParseNetworkProxyConfig(
+            proxy_host, proxy_port,
+            proxy_scheme != nullptr ? proxy_scheme : "http");
     if (proxy.has_value()) {
       proxy_url = runtime::BuildNetworkProxyUrl(*proxy);
       curl_easy_setopt(handle, CURLOPT_PROXY, proxy_url.c_str());
-      curl_easy_setopt(handle, CURLOPT_PROXYTYPE, CURLPROXY_HTTP);
     }
   }
   if (headers != nullptr) {

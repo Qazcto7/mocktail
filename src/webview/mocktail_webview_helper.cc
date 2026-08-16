@@ -243,11 +243,18 @@ bool InitializeNetworkSession(AppState* state) {
     return false;
   }
 
+  const char* system_proxy = std::getenv("MOCKTAIL_USE_SYSTEM_PROXY");
+  const bool use_system_proxy =
+      system_proxy != nullptr && system_proxy[0] != '\0' &&
+      std::string_view(system_proxy) != "0";
   const char* proxy_host = std::getenv("MOCKTAIL_HTTP_PROXY_HOST");
   const char* proxy_port = std::getenv("MOCKTAIL_HTTP_PROXY_PORT");
+  const char* proxy_scheme = std::getenv("MOCKTAIL_HTTP_PROXY_SCHEME");
   if (proxy_host != nullptr && proxy_port != nullptr) {
     const std::optional<mocktail::runtime::NetworkProxyConfig> proxy =
-        mocktail::runtime::ParseNetworkProxyConfig(proxy_host, proxy_port);
+        mocktail::runtime::ParseNetworkProxyConfig(
+            proxy_host, proxy_port,
+            proxy_scheme != nullptr ? proxy_scheme : "http");
     if (proxy.has_value()) {
       const std::string proxy_url =
           mocktail::runtime::BuildNetworkProxyUrl(*proxy);
@@ -262,7 +269,9 @@ bool InitializeNetworkSession(AppState* state) {
       webkit_network_session_set_proxy_settings(
           state->network_session, WEBKIT_NETWORK_PROXY_MODE_CUSTOM, settings);
       webkit_network_proxy_settings_free(settings);
-      std::cerr << "[webview] configured Mocktail HTTP proxy applied\n";
+      std::cerr << "[webview] "
+                << (use_system_proxy ? "normalized system" : "configured")
+                << " proxy applied: " << proxy_url << '\n';
     }
   }
 

@@ -118,16 +118,29 @@ std::optional<NetworkProxyConfig> ReadNetworkProxy(
       environment.Get("MOCKTAIL_HTTP_PROXY_HOST");
   const std::optional<std::string> port =
       environment.Get("MOCKTAIL_HTTP_PROXY_PORT");
+  const std::string scheme =
+      environment.GetOr("MOCKTAIL_HTTP_PROXY_SCHEME", "http");
   if (!host.has_value() || host->empty() || !port.has_value()) {
     return std::nullopt;
   }
-  return ParseNetworkProxyConfig(*host, *port);
+  return ParseNetworkProxyConfig(*host, *port, scheme);
 }
 
 }  // namespace
 
 std::optional<NetworkProxyConfig> ParseNetworkProxyConfig(
-    std::string_view host, std::string_view port) {
+    std::string_view host, std::string_view port, std::string_view scheme) {
+  std::string normalized_scheme;
+  if (scheme == "http" || scheme == "https") {
+    // Desktop resolvers commonly label the proxy selected for an HTTPS URL as
+    // `https://` even when the local endpoint speaks plain HTTP CONNECT.
+    normalized_scheme = "http";
+  } else if (scheme == "socks" || scheme == "socks5" ||
+             scheme == "socks5h") {
+    normalized_scheme = "socks5h";
+  } else {
+    return std::nullopt;
+  }
   if (host.empty() || port.empty() || host.find("://") != std::string::npos ||
       std::any_of(host.begin(), host.end(), [](unsigned char character) {
         return character <= 0x20 || character == 0x7f || character == '/' ||
@@ -144,12 +157,13 @@ std::optional<NetworkProxyConfig> ParseNetworkProxyConfig(
       parsed_port > 65535) {
     return std::nullopt;
   }
-  return NetworkProxyConfig{std::string(host), parsed_port};
+  return NetworkProxyConfig{std::move(normalized_scheme), std::string(host),
+                            parsed_port};
 }
 
 std::string BuildNetworkProxyUrl(const NetworkProxyConfig& proxy) {
   const bool ipv6 = proxy.host.find(':') != std::string::npos;
-  return "http://" + std::string(ipv6 ? "[" : "") + proxy.host +
+  return proxy.scheme + "://" + std::string(ipv6 ? "[" : "") + proxy.host +
          (ipv6 ? "]" : "") + ":" + std::to_string(proxy.port);
 }
 
@@ -261,6 +275,8 @@ RuntimeConfig RuntimeConfig::FromEnvironment(const Environment& environment) {
       "MOCKTAIL_AUDIO_OUTPUT_DEVICE", config.audio_output_device_);
   config.audio_output_device_valid_ =
       IsValidDeviceProfileValue(config.audio_output_device_, 512);
+  config.use_system_proxy_ =
+      LegacyEnabled(environment, "MOCKTAIL_USE_SYSTEM_PROXY");
   config.network_proxy_ = ReadNetworkProxy(environment);
   bool discord_booleans_valid = true;
   config.discord_rpc_.enabled = ReadBoolean(
