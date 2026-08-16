@@ -1,4 +1,4 @@
-name: Publish AUR development package
+name: Publish AUR packages
 
 on:
   push:
@@ -9,12 +9,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: aur-mocktail-git
+  group: aur-packages
   cancel-in-progress: true
 
 jobs:
   publish:
-    name: Publish mocktail-git
+    name: Publish AUR packages
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -87,18 +87,28 @@ jobs:
             -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes \
             -o UserKnownHostsFile=$known_hosts"
-          aur_dir="$RUNNER_TEMP/mocktail-git-aur"
-          git clone --branch master --single-branch \
-            ssh://aur@aur.archlinux.org/mocktail-git.git "$aur_dir"
-          install -m 0644 packaging/aur/mocktail-git/PKGBUILD "$aur_dir/PKGBUILD"
-          install -m 0644 packaging/aur/mocktail-git/.SRCINFO "$aur_dir/.SRCINFO"
+          publish_aur_package() {
+            local package_name="$1"
+            local commit_message="$2"
+            local source_dir="packaging/aur/$package_name"
+            local aur_dir="$RUNNER_TEMP/${package_name}-aur"
 
-          git -C "$aur_dir" config user.name komaruworld
-          git -C "$aur_dir" config user.email rtysus228@gmail.com
-          git -C "$aur_dir" add PKGBUILD .SRCINFO
-          if git -C "$aur_dir" diff --cached --quiet; then
-            printf 'mocktail-git %s is already published\n' "$AUR_PKGVER"
-            exit 0
-          fi
-          git -C "$aur_dir" commit -m "Update to ${AUR_PKGVER}"
-          git -C "$aur_dir" push origin HEAD:master
+            git clone --branch master --single-branch \
+              "ssh://aur@aur.archlinux.org/${package_name}.git" "$aur_dir"
+            install -m 0644 "$source_dir/PKGBUILD" "$aur_dir/PKGBUILD"
+            install -m 0644 "$source_dir/.SRCINFO" "$aur_dir/.SRCINFO"
+
+            git -C "$aur_dir" config user.name komaruworld
+            git -C "$aur_dir" config user.email rtysus228@gmail.com
+            git -C "$aur_dir" add PKGBUILD .SRCINFO
+            if git -C "$aur_dir" diff --cached --quiet; then
+              printf '%s is already published\n' "$package_name"
+              return
+            fi
+            git -C "$aur_dir" commit -m "$commit_message"
+            git -C "$aur_dir" push origin HEAD:master
+          }
+
+          publish_aur_package mocktail-git "Update to ${AUR_PKGVER}"
+          publish_aur_package mocktail 'make builds stable'
+          publish_aur_package mocktail-bin 'make builds stable'
