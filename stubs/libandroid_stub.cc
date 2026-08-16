@@ -4,6 +4,8 @@
 // Symbols sourced from Android NDK r28 android/native_activity.h,
 // android/asset_manager.h, android/looper.h, android/configuration.h.
 
+#include "libc_shim/vulkan_etc1_sky_transcoder.h"
+
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <minizip/unzip.h>
@@ -268,6 +270,9 @@ AAsset* AAssetManager_open(AAssetManager* mgr, const char* filename,
   if (!LoadFile(path, &asset->data)) {
     delete asset;
     return nullptr;
+  }
+  if (MocktailUsesDirectVulkan()) {
+    libc_shim::TranscodeEtc1SkyTextureForVulkan(path.c_str(), &asset->data);
   }
   if (AssetTraceEnabled()) {
     std::fprintf(stderr, "[asset] open %s -> %s (%zu bytes)\n", filename,
