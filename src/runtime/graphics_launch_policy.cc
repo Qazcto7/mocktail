@@ -8,7 +8,7 @@ namespace runtime {
 namespace {
 
 constexpr char kVulkanClientSettingsOverrides[] =
-    R"({"FStringGraphicsVulkanShaderMTDenyPattern":"4318:.*"})";
+    R"({"FStringGraphicsTextureManager2DenyPattern2":".*","FStringGraphicsVulkanShaderMTDenyPattern":"4318:.*"})";
 
 bool SetValue(const char* name, const std::string& value, std::string* error) {
   if (setenv(name, value.c_str(), 1) == 0) {
