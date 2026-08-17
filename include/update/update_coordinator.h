@@ -24,6 +24,9 @@ struct UpdateRequest {
   bool startup_preflight = false;
   bool check_latest = true;
   bool run_canary = true;
+  // Explicit manual escape hatch. It launches the provider latest once with a
+  // derived candidate profile and never promotes it into current.json.
+  bool force_run_latest = false;
   CanaryGraphicsBackend canary_graphics_backend =
       CanaryGraphicsBackend::kDirectVulkan;
   int progress_fd = -1;

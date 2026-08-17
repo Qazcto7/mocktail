@@ -139,6 +139,17 @@ int main(int argc, char* argv[]) {
                         MOCKTAIL_DEFAULT_COMPATIBILITY_MANIFEST));
   const mocktail::runtime::RuntimePaths paths =
       mocktail::runtime::RuntimePaths::FromEnvironment(environment);
+  if (command_line.options.force_run_latest) {
+    std::cerr << "[runtime] WARNING: latest Roblox will run once without "
+                 "approval and will not become the active payload\n";
+    const mocktail::runtime::PayloadUpdatePreflightResult force_latest =
+        mocktail::runtime::RunPayloadUpdatePreflight(environment, paths, true);
+    if (!force_latest) {
+      std::cerr << "[FATAL] " << force_latest.error << '\n';
+      return EXIT_FAILURE;
+    }
+    return EXIT_SUCCESS;
+  }
   std::optional<mocktail::runtime::RobloxExperienceLaunchRequest>
       external_launch_request;
   if (!command_line.options.launch_request_json.empty()) {

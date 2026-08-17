@@ -28,7 +28,8 @@ int IntegerEnvironment(const char* name, int fallback) {
 
 int main(int argc, char** argv) {
   if (argc != 3 || std::string_view(argv[1]) != "update" ||
-      std::string_view(argv[2]) != "--startup-preflight") {
+      (std::string_view(argv[2]) != "--startup-preflight" &&
+       std::string_view(argv[2]) != "--force-run-latest")) {
     return 64;
   }
   const char* capture = Environment("MOCKTAIL_TEST_UPDATE_CAPTURE");
@@ -39,6 +40,13 @@ int main(int argc, char** argv) {
            << Environment("MOCKTAIL_CACHE_ROOT") << '\n'
            << Environment("MOCKTAIL_STATE_ROOT") << '\n';
     if (!output) return 65;
+  }
+  const char* argument_capture =
+      Environment("MOCKTAIL_TEST_UPDATE_ARGUMENT_CAPTURE");
+  if (argument_capture[0] != '\0') {
+    std::ofstream output(argument_capture);
+    output << argv[2] << '\n';
+    if (!output) return 67;
   }
   const int progress = IntegerEnvironment("MOCKTAIL_UPDATE_PROGRESS_FD", -1);
   if (progress >= 0) {

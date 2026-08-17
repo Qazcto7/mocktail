@@ -267,7 +267,8 @@ TEST(CommandLineTest, UsageContainsEverySupportedOption) {
   EXPECT_NE(usage.find("mocktail-test"), std::string::npos);
   for (const char* option :
        {"--roblox-lib", "--headless", "--windowed", "--graphics",
-        "--allow-unverified-build", "--launch-uri", "--help"}) {
+        "--allow-unverified-build", "--force-run-latest", "--launch-uri",
+        "--help"}) {
     EXPECT_NE(usage.find(option), std::string::npos) << option;
   }
   EXPECT_EQ(usage.find("--login"), std::string::npos);

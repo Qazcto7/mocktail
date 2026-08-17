@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <minizip/zip.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <cstdlib>
@@ -16,6 +17,7 @@
 #include "update/payload_integrity.h"
 #include "update/payload_store.h"
 #include "update/readiness_canary.h"
+#include "update/unsafe_latest_runner.h"
 #include "update/update_config.h"
 #include "update/zip_archive.h"
 
@@ -159,6 +161,65 @@ TEST(ApkPureProviderTest, ParsesExactVersionIdentityAndTrustedUrl) {
   ASSERT_TRUE(error.empty()) << error;
   ASSERT_EQ(urls.size(), 1);
   EXPECT_EQ(urls.front(), "https://download.pureapk.com/b/XAPK/roblox");
+}
+
+TEST(UnsafeLatestRunnerTest, LaunchesCandidateWithUnapprovedEnvironment) {
+  TemporaryDirectory temporary;
+  const std::filesystem::path output = temporary.root() / "environment.txt";
+  const std::filesystem::path arguments = temporary.root() / "arguments.txt";
+  const std::filesystem::path runtime = temporary.root() / "runtime.sh";
+  Write(runtime,
+        "#!/bin/sh\n"
+        "env | sort > \"$ENV_OUTPUT\"\n"
+        "printf '%s\\n' \"$@\" > \"$ARGUMENT_OUTPUT\"\n");
+  ASSERT_EQ(chmod(runtime.c_str(), 0700), 0);
+
+  const std::filesystem::path payload = temporary.root() / "payload";
+  Write(payload / "libroblox.so", "candidate");
+  std::filesystem::create_directories(payload / "assets/content");
+  const std::filesystem::path compatibility =
+      temporary.root() / "compatibility.json";
+  const std::filesystem::path profile = temporary.root() / "profile.json";
+  Write(compatibility, "{}\n");
+  Write(profile, "{}\n");
+
+  UnsafeLatestRunOptions options;
+  options.runtime_binary = runtime;
+  options.payload_directory = payload;
+  options.compatibility_manifest = compatibility;
+  options.host_abi_profile = profile;
+  options.inherited_environment = {
+      "PATH=/usr/bin:/bin", "ENV_OUTPUT=" + output.string(),
+      "ARGUMENT_OUTPUT=" + arguments.string(), "UNCHANGED=value",
+      "ROBLOX_LIB_PATH=/stale/libroblox.so",
+      "MOCKTAIL_HOST_ABI_APPROVAL_RECEIPT=/stale/approval.json",
+      "MOCKTAIL_SKIP_UPDATE_CHECK=0",
+  };
+
+  const UnsafeLatestRunResult result = RunUnsafeLatestCandidate(options);
+  ASSERT_TRUE(result) << result.error;
+  const std::string environment = ReadFile(output);
+  EXPECT_NE(environment.find("UNCHANGED=value\n"), std::string::npos);
+  EXPECT_NE(environment.find("ROBLOX_LIB_PATH=" +
+                             (payload / "libroblox.so").string() + "\n"),
+            std::string::npos);
+  EXPECT_NE(environment.find("MOCKTAIL_COMPATIBILITY_MANIFEST=" +
+                             compatibility.string() + "\n"),
+            std::string::npos);
+  EXPECT_NE(environment.find("MOCKTAIL_HOST_ABI_PROFILE_FILE=" +
+                             profile.string() + "\n"),
+            std::string::npos);
+  EXPECT_NE(environment.find("MOCKTAIL_HOST_ABI_CANARY=1\n"),
+            std::string::npos);
+  EXPECT_NE(environment.find("MOCKTAIL_ALLOW_CANDIDATE_HOST_ABI=1\n"),
+            std::string::npos);
+  EXPECT_NE(environment.find("MOCKTAIL_SKIP_UPDATE_CHECK=1\n"),
+            std::string::npos);
+  EXPECT_NE(environment.find("MOCKTAIL_UNSAFE_LATEST=1\n"),
+            std::string::npos);
+  EXPECT_EQ(environment.find("/stale/libroblox.so"), std::string::npos);
+  EXPECT_EQ(environment.find("/stale/approval.json"), std::string::npos);
+  EXPECT_EQ(ReadFile(arguments), "--windowed\n--allow-unverified-build\n");
 }
 
 TEST(HttpDownloadPolicyTest, RejectsCredentialsAndHostSuffixTricks) {

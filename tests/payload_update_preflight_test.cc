@@ -101,6 +101,22 @@ TEST(PayloadUpdatePreflightTest, RunsNativeUpdater) {
   EXPECT_TRUE(result.attempted);
 }
 
+TEST(PayloadUpdatePreflightTest, RunsForceLatestThroughNativeUpdater) {
+  TemporaryDirectory temporary;
+  const std::filesystem::path capture = temporary.root() / "argument";
+  ScopedVariable capture_variable("MOCKTAIL_TEST_UPDATE_ARGUMENT_CAPTURE",
+                                  capture.string());
+  const MapEnvironment environment = NativeEnvironment();
+  const RuntimePaths paths = RuntimePaths::FromEnvironment(environment);
+
+  const auto result = RunPayloadUpdatePreflight(environment, paths, true);
+
+  ASSERT_TRUE(result) << result.error;
+  EXPECT_TRUE(result.attempted);
+  EXPECT_EQ(ReadLines(capture),
+            std::vector<std::string>({"--force-run-latest"}));
+}
+
 TEST(PayloadUpdatePreflightTest, RunsPackagedUpdaterFromProjectBin) {
   TemporaryDirectory temporary;
   const std::filesystem::path project_root = temporary.root() / "portable";

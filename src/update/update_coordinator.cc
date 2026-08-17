@@ -22,6 +22,7 @@
 #include "update/payload_integrity.h"
 #include "update/payload_store.h"
 #include "update/readiness_canary.h"
+#include "update/unsafe_latest_runner.h"
 #include "update/update_config.h"
 
 namespace mocktail::update {
@@ -277,6 +278,109 @@ ReferenceProfile ResolveReference(const UpdatePaths& paths,
   return result;
 }
 
+UpdateResult RunUnsafeLatest(
+    const UpdatePaths& paths, const UpdateRequest& request,
+    const std::vector<SupportedPayloadProfile>& profiles,
+    const SupportedPayloadProfile& preferred,
+    const PayloadStoreResult& installed, PayloadStore* store) {
+  UpdateResult result;
+  if (request.startup_preflight || !request.check_latest) {
+    result.error =
+        "unsafe latest launch requires an explicit latest-version check";
+    return result;
+  }
+
+  ApkPureProvider provider;
+  Progress(request.progress_fd, "Checking latest Roblox...");
+  const ProviderVersion latest = provider.CheckLatest();
+  if (!latest) {
+    result.error = "cannot check latest Roblox for unsafe launch: " +
+                   latest.error;
+    return result;
+  }
+
+  std::string workspace_error;
+  const std::filesystem::path workspace = UniqueDirectory(
+      paths.cache_root / "downloads/native-updater", &workspace_error);
+  if (!workspace_error.empty()) {
+    result.error = workspace_error;
+    return result;
+  }
+  std::error_code filesystem_error;
+  const auto cleanup = [&]() {
+    std::filesystem::remove_all(workspace, filesystem_error);
+  };
+
+  ExpectedPayloadIdentity identity;
+  identity.version_name = latest.version_name;
+  identity.version_code = latest.version_code;
+  const std::optional<SupportedPayloadProfile> exact =
+      FindSupportedProfile(profiles, identity.version_name, identity.version_code);
+  if (exact.has_value()) identity.exact_build_id = exact->elf_build_id;
+  Candidate candidate = FindStagedCandidate(paths, identity, exact.has_value());
+  if (!candidate) {
+    candidate = DownloadCandidate(&provider, store, identity, exact.has_value(),
+                                  paths, workspace / "candidate",
+                                  request.progress_fd);
+  }
+  if (!candidate) {
+    result.error = "cannot prepare latest Roblox for unsafe launch: " +
+                   candidate.error;
+    cleanup();
+    return result;
+  }
+
+  if (!candidate.exact_supported) {
+    const ReferenceProfile reference = ResolveReference(
+        paths, installed, preferred, &provider, store, workspace,
+        request.progress_fd);
+    if (!reference) {
+      result.error = "cannot prepare latest Roblox for unsafe launch: " +
+                     reference.error;
+      cleanup();
+      return result;
+    }
+    HostAbiDerivationOptions derivation;
+    derivation.reference_library = reference.library;
+    derivation.reference_profile = reference.profile;
+    derivation.candidate_payload_directory = candidate.staged.payload_directory;
+    derivation.output_directory = workspace / "derived";
+    Progress(request.progress_fd, "Deriving latest Roblox compatibility...");
+    const HostAbiDerivationResult derived = DeriveHostAbiProfile(derivation);
+    if (!derived) {
+      result.error = "cannot derive latest Roblox HostAbi profile: " +
+                     derived.error;
+      cleanup();
+      return result;
+    }
+    candidate.profile = derived.profile;
+    candidate.compatibility = derived.compatibility_manifest;
+  }
+
+  // Staging preserves the immutable APK for inspection, but this path must
+  // never promote it or alter the normal current payload.
+  UnsafeLatestRunOptions launch;
+  launch.runtime_binary = paths.runtime_binary;
+  launch.payload_directory = candidate.staged.payload_directory;
+  launch.compatibility_manifest = candidate.exact_supported
+                                      ? paths.compatibility_manifest
+                                      : candidate.compatibility;
+  launch.host_abi_profile = candidate.profile;
+  Progress(request.progress_fd, "Launching unapproved latest Roblox...");
+  const UnsafeLatestRunResult launched = RunUnsafeLatestCandidate(launch);
+  result.payload_id = candidate.staged.payload_id;
+  if (!launched) {
+    result.error = "unsafe latest Roblox " + candidate.staged.version_name +
+                   " did not complete: " + launched.error;
+    cleanup();
+    return result;
+  }
+  result.message = "unsafe latest Roblox " + candidate.staged.version_name +
+                   " exited successfully; active payload was not changed";
+  cleanup();
+  return result;
+}
+
 bool RunCandidateCanaries(const UpdatePaths& paths, const Candidate& candidate,
                           bool run_canary,
                           CanaryGraphicsBackend graphics_backend,
@@ -382,6 +486,12 @@ UpdateResult RunUpdate(const UpdatePaths& paths, const UpdateRequest& request) {
     installed.error.clear();
   } else if (!current) {
     installed = store.InspectCurrent();
+  }
+  if (request.force_run_latest) {
+    UpdateResult unsafe = RunUnsafeLatest(paths, request, catalog.profiles,
+                                          *preferred, installed, &store);
+    unsafe.warnings = std::move(result.warnings);
+    return unsafe;
   }
   if (!configured.config.automatic && request.startup_preflight) {
     if (current) {

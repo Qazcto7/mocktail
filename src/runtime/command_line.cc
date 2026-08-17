@@ -76,6 +76,8 @@ CommandLineParseResult ParseCommandLine(int argc, const char* const argv[]) {
       }
     } else if (argument == "--allow-unverified-build") {
       result.options.allow_unverified_build = true;
+    } else if (argument == "--force-run-latest") {
+      result.options.force_run_latest = true;
     } else if (argument == "--launch-uri") {
       if (!result.options.launch_request_json.empty()) {
         result.error = "duplicate option: --launch-uri";
@@ -134,6 +136,14 @@ CommandLineParseResult ParseCommandLine(int argc, const char* const argv[]) {
                          : "unknown option: " + argument;
       return result;
     }
+  }
+  if (result.options.force_run_latest &&
+      (!result.options.roblox_library_path.empty() ||
+       result.options.window_mode != WindowMode::kUnspecified ||
+       !result.options.graphics_backend.empty() ||
+       result.options.allow_unverified_build ||
+       !result.options.launch_request_json.empty())) {
+    result.error = "--force-run-latest must be used on its own";
   }
   return result;
 }
@@ -242,6 +252,8 @@ std::string CommandLineUsage(const std::string& program_name) {
          "angle-vulkan (default: direct-vulkan)\n"
       << "  --allow-unverified-build Run a known but unverified Build-ID "
          "profile\n"
+      << "  --force-run-latest       Download and run the provider latest once "
+         "without approval; it is not activated\n"
       << "  --launch-uri <uri>       Join from a roblox: or roblox-player: "
          "website link\n"
       << "  --help, -h               Show this help\n\n"

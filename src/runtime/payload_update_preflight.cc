@@ -249,15 +249,20 @@ std::vector<std::string> ChildEnvironment(const RuntimePaths& paths,
 }  // namespace
 
 PayloadUpdatePreflightResult RunPayloadUpdatePreflight(
-    const Environment& environment, const RuntimePaths& paths) {
+    const Environment& environment, const RuntimePaths& paths,
+    bool force_run_latest) {
   PayloadUpdatePreflightResult result;
-  if (Enabled(environment, "MOCKTAIL_SKIP_UPDATE_CHECK") ||
-      environment.HasNonEmpty("ROBLOX_LIB_PATH")) {
+  if (!force_run_latest &&
+      (Enabled(environment, "MOCKTAIL_SKIP_UPDATE_CHECK") ||
+       environment.HasNonEmpty("ROBLOX_LIB_PATH"))) {
     return result;
   }
 
   const std::filesystem::path helper = UpdateHelper(environment);
   if (helper.empty()) {
+    if (force_run_latest) {
+      result.error = "cannot locate the Mocktail update helper";
+    }
     return result;
   }
 
@@ -265,7 +270,9 @@ PayloadUpdatePreflightResult RunPayloadUpdatePreflight(
   std::string helper_string = helper.string();
   char update[] = "update";
   char startup_preflight[] = "--startup-preflight";
-  char* arguments[] = {helper_string.data(), update, startup_preflight,
+  char force_latest[] = "--force-run-latest";
+  char* arguments[] = {helper_string.data(), update,
+                       force_run_latest ? force_latest : startup_preflight,
                        nullptr};
   UpdateProgressMonitor progress = UpdateProgressMonitor::Start(environment);
   std::vector<std::string> child_environment =
@@ -318,7 +325,8 @@ PayloadUpdatePreflightResult RunPayloadUpdatePreflight(
     return result;
   }
   if (!WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0) {
-    result.error = "Roblox update preflight failed";
+    result.error = force_run_latest ? "forced latest Roblox run failed"
+                                     : "Roblox update preflight failed";
   }
   return result;
 }

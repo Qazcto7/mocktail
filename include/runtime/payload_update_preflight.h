@@ -17,7 +17,8 @@ struct PayloadUpdatePreflightResult {
 };
 
 PayloadUpdatePreflightResult RunPayloadUpdatePreflight(
-    const Environment& environment, const RuntimePaths& paths);
+    const Environment& environment, const RuntimePaths& paths,
+    bool force_run_latest = false);
 
 }  // namespace runtime
 }  // namespace mocktail

@@ -311,10 +311,22 @@ int main(int argc, char** argv) {
       request.check_latest = false;
     } else if (option == "--skip-canary") {
       request.run_canary = false;
+    } else if (option == "--force-run-latest") {
+      request.force_run_latest = true;
     } else {
       std::cerr << "[native-updater] unknown option: " << option << '\n';
       return 2;
     }
+  }
+  if (request.force_run_latest &&
+      (request.startup_preflight || !request.check_latest || !request.run_canary)) {
+    std::cerr << "[native-updater] --force-run-latest cannot be combined with "
+                 "--startup-preflight, --no-latest-check, or --skip-canary\n";
+    return 2;
+  }
+  if (request.force_run_latest) {
+    std::cerr << "[native-updater] WARNING: latest Roblox will run once without "
+                 "approval and will not become the active payload\n";
   }
   const mocktail::update::UpdateResult updated =
       mocktail::update::RunUpdate(paths, request);

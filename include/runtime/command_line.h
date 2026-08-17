@@ -30,6 +30,9 @@ struct CommandLineOptions {
   std::string launch_request_json;
   int launch_argument_index = -1;
   bool allow_unverified_build = false;
+  // Requests one explicit launch of the provider latest without promoting it
+  // into the managed payload state.
+  bool force_run_latest = false;
 };
 
 struct CommandLineParseResult {
