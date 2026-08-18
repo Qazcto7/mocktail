@@ -184,6 +184,7 @@ bool ValidateAndMap(const ValueMap& yaml, ValueMap* environment,
       "network.use_system_proxy",
       "network.proxy_host",
       "network.proxy_port",
+      "network.ca_bundle",
       "integrations.discord_rpc.enabled",
       "integrations.discord_rpc.show_place_name",
       "integrations.discord_rpc.show_elapsed_time",
@@ -439,6 +440,15 @@ bool ValidateAndMap(const ValueMap& yaml, ValueMap* environment,
     }
     (*environment)["MOCKTAIL_HTTP_PROXY_HOST"] = *proxy_host;
     (*environment)["MOCKTAIL_HTTP_PROXY_PORT"] = *proxy_port;
+  }
+  if (const auto ca_bundle = value("network.ca_bundle");
+      ca_bundle.has_value()) {
+    const std::filesystem::path path(*ca_bundle);
+    if (ca_bundle->empty() || !path.is_absolute()) {
+      *error = "network.ca_bundle must be an absolute file path";
+      return false;
+    }
+    (*environment)["MOCKTAIL_CA_BUNDLE"] = *ca_bundle;
   }
   for (const auto& [key, variable] : {
            std::pair<std::string_view, std::string_view>(
@@ -702,6 +712,8 @@ RuntimeConfigLoadResult LoadRuntimeConfig(
     result.error = "GameMode policy is invalid";
   } else if (!result.config.performance().physics_worker_mode_valid) {
     result.error = "physics worker policy is invalid";
+  } else if (!result.config.ca_bundle_valid()) {
+    result.error = "CA bundle path is invalid";
   } else if (!result.config.discord_rpc_valid()) {
     result.error = "Discord Rich Presence configuration is invalid";
   }
@@ -737,6 +749,12 @@ bool ExportRuntimeConfigEnvironment(const RuntimeConfig& config,
   if (!config.performance().physics_worker_mode_valid) {
     if (error != nullptr) {
       *error = "cannot export an invalid physics worker policy";
+    }
+    return false;
+  }
+  if (!config.ca_bundle_valid()) {
+    if (error != nullptr) {
+      *error = "cannot export an invalid CA bundle path";
     }
     return false;
   }
@@ -840,6 +858,14 @@ bool ExportRuntimeConfigEnvironment(const RuntimeConfig& config,
       SetEnvironmentValue("MOCKTAIL_DISCORD_RPC_TEXT_UNKNOWN_PLACE",
                           config.discord_rpc().text.unknown_place, error);
   if (!base_exported) {
+    return false;
+  }
+  if (config.ca_bundle().has_value()) {
+    if (!SetEnvironmentValue("MOCKTAIL_CA_BUNDLE",
+                             config.ca_bundle()->string(), error)) {
+      return false;
+    }
+  } else if (!UnsetEnvironmentValue("MOCKTAIL_CA_BUNDLE", error)) {
     return false;
   }
   if (config.roblox_http_user_agent().has_value() &&

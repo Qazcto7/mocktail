@@ -278,6 +278,13 @@ RuntimeConfig RuntimeConfig::FromEnvironment(const Environment& environment) {
   config.use_system_proxy_ =
       LegacyEnabled(environment, "MOCKTAIL_USE_SYSTEM_PROXY");
   config.network_proxy_ = ReadNetworkProxy(environment);
+  if (const std::optional<std::string> ca_bundle =
+          environment.Get("MOCKTAIL_CA_BUNDLE");
+      ca_bundle.has_value()) {
+    config.ca_bundle_ = *ca_bundle;
+    config.ca_bundle_valid_ = !ca_bundle->empty() &&
+                              config.ca_bundle_->is_absolute();
+  }
   bool discord_booleans_valid = true;
   config.discord_rpc_.enabled = ReadBoolean(
       environment, "MOCKTAIL_DISCORD_RPC_ENABLED", false,

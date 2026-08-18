@@ -102,6 +102,10 @@ class RuntimeConfig {
   const std::optional<NetworkProxyConfig>& network_proxy() const {
     return network_proxy_;
   }
+  const std::optional<std::filesystem::path>& ca_bundle() const {
+    return ca_bundle_;
+  }
+  bool ca_bundle_valid() const { return ca_bundle_valid_; }
   bool use_system_proxy() const { return use_system_proxy_; }
   const DiscordRpcConfig& discord_rpc() const { return discord_rpc_; }
   bool discord_rpc_valid() const { return discord_rpc_valid_; }
@@ -134,6 +138,8 @@ class RuntimeConfig {
   bool audio_output_device_valid_ = true;
   bool use_system_proxy_ = false;
   std::optional<NetworkProxyConfig> network_proxy_;
+  std::optional<std::filesystem::path> ca_bundle_;
+  bool ca_bundle_valid_ = true;
   DiscordRpcConfig discord_rpc_;
   bool discord_rpc_valid_ = true;
   std::vector<std::string> unsafe_detached_thread_overrides_;

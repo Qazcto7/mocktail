@@ -108,6 +108,9 @@ network:
   # proxy_host: 127.0.0.1
   # Integer (optional, default: disabled): proxy TCP port from 1 to 65535.
   # proxy_port: 8080
+  # Absolute path (optional): custom PEM CA bundle. Mocktail reads this file
+  # directly and does not replace it during Roblox payload updates.
+  # ca_bundle: /home/user/.config/mocktail/cacert.pem
 
 updates:
   # Boolean (default: true): check the latest Roblox version, derive an exact
