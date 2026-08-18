@@ -182,6 +182,7 @@ jobs:
               cmake -S . -B build-rpm -G Ninja \
                 -DCMAKE_BUILD_TYPE=Release \
                 -DCMAKE_INSTALL_PREFIX=/usr \
+                -DCMAKE_INSTALL_LIBDIR=lib \
                 -DMOCKTAIL_PACKAGE_NAME=mocktail-nightly \
                 -DMOCKTAIL_PACKAGE_VERSION_SUFFIX="$MOCKTAIL_PACKAGE_VERSION_SUFFIX" \
                 -DBUILD_TESTING=OFF
