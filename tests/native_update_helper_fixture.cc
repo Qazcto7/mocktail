@@ -2,6 +2,7 @@
 #include <unistd.h>
 
 #include <charconv>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <string>
@@ -47,6 +48,12 @@ int main(int argc, char** argv) {
     std::ofstream output(argument_capture);
     output << argv[2] << '\n';
     if (!output) return 67;
+  }
+  const char* diagnostics = Environment("MOCKTAIL_TEST_UPDATE_STDERR");
+  if (diagnostics[0] != '\0') {
+    std::fputs(diagnostics, stderr);
+    std::fputc('\n', stderr);
+    std::fflush(stderr);
   }
   const int progress = IntegerEnvironment("MOCKTAIL_UPDATE_PROGRESS_FD", -1);
   if (progress >= 0) {

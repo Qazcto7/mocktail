@@ -196,6 +196,30 @@ std::string CurlFailure(CURLcode status,
                            : std::string(curl_easy_strerror(status));
 }
 
+std::string UrlHost(std::string_view url) {
+  std::unique_ptr<CURLU, CurlUrlDeleter> parsed(curl_url());
+  char* raw_host = nullptr;
+  if (!parsed ||
+      curl_url_set(parsed.get(), CURLUPART_URL, std::string(url).c_str(), 0) !=
+          CURLUE_OK ||
+      curl_url_get(parsed.get(), CURLUPART_HOST, &raw_host, 0) != CURLUE_OK ||
+      raw_host == nullptr) {
+    return {};
+  }
+  std::unique_ptr<char, CurlStringDeleter> host(raw_host);
+  return Lower(host.get());
+}
+
+// Provider outages are the most common first-run failure, so the host that
+// rejected the transfer belongs in the message the user actually reads.
+std::string StatusFailure(std::string_view action, std::string_view url,
+                          long status_code) {
+  const std::string host = UrlHost(url);
+  return (host.empty() ? std::string("HTTPS ") + std::string(action)
+                       : host + " " + std::string(action)) +
+         " returned status " + std::to_string(status_code);
+}
+
 }  // namespace
 
 bool IsTrustedHttpsUrl(std::string_view url,
@@ -293,8 +317,7 @@ HttpBytesResult DownloadBytes(const HttpTransferRequest& request) {
       continue;
     }
     if (result.status_code < 200 || result.status_code >= 300) {
-      result.error =
-          "HTTPS request returned status " + std::to_string(result.status_code);
+      result.error = StatusFailure("request", current, result.status_code);
       return result;
     }
     result.final_url = current;
@@ -391,9 +414,9 @@ HttpDownloadResult DownloadFile(const HttpTransferRequest& request,
     }
     if (http_status < 200 || http_status >= 300 || writer.written == 0) {
       std::filesystem::remove(temporary, filesystem_error);
-      result.error = writer.written == 0 ? "HTTPS download is empty"
-                                         : "HTTPS download returned status " +
-                                               std::to_string(http_status);
+      result.error = writer.written == 0
+                         ? "HTTPS download is empty"
+                         : StatusFailure("download", current, http_status);
       return result;
     }
     std::filesystem::rename(temporary, destination, filesystem_error);

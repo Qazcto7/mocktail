@@ -265,5 +265,46 @@ TEST(PayloadUpdatePreflightTest, PropagatesUpdaterFailure) {
   EXPECT_EQ(result.error, "Roblox update preflight failed");
 }
 
+TEST(PayloadUpdatePreflightTest, ReportsUpdaterFailureDetails) {
+  ScopedVariable exit_variable("MOCKTAIL_TEST_UPDATE_EXIT", "1");
+  ScopedVariable stderr_variable(
+      "MOCKTAIL_TEST_UPDATE_STDERR",
+      "[native-updater] latest Roblox failed probation (api.pureapk.com "
+      "request returned status 503)");
+  const MapEnvironment environment = NativeEnvironment();
+  const RuntimePaths paths = RuntimePaths::FromEnvironment(environment);
+  const auto result = RunPayloadUpdatePreflight(environment, paths);
+  EXPECT_FALSE(result);
+  EXPECT_EQ(result.error, "Roblox update preflight failed");
+  EXPECT_EQ(result.details,
+            "latest Roblox failed probation (api.pureapk.com request returned "
+            "status 503)");
+}
+
+TEST(PayloadUpdatePreflightTest, KeepsLastUpdaterFailureOverWarnings) {
+  ScopedVariable exit_variable("MOCKTAIL_TEST_UPDATE_EXIT", "1");
+  ScopedVariable stderr_variable(
+      "MOCKTAIL_TEST_UPDATE_STDERR",
+      "[native-updater] warning: configuration key is unknown\n"
+      "unrelated diagnostic line\n"
+      "[native-updater] supported fallback also failed");
+  const MapEnvironment environment = NativeEnvironment();
+  const RuntimePaths paths = RuntimePaths::FromEnvironment(environment);
+  const auto result = RunPayloadUpdatePreflight(environment, paths);
+  EXPECT_FALSE(result);
+  EXPECT_EQ(result.details, "supported fallback also failed");
+}
+
+TEST(PayloadUpdatePreflightTest, LeavesDetailsEmptyWhenUpdaterSucceeds) {
+  ScopedVariable stderr_variable(
+      "MOCKTAIL_TEST_UPDATE_STDERR",
+      "[native-updater] installed exact-supported Roblox 2.727.1199 (2628)");
+  const MapEnvironment environment = NativeEnvironment();
+  const RuntimePaths paths = RuntimePaths::FromEnvironment(environment);
+  const auto result = RunPayloadUpdatePreflight(environment, paths);
+  ASSERT_TRUE(result) << result.error;
+  EXPECT_TRUE(result.details.empty());
+}
+
 }  // namespace
 }  // namespace mocktail::runtime
