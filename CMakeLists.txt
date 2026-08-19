@@ -215,6 +215,7 @@ pkg_check_modules(WEBKITGTK6 REQUIRED IMPORTED_TARGET webkitgtk-6.0)
 add_library(mocktail_update STATIC
   src/update/android_manifest.cc
   src/update/apk_bundle.cc
+  src/update/apk_provider.cc
   src/update/apk_signature.cc
   src/update/apkpure_provider.cc
   src/update/candidate_approval.cc

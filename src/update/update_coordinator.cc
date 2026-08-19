@@ -8,6 +8,7 @@
 #include <cerrno>
 #include <cstring>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -16,6 +17,7 @@
 
 #include "compat/elf_build_id.h"
 #include "update/apk_bundle.h"
+#include "update/apk_provider.h"
 #include "update/apkpure_provider.h"
 #include "update/compatibility_catalog.h"
 #include "update/host_abi_deriver.h"
@@ -189,7 +191,15 @@ void RecordRejection(const UpdatePaths& paths, const Candidate& candidate,
   close(descriptor);
 }
 
-Candidate DownloadCandidate(ApkPureProvider* provider, PayloadStore* store,
+// Built once per run. Providers are consulted in order, so adding a second
+// source is a one-line change here rather than a rewrite of the coordinator.
+ProviderChain BuildProviderChain() {
+  ProviderChain chain;
+  chain.Add(std::make_unique<ApkPureProvider>());
+  return chain;
+}
+
+Candidate DownloadCandidate(const ApkProvider* provider, PayloadStore* store,
                             const ExpectedPayloadIdentity& identity,
                             bool exact_supported, const UpdatePaths& paths,
                             const std::filesystem::path& workspace,
@@ -207,7 +217,7 @@ Candidate DownloadCandidate(ApkPureProvider* provider, PayloadStore* store,
   Progress(progress_fd, "Verifying Roblox...");
   const PreparedPayload prepared = PreparePayloadFromArchives(
       downloaded.archives, identity, paths.signing_trust_manifest,
-      workspace / "prepare", "apk-pure-native");
+      workspace / "prepare", downloaded.source + "-native");
   if (!prepared) {
     result.error = prepared.error;
     return result;
@@ -230,7 +240,7 @@ struct ReferenceProfile {
 ReferenceProfile ResolveReference(const UpdatePaths& paths,
                                   const PayloadStoreResult& installed,
                                   const SupportedPayloadProfile& preferred,
-                                  ApkPureProvider* provider,
+                                  const ApkProvider* provider,
                                   PayloadStore* store,
                                   const std::filesystem::path& workspace,
                                   int progress_fd) {
@@ -290,7 +300,7 @@ UpdateResult RunUnsafeLatest(
     return result;
   }
 
-  ApkPureProvider provider;
+  const ProviderChain provider = BuildProviderChain();
   Progress(request.progress_fd, "Checking latest Roblox...");
   const ProviderVersion latest = provider.CheckLatest();
   if (!latest) {
@@ -457,8 +467,9 @@ UpdateResult RunUpdate(const UpdatePaths& paths, const UpdateRequest& request) {
     result.error = configured.error;
     return result;
   }
-  if (configured.config.source != "apk-pure") {
-    result.error = "native updater supports only the direct APKPure provider";
+  if (configured.config.source != "apk-pure" &&
+      configured.config.source != "auto") {
+    result.error = "native updater supports only the direct APK providers";
     return result;
   }
   const CompatibilityCatalogResult catalog =
@@ -503,7 +514,7 @@ UpdateResult RunUpdate(const UpdatePaths& paths, const UpdateRequest& request) {
         "no runnable payload is installed and automatic updates are disabled";
     return result;
   }
-  ApkPureProvider provider;
+  const ProviderChain provider = BuildProviderChain();
   std::optional<ProviderVersion> latest_version;
   if (request.check_latest) {
     Progress(request.progress_fd, "Checking Roblox...");

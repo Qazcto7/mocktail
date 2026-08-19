@@ -208,6 +208,7 @@ ProviderDownloadResult ApkPureProvider::DownloadExact(
     std::string_view version, const std::filesystem::path& output_directory,
     int progress_fd) const {
   ProviderDownloadResult result;
+  result.source = std::string(name());
   if (version.empty() || version.size() > 128 ||
       !std::all_of(version.begin(), version.end(), [](unsigned char character) {
         return VersionCharacter(character);
