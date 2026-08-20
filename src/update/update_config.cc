@@ -167,8 +167,12 @@ UpdateConfigResult LoadUpdateConfig(const std::filesystem::path& path) {
       }
     } else if (key == "source") {
       result.config.source = Scalar(value);
-      if (result.config.source != "apk-pure") {
-        result.error = "updates.source must be apk-pure in the native updater";
+      // `apk-pure` predates the fallback chain and still selects it, so an
+      // existing configuration file keeps working unchanged.
+      if (result.config.source != "apk-pure" &&
+          result.config.source != "auto") {
+        result.error =
+            "updates.source must be auto or apk-pure in the native updater";
         break;
       }
     } else {

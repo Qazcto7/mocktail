@@ -1,11 +1,14 @@
 #include "runtime/payload_update_preflight.h"
 
+#include <fcntl.h>
 #include <spawn.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <array>
 #include <cerrno>
+#include <cstddef>
 #include <cstring>
 #include <filesystem>
 #include <optional>
@@ -219,6 +222,120 @@ bool IsOverriddenEnvironmentEntry(
   return false;
 }
 
+// The updater runs as a separate process, so the reason it failed ("api.
+// pureapk.com request returned status 503") only ever reached the session log.
+// Relay its stderr verbatim and keep the last failure it reported, so the
+// launcher can tell the user what actually went wrong.
+class UpdaterStderrRelay final {
+ public:
+  UpdaterStderrRelay() {
+    if (pipe2(descriptors_, O_CLOEXEC) != 0) {
+      descriptors_[0] = -1;
+      descriptors_[1] = -1;
+    }
+  }
+
+  ~UpdaterStderrRelay() {
+    CloseDescriptor(&descriptors_[0]);
+    CloseWrite();
+  }
+
+  UpdaterStderrRelay(const UpdaterStderrRelay&) = delete;
+  UpdaterStderrRelay& operator=(const UpdaterStderrRelay&) = delete;
+
+  bool active() const { return descriptors_[0] >= 0; }
+  int write_descriptor() const { return descriptors_[1]; }
+  void CloseWrite() { CloseDescriptor(&descriptors_[1]); }
+  const std::string& failure() const { return failure_; }
+
+  // Must run before waitpid: a child that fills the pipe blocks until it is
+  // drained, and waiting first would deadlock the launcher.
+  void Drain() {
+    if (!active()) {
+      return;
+    }
+    std::string pending;
+    std::array<char, 4096> buffer{};
+    while (true) {
+      const ssize_t received =
+          read(descriptors_[0], buffer.data(), buffer.size());
+      if (received < 0 && errno == EINTR) {
+        continue;
+      }
+      if (received <= 0) {
+        break;
+      }
+      const auto bytes = static_cast<std::size_t>(received);
+      WriteAll(buffer.data(), bytes);
+      pending.append(buffer.data(), bytes);
+      for (std::size_t end = pending.find('\n'); end != std::string::npos;
+           end = pending.find('\n')) {
+        RecordLine(std::string_view(pending).substr(0, end));
+        pending.erase(0, end + 1);
+      }
+    }
+    RecordLine(pending);
+    CloseDescriptor(&descriptors_[0]);
+  }
+
+ private:
+  // An Adwaita alert dialog stays readable well below the packet limit.
+  static constexpr std::size_t kMaximumFailureBytes = 400;
+
+  static void CloseDescriptor(int* descriptor) {
+    if (*descriptor >= 0) {
+      close(*descriptor);
+      *descriptor = -1;
+    }
+  }
+
+  static void WriteAll(const char* data, std::size_t bytes) {
+    std::size_t offset = 0;
+    while (offset < bytes) {
+      const ssize_t written =
+          write(STDERR_FILENO, data + offset, bytes - offset);
+      if (written < 0 && errno == EINTR) {
+        continue;
+      }
+      if (written <= 0) {
+        return;
+      }
+      offset += static_cast<std::size_t>(written);
+    }
+  }
+
+  // A message cut mid-codepoint fails UTF-8 validation in the dialog helper
+  // and would be replaced by the generic text.
+  static std::string_view TrimToCharacterBoundary(std::string_view text) {
+    if (text.size() <= kMaximumFailureBytes) {
+      return text;
+    }
+    std::size_t size = kMaximumFailureBytes;
+    while (size > 0 &&
+           (static_cast<unsigned char>(text[size]) & 0xC0U) == 0x80U) {
+      --size;
+    }
+    return text.substr(0, size);
+  }
+
+  void RecordLine(std::string_view line) {
+    constexpr std::string_view kPrefix = "[native-updater] ";
+    constexpr std::string_view kWarningPrefix = "warning: ";
+    if (line.size() <= kPrefix.size() ||
+        line.substr(0, kPrefix.size()) != kPrefix) {
+      return;
+    }
+    const std::string_view detail = line.substr(kPrefix.size());
+    if (detail.substr(0, kWarningPrefix.size()) == kWarningPrefix) {
+      return;
+    }
+    failure_.assign(TrimToCharacterBoundary(detail));
+  }
+
+  int descriptors_[2] = {-1, -1};
+  std::string failure_;
+};
+
 std::vector<std::string> ChildEnvironment(const RuntimePaths& paths,
                                           bool progress_enabled) {
   const std::vector<std::pair<std::string_view, std::filesystem::path>>
@@ -283,16 +400,21 @@ PayloadUpdatePreflightResult RunPayloadUpdatePreflight(
     child_environment_pointers.push_back(entry.data());
   }
   child_environment_pointers.push_back(nullptr);
+  UpdaterStderrRelay stderr_relay;
   posix_spawn_file_actions_t actions;
   bool actions_initialized = false;
   int action_status = 0;
-  if (progress.active()) {
+  if (progress.active() || stderr_relay.active()) {
     action_status = posix_spawn_file_actions_init(&actions);
     actions_initialized = action_status == 0;
-    if (action_status == 0) {
-      action_status = posix_spawn_file_actions_adddup2(
-          &actions, progress.socket(), kUpdaterProgressDescriptor);
-    }
+  }
+  if (action_status == 0 && progress.active()) {
+    action_status = posix_spawn_file_actions_adddup2(
+        &actions, progress.socket(), kUpdaterProgressDescriptor);
+  }
+  if (action_status == 0 && stderr_relay.active()) {
+    action_status = posix_spawn_file_actions_adddup2(
+        &actions, stderr_relay.write_descriptor(), STDERR_FILENO);
   }
   if (action_status != 0) {
     if (actions_initialized) {
@@ -315,6 +437,10 @@ PayloadUpdatePreflightResult RunPayloadUpdatePreflight(
     return result;
   }
 
+  // The child owns the write end now; the relay must observe end-of-file.
+  stderr_relay.CloseWrite();
+  stderr_relay.Drain();
+
   int child_status = 0;
   while (waitpid(child, &child_status, 0) < 0) {
     if (errno == EINTR) {
@@ -327,6 +453,7 @@ PayloadUpdatePreflightResult RunPayloadUpdatePreflight(
   if (!WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0) {
     result.error = force_run_latest ? "forced latest Roblox run failed"
                                      : "Roblox update preflight failed";
+    result.details = stderr_relay.failure();
   }
   return result;
 }

@@ -170,7 +170,11 @@ TEST(RuntimeConfigBootstrapTest,
            "payload is\n  "
            "# preserved when probation fails.\n  "
            "automatic: true",
-           "# String (default: apk-pure): direct x86_64 APK provider.\n  "
+           "# String (default: apk-pure): direct x86_64 APK provider "
+           "selection. Both\n  "
+           "# accepted values resolve the provider chain, which currently "
+           "starts with\n  "
+           "# APKPure. Supported values: auto, apk-pure.\n  "
            "source: apk-pure",
            "# Reserved for desktop update integrations. `mocktail_updater` "
            "itself never\n  # launches another process after changing the "

@@ -118,7 +118,9 @@ updates:
   # backend, and promote only on success. An existing current payload is
   # preserved when probation fails.
   automatic: true
-  # String (default: apk-pure): direct x86_64 APK provider.
+  # String (default: apk-pure): direct x86_64 APK provider selection. Both
+  # accepted values resolve the provider chain, which currently starts with
+  # APKPure. Supported values: auto, apk-pure.
   source: apk-pure
   # Reserved for desktop update integrations. `mocktail_updater` itself never
   # launches another process after changing the active payload.

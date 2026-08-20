@@ -56,6 +56,12 @@ target_link_libraries(native_update_test PRIVATE
   GTest::gtest_main
 )
 
+add_executable(apk_provider_test apk_provider_test.cc)
+target_link_libraries(apk_provider_test PRIVATE
+  Mocktail::Update
+  GTest::gtest_main
+)
+
 add_executable(support_bundle_runtime_test support_bundle_runtime_test.cc)
 target_link_libraries(support_bundle_runtime_test PRIVATE
   Mocktail::Runtime
@@ -807,6 +813,7 @@ gtest_discover_tests(jnivm_test)
 gtest_discover_tests(runtime_config_test)
 gtest_discover_tests(runtime_config_file_test)
 gtest_discover_tests(payload_update_preflight_test)
+gtest_discover_tests(apk_provider_test)
 gtest_discover_tests(native_update_test)
 gtest_discover_tests(support_bundle_runtime_test)
 gtest_discover_tests(session_log_test)
