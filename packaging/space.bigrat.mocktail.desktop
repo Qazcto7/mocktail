@@ -1,6 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=Mocktail
+GenericName=Roblox Player
 Comment=Play Roblox on Linux
 Exec=mocktail %u
 Icon=space.bigrat.mocktail
