@@ -291,6 +291,21 @@ Status RobloxTextSurfaceOverlay::Shutdown() {
   return failure_;
 }
 
+Status RobloxTextSurfaceOverlay::UpdateViewport(
+    RobloxTextOverlayViewport viewport) {
+  if (!viewport.valid()) {
+    return Status::Error(StatusCode::kInvalidArgument,
+                         "text surface overlay viewport is invalid");
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!initialized_) {
+    return Status::Error(StatusCode::kFailedPrecondition,
+                         "text surface overlay is not initialized");
+  }
+  viewport_ = viewport;
+  return Status::Ok();
+}
+
 RobloxTextDisplaySink RobloxTextSurfaceOverlay::sink() {
   return {this, &RobloxTextSurfaceOverlay::UpdateCallback};
 }

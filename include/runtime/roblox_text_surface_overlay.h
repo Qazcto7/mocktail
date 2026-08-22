@@ -27,6 +27,7 @@ class RobloxTextSurfaceOverlay final {
   RobloxTextSurfaceOverlay& operator=(const RobloxTextSurfaceOverlay&) = delete;
 
   Status Initialize(RobloxTextOverlayViewport viewport);
+  Status UpdateViewport(RobloxTextOverlayViewport viewport);
   Status Shutdown();
   RobloxTextDisplaySink sink();
 

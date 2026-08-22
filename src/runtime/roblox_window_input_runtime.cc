@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <string>
 #include <utility>
+#include <variant>
 
 #include "window/window.h"
 
@@ -36,7 +37,7 @@ Status RobloxWindowInputRuntime::Initialize() {
                          "SDL input window is unavailable");
   }
   Status status = text_surface_overlay_.Initialize(
-      {window_viewport.logical_width, window_viewport.logical_height});
+      {window_viewport.pixel_width, window_viewport.pixel_height});
   if (!status.ok()) {
     return status;
   }
@@ -51,7 +52,7 @@ Status RobloxWindowInputRuntime::Initialize() {
     return status;
   }
   if (!window::SetPlatformEventObserver(
-          &RobloxInputRuntime::PlatformEventCallback, &runtime_)) {
+          &RobloxWindowInputRuntime::PlatformEventCallback, this)) {
     runtime_.Deactivate();
     (void)text_surface_overlay_.Shutdown();
     return Status::Error(StatusCode::kFailedPrecondition,
@@ -70,6 +71,20 @@ Status RobloxWindowInputRuntime::Initialize() {
   mouse_lock_query_registered_ = true;
   initialized_ = true;
   return Status::Ok();
+}
+
+void RobloxWindowInputRuntime::PlatformEventCallback(
+    void* context, const platform::PlatformEvent& event) {
+  if (context == nullptr) {
+    return;
+  }
+  auto* self = static_cast<RobloxWindowInputRuntime*>(context);
+  if (const auto* resized =
+          std::get_if<platform::WindowResizedEvent>(&event.payload)) {
+    (void)self->text_surface_overlay_.UpdateViewport(
+        {resized->pixel_width, resized->pixel_height});
+  }
+  (void)self->runtime_.HandleEvent(event);
 }
 
 Status RobloxWindowInputRuntime::Shutdown() {

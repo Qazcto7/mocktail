@@ -1995,6 +1995,7 @@ jobject MakeNativeTextBoxInfoObject() {
   SetBooleanFieldRaw(object, "multiline", JNI_FALSE);
   SetBooleanFieldRaw(object, "secureTextEntry", JNI_FALSE);
   SetBooleanFieldRaw(object, "showKeyboard", JNI_FALSE);
+  SetBooleanFieldRaw(object, "editable", JNI_FALSE);
   return object;
 }
 
@@ -2661,6 +2662,22 @@ constexpr char kRobloxNativeHelperClass[] =
     "com/roblox/client/startup/NativeHelper";
 constexpr char kRobloxShowKeyboardSignature[] =
     "(JZ[BLcom/roblox/engine/jni/model/NativeTextBoxInfo;)V";
+constexpr char kRobloxLegacyTextBoxInfoConstructor[] = "(FFFFFZIIIIIIZZ)V";
+constexpr char kRobloxTextBoxInfoConstructor[] = "(FFFFFZIIIIIIZZZ)V";
+
+bool IsRobloxTextBoxInfoConstructor(jmethodID method_id) {
+  if (std::strcmp(MethodName(method_id), "<init>") != 0) {
+    return false;
+  }
+  const char* signature = MethodSignature(method_id);
+  return std::strcmp(signature, kRobloxLegacyTextBoxInfoConstructor) == 0 ||
+         std::strcmp(signature, kRobloxTextBoxInfoConstructor) == 0;
+}
+
+bool HasRobloxTextBoxEditableArgument(jmethodID method_id) {
+  return std::strcmp(MethodSignature(method_id),
+                     kRobloxTextBoxInfoConstructor) == 0;
+}
 
 void ClearSensitiveString(std::string* value) {
   if (value == nullptr) {
@@ -4014,8 +4031,7 @@ jobject ConstructObjectV(jclass clazz, jmethodID methodID, va_list args) {
     SetLongFieldRaw(object, "ref", va_arg(args, jlong));
   } else if (object_class->GetName() ==
                  "com/roblox/engine/jni/model/NativeTextBoxInfo" &&
-             std::strcmp(MethodName(methodID), "<init>") == 0 &&
-             std::strcmp(MethodSignature(methodID), "(FFFFFZIIIIIIZZ)V") == 0) {
+             IsRobloxTextBoxInfoConstructor(methodID)) {
     SetFloatFieldRaw(object, "x", static_cast<jfloat>(va_arg(args, double)));
     SetFloatFieldRaw(object, "y", static_cast<jfloat>(va_arg(args, double)));
     SetFloatFieldRaw(object, "width",
@@ -4036,6 +4052,10 @@ jobject ConstructObjectV(jclass clazz, jmethodID methodID, va_list args) {
                        static_cast<jboolean>(va_arg(args, jint)));
     SetBooleanFieldRaw(object, "textWrapped",
                        static_cast<jboolean>(va_arg(args, jint)));
+    if (HasRobloxTextBoxEditableArgument(methodID)) {
+      SetBooleanFieldRaw(object, "editable",
+                         static_cast<jboolean>(va_arg(args, jint)));
+    }
   } else if (object_class->GetName() ==
                  "com/roblox/engine/jni/model/NativeTextBoxInfo" &&
              std::strcmp(MethodName(methodID), "<init>") == 0 &&
@@ -4054,8 +4074,8 @@ jobject ConstructObjectV(jclass clazz, jmethodID methodID, va_list args) {
     for (const char *field : kIntFields) {
       SetIntFieldRaw(object, field, IntFieldValue(source, field));
     }
-    constexpr const char *kBooleanFields[] = {"multiline", "manualFocusRelease",
-                                              "textWrapped"};
+    constexpr const char* kBooleanFields[] = {"multiline", "manualFocusRelease",
+                                              "textWrapped", "editable"};
     for (const char *field : kBooleanFields) {
       SetBooleanFieldRaw(object, field, BooleanFieldValue(source, field));
     }
@@ -4083,8 +4103,7 @@ jobject ConstructObjectA(jclass clazz, jmethodID methodID, const jvalue *args) {
     SetLongFieldRaw(object, "ref", args[0].j);
   } else if (object_class->GetName() ==
                  "com/roblox/engine/jni/model/NativeTextBoxInfo" &&
-             std::strcmp(MethodName(methodID), "<init>") == 0 &&
-             std::strcmp(MethodSignature(methodID), "(FFFFFZIIIIIIZZ)V") == 0) {
+             IsRobloxTextBoxInfoConstructor(methodID)) {
     constexpr const char *kFloatFields[] = {"x", "y", "width", "height",
                                             "fontSize"};
     for (std::size_t index = 0; index < 5; ++index) {
@@ -4099,6 +4118,9 @@ jobject ConstructObjectA(jclass clazz, jmethodID methodID, const jvalue *args) {
     }
     SetBooleanFieldRaw(object, "manualFocusRelease", args[12].z);
     SetBooleanFieldRaw(object, "textWrapped", args[13].z);
+    if (HasRobloxTextBoxEditableArgument(methodID)) {
+      SetBooleanFieldRaw(object, "editable", args[14].z);
+    }
   } else if (object_class->GetName() ==
                  "com/roblox/engine/jni/model/NativeTextBoxInfo" &&
              std::strcmp(MethodName(methodID), "<init>") == 0 &&
@@ -4117,8 +4139,8 @@ jobject ConstructObjectA(jclass clazz, jmethodID methodID, const jvalue *args) {
     for (const char *field : kIntFields) {
       SetIntFieldRaw(object, field, IntFieldValue(source, field));
     }
-    constexpr const char *kBooleanFields[] = {"multiline", "manualFocusRelease",
-                                              "textWrapped"};
+    constexpr const char* kBooleanFields[] = {"multiline", "manualFocusRelease",
+                                              "textWrapped", "editable"};
     for (const char *field : kBooleanFields) {
       SetBooleanFieldRaw(object, field, BooleanFieldValue(source, field));
     }

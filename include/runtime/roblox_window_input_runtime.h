@@ -37,6 +37,8 @@ class RobloxWindowInputRuntime final {
   RobloxInputSnapshot Snapshot() const;
 
  private:
+  static void PlatformEventCallback(void* context,
+                                    const platform::PlatformEvent& event);
   static bool MouseLockQueryCallback(void* context, bool* locked_center);
 
   RobloxTextSurfaceOverlay text_surface_overlay_;

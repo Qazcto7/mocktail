@@ -9,7 +9,7 @@ namespace {
 
 constexpr char kInfoClass[] =
     "com/roblox/engine/jni/model/NativeTextBoxInfo";
-constexpr char kInfoConstructor[] = "(FFFFFZIIIIIIZZ)V";
+constexpr char kInfoConstructor[] = "(FFFFFZIIIIIIZZZ)V";
 
 struct ShowProbe {
   int calls = 0;
@@ -57,6 +57,8 @@ void ExpectGeometry(JNIEnv* env, jclass cls, jobject info) {
             JNI_TRUE);
   EXPECT_EQ(env->GetBooleanField(info, Field(env, cls, "textWrapped", "Z")),
             JNI_FALSE);
+  EXPECT_EQ(env->GetBooleanField(info, Field(env, cls, "editable", "Z")),
+            JNI_TRUE);
 }
 
 void FillArguments(jvalue* args) {
@@ -74,6 +76,7 @@ void FillArguments(jvalue* args) {
   args[11].i = 7;
   args[12].z = JNI_TRUE;
   args[13].z = JNI_FALSE;
+  args[14].z = JNI_TRUE;
 }
 
 TEST(JniVmNativeTextBoxInfoTest, DirectAndArrayConstructorsPreserveGeometry) {
@@ -84,13 +87,13 @@ TEST(JniVmNativeTextBoxInfoTest, DirectAndArrayConstructorsPreserveGeometry) {
   jmethodID constructor = env->GetMethodID(cls, "<init>", kInfoConstructor);
   ASSERT_NE(constructor, nullptr);
 
-  jobject direct = env->NewObject(
-      cls, constructor, 11.5, 22.5, 333.0, 44.0, 18.0, JNI_TRUE, 1, 2,
-      0x123456, 4, 6, 7, JNI_TRUE, JNI_FALSE);
+  jobject direct =
+      env->NewObject(cls, constructor, 11.5, 22.5, 333.0, 44.0, 18.0, JNI_TRUE,
+                     1, 2, 0x123456, 4, 6, 7, JNI_TRUE, JNI_FALSE, JNI_TRUE);
   ASSERT_NE(direct, nullptr);
   ExpectGeometry(env, cls, direct);
 
-  jvalue args[14]{};
+  jvalue args[15]{};
   FillArguments(args);
   jobject array = env->NewObjectA(cls, constructor, args);
   ASSERT_NE(array, nullptr);
@@ -105,7 +108,7 @@ TEST(JniVmNativeTextBoxInfoTest, CopyConstructorPreservesEveryTypedField) {
   jmethodID copy_constructor = env->GetMethodID(
       cls, "<init>",
       "(Lcom/roblox/engine/jni/model/NativeTextBoxInfo;)V");
-  jvalue args[14]{};
+  jvalue args[15]{};
   FillArguments(args);
   jobject source = env->NewObjectA(cls, constructor, args);
   ASSERT_NE(source, nullptr);
@@ -129,7 +132,7 @@ TEST(JniVmNativeTextBoxInfoTest, ShowKeyboardSnapshotsNonzeroGeometry) {
   jclass info_class = env->FindClass(kInfoClass);
   jmethodID constructor =
       env->GetMethodID(info_class, "<init>", kInfoConstructor);
-  jvalue args[14]{};
+  jvalue args[15]{};
   FillArguments(args);
   jobject info = env->NewObjectA(info_class, constructor, args);
   const jbyte text_bytes[] = {'t', 'e', 's', 't'};

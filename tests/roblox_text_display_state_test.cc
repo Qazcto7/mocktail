@@ -237,6 +237,11 @@ TEST(RobloxTextDisplayStateTest,
   }
   EXPECT_TRUE(has_visible_pixel);
 
+  ASSERT_TRUE(overlay.UpdateViewport({1000, 700}).ok());
+  ASSERT_TRUE(overlay.QueryFrame(&frame));
+  EXPECT_EQ(frame.coordinate_width, 1000U);
+  EXPECT_EQ(frame.coordinate_height, 700U);
+
   RobloxTextDisplayUpdate hide;
   hide.event = RobloxTextDisplayEvent::kHide;
   hide.generation = 7;
