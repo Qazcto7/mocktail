@@ -36,6 +36,7 @@
 #include <vector>
 
 #include <jni.h>
+#include <SDL3/SDL_video.h>
 
 #include "compat/bionic_abi_exports.h"
 #include "compat/bionic_prctl_runtime.h"
@@ -55,6 +56,7 @@
 #include "runtime/discord_rpc.h"
 #include "runtime/jnivm_platform_web_callbacks.h"
 #include "runtime/owned_pthread.h"
+#include "runtime/platform_cache_migration.h"
 #include "runtime/roblox_app_lifecycle.h"
 #include "runtime/roblox_capability_resolver.h"
 #include "runtime/roblox_platform_web_symbols.h"
@@ -29297,7 +29299,9 @@ jobject BuildStartAppParams(JNIEnv* env, jstring app_params,
   SetStringField(env, params, "username", identity.username.c_str());
   SetIntField(env, params, "membershipType",
               GetEnvInt("MOCKTAIL_ROBLOX_MEMBERSHIP_TYPE", 0));
-  SetStringField(env, params, "selectedTheme", "dark");
+  const char* theme = std::getenv("MOCKTAIL_RESOLVED_THEME_INTERNAL");
+  SetStringField(env, params, "selectedTheme",
+                 theme != nullptr ? theme : "Dark");
   SetObjectField(env, params, "vrContext", "Landroid/app/Activity;",
                  activity);
 
@@ -31878,6 +31882,11 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
                  "display, 30, 60, 120, 144, 240, or unlimited\n";
     return EXIT_FAILURE;
   }
+  if (!runtime_config.theme_mode_valid()) {
+    std::cerr << "[FATAL] Invalid MOCKTAIL_THEME; expected system, light, or "
+                 "dark\n";
+    return EXIT_FAILURE;
+  }
   setenv("MOCKTAIL_TOUCH_ENABLED_INTERNAL",
          input_capabilities.touch_enabled ? "1" : "0", 1);
   setenv("MOCKTAIL_MOUSE_ENABLED_INTERNAL",
@@ -32075,6 +32084,8 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
       "JNIActivityLifecycleCallbacks");
   jni_vm->RegisterClass("com/roblox/universalapp/messagebus/MessageBus");
   jni_vm->RegisterClass("com/roblox/universalapp/messagebus/Connection");
+  jni_vm->RegisterClass(
+      "com/roblox/universalapp/systemtheme/SystemThemeProtocol");
   jni_vm->RegisterClass("com/roblox/universalapp/cookie/JNICookieManager");
   jni_vm->RegisterClass("com/roblox/universalapp/cookie/JNICookieProtocol");
   jni_vm->RegisterClass(
@@ -32148,6 +32159,28 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
       std::cout << "  [window] Window ready; waiting for Roblox frames\n"
                 << std::flush;
     }
+  }
+  const SDL_SystemTheme system_theme =
+      window_initialised ? SDL_GetSystemTheme() : SDL_SYSTEM_THEME_UNKNOWN;
+  const bool system_dark_theme = system_theme == SDL_SYSTEM_THEME_DARK;
+  const bool dark_theme =
+      runtime_config.theme_mode() == "dark" ||
+      (runtime_config.theme_mode() == "system" && system_dark_theme);
+  setenv("MOCKTAIL_RESOLVED_THEME_INTERNAL", dark_theme ? "Dark" : "Light", 1);
+  const char* app_storage_file =
+      std::getenv("MOCKTAIL_APP_STORAGE_FILE_INTERNAL");
+  if (app_storage_file != nullptr) {
+    std::string theme_error;
+    if (!mocktail::runtime::ApplyRobloxThemeCacheOverride(
+            app_storage_file, dependencies.account_identity().user_id,
+            dark_theme, &theme_error)) {
+      std::cerr << "[FATAL] Roblox theme cache override failed: " << theme_error
+                << '\n';
+      return EXIT_FAILURE;
+    }
+    std::cout << "  [theme] Roblox local theme="
+              << (dark_theme ? "dark" : "light") << '\n'
+              << std::flush;
   }
   const bool has_window = window_initialised;
   if (!has_window) {

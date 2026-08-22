@@ -182,6 +182,7 @@ RuntimeConfig RuntimeConfig::FromEnvironment(const Environment& environment) {
                                           config.window_.height);
   config.window_.title =
       environment.GetOr("MOCKTAIL_WIN_TITLE", config.window_.title);
+  config.theme_mode_ = environment.GetOr("MOCKTAIL_THEME", "system");
   const std::optional<std::string> configured_device =
       environment.Get("MOCKTAIL_DEVICE_PROFILE");
   const bool has_explicit_device =

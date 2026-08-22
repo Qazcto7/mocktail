@@ -1,6 +1,7 @@
 #ifndef MOCKTAIL_RUNTIME_PLATFORM_CACHE_MIGRATION_H_
 #define MOCKTAIL_RUNTIME_PLATFORM_CACHE_MIGRATION_H_
 
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <string_view>
@@ -36,6 +37,11 @@ struct PlatformCacheMigrationResult {
 PlatformCacheMigrationResult MigratePlatformProfileCaches(
     const Environment& environment, const RuntimePaths& paths,
     std::string_view desired_revision);
+
+// Synchronizes only Roblox's local theme keys with the resolved host theme.
+bool ApplyRobloxThemeCacheOverride(
+    const std::filesystem::path& app_storage_file,
+    std::int64_t authenticated_user_id, bool dark_theme, std::string* error);
 
 }  // namespace runtime
 }  // namespace mocktail

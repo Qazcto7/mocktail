@@ -484,6 +484,7 @@ int main(int argc, char* argv[]) {
       return EXIT_FAILURE;
     }
     app_storage_file = cache_migration.app_storage_file;
+    setenv("MOCKTAIL_APP_STORAGE_FILE_INTERNAL", app_storage_file.c_str(), 1);
     if (cache_migration.transitioned) {
       std::cout << "  [runtime] platform cache profile transitioned; "
                 << "refreshable identity and policy caches invalidated="

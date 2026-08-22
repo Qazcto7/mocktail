@@ -272,6 +272,35 @@ TEST(PlatformCacheMigrationTest, MapsAndroidVirtualFilesDirectoryToXdgRoot) {
             runtime_root / "data/files/appData/LocalStorage/appStorage.json");
 }
 
+TEST(PlatformCacheMigrationTest,
+     ThemeOverridePreservesUnrelatedAndOtherUsersCache) {
+  TemporaryDirectory temporary;
+  FixturePaths fixture = PathsFor(temporary);
+  const nlohmann::json device_themes = {
+      {"42", "dark"},
+      {"99", "dark"},
+  };
+  ASSERT_TRUE(WriteJson(fixture.app_storage,
+                        {{"AuthenticatedTheme", "dark"},
+                         {"DeviceLevelTheme", device_themes.dump()},
+                         {"DeviceLevelThemeSnapshotTimestamp", "1234"},
+                         {"UnrelatedPreference", "keep"}}));
+
+  std::string error;
+  ASSERT_TRUE(
+      ApplyRobloxThemeCacheOverride(fixture.app_storage, 42, false, &error))
+      << error;
+
+  const nlohmann::json storage = ReadJson(fixture.app_storage);
+  EXPECT_EQ(storage["AuthenticatedTheme"], "light");
+  const nlohmann::json updated_device_themes = nlohmann::json::parse(
+      storage["DeviceLevelTheme"].get_ref<const std::string&>());
+  EXPECT_EQ(updated_device_themes["42"], "light");
+  EXPECT_EQ(updated_device_themes["99"], "dark");
+  EXPECT_EQ(storage["DeviceLevelThemeSnapshotTimestamp"], "1234");
+  EXPECT_EQ(storage["UnrelatedPreference"], "keep");
+}
+
 }  // namespace
 }  // namespace runtime
 }  // namespace mocktail

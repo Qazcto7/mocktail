@@ -380,6 +380,11 @@ std::string GetterFieldName(const char* method_name) {
   return field_name;
 }
 
+bool ResolvedDarkTheme() {
+  const char* theme = std::getenv("MOCKTAIL_RESOLVED_THEME_INTERNAL");
+  return theme == nullptr || std::strcmp(theme, "Light") != 0;
+}
+
 jint IntResultForName(const char* name) {
   if (std::strcmp(name, "getScreenWidth") == 0 ||
       std::strcmp(name, "getWidth") == 0) {
@@ -408,6 +413,9 @@ jint IntResultForName(const char* name) {
   }
   if (std::strcmp(name, "getOutputBlockSize") == 0) {
     return 512;
+  }
+  if (std::strcmp(name, "getSystemTheme") == 0) {
+    return ResolvedDarkTheme() ? 4 : 3;
   }
   if (std::strcmp(name, "getRotation") == 0 ||
       std::strcmp(name, "getInt") == 0 ||
@@ -3276,7 +3284,7 @@ jobject StaticObjectResultForMethod(jmethodID method_id) {
     return MakeString("");
   }
   if (std::strcmp(name, "getTheme") == 0) {
-    return MakeString("dark");
+    return MakeString(ResolvedDarkTheme() ? "Dark" : "Light");
   }
   if (std::strcmp(name, "getFilesDir") == 0) {
     return MakeString("/data/user/0/com.roblox.client/files");
@@ -3852,6 +3860,9 @@ jboolean JNICALL CallStaticBooleanMethod(JNIEnv* /*env*/, jclass /*clazz*/, jmet
   }
   jboolean result = JNI_FALSE;
   const char* name = MethodName(methodID);
+  if (std::strcmp(name, "isSystemThemeAvailable") == 0) {
+    return JNI_TRUE;
+  }
   if (FmodBooleanResultForMethod(name, &result)) {
     return result;
   }
@@ -5495,6 +5506,9 @@ void VM::InitJNIFunctionTables() {
     }
     jboolean result = JNI_FALSE;
     const char* name = MethodName(methodID);
+    if (std::strcmp(name, "isSystemThemeAvailable") == 0) {
+      return JNI_TRUE;
+    }
     if (FmodBooleanResultForMethod(name, &result)) {
       return result;
     }
@@ -5509,6 +5523,9 @@ void VM::InitJNIFunctionTables() {
     }
     jboolean result = JNI_FALSE;
     const char* name = MethodName(methodID);
+    if (std::strcmp(name, "isSystemThemeAvailable") == 0) {
+      return JNI_TRUE;
+    }
     if (FmodBooleanResultForMethod(name, &result)) {
       return result;
     }

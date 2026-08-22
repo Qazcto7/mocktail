@@ -25,6 +25,7 @@ protected:
     unsetenv("MOCKTAIL_JNI_STRING_TRACE");
     unsetenv("MOCKTAIL_TRACE_ALL");
     unsetenv("MOCKTAIL_FULL_TRACE");
+    unsetenv("MOCKTAIL_RESOLVED_THEME_INTERNAL");
     vm_ = std::make_shared<VM>();
   }
 
@@ -35,6 +36,7 @@ protected:
     unsetenv("MOCKTAIL_JNI_STRING_TRACE");
     unsetenv("MOCKTAIL_TRACE_ALL");
     unsetenv("MOCKTAIL_FULL_TRACE");
+    unsetenv("MOCKTAIL_RESOLVED_THEME_INTERNAL");
   }
 
   std::shared_ptr<VM> vm_;
@@ -633,6 +635,7 @@ TEST_F(JniVmTest, NativeUserJavaInterfaceReturnsInjectedIdentityExactly) {
   // Injected identity takes precedence over environment fallbacks.
   setenv("MOCKTAIL_ROBLOX_USER_ID", "77", 1);
   setenv("MOCKTAIL_ROBLOX_USERNAME", "EnvironmentName", 1);
+  setenv("MOCKTAIL_RESOLVED_THEME_INTERNAL", "Light", 1);
 
   JNIEnv *env = vm_->GetJNIEnv();
   jclass cls =
@@ -655,6 +658,17 @@ TEST_F(JniVmTest, NativeUserJavaInterfaceReturnsInjectedIdentityExactly) {
   EXPECT_EQ(ReadIdentityMethod("getAlternateName"), identity.display_name);
   EXPECT_EQ(ReadIdentityMethod("getLastLoggedInUser"), identity.username);
   EXPECT_EQ(ReadIdentityMethod("getLastLoggedInUserId"), "123456789");
+  EXPECT_EQ(ReadIdentityMethod("getTheme"), "Light");
+
+  jclass system_theme =
+      env->FindClass("com/roblox/universalapp/systemtheme/SystemThemeProtocol");
+  ASSERT_NE(system_theme, nullptr);
+  jmethodID is_available =
+      env->GetStaticMethodID(system_theme, "isSystemThemeAvailable", "()Z");
+  jmethodID get_system_theme =
+      env->GetStaticMethodID(system_theme, "getSystemTheme", "()I");
+  EXPECT_EQ(env->CallStaticBooleanMethod(system_theme, is_available), JNI_TRUE);
+  EXPECT_EQ(env->CallStaticIntMethod(system_theme, get_system_theme), 3);
 }
 
 TEST_F(JniVmTest, RobloxAuthIdentitySnapshotIsIndependentAndClearable) {

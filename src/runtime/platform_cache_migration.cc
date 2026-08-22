@@ -341,5 +341,55 @@ PlatformCacheMigrationResult MigratePlatformProfileCaches(
   return result;
 }
 
+bool ApplyRobloxThemeCacheOverride(
+    const std::filesystem::path& app_storage_file,
+    std::int64_t authenticated_user_id, bool dark_theme, std::string* error) {
+  if (error == nullptr || !app_storage_file.is_absolute() ||
+      authenticated_user_id < -1) {
+    if (error != nullptr) {
+      *error = "Roblox theme cache path or user ID is invalid";
+    }
+    return false;
+  }
+
+  JsonReadResult storage = ReadJson(app_storage_file);
+  if (storage.status == ReadStatus::kInvalid) {
+    *error = storage.error;
+    return false;
+  }
+  if (storage.status == ReadStatus::kMissing) {
+    storage.value = nlohmann::json::object();
+  }
+
+  const std::string desired_theme = dark_theme ? "dark" : "light";
+  const nlohmann::json original = storage.value;
+  storage.value["AuthenticatedTheme"] = desired_theme;
+
+  if (authenticated_user_id >= 0) {
+    nlohmann::json device_themes = nlohmann::json::object();
+    const auto encoded_device_themes = storage.value.find("DeviceLevelTheme");
+    if (encoded_device_themes != storage.value.end()) {
+      if (!encoded_device_themes->is_string()) {
+        *error = "Roblox DeviceLevelTheme is not an encoded object";
+        return false;
+      }
+      device_themes = nlohmann::json::parse(
+          encoded_device_themes->get_ref<const std::string&>(), nullptr, false,
+          true);
+      if (device_themes.is_discarded() || !device_themes.is_object()) {
+        *error = "Roblox DeviceLevelTheme encoding is invalid";
+        return false;
+      }
+    }
+    device_themes[std::to_string(authenticated_user_id)] = desired_theme;
+    storage.value["DeviceLevelTheme"] = device_themes.dump();
+  }
+
+  if (storage.value == original) {
+    return true;
+  }
+  return AtomicWriteJson(app_storage_file, storage.value, error);
+}
+
 }  // namespace runtime
 }  // namespace mocktail

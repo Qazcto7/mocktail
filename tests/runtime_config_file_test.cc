@@ -279,6 +279,8 @@ version: 1
 runtime:
   headless: false
   roblox_library: /payload/libroblox.so
+appearance:
+  theme: dark
 graphics:
   backend: vulkan
   frame_rate_limit: unlimited
@@ -328,6 +330,7 @@ updates:
   EXPECT_EQ(loaded.config.graphics_backend(), GraphicsBackend::kVulkan);
   EXPECT_EQ(loaded.config.frame_rate().mode, FrameRateLimitMode::kUnlimited);
   EXPECT_EQ(loaded.config.vsync_mode(), "off");
+  EXPECT_EQ(loaded.config.theme_mode(), "dark");
   EXPECT_TRUE(loaded.config.performance().multithreaded_rendering);
   EXPECT_EQ(loaded.config.performance().physics_worker_mode,
             PhysicsWorkerMode::kLatency);

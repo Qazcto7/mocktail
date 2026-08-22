@@ -168,6 +168,7 @@ bool ValidateAndMap(const ValueMap& yaml, ValueMap* environment,
       "device.keyboard",
       "runtime.headless",
       "runtime.roblox_library",
+      "appearance.theme",
       "graphics.backend",
       "graphics.frame_rate_limit",
       "graphics.vsync",
@@ -296,6 +297,13 @@ bool ValidateAndMap(const ValueMap& yaml, ValueMap* environment,
       return false;
     }
     (*environment)["ROBLOX_LIB_PATH"] = *library;
+  }
+  if (const auto theme = value("appearance.theme"); theme.has_value()) {
+    if (*theme != "system" && *theme != "light" && *theme != "dark") {
+      *error = "appearance.theme must be system, light, or dark";
+      return false;
+    }
+    (*environment)["MOCKTAIL_THEME"] = *theme;
   }
   if (const auto backend = value("graphics.backend"); backend.has_value()) {
     if (RuntimeConfig::ParseGraphicsBackend(*backend) ==
@@ -627,9 +635,10 @@ bool LoadYaml(const std::filesystem::path& path, ValueMap* values, bool* loaded,
           *error = "device must be a preset scalar or detailed mapping";
           valid = false;
         }
-      } else if (key == "runtime" || key == "graphics" ||
-                 key == "performance" || key == "audio" || key == "window" ||
-                 key == "input" || key == "compatibility" || key == "network") {
+      } else if (key == "runtime" || key == "appearance" ||
+                 key == "graphics" || key == "performance" ||
+                 key == "audio" || key == "window" || key == "input" ||
+                 key == "compatibility" || key == "network") {
         valid = ReadMapping(&document, value_node, key, values, error);
       } else if (key == "integrations") {
         valid = ReadNestedMapping(&document, value_node, key, 2, values, error);
@@ -700,6 +709,8 @@ RuntimeConfigLoadResult LoadRuntimeConfig(
     result.error = "device must expose at least one usable input capability";
   } else if (result.config.graphics_backend() == GraphicsBackend::kUnknown) {
     result.error = "graphics backend is invalid";
+  } else if (!result.config.theme_mode_valid()) {
+    result.error = "theme mode is invalid";
   } else if (result.config.vsync_mode() != "auto" &&
              result.config.vsync_mode() != "on" &&
              result.config.vsync_mode() != "off") {
@@ -793,6 +804,7 @@ bool ExportRuntimeConfigEnvironment(const RuntimeConfig& config,
                           config.roblox_library_path().string(), error) &&
       SetEnvironmentValue("MOCKTAIL_GRAPHICS_BACKEND",
                           config.graphics_backend_name(), error) &&
+      SetEnvironmentValue("MOCKTAIL_THEME", config.theme_mode(), error) &&
       SetEnvironmentValue("MOCKTAIL_WIN_WIDTH",
                           std::to_string(config.window().width), error) &&
       SetEnvironmentValue("MOCKTAIL_WIN_HEIGHT",

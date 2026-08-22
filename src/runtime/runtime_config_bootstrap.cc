@@ -49,6 +49,9 @@ runtime:
   # active verified payload.
   # roblox_library: /absolute/path/to/libroblox.so
 
+appearance:
+  theme: system
+
 graphics:
   # String (default: direct-vulkan): graphics backend. Use opengl on hardware
   # without a working Vulkan driver; OpenGL ES 3.0 or newer is required.

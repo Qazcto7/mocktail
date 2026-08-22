@@ -103,6 +103,40 @@ Status CheckJni(JNIEnv* env, const char* operation) {
           " failed in experience composition");
 }
 
+Status PublishSystemTheme(JNIEnv* env,
+                          const RobloxWebViewMessageBusSymbols& symbols,
+                          jobject message_bus) {
+  jclass message_bus_class =
+      env->FindClass("com/roblox/universalapp/messagebus/MessageBus");
+  jstring protocol = env->NewStringUTF("SystemTheme");
+  jstring message = env->NewStringUTF("systemThemeUpdated");
+  jstring payload = env->NewStringUTF("{}");
+  jstring message_id = nullptr;
+  Status status = Status::Ok();
+  if (message_bus_class == nullptr || protocol == nullptr ||
+      message == nullptr || payload == nullptr) {
+    status = Unavailable("could not allocate SystemTheme MessageBus values");
+  } else {
+    message_id =
+        symbols.get_message_id(env, message_bus_class, protocol, message);
+    status = CheckJni(env, "compose SystemTheme.systemThemeUpdated id");
+  }
+  if (status.ok() && message_id == nullptr) {
+    status = Unavailable("SystemTheme.systemThemeUpdated id is unavailable");
+  }
+  if (status.ok()) {
+    symbols.publish_raw(env, message_bus, message_id, payload);
+    status = CheckJni(env, "publish SystemTheme.systemThemeUpdated");
+  }
+
+  if (message_id != nullptr) env->DeleteLocalRef(message_id);
+  if (payload != nullptr) env->DeleteLocalRef(payload);
+  if (message != nullptr) env->DeleteLocalRef(message);
+  if (protocol != nullptr) env->DeleteLocalRef(protocol);
+  if (message_bus_class != nullptr) env->DeleteLocalRef(message_bus_class);
+  return status;
+}
+
 Status LaunchRobloxWebSurface(
     const std::string& url, const char* transport,
     WebViewHelperExitObserver exit_observer = {},
@@ -433,6 +467,14 @@ Status RobloxExperienceComposition::OnLuaAppReady(
       RobloxExperienceLaunchSink{this,
                                  &RobloxExperienceComposition::DispatchLaunch});
   status = bridge->Initialize();
+  if (status.ok()) {
+    JNIEnv* env = nullptr;
+    status = environment_.Acquire(&env);
+    if (status.ok()) {
+      status = PublishSystemTheme(env, web_view_symbols_,
+                                  bridge_objects.message_bus);
+    }
+  }
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (status.ok()) {
@@ -443,6 +485,13 @@ Status RobloxExperienceComposition::OnLuaAppReady(
     }
   }
   if (!status.ok()) (void)ReleaseLuaAppGlobalObjects();
+  if (status.ok()) {
+    std::fprintf(stderr,
+                 "  [theme] published SystemTheme.systemThemeUpdated (%s)\n",
+                 std::getenv("MOCKTAIL_RESOLVED_THEME_INTERNAL") != nullptr
+                     ? std::getenv("MOCKTAIL_RESOLVED_THEME_INTERNAL")
+                     : "Dark");
+  }
   return status.ok() ? DrainExternalLaunchRequests() : status;
 }
 
@@ -1721,7 +1770,8 @@ Status RobloxExperienceComposition::BuildLuaAppStartParams(
     app_starter_place = env->NewStringUTF("rbxasset://places/Mobile.rbxl");
     app_starter_script = env->NewStringUTF("LuaAppStarterScript");
     username = env->NewStringUTF(readiness.username.c_str());
-    selected_theme = env->NewStringUTF("dark");
+    const char* theme = std::getenv("MOCKTAIL_RESOLVED_THEME_INTERNAL");
+    selected_theme = env->NewStringUTF(theme != nullptr ? theme : "Dark");
     const bool populated =
         app_starter_place != nullptr && app_starter_script != nullptr &&
         username != nullptr && selected_theme != nullptr &&

@@ -81,6 +81,11 @@ class RuntimeConfig {
     return graphics_backend_name_;
   }
   const WindowConfig& window() const { return window_; }
+  const std::string& theme_mode() const { return theme_mode_; }
+  bool theme_mode_valid() const {
+    return theme_mode_ == "system" || theme_mode_ == "light" ||
+           theme_mode_ == "dark";
+  }
   const InputCapabilityConfig& input_capabilities() const {
     return input_capabilities_;
   }
@@ -127,6 +132,7 @@ class RuntimeConfig {
   GraphicsBackend graphics_backend_ = GraphicsBackend::kVulkan;
   std::string graphics_backend_name_ = "direct-vulkan";
   WindowConfig window_;
+  std::string theme_mode_ = "system";
   InputCapabilityConfig input_capabilities_;
   DeviceProfile device_profile_ = *FindDeviceProfile(kDefaultDeviceProfileName);
   bool device_profile_valid_ = true;
