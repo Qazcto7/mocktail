@@ -55,6 +55,7 @@ struct AppState {
   std::string initial_url;
   std::string pending_navigation_url;
   std::string pending_roblox_cookie;
+  std::string last_reported_roblox_cookie;
   std::deque<std::string> pending_hybrid_packets;
   std::size_t pending_hybrid_bytes = 0;
   GWeakRef primary_web_view;
@@ -71,6 +72,7 @@ struct AppState {
   bool terminating = false;
   bool cookie_sync_received = false;
   bool cookie_install_in_flight = false;
+  bool browser_login_mode = false;
   bool initial_load_started = false;
 };
 
@@ -107,6 +109,11 @@ struct CallbackConfirmation {
 
 void BeginTermination(AppState* state, const char* reason);
 void ApplyPendingRobloxCookie(AppState* state);
+bool QueueHelperEvent(AppState* state,
+                      mocktail::runtime::WebViewHelperEventType type,
+                      std::string_view command);
+void RequestRobloxCookie(AppState* state);
+void OnCookiesChanged(WebKitCookieManager* manager, gpointer user_data);
 
 void ClearSensitiveString(std::string* value) {
   volatile char* bytes = value->empty() ? nullptr : value->data();
@@ -281,6 +288,7 @@ bool InitializeNetworkSession(AppState* state) {
       cookies, cookie_database, WEBKIT_COOKIE_PERSISTENT_STORAGE_SQLITE);
   webkit_cookie_manager_set_accept_policy(cookies,
                                           WEBKIT_COOKIE_POLICY_ACCEPT_ALWAYS);
+  g_signal_connect(cookies, "changed", G_CALLBACK(OnCookiesChanged), state);
   g_free(cookie_database);
 
   // Android WebView permits the third-party cookies used by Roblox login and
@@ -292,6 +300,110 @@ bool InitializeNetworkSession(AppState* state) {
                                                WEBKIT_TLS_ERRORS_POLICY_FAIL);
   std::cerr << "[webview] persistent XDG network session ready\n";
   return true;
+}
+
+bool IsCookieOctet(unsigned char byte) {
+  return byte == 0x21 || (byte >= 0x23 && byte <= 0x2b) ||
+         (byte >= 0x2d && byte <= 0x3a) || (byte >= 0x3c && byte <= 0x5b) ||
+         (byte >= 0x5d && byte <= 0x7e);
+}
+
+bool IsRobloxCookieDomain(const char* domain) {
+  if (domain == nullptr) {
+    return false;
+  }
+  const std::string_view value(domain);
+  return value == ".roblox.com" || value == "roblox.com" ||
+         value == "www.roblox.com";
+}
+
+bool IsBrowserLoginUrl(std::string_view url) {
+  constexpr std::string_view kLoginUrl = "https://www.roblox.com/login";
+  return url.compare(0, kLoginUrl.size(), kLoginUrl) == 0 &&
+         (url.size() == kLoginUrl.size() || url[kLoginUrl.size()] == '?' ||
+          url[kLoginUrl.size()] == '#');
+}
+
+void FinishRobloxCookieQuery(GObject* source, GAsyncResult* result,
+                             gpointer user_data) {
+  auto* state = static_cast<AppState*>(user_data);
+  GError* error = nullptr;
+  GList* cookies = webkit_cookie_manager_get_cookies_finish(
+      WEBKIT_COOKIE_MANAGER(source), result, &error);
+
+  std::string candidate;
+  if (error == nullptr && state->browser_login_mode) {
+    for (GList* item = cookies; item != nullptr; item = item->next) {
+      auto* cookie = static_cast<SoupCookie*>(item->data);
+      const char* name = soup_cookie_get_name(cookie);
+      const char* value = soup_cookie_get_value(cookie);
+      const char* path = soup_cookie_get_path(cookie);
+      if (name == nullptr || std::string_view(name) != ".ROBLOSECURITY" ||
+          value == nullptr || path == nullptr ||
+          std::string_view(path) != "/" ||
+          !IsRobloxCookieDomain(soup_cookie_get_domain(cookie)) ||
+          !soup_cookie_get_secure(cookie) ||
+          !soup_cookie_get_http_only(cookie)) {
+        continue;
+      }
+      const std::size_t size =
+          strnlen(value, mocktail::runtime::kMaximumWebViewCookieBytes + 1);
+      if (size == 0 || size > mocktail::runtime::kMaximumWebViewCookieBytes ||
+          !std::all_of(value, value + size, [](char byte) {
+            return IsCookieOctet(static_cast<unsigned char>(byte));
+          })) {
+        continue;
+      }
+      candidate.assign(value, size);
+      break;
+    }
+  }
+  for (GList* item = cookies; item != nullptr; item = item->next) {
+    soup_cookie_free(static_cast<SoupCookie*>(item->data));
+  }
+  g_list_free(cookies);
+  g_clear_error(&error);
+
+  if (!candidate.empty() && candidate != state->last_reported_roblox_cookie) {
+    if (QueueHelperEvent(
+            state, mocktail::runtime::WebViewHelperEventType::kRobloxCookie,
+            candidate)) {
+      ClearSensitiveString(&state->last_reported_roblox_cookie);
+      state->last_reported_roblox_cookie = candidate;
+      std::cerr << "[webview] browser sign-in session captured\n";
+    } else {
+      std::cerr << "[webview] could not forward browser sign-in session\n";
+    }
+  }
+  ClearSensitiveString(&candidate);
+}
+
+void RequestRobloxCookie(AppState* state) {
+  if (!state->browser_login_mode || state->network_session == nullptr ||
+      state->terminating) {
+    return;
+  }
+  WebKitCookieManager* manager =
+      webkit_network_session_get_cookie_manager(state->network_session);
+  webkit_cookie_manager_get_cookies(manager, "https://www.roblox.com/", nullptr,
+                                    FinishRobloxCookieQuery, state);
+}
+
+void OnCookiesChanged(WebKitCookieManager*, gpointer user_data) {
+  RequestRobloxCookie(static_cast<AppState*>(user_data));
+}
+
+void ConfigureBrowserLogin(AppState* state, WebKitWebView* web_view,
+                           std::string_view url) {
+  state->browser_login_mode = IsBrowserLoginUrl(url);
+  WebKitSettings* settings = webkit_web_view_get_settings(web_view);
+  if (state->browser_login_mode) {
+    webkit_settings_set_user_agent(settings, nullptr);
+    RequestRobloxCookie(state);
+    return;
+  }
+  const std::string user_agent = BuildRobloxAndroidUserAgent();
+  webkit_settings_set_user_agent(settings, user_agent.c_str());
 }
 
 void StartInitialLoad(AppState* state) {
@@ -308,6 +420,7 @@ void StartInitialLoad(AppState* state) {
                             : &state->initial_url;
   if (!target->empty()) {
     state->initial_load_started = true;
+    ConfigureBrowserLogin(state, WEBKIT_WEB_VIEW(web_view_object), *target);
     webkit_web_view_load_uri(WEBKIT_WEB_VIEW(web_view_object), target->c_str());
     ClearSensitiveString(target);
   }
@@ -756,8 +869,12 @@ void ConfigureWebView(WebKitWebView* web_view, const AppState* app) {
   webkit_settings_set_javascript_can_open_windows_automatically(settings, TRUE);
   webkit_settings_set_enable_back_forward_navigation_gestures(
       settings, !app->back_navigation_disabled);
-  const std::string user_agent = BuildRobloxAndroidUserAgent();
-  webkit_settings_set_user_agent(settings, user_agent.c_str());
+  if (app->browser_login_mode) {
+    webkit_settings_set_user_agent(settings, nullptr);
+  } else {
+    const std::string user_agent = BuildRobloxAndroidUserAgent();
+    webkit_settings_set_user_agent(settings, user_agent.c_str());
+  }
 }
 
 void FinishControlledJavaScript(GObject* source_object, GAsyncResult* result,
@@ -1187,6 +1304,7 @@ int main(int argc, char *argv[]) {
   ClearSensitiveString(&state.initial_url);
   ClearSensitiveString(&state.pending_navigation_url);
   ClearSensitiveString(&state.pending_roblox_cookie);
+  ClearSensitiveString(&state.last_reported_roblox_cookie);
   for (std::string& packet : state.pending_hybrid_packets) {
     ClearSensitiveString(&packet);
   }

@@ -53,6 +53,7 @@ enum class WebViewHelperEventType : unsigned char {
   kExecuteRoblox = 1,
   kRobloxWkHybrid = 2,
   kReady = 3,
+  kRobloxCookie = 4,
 };
 
 struct WebViewHelperEvent {

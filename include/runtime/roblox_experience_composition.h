@@ -9,6 +9,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 
 #include "mocktail/status.h"
 #include "runtime/owned_pthread.h"
@@ -184,6 +185,7 @@ class RobloxExperienceComposition final {
       const std::shared_ptr<WebViewHelperProcess>& source_process,
       uint64_t process_generation, uint64_t logical_generation,
       const WebViewHelperEvent& event);
+  Status AcceptWebViewRobloxCookie(std::string_view value);
   Status OpenWebSurface(const std::string& url, const char* transport,
                         WebSurfaceRoute route,
                         WebViewHelperExitObserver exit_observer,

@@ -33,6 +33,19 @@ constexpr char kNativeGlInterfaceClass[] =
     "com/roblox/engine/jni/NativeGLInterface";
 constexpr char kConnectionPointerField[] = "a";
 constexpr std::size_t kMaximumPendingHostWindowEvents = 256;
+constexpr std::string_view kBrowserLoginUrl = "https://www.roblox.com/login";
+
+bool IsLoginCaptchaUrl(std::string_view url) {
+  constexpr std::string_view kHttpsPrefix =
+      "https://www.roblox.com/captcha/app/login";
+  constexpr std::string_view kInternalPrefix = "www:captcha/app/login";
+  const auto matches = [url](std::string_view prefix) {
+    return url.compare(0, prefix.size(), prefix) == 0 &&
+           (url.size() == prefix.size() || url[prefix.size()] == '?' ||
+            url[prefix.size()] == '#');
+  };
+  return matches(kHttpsPrefix) || matches(kInternalPrefix);
+}
 
 Status Invalid(std::string message) {
   return Status::Error(StatusCode::kInvalidArgument, std::move(message));
@@ -158,6 +171,7 @@ struct RobloxWebViewBridge::HostWindowCloseTarget {
   uint64_t active_generation = 0;
   OpenSource active_source = OpenSource::kMessageBus;
   bool close_queued = false;
+  bool browser_login_fallback = false;
 };
 
 struct RobloxWebViewBridge::HostWindowExitContext {
@@ -1112,7 +1126,21 @@ Status RobloxWebViewBridge::HandleCloseWindow() {
   if (!status.ok()) {
     return status;
   }
-  status = sink_.dispatch_close(sink_.context);
+  bool keep_browser_login_open = false;
+  const std::shared_ptr<HostWindowCloseTarget> target =
+      host_window_close_target_;
+  if (target != nullptr) {
+    std::lock_guard<std::mutex> lock(target->mutex);
+    keep_browser_login_open =
+        target->active_generation != 0 && target->browser_login_fallback;
+  }
+  if (keep_browser_login_open) {
+    std::fprintf(stderr,
+                 "  [webview] keeping browser sign-in open after native "
+                 "challenge closed\n");
+  } else {
+    status = sink_.dispatch_close(sink_.context);
+  }
   EndDispatch();
   return status;
 }
@@ -1133,6 +1161,13 @@ Status RobloxWebViewBridge::DispatchOpenRequest(
   if (!status.ok()) {
     return status;
   }
+  const bool browser_login_fallback = IsLoginCaptchaUrl(request.url);
+  if (browser_login_fallback) {
+    request.url = kBrowserLoginUrl;
+    request.title = "Roblox sign in";
+    std::fprintf(stderr,
+                 "  [webview] login challenge routed to browser sign-in\n");
+  }
   if (request.url.empty() ||
       request.url.size() > kMaximumRobloxWebViewUrlBytes) {
     status = Invalid("WebView host-window URL is invalid");
@@ -1149,6 +1184,7 @@ Status RobloxWebViewBridge::DispatchOpenRequest(
       uint64_t previous_generation = 0;
       OpenSource previous_source = OpenSource::kMessageBus;
       bool previous_close_queued = false;
+      bool previous_browser_login_fallback = false;
       {
         std::lock_guard<std::mutex> target_lock(exit_context->target->mutex);
         if (exit_context->target->bridge != this) {
@@ -1158,9 +1194,12 @@ Status RobloxWebViewBridge::DispatchOpenRequest(
           previous_generation = exit_context->target->active_generation;
           previous_source = exit_context->target->active_source;
           previous_close_queued = exit_context->target->close_queued;
+          previous_browser_login_fallback =
+              exit_context->target->browser_login_fallback;
           exit_context->target->active_generation = generation;
           exit_context->target->active_source = source;
           exit_context->target->close_queued = false;
+          exit_context->target->browser_login_fallback = browser_login_fallback;
         }
       }
       if (status.ok()) {
@@ -1181,6 +1220,8 @@ Status RobloxWebViewBridge::DispatchOpenRequest(
           exit_context->target->active_generation = previous_generation;
           exit_context->target->active_source = previous_source;
           exit_context->target->close_queued = previous_close_queued;
+          exit_context->target->browser_login_fallback =
+              previous_browser_login_fallback;
         }
       }
     }
@@ -1273,6 +1314,7 @@ Status RobloxWebViewBridge::DrainHostWindowEvents() {
         if (target->active_generation == event.generation) {
           target->active_generation = 0;
           target->close_queued = false;
+          target->browser_login_fallback = false;
         }
       }
     }
@@ -1688,6 +1730,7 @@ void RobloxWebViewBridge::HostWindowExited(void *context) {
       break;
     case OpenSource::kNativeOverlay:
       exit_context->target->active_generation = 0;
+      exit_context->target->browser_login_fallback = false;
       queue_close_event = false;
       break;
   }

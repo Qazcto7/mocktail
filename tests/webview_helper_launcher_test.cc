@@ -192,6 +192,12 @@ TEST(WebViewHelperLauncherTest, EncodesDistinctBoundedHybridEvents) {
   ASSERT_TRUE(DecodeWebViewHelperEventPacket(packet, &event, &error)) << error;
   EXPECT_EQ(event.type, WebViewHelperEventType::kReady);
   EXPECT_TRUE(event.payload.empty());
+
+  ASSERT_TRUE(EncodeWebViewHelperEventPacket(
+      WebViewHelperEventType::kRobloxCookie, "_|browser-session", &packet));
+  ASSERT_TRUE(DecodeWebViewHelperEventPacket(packet, &event, &error)) << error;
+  EXPECT_EQ(event.type, WebViewHelperEventType::kRobloxCookie);
+  EXPECT_EQ(event.payload, "_|browser-session");
 }
 
 TEST(WebViewHelperLauncherTest, WaitsForExplicitSurfaceReadiness) {
@@ -219,6 +225,9 @@ TEST(WebViewHelperLauncherTest, RejectsMalformedOrOversizedHybridEvents) {
   EXPECT_FALSE(EncodeWebViewHelperEventPacket(
       WebViewHelperEventType::kExecuteRoblox,
       std::string(kMaximumWebViewHybridEventBytes + 1, 'x'), &packet));
+  EXPECT_FALSE(EncodeWebViewHelperEventPacket(
+      WebViewHelperEventType::kRobloxCookie,
+      std::string(kMaximumWebViewCookieBytes + 1, 'x'), &packet));
   ASSERT_TRUE(EncodeWebViewHelperEventPacket(
       WebViewHelperEventType::kExecuteRoblox, "{}", &packet));
 

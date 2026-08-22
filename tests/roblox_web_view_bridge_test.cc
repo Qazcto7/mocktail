@@ -648,9 +648,10 @@ TEST(RobloxWebViewBridgeTest,
       env, env->NewStringUTF(kRobloxOpenCaptchaViewNotification),
       captcha_notification));
   ASSERT_EQ(probe.dispatches, 3);
-  EXPECT_EQ(probe.request.url,
-            "https://www.roblox.com/captcha/app/login?credentialsType="
-            "username&credentialsValue=test%20user&hybrid-return-token=1");
+  EXPECT_EQ(probe.request.url, "https://www.roblox.com/login");
+  EXPECT_EQ(probe.request.title, "Roblox sign in");
+  EXPECT_TRUE(bridge.HandleCloseWindow().ok());
+  EXPECT_EQ(probe.close_dispatches, 1);
   ASSERT_TRUE(bridge.DrainHostWindowEvents().ok());
   EXPECT_EQ(probe.data_model_focus_states,
             (std::vector<std::string>{"Unfocused", "Focused", "Unfocused"}));
@@ -671,6 +672,15 @@ TEST(RobloxWebViewBridgeTest,
   ASSERT_TRUE(bridge.DrainHostWindowEvents().ok());
   EXPECT_EQ(probe.close_publications, close_publications_before_overlay);
 
+  ASSERT_TRUE(
+      bridge
+          .HandleOwnedMessage(
+              R"({"url":"www:captcha/app/login?hybrid-return-token=1"})")
+          .ok());
+  EXPECT_EQ(probe.request.url, "https://www.roblox.com/login");
+  EXPECT_TRUE(bridge.HandleCloseWindow().ok());
+  EXPECT_EQ(probe.close_dispatches, 1);
+
   ASSERT_TRUE(bridge.Shutdown().ok());
   EXPECT_EQ(probe.cookie_handler_clears, 1);
   EXPECT_EQ(probe.cookie_set_handler, nullptr);
@@ -688,7 +698,7 @@ TEST(RobloxWebViewBridgeTest,
   stale_observer.on_exit(stale_observer.context.get());
   EXPECT_TRUE(bridge.DrainHostWindowEvents().ok());
   EXPECT_EQ(probe.close_publications, 1);
-  EXPECT_EQ(probe.dispatches, 4);
+  EXPECT_EQ(probe.dispatches, 5);
   EXPECT_EQ(probe.mutation_dispatches, 1);
   EXPECT_EQ(probe.close_dispatches, 1);
   EXPECT_EQ(probe.cookie_dispatches, 2);

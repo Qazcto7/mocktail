@@ -745,6 +745,46 @@ Status RobloxExperienceComposition::DispatchWebViewCookie(
   return Status::Ok();
 }
 
+Status RobloxExperienceComposition::AcceptWebViewRobloxCookie(
+    std::string_view value) {
+  std::string canonical_header = ".ROBLOSECURITY=";
+  canonical_header.append(value);
+  SecureRobloxCredential credential{std::move(canonical_header)};
+  WebViewRobloxCookieResult prepared = PrepareWebViewRobloxCookie(credential);
+  if (!prepared) {
+    return Invalid(prepared.error);
+  }
+
+  jnivm::VM* vm = jnivm::VM::FromJavaVM(environment_.java_vm);
+  if (vm == nullptr) {
+    return FailedPrecondition("WebView login has no active VM");
+  }
+  const bool was_guest = vm->GetRobloxAuthIdentitySnapshot().user_id <= 0;
+  if (!vm->DispatchRobloxCredential(credential.c_str(), credential.size())) {
+    return Unavailable("could not store WebView login credential");
+  }
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    web_view_cookie_ = std::move(prepared.cookie);
+    web_view_cookie_synchronized_ = true;
+    clear_persisted_web_view_cookie_ = false;
+  }
+
+  if (was_guest && vm->GetRobloxAuthIdentitySnapshot().user_id > 0) {
+    const Status close_status = CloseWebSurface();
+    if (!close_status.ok()) {
+      std::fprintf(stderr,
+                   "  [auth] browser sign-in accepted; WebView close failed: "
+                   "%s\n",
+                   close_status.message().c_str());
+    } else {
+      std::fprintf(stderr,
+                   "  [auth] browser sign-in accepted into the running VM\n");
+    }
+  }
+  return Status::Ok();
+}
+
 Status RobloxExperienceComposition::DispatchBrowserServiceOpen(
     void* context, const RobloxBrowserServiceOpenRequest& request,
     WebViewHelperExitObserver exit_observer) {
@@ -858,6 +898,9 @@ Status RobloxExperienceComposition::RouteWebSurfaceEvent(
                  : FailedPrecondition("WebViewProtocol bridge is unavailable");
     case WebViewHelperEventType::kReady:
       return Status::Ok();
+    case WebViewHelperEventType::kRobloxCookie:
+      return FailedPrecondition(
+          "WebView cookie event requires the active composition");
   }
   return Status::Error(StatusCode::kUnsupported,
                        "WebView helper event type is unsupported");
@@ -882,7 +925,9 @@ Status RobloxExperienceComposition::RouteCurrentWebSurfaceEvent(
     route = web_surface_route_;
     web_view_bridge = web_view_bridge_.get();
   }
-  return RouteWebSurfaceEvent(route, event, web_view_bridge);
+  return event.type == WebViewHelperEventType::kRobloxCookie
+             ? AcceptWebViewRobloxCookie(event.payload)
+             : RouteWebSurfaceEvent(route, event, web_view_bridge);
 }
 
 Status RobloxExperienceComposition::DrainPlatformEvents() {
@@ -905,10 +950,14 @@ Status RobloxExperienceComposition::DrainPlatformEvents() {
                  ? Unavailable("could not receive WebView helper events")
                  : Status::Ok();
     }
-    for (const WebViewHelperEvent& event : events) {
+    for (WebViewHelperEvent& event : events) {
       const Status event_status = RouteCurrentWebSurfaceEvent(
           process, process_generation, logical_generation, event);
+      SecurelyClearString(&event.payload);
       if (!event_status.ok()) {
+        for (WebViewHelperEvent& remaining : events) {
+          SecurelyClearString(&remaining.payload);
+        }
         return event_status;
       }
     }
