@@ -1194,6 +1194,33 @@ bool CookieAvailableForJava() {
   return available;
 }
 
+void SyncRobloxCookiesFromEngine(VM* vm) {
+  if (vm == nullptr) {
+    return;
+  }
+  JNIEnv* env = vm->GetJNIEnv();
+  (void)vm->RefreshRobloxCredentialFromEngine(env);
+  std::string header = CookieHeaderForJava();
+  jstring cookie = static_cast<jstring>(MakeString(header.c_str()));
+  (void)vm->DispatchRobloxCookieSync(env, cookie);
+  ClearCookieString(&header);
+}
+
+bool IsRobloxCookieSyncMethod(jobject obj, jmethodID method_id) {
+  return obj != nullptr && method_id != nullptr &&
+         ObjectClassName(obj) == "com/roblox/client/startup/MainGameActivity" &&
+         std::strcmp(MethodName(method_id), "syncCookiesFromEngine") == 0 &&
+         std::strcmp(MethodSignature(method_id), "()V") == 0;
+}
+
+bool IsRobloxDidLogInMethod(jobject obj, jmethodID method_id) {
+  return obj != nullptr && method_id != nullptr &&
+         ObjectClassName(obj) == "com/roblox/client/startup/NativeHelper" &&
+         std::strcmp(MethodName(method_id),
+                     "gameActivity_onDidLogInReceived") == 0 &&
+         std::strcmp(MethodSignature(method_id), "(Ljava/lang/String;)V") == 0;
+}
+
 bool CookieObjectResultForMethodV(const char* name, va_list args,
                                   jobject* result) {
   if (!name || !result) {
@@ -1726,14 +1753,8 @@ void HandleVoidMethod(jobject obj, jmethodID method_id, va_list args) {
       std::strcmp(name, "setState") == 0) {
     return;
   }
-  if (std::strcmp(name, "syncCookiesFromEngine") == 0) {
-    VM* vm = CurrentVM();
-    if (vm != nullptr) {
-      std::string header = CookieHeaderForJava();
-      jstring cookie = static_cast<jstring>(MakeString(header.c_str()));
-      (void)vm->DispatchRobloxCookieSync(vm->GetJNIEnv(), cookie);
-      ClearCookieString(&header);
-    }
+  if (IsRobloxCookieSyncMethod(obj, method_id)) {
+    SyncRobloxCookiesFromEngine(CurrentVM());
     return;
   }
   if (std::strcmp(name, "l0") == 0) {
@@ -1793,8 +1814,13 @@ void HandleVoidMethod(jobject obj, jmethodID method_id, va_list args) {
     RecordNativeHelperCallback(obj, name);
     return;
   }
+  if (IsRobloxDidLogInMethod(obj, method_id)) {
+    (void)va_arg(args, jstring);
+    SyncRobloxCookiesFromEngine(CurrentVM());
+    RecordNativeHelperCallback(obj, name);
+    return;
+  }
   if (std::strcmp(name, "gameActivity_onAppReady") == 0 ||
-      std::strcmp(name, "gameActivity_onDidLogInReceived") == 0 ||
       std::strcmp(name, "gameActivity_onDidSignUp") == 0 ||
       std::strcmp(name, "gameActivity_onMotionEventListening") == 0 ||
       std::strcmp(name, "gameActivity_onLuaTextBoxChanged") == 0 ||
@@ -3724,14 +3750,8 @@ void HandleVoidMethodA(jobject obj, jmethodID method_id, const jvalue *args) {
   if (HandleAndroidSetWindowFlagsMethodA(obj, method_id, args)) {
     return;
   }
-  if (std::strcmp(name, "syncCookiesFromEngine") == 0) {
-    VM* vm = CurrentVM();
-    if (vm != nullptr) {
-      std::string header = CookieHeaderForJava();
-      jstring cookie = static_cast<jstring>(MakeString(header.c_str()));
-      (void)vm->DispatchRobloxCookieSync(vm->GetJNIEnv(), cookie);
-      ClearCookieString(&header);
-    }
+  if (IsRobloxCookieSyncMethod(obj, method_id)) {
+    SyncRobloxCookiesFromEngine(CurrentVM());
     return;
   }
   if (!args) {
@@ -3835,6 +3855,11 @@ void HandleVoidMethodA(jobject obj, jmethodID method_id, const jvalue *args) {
   if (std::strcmp(name, "gameActivity_onScreenOrientationChanged") == 0) {
     SetIntFieldRaw(obj, "orientation", args[0].i);
     SetNativeHelperBoolean(obj, "isInExperience", "j", args[1].z);
+    RecordNativeHelperCallback(obj, name);
+    return;
+  }
+  if (IsRobloxDidLogInMethod(obj, method_id)) {
+    SyncRobloxCookiesFromEngine(CurrentVM());
     RecordNativeHelperCallback(obj, name);
     return;
   }
@@ -5010,6 +5035,43 @@ bool VM::CopyRobloxCredentialFromProvider(std::string* credential) const {
   } else {
     credential->assign(view.data, view.size);
   }
+  return true;
+}
+
+void VM::SetRobloxCookieGetter(RobloxCookieGetter getter) {
+  std::lock_guard<std::mutex> lock(roblox_cookie_getter_mutex_);
+  roblox_cookie_getter_ = getter;
+}
+
+bool VM::RefreshRobloxCredentialFromEngine(JNIEnv* env) {
+  RobloxCookieGetter getter = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(roblox_cookie_getter_mutex_);
+    getter = roblox_cookie_getter_;
+  }
+  if (getter == nullptr || env == nullptr) {
+    return false;
+  }
+
+  jstring domain = env->NewStringUTF("https://www.roblox.com/");
+  if (domain == nullptr) {
+    return false;
+  }
+  jstring cookies = getter(env, nullptr, domain);
+  env->DeleteLocalRef(domain);
+  if (cookies == nullptr) {
+    return false;
+  }
+
+  std::string raw_cookie = StringFromJString(cookies);
+  env->DeleteLocalRef(cookies);
+  std::string canonical_cookie = NormalizeCookieHeader(raw_cookie);
+  ClearCookieString(&raw_cookie);
+  if (canonical_cookie.empty()) {
+    return false;
+  }
+  StoreCookieHeader(canonical_cookie);
+  ClearCookieString(&canonical_cookie);
   return true;
 }
 

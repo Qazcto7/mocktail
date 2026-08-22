@@ -59,6 +59,8 @@ struct RobloxCredentialView {
 };
 
 using RobloxCredentialProvider = RobloxCredentialView (*)(const void *context);
+using RobloxCookieGetter = jstring (*)(JNIEnv* env, jclass clazz,
+                                       jstring domain);
 
 jobject CreateAndroidConfiguration(JNIEnv *env);
 
@@ -228,6 +230,9 @@ public:
   // retained privately and returned instead until the provider is cleared.
   bool CopyRobloxCredentialFromProvider(std::string *credential) const;
 
+  void SetRobloxCookieGetter(RobloxCookieGetter getter);
+  bool RefreshRobloxCredentialFromEngine(JNIEnv* env);
+
   void SetRobloxCredentialSink(std::shared_ptr<void> context,
                                const RobloxCredentialSinkCallbacks &callbacks);
   void ClearRobloxCredentialSink();
@@ -337,6 +342,9 @@ private:
   const void *roblox_credential_provider_context_ = nullptr;
   RobloxCredentialProvider roblox_credential_provider_ = nullptr;
   std::string roblox_credential_override_;
+
+  mutable std::mutex roblox_cookie_getter_mutex_;
+  RobloxCookieGetter roblox_cookie_getter_ = nullptr;
 
   struct RobloxCredentialSinkBinding {
     std::shared_ptr<void> context;

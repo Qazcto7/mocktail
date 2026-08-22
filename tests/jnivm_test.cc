@@ -164,6 +164,11 @@ RobloxCredentialView TestCredentialProvider(const void *context) {
              : RobloxCredentialView{};
 }
 
+jstring QuickLoginCookieGetter(JNIEnv* env, jclass, jstring) {
+  return env->NewStringUTF(
+      ".ROBLOSECURITY=_|quick-login-cookie; RBXEventTracker=ignored");
+}
+
 struct FmodAudioDeviceProbe {
   int init_calls = 0;
   int write_calls = 0;
@@ -1553,6 +1558,33 @@ TEST_F(JniVmTest, MainGameActivitySynchronizesTypedCookieAndGuestEmpty) {
   env->CallVoidMethodA(activity, sync, nullptr);
   EXPECT_EQ(probe->cookie_sync_calls, 2);
   EXPECT_TRUE(probe->cookie.empty());
+}
+
+TEST_F(JniVmTest, DidLoginRefreshesCredentialFromNativeCookieJar) {
+  const std::string guest;
+  vm_->SetRobloxCredentialProvider(&guest, &TestCredentialProvider);
+  auto credential_probe = std::make_shared<CredentialSinkProbe>();
+  vm_->SetRobloxCredentialSink(
+      credential_probe, RobloxCredentialSinkCallbacks{&ProbeCredentialStore});
+  vm_->SetRobloxCookieGetter(&QuickLoginCookieGetter);
+
+  JNIEnv* env = vm_->GetJNIEnv();
+  jclass helper_class =
+      env->FindClass("com/roblox/client/startup/NativeHelper");
+  jobject helper = env->AllocObject(helper_class);
+  jmethodID did_login = env->GetMethodID(
+      helper_class, "gameActivity_onDidLogInReceived", "(Ljava/lang/String;)V");
+  ASSERT_NE(did_login, nullptr);
+
+  env->CallVoidMethod(helper, did_login,
+                      env->NewStringUTF(R"({"userId":123})"));
+
+  EXPECT_EQ(credential_probe->calls, 1);
+  EXPECT_EQ(credential_probe->credential,
+            ".ROBLOSECURITY=_|quick-login-cookie");
+  std::string credential;
+  ASSERT_TRUE(vm_->CopyRobloxCredentialFromProvider(&credential));
+  EXPECT_EQ(credential, ".ROBLOSECURITY=_|quick-login-cookie");
 }
 
 TEST_F(JniVmTest, CookieProtocolPersistsAndDispatchesExactSetHandler) {

@@ -33398,6 +33398,12 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
             roblox_handle,
             "Java_com_roblox_engine_jni_NativeSettingsInterface_"
             "nativeSetMultipleCookies"));
+    auto* native_get_cookies_for_domain =
+        reinterpret_cast<jnivm::RobloxCookieGetter>(linker::ResolveSymbol(
+            roblox_handle,
+            "Java_com_roblox_engine_jni_NativeSettingsInterface_"
+            "nativeGetCookiesForDomain"));
+    jni_vm->SetRobloxCookieGetter(native_get_cookies_for_domain);
     auto* native_cookie_manager_set_cookie =
         reinterpret_cast<NativeSetTwoStringParamsFn>(linker::ResolveSymbol(
             roblox_handle,
