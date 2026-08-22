@@ -204,13 +204,53 @@ TEST_F(RobloxInputRouterTest, RoutesMouseMotionButtonAndVerticalWheel) {
                   .dispatched());
 
   ASSERT_EQ(probe_.mouse_moves.size(), 1U);
-  EXPECT_FLOAT_EQ(probe_.mouse_moves[0].delta_x, 5.0f);
+  EXPECT_FLOAT_EQ(probe_.mouse_moves[0].x, 200.0f);
+  EXPECT_FLOAT_EQ(probe_.mouse_moves[0].y, 160.0f);
+  EXPECT_FLOAT_EQ(probe_.mouse_moves[0].delta_x, 10.0f);
+  EXPECT_FLOAT_EQ(probe_.mouse_moves[0].delta_y, -6.0f);
   ASSERT_EQ(probe_.mouse_buttons.size(), 1U);
+  EXPECT_FLOAT_EQ(probe_.mouse_buttons[0].x, 200.0f);
+  EXPECT_FLOAT_EQ(probe_.mouse_buttons[0].y, 160.0f);
   EXPECT_EQ(probe_.mouse_buttons[0].button, 1);
   ASSERT_EQ(probe_.mouse_wheels.size(), 1U);
   EXPECT_FLOAT_EQ(probe_.mouse_wheels[0].x, 0.0f);
   EXPECT_FLOAT_EQ(probe_.mouse_wheels[0].y, 0.0f);
   EXPECT_FLOAT_EQ(probe_.mouse_wheels[0].delta_y, -2.0f);
+}
+
+TEST_F(RobloxInputRouterTest,
+       ScalesMouseCoordinatesAfterDisplayScaleChange) {
+  const RobloxInputDispatchResult resize = router_.HandleEvent(
+      Event(platform::WindowResizedEvent{1000, 800, 1250, 1000}));
+  ASSERT_EQ(resize.state, RobloxInputDispatchState::kStateUpdated);
+
+  ASSERT_TRUE(router_
+                  .HandleEvent(Event(platform::MouseMotionEvent{
+                      400.0f, 240.0f, 8.0f, -4.0f, 0}))
+                  .dispatched());
+  ASSERT_TRUE(router_
+                  .HandleEvent(Event(platform::MouseButtonEvent{
+                      true, SDL_BUTTON_LEFT, 1, 300.0f, 200.0f}))
+                  .dispatched());
+  ASSERT_TRUE(router_
+                  .HandleEvent(Event(
+                      platform::MouseWheelEvent{0.0f, 2.0f, 600.0f, 400.0f}))
+                  .dispatched());
+
+  ASSERT_EQ(probe_.mouse_moves.size(), 1U);
+  EXPECT_FLOAT_EQ(probe_.mouse_moves[0].x, 500.0f);
+  EXPECT_FLOAT_EQ(probe_.mouse_moves[0].y, 300.0f);
+  EXPECT_FLOAT_EQ(probe_.mouse_moves[0].delta_x, 10.0f);
+  EXPECT_FLOAT_EQ(probe_.mouse_moves[0].delta_y, -5.0f);
+
+  ASSERT_EQ(probe_.mouse_buttons.size(), 1U);
+  EXPECT_FLOAT_EQ(probe_.mouse_buttons[0].x, 375.0f);
+  EXPECT_FLOAT_EQ(probe_.mouse_buttons[0].y, 250.0f);
+
+  ASSERT_EQ(probe_.mouse_wheels.size(), 1U);
+  EXPECT_FLOAT_EQ(probe_.mouse_wheels[0].x, 750.0f);
+  EXPECT_FLOAT_EQ(probe_.mouse_wheels[0].y, 500.0f);
+  EXPECT_FLOAT_EQ(probe_.mouse_wheels[0].delta_y, 2.0f);
 }
 
 TEST_F(RobloxInputRouterTest, ScalesNormalizedTouchAndKeepsStablePointerIds) {
@@ -493,8 +533,8 @@ TEST_F(RobloxInputRouterTest,
 
   ASSERT_TRUE(result.dispatched());
   ASSERT_EQ(probe_.mouse_buttons.size(), 1U);
-  EXPECT_FLOAT_EQ(probe_.mouse_buttons[0].x, 321.0f);
-  EXPECT_FLOAT_EQ(probe_.mouse_buttons[0].y, 123.0f);
+  EXPECT_FLOAT_EQ(probe_.mouse_buttons[0].x, 642.0f);
+  EXPECT_FLOAT_EQ(probe_.mouse_buttons[0].y, 246.0f);
   EXPECT_TRUE(probe_.mouse_buttons[0].pressed);
   EXPECT_EQ(probe_.mouse_buttons[0].button, 0);
 }
