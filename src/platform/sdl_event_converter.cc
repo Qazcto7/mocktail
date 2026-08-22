@@ -20,7 +20,8 @@ bool ConvertSdlEvent(SDL_Window* window, const SDL_Event& source,
       destination->payload = QuitEvent{};
       return true;
     case SDL_EVENT_WINDOW_RESIZED:
-    case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED: {
+    case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+    case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED: {
       WindowResizedEvent resized;
       if (!SDL_GetWindowSize(window, &resized.logical_width,
                              &resized.logical_height) ||

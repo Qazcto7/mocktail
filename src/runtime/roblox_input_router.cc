@@ -32,6 +32,12 @@ RobloxInputDispatchResult Result(RobloxInputDispatchState state,
   return {state, kind, std::move(status)};
 }
 
+float ScaleToSurfacePixels(float coordinate, int32_t logical_extent,
+                           int32_t pixel_extent) {
+  return coordinate * static_cast<float>(pixel_extent) /
+         static_cast<float>(logical_extent);
+}
+
 }  // namespace
 
 AndroidKeyMapping MapSdlKeyToAndroid(uint32_t sdl_scancode) {
@@ -493,11 +499,19 @@ RobloxInputDispatchResult RobloxInputRouter::HandleMouseMotionLocked(
                   RobloxInputEventKind::kMouseMotion,
                   Unsupported("native mouse motion is unavailable"));
   }
-  mouse_x_ = event.x;
-  mouse_y_ = event.y;
-  return NativeResultLocked(sink_.mouse_move(sink_.context, event.x, event.y,
-                                             event.delta_x, event.delta_y),
-                            RobloxInputEventKind::kMouseMotion);
+  mouse_x_ = ScaleToSurfacePixels(event.x, snapshot_.viewport.logical_width,
+                                  snapshot_.viewport.pixel_width);
+  mouse_y_ = ScaleToSurfacePixels(event.y, snapshot_.viewport.logical_height,
+                                  snapshot_.viewport.pixel_height);
+  const float delta_x = ScaleToSurfacePixels(
+      event.delta_x, snapshot_.viewport.logical_width,
+      snapshot_.viewport.pixel_width);
+  const float delta_y = ScaleToSurfacePixels(
+      event.delta_y, snapshot_.viewport.logical_height,
+      snapshot_.viewport.pixel_height);
+  return NativeResultLocked(
+      sink_.mouse_move(sink_.context, mouse_x_, mouse_y_, delta_x, delta_y),
+      RobloxInputEventKind::kMouseMotion);
 }
 
 RobloxInputDispatchResult RobloxInputRouter::HandleMouseButtonLocked(
@@ -513,9 +527,11 @@ RobloxInputDispatchResult RobloxInputRouter::HandleMouseButtonLocked(
                   RobloxInputEventKind::kMouseButton,
                   Unsupported("SDL mouse button has no Android mapping"));
   }
-  mouse_x_ = event.x;
-  mouse_y_ = event.y;
-  Status status = sink_.mouse_button(sink_.context, event.x, event.y,
+  mouse_x_ = ScaleToSurfacePixels(event.x, snapshot_.viewport.logical_width,
+                                  snapshot_.viewport.pixel_width);
+  mouse_y_ = ScaleToSurfacePixels(event.y, snapshot_.viewport.logical_height,
+                                  snapshot_.viewport.pixel_height);
+  Status status = sink_.mouse_button(sink_.context, mouse_x_, mouse_y_,
                                      event.pressed, android_button);
   if (status.ok()) {
     const auto active = std::find(active_mouse_buttons_.begin(),
@@ -538,8 +554,12 @@ RobloxInputDispatchResult RobloxInputRouter::HandleMouseWheelLocked(
                   RobloxInputEventKind::kMouseWheel,
                   Unsupported("vertical native mouse wheel is unavailable"));
   }
-  mouse_x_ = std::max(0.0f, event.mouse_x);
-  mouse_y_ = std::max(0.0f, event.mouse_y);
+  mouse_x_ = ScaleToSurfacePixels(
+      std::max(0.0f, event.mouse_x), snapshot_.viewport.logical_width,
+      snapshot_.viewport.pixel_width);
+  mouse_y_ = ScaleToSurfacePixels(
+      std::max(0.0f, event.mouse_y), snapshot_.viewport.logical_height,
+      snapshot_.viewport.pixel_height);
   return NativeResultLocked(
       sink_.mouse_wheel(sink_.context, mouse_x_, mouse_y_, event.delta_y),
       RobloxInputEventKind::kMouseWheel);
