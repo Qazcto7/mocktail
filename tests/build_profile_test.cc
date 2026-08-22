@@ -62,6 +62,21 @@ TEST(BuildProfileTest, Payload2628IsSupportedWithoutBinaryPatches) {
   EXPECT_FALSE(result.profile->fmod_output_device_bridge.has_value());
 }
 
+TEST(BuildProfileTest, Payload2908IsSupportedWithoutBinaryPatches) {
+  const ProfileLookupResult result = FindBuildProfile(
+      kManifestPath, "63c5109637b7d7b2bdb8ed8f858023ff5ef49326");
+
+  ASSERT_TRUE(result) << result.error;
+  ASSERT_TRUE(result.profile.has_value());
+  EXPECT_EQ(result.profile->version_name, "2.734.917");
+  EXPECT_EQ(result.profile->version_code, 2908);
+  EXPECT_EQ(result.profile->status, BuildStatus::kSupported);
+  EXPECT_TRUE(result.profile->default_allowed);
+  EXPECT_FALSE(result.profile->allow_legacy_binary_patches);
+  EXPECT_TRUE(result.profile->allow_host_abi_bridges);
+  EXPECT_TRUE(result.profile->allow_host_constructor_replay);
+}
+
 TEST(BuildProfileTest, ReportsUnknownBuildWithoutInventingProfile) {
   const ProfileLookupResult result = FindBuildProfile(
       kManifestPath, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");

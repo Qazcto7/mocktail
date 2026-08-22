@@ -42,6 +42,17 @@
       "allow_host_abi_bridges": true,
       "allow_host_constructor_replay": true,
       "reason": "Verified 2026-07-16 on the current host: independently signature-matched native allocator and pre-JNI state, 3479 constructors replayed without recovery, JNI_OnLoad and ASMA/V2 startup, 2988 Vulkan shaders, a real vkQueuePresentKHR, and explicit lifecycle teardown to Stopped; legacy executable patches and signal recovery remain disabled."
+    },
+    {
+      "version_name": "2.734.917",
+      "version_code": 2908,
+      "elf_build_id": "63c5109637b7d7b2bdb8ed8f858023ff5ef49326",
+      "status": "supported",
+      "default_allowed": true,
+      "allow_legacy_binary_patches": false,
+      "allow_host_abi_bridges": true,
+      "allow_host_constructor_replay": true,
+      "reason": "Verified 2026-08-14 on the current host: the machine-derived exact-Build-ID profile passed two isolated no-recovery Tier C Vulkan canaries; legacy executable patches and signal recovery remain disabled."
     }
   ]
 }

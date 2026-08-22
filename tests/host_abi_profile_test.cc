@@ -28,6 +28,30 @@
 namespace mocktail::compat {
 namespace {
 
+TEST(HostAbiProfileTest, Supported2908HasExactDerivedBoundaries) {
+  const HostAbiProfile* profile =
+      FindHostAbiProfile("63c5109637b7d7b2bdb8ed8f858023ff5ef49326");
+
+  ASSERT_NE(profile, nullptr);
+  ASSERT_EQ(profile->bridge_entry_count, 6U);
+  EXPECT_EQ(profile->bridge_entries[0].rva, 0x1cf69e2U);
+  EXPECT_EQ(profile->bridge_entries[5].rva, 0x1cfa1d9U);
+  EXPECT_EQ(profile->data_seeds.allocator_object_slot, 0x7571570U);
+  EXPECT_EQ(profile->native_allocator.allocate, 0x1cf677eU);
+  EXPECT_EQ(profile->native_allocator.deallocate, 0x1cfa1d9U);
+  EXPECT_EQ(profile->init_array_offset, 0x6f78a18U);
+  EXPECT_EQ(profile->init_array_count, 3556U);
+  EXPECT_TRUE(profile->HasValidConstructorRanges());
+  EXPECT_EQ(profile->ConstructorRangeBegin(), 2U);
+  EXPECT_EQ(profile->ConstructorRangeEndExclusive(), 3556U);
+  EXPECT_TRUE(profile->HasValidNativeMimallocConstructorRanges());
+  EXPECT_EQ(profile->native_pre_jni_bootstrap.registry_initializer,
+            0x21b1889U);
+  EXPECT_EQ(profile->native_pre_jni_bootstrap.registry_slot, 0x7a14898U);
+  EXPECT_EQ(profile->default_allocator_strategy,
+            HostAllocatorStrategy::kNativeMimalloc);
+}
+
 TEST(HostAbiProfileTest, Supported2628HasExactResearchedBoundaries) {
   const HostAbiProfile* profile =
       FindHostAbiProfile("1686400865ae0e408cd7bd67de7a439625c6fd13");
