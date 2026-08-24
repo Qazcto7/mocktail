@@ -14,6 +14,9 @@ PORTABLE_MODE ?= standalone
 PORTABLE_CANONICAL_MODE := $(if $(filter dynamic minimal,$(PORTABLE_MODE)),thin,$(if $(filter full static,$(PORTABLE_MODE)),standalone,$(PORTABLE_MODE)))
 PORTABLE_DIR ?= dist/mocktail-linux-x86_64-glibc-$(PORTABLE_CANONICAL_MODE)
 APPIMAGE ?= dist/Mocktail-x86_64.AppImage
+APPIMAGE_FORMAT ?= classic
+ANYLINUX_PACKAGER ?= quick-sharun
+ANYLINUX_APPIMAGETOOL ?= appimagetool
 PREFIX ?= /usr
 FLATPAK_BUILD_DIR ?= build-flatpak
 FLATPAK_MANIFEST ?= packaging/flatpak/space.bigrat.mocktail.json
@@ -73,13 +76,11 @@ portable-test: release-runtime ## Verify portable packaging and relocation
 
 standalone: appimage ## Build the standalone x86-64 AppImage
 
-appimage: release-runtime ## Build AppImage (requires appimagetool)
-	@command -v appimagetool >/dev/null 2>&1 || { \
-		echo "appimagetool is required for make appimage" >&2; \
-		echo "Install it, then rerun make appimage." >&2; \
-		exit 1; \
-	}
-	@./scripts/package_portable.sh --build-dir "$(BUILD_DIR)" \
+appimage: release-runtime ## Build AppImage (APPIMAGE_FORMAT=classic|anylinux)
+	@MOCKTAIL_APPIMAGE_FORMAT="$(APPIMAGE_FORMAT)" \
+		MOCKTAIL_ANYLINUX_PACKAGER="$(ANYLINUX_PACKAGER)" \
+		MOCKTAIL_ANYLINUX_APPIMAGETOOL="$(ANYLINUX_APPIMAGETOOL)" \
+		./scripts/package_portable.sh --build-dir "$(BUILD_DIR)" \
 		--libc glibc --output "$(PORTABLE_DIR)" --mode "$(PORTABLE_MODE)" \
 		--appimage "$(APPIMAGE)"
 

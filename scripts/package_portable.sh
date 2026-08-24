@@ -28,6 +28,11 @@ STAGING=""
 APPDIR=""
 PACKAGING_LIBRARY_PATH=""
 ANDROID_TOOLS_ABI=""
+APPIMAGE_FORMAT="${MOCKTAIL_APPIMAGE_FORMAT:-classic}"
+ANYLINUX_PACKAGER="${MOCKTAIL_ANYLINUX_PACKAGER:-quick-sharun}"
+ANYLINUX_APPIMAGETOOL="${MOCKTAIL_ANYLINUX_APPIMAGETOOL:-appimagetool}"
+ANYLINUX_SHARUN="${MOCKTAIL_ANYLINUX_SHARUN:-}"
+ANYLINUX_C_SOURCE="${MOCKTAIL_ANYLINUX_C_SOURCE:-}"
 
 readonly -a PROJECT_ARTIFACTS=(
   mocktail
@@ -86,7 +91,8 @@ Options:
   --mode MODE          standalone (default) or thin; aliases: full, static,
                        dynamic, and legacy minimal.
   --dry-run            Audit artifacts and dependency policy without writing.
-  --appimage FILE      Also build FILE with appimagetool.
+  --appimage FILE      Also build FILE. Set MOCKTAIL_APPIMAGE_FORMAT to
+                       classic (default) or anylinux.
   -h, --help           Show this help.
 
 standalone bundles the application userspace and support tools. thin omits
@@ -165,6 +171,12 @@ ParseArguments() {
     Die "--mode must be standalone or thin"
   [[ "${TARGET_LIBC}" == glibc || "${TARGET_LIBC}" == musl ]] ||
     Die "--libc must be glibc or musl"
+  [[ "${APPIMAGE_FORMAT}" == classic ||
+     "${APPIMAGE_FORMAT}" == anylinux ]] ||
+    Die "MOCKTAIL_APPIMAGE_FORMAT must be classic or anylinux"
+  if [[ "${APPIMAGE_FORMAT}" == anylinux && "${TARGET_LIBC}" != glibc ]]; then
+    Die "AnyLinux packaging requires a glibc build"
+  fi
 
   if [[ "${TARGET_LIBC}" == musl && "${MODE}" == standalone ]]; then
     ANDROID_TOOLS_ABI=java
@@ -920,7 +932,6 @@ PublishBundle() {
 BuildAppImage() {
   local icon_path icon_relative_path
   [[ -n "${APPIMAGE_OUTPUT}" ]] || return 0
-  RequireCommand appimagetool
   APPDIR="$(mktemp -d "${OUTPUT%/*}/.Mocktail.AppDir.XXXXXX")"
   mkdir -p "${APPDIR}/usr/share/mocktail-bundle" \
     "${APPDIR}/usr/share/applications" \
@@ -949,10 +960,82 @@ BuildAppImage() {
   done
   ln -s space.bigrat.mocktail.svg "${APPDIR}/.DirIcon"
   mkdir -p -- "$(dirname -- "${APPIMAGE_OUTPUT}")"
-  ARCH=x86_64 appimagetool "${APPDIR}" "${APPIMAGE_OUTPUT}"
+  if [[ "${APPIMAGE_FORMAT}" == anylinux ]]; then
+    BuildAnyLinuxAppImage
+  else
+    ARCH=x86_64 appimagetool "${APPDIR}" "${APPIMAGE_OUTPUT}"
+  fi
   rm -rf -- "${APPDIR}"
   APPDIR=""
   Log "AppImage ready: ${APPIMAGE_OUTPUT}"
+}
+
+BuildAnyLinuxAppImage() {
+  local apkanalyzer path
+  local -a inputs=(
+    "${APPDIR}/usr/share/mocktail-bundle/mocktail/bin/mocktail"
+  )
+  mv -- "${APPDIR}/AppRun" "${APPDIR}/AppRun.sh"
+  while IFS= read -r -d '' path; do
+    [[ "${path}" != "${inputs[0]}" ]] || continue
+    [[ "${path##*/}" != "${FREEBSD_SOCKET_HELPER}" ]] || continue
+    IsElfFile "${path}" || continue
+    [[ -n "$(ReadElfInterpreter "${path}")" ]] || continue
+    inputs+=("${path}")
+  done < <(find "${APPDIR}/usr/share/mocktail-bundle" \
+    \( -type f -o -type l \) -print0 |
+    LC_ALL=C sort -z)
+
+  if [[ -n "${ANYLINUX_SHARUN}" ]]; then
+    install -m 0755 -- "${ANYLINUX_SHARUN}" "${APPDIR}/sharun"
+  fi
+  if [[ -n "${ANYLINUX_C_SOURCE}" ]]; then
+    mkdir -p -- "${APPDIR}/lib"
+    cc -shared -fPIC -O2 "${ANYLINUX_C_SOURCE}" \
+      -o "${APPDIR}/lib/anylinux.so"
+  fi
+
+  Log "deploying AnyLinux runtime"
+  APPDIR="${APPDIR}" MAIN_BIN=mocktail STRACE_MODE=0 NO_STRIP=1 \
+    DEPLOY_DATADIR=0 DEPLOY_LOCALE=0 \
+  "${ANYLINUX_PACKAGER}" "${inputs[@]}"
+
+  WriteAnyLinuxScriptWrapper apksigner
+  apkanalyzer="${APPDIR}/usr/share/mocktail-bundle/mocktail/runtime/android-tools/bin/apkanalyzer"
+  if [[ -x "${apkanalyzer}" ]]; then
+    WriteAnyLinuxScriptWrapper apkanalyzer
+  fi
+  RefreshAnyLinuxBundleChecksums
+
+  APPDIR="${APPDIR}" APPIMAGE_ARCH=x86_64 \
+    "${ANYLINUX_APPIMAGETOOL}" "${APPDIR}" \
+      --output "$(dirname -- "${APPIMAGE_OUTPUT}")" \
+      --name "$(basename -- "${APPIMAGE_OUTPUT}")"
+}
+
+WriteAnyLinuxScriptWrapper() {
+  local name="$1"
+  local wrapper="${APPDIR}/bin/${name}"
+  rm -f -- "${wrapper}"
+  cat >"${wrapper}" <<EOF
+#!/bin/sh
+exec "\${APPDIR}/bin/bash" \
+  "\${APPDIR}/usr/share/mocktail-bundle/mocktail/runtime/android-tools/bin/${name}" "\$@"
+EOF
+  chmod 0755 -- "${wrapper}"
+}
+
+RefreshAnyLinuxBundleChecksums() {
+  local bundle="${APPDIR}/usr/share/mocktail-bundle"
+  (
+    cd -- "${bundle}"
+    find . -type f \
+      ! -path './mocktail/metadata/SHA256SUMS.txt' -print0 |
+      LC_ALL=C sort -z |
+      while IFS= read -r -d '' path; do
+        sha256sum -- "${path}"
+      done
+  ) >"${bundle}/mocktail/metadata/SHA256SUMS.txt"
 }
 
 DryRun() {
@@ -982,7 +1065,21 @@ Main() {
   RequireCommand paste
   RequireCommand unzip
   if [[ -n "${APPIMAGE_OUTPUT}" ]]; then
-    RequireCommand appimagetool
+    if [[ "${APPIMAGE_FORMAT}" == anylinux ]]; then
+      RequireCommand "${ANYLINUX_PACKAGER}"
+      RequireCommand "${ANYLINUX_APPIMAGETOOL}"
+      if [[ -n "${ANYLINUX_SHARUN}" ]]; then
+        [[ -x "${ANYLINUX_SHARUN}" ]] ||
+          Die "AnyLinux sharun is not executable: ${ANYLINUX_SHARUN}"
+      fi
+      if [[ -n "${ANYLINUX_C_SOURCE}" ]]; then
+        [[ -r "${ANYLINUX_C_SOURCE}" ]] ||
+          Die "AnyLinux C source is not readable: ${ANYLINUX_C_SOURCE}"
+        RequireCommand cc
+      fi
+    else
+      RequireCommand appimagetool
+    fi
   fi
   BUILD_DIR="$(CanonicalDirectory "${BUILD_DIR}")"
   ValidateArtifacts

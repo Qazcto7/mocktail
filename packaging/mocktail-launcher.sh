@@ -27,20 +27,36 @@ else
   BUNDLE_ROOT="$(cd -P -- "${LAUNCHER_DIR}/../.." && pwd)"
 fi
 RUNTIME_ROOT="${BUNDLE_ROOT}/mocktail"
-BIN_DIR="${RUNTIME_ROOT}/bin"
+BUNDLED_BIN_DIR="${RUNTIME_ROOT}/bin"
+ANYLINUX_BIN_DIR="${MOCKTAIL_ANYLINUX_BIN_DIR:-}"
+if [[ -n "${ANYLINUX_BIN_DIR}" ]]; then
+  [[ "${ANYLINUX_BIN_DIR}" == /* && -d "${ANYLINUX_BIN_DIR}" ]] || {
+    printf 'mocktail: invalid AnyLinux binary directory: %s\n' \
+      "${ANYLINUX_BIN_DIR}" >&2
+    exit 1
+  }
+  BIN_DIR="${ANYLINUX_BIN_DIR}"
+else
+  BIN_DIR="${BUNDLED_BIN_DIR}"
+fi
 MAIN_BINARY="${BIN_DIR}/mocktail"
 UPDATE_HELPER="${BIN_DIR}/mocktail_updater"
 FAILURE_DIALOG_HELPER="${BIN_DIR}/mocktail_failure_dialog"
 WEBVIEW_HELPER="${BIN_DIR}/mocktail_webview_helper"
-FREEBSD_SOCKET_HELPER="${BIN_DIR}/mocktail_freebsd_socket_helper"
+FREEBSD_SOCKET_HELPER="${BUNDLED_BIN_DIR}/mocktail_freebsd_socket_helper"
 ANDROID_BUILD_TOOLS="${RUNTIME_ROOT}/runtime/android-tools/bin"
+ANDROID_TOOL_EXEC_DIR="${ANYLINUX_BIN_DIR:-${ANDROID_BUILD_TOOLS}}"
 METADATA_DIR="${RUNTIME_ROOT}/metadata"
 ABI_MANIFEST="${METADATA_DIR}/ABI.txt"
 DEPENDENCY_MANIFEST="${METADATA_DIR}/DEPENDENCIES.txt"
 CHECKSUM_MANIFEST="${METADATA_DIR}/SHA256SUMS.txt"
 SUPPORT_ROOT="${RUNTIME_ROOT}/runtime"
-SUPPORT_BIN="${SUPPORT_ROOT}/bin"
-export PATH="${SUPPORT_BIN}:${ANDROID_BUILD_TOOLS}:${PATH}"
+if [[ -n "${ANYLINUX_BIN_DIR}" ]]; then
+  SUPPORT_BIN="${ANYLINUX_BIN_DIR}"
+else
+  SUPPORT_BIN="${SUPPORT_ROOT}/bin"
+fi
+export PATH="${BIN_DIR}:${SUPPORT_BIN}:${ANDROID_BUILD_TOOLS}:${PATH}"
 export LD_LIBRARY_PATH="${RUNTIME_ROOT}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 export MOCKTAIL_FREEBSD_SOCKET_HELPER="${FREEBSD_SOCKET_HELPER}"
 
@@ -209,11 +225,16 @@ ConfigureStandaloneEnvironment() {
   export JAVA_HOME="${SUPPORT_ROOT}/jre"
   export SSL_CERT_FILE="${SUPPORT_ROOT}/share/ca-certificates/ca-bundle.crt"
   export REQUESTS_CA_BUNDLE="${SSL_CERT_FILE}"
-  export WEBKIT_EXEC_PATH="${RUNTIME_ROOT}/${webkit6_exec}"
+  if [[ -n "${ANYLINUX_BIN_DIR}" ]]; then
+    export WEBKIT_EXEC_PATH="${ANYLINUX_BIN_DIR}"
+    export GST_PLUGIN_SCANNER="${ANYLINUX_BIN_DIR}/gst-plugin-scanner"
+  else
+    export WEBKIT_EXEC_PATH="${RUNTIME_ROOT}/${webkit6_exec}"
+    export GST_PLUGIN_SCANNER="${RUNTIME_ROOT}/${gst_scanner}"
+  fi
   export WEBKIT_INJECTED_BUNDLE_PATH="$(dirname -- \
     "${RUNTIME_ROOT}/${webkit6_bundle}")"
   export GST_PLUGIN_PATH_1_0="${RUNTIME_ROOT}/${gst_plugins}"
-  export GST_PLUGIN_SCANNER="${RUNTIME_ROOT}/${gst_scanner}"
   export GIO_EXTRA_MODULES="${RUNTIME_ROOT}/${gio_modules}"
   export GIO_USE_TLS="${gio_tls}"
   export GDK_PIXBUF_MODULE_FILE="${RUNTIME_ROOT}/${pixbuf_cache}"
@@ -227,6 +248,7 @@ ConfigureStandaloneEnvironment() {
 
 EnterStandaloneNamespace() {
   [[ "${ABI_MODE}" == standalone &&
+     -z "${ANYLINUX_BIN_DIR}" &&
      "${MOCKTAIL_STANDALONE_NAMESPACE:-0}" != 1 &&
      "${MOCKTAIL_SKIP_NAMESPACE_CHECK:-0}" != 1 ]] || return 0
   local namespace_usr="${RUNTIME_ROOT}/namespace/usr"
@@ -345,12 +367,14 @@ CheckBundleAbi() {
   [[ "$(uname -m)" == "${ABI_ARCHITECTURE}" ]] ||
     Die "bundle requires ${ABI_ARCHITECTURE}, host is $(uname -m)"
   local main_interpreter host_libc
-  main_interpreter="$(ReadElfInterpreter "${MAIN_BINARY}")"
+  main_interpreter="$(ReadElfInterpreter "${BUNDLED_BIN_DIR}/mocktail")"
   [[ "${main_interpreter}" == "${ABI_INTERPRETER}" ]] ||
     Die "mocktail ELF interpreter does not match ABI.txt (expected ${ABI_INTERPRETER}, found ${main_interpreter:-none})"
-  ValidateBundledElfAbi "${MAIN_BINARY}" "mocktail"
-  ValidateBundledElfAbi "${UPDATE_HELPER}" "Mocktail updater"
-  ValidateBundledElfAbi "${WEBVIEW_HELPER}" "WebView helper"
+  ValidateBundledElfAbi "${BUNDLED_BIN_DIR}/mocktail" "mocktail"
+  ValidateBundledElfAbi "${BUNDLED_BIN_DIR}/mocktail_updater" \
+    "Mocktail updater"
+  ValidateBundledElfAbi "${BUNDLED_BIN_DIR}/mocktail_webview_helper" \
+    "WebView helper"
   [[ -x "${ANDROID_BUILD_TOOLS}/aapt" ]] ||
     Die "Android APK metadata tool is unavailable"
   if [[ "${ABI_ANDROID_TOOLS_LIBC}" == java ]]; then
@@ -361,11 +385,13 @@ CheckBundleAbi() {
       "Android aapt" glibc
   fi
 
-  host_libc="$(DetectHostLibc)"
-  [[ "${host_libc}" != unknown ]] ||
-    Die "cannot determine host libc ABI; install working getconf or ldd"
-  [[ "${host_libc}" == "${ABI_LIBC}" ]] ||
-    Die "bundle targets ${ABI_LIBC}, but host libc is ${host_libc}; use a Mocktail x86-64 ${host_libc} AppImage"
+  if [[ -z "${ANYLINUX_BIN_DIR}" ]]; then
+    host_libc="$(DetectHostLibc)"
+    [[ "${host_libc}" != unknown ]] ||
+      Die "cannot determine host libc ABI; install working getconf or ldd"
+    [[ "${host_libc}" == "${ABI_LIBC}" ]] ||
+      Die "bundle targets ${ABI_LIBC}, but host libc is ${host_libc}; use a Mocktail x86-64 ${host_libc} AppImage"
+  fi
 }
 
 CheckCommand() {
@@ -428,16 +454,16 @@ CheckSystem() {
       status=1
     fi
   fi
-  if ! "${ANDROID_BUILD_TOOLS}/aapt" version >/dev/null 2>&1; then
+  if ! "${ANDROID_TOOL_EXEC_DIR}/aapt" version >/dev/null 2>&1; then
     printf '  bundled Android APK analyzer cannot execute\n' >&2
     status=1
   fi
   if [[ "${ABI_ANDROID_TOOLS_LIBC}" == java ]] &&
-      ! "${ANDROID_BUILD_TOOLS}/apkanalyzer" --help >/dev/null 2>&1; then
+      ! "${ANDROID_TOOL_EXEC_DIR}/apkanalyzer" --help >/dev/null 2>&1; then
       printf '  bundled Android apkanalyzer cannot execute with Java\n' >&2
       status=1
   fi
-  if ! "${ANDROID_BUILD_TOOLS}/apksigner" version >/dev/null 2>&1; then
+  if ! "${ANDROID_TOOL_EXEC_DIR}/apksigner" version >/dev/null 2>&1; then
     printf '  bundled Android apksigner cannot execute with host Java\n' >&2
     status=1
   fi

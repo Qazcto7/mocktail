@@ -33,7 +33,7 @@ concurrency:
 
 jobs:
   appimage:
-    name: AppImage (Ubuntu 26.04)
+    name: AppImage (AnyLinux)
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -49,29 +49,57 @@ jobs:
           docker run --rm \
             --volume "$GITHUB_WORKSPACE:/workspace" \
             --workdir /workspace \
-            ubuntu:26.04 bash -Eeuo pipefail -c '
-              export DEBIAN_FRONTEND=noninteractive
-              apt-get update
-              apt-get install --yes --no-install-recommends \
-                build-essential cmake git ninja-build pkg-config lld \
-                libsdl3-dev libsdl3-ttf-dev libcurl4-openssl-dev \
-                libssl-dev nlohmann-json3-dev libyaml-dev libelf-dev \
-                libminizip-dev libcapstone-dev libgtk-4-dev \
-                libadwaita-1-dev libwebkitgtk-6.0-dev libutf8proc-dev \
-                libfontconfig1-dev libegl-dev libvulkan-dev zlib1g-dev \
-                libplacebo-dev \
-                bubblewrap xdg-dbus-proxy patchelf jq unzip file curl \
-                ca-certificates default-jdk-headless libgif7 python3 \
-                python3-capstone python3-yaml python3-requests \
-                python3-urllib3 python3-certifi python3-charset-normalizer \
-                python3-idna squashfs-tools
+            archlinux:base-devel bash -Eeuo pipefail -c '
+              pacman -Syu --noconfirm --needed \
+                cmake git ninja pkgconf lld sdl3 sdl3_ttf curl openssl \
+                nlohmann-json libyaml libelf minizip-ng capstone gtk4 \
+                libadwaita webkitgtk-6.0 libutf8proc fontconfig libglvnd \
+                vulkan-headers zlib libplacebo bubblewrap xdg-dbus-proxy \
+                patchelf jq unzip file ca-certificates jdk-openjdk giflib \
+                python python-capstone python-yaml python-requests \
+                python-urllib3 python-certifi python-charset-normalizer \
+                python-idna dbus
+
+              curl --fail --location --retry 3 \
+                --output /tmp/quick-sharun \
+                https://raw.githubusercontent.com/pkgforge-dev/Anylinux-AppImages/2a025cef14483c5bc2a75b479071f4d5c58a906f/useful-tools/quick-sharun.sh
+              echo "fa66d0189e1e87df781c049dfb23cbb1e753786056f693a4483d6d3af61e7ee1  /tmp/quick-sharun" | \
+                sha256sum --check --strict
+              chmod 0755 /tmp/quick-sharun
+
+              curl --fail --location --retry 3 \
+                --output /tmp/sharun \
+                https://github.com/pkgforge-dev/Anylinux-sharun/releases/download/2.2.6/sharun-x86_64
+              echo "a4d51752f9861b4870ca529fea04087310b28f8943cc55b99a95b777d4db92ec  /tmp/sharun" | \
+                sha256sum --check --strict
+              chmod 0755 /tmp/sharun
+
+              curl --fail --location --retry 3 \
+                --output /tmp/anylinux.c \
+                https://raw.githubusercontent.com/pkgforge-dev/Anylinux-AppImages/2a025cef14483c5bc2a75b479071f4d5c58a906f/useful-tools/lib/anylinux.c
+              echo "f50650ad96d177559bdd0737df509fa20bd4af08887631c738fc1f31bfac185f  /tmp/anylinux.c" | \
+                sha256sum --check --strict
 
               curl --fail --location --retry 3 \
                 --output /tmp/appimagetool \
-                https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
-              echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  /tmp/appimagetool" | \
+                https://github.com/pkgforge-dev/appimagetool/releases/download/0.3.3/appimagetool-x86_64-linux
+              echo "0d01a4e2628efc897be9663f0faeed6a171e1851270b4e1ce4c22434a36ecebd  /tmp/appimagetool" | \
                 sha256sum --check --strict
-              install -m 0755 /tmp/appimagetool /usr/local/bin/appimagetool
+              chmod 0755 /tmp/appimagetool
+
+              curl --fail --location --retry 3 \
+                --output /tmp/uruntime \
+                https://github.com/VHSgunzo/uruntime/releases/download/v0.5.9/uruntime-appimage-dwarfs-lite-x86_64
+              echo "cef962c299f2fa19b2b3cdf2fa1565ee8541796cc89b9a97a591f94041e8b083  /tmp/uruntime" | \
+                sha256sum --check --strict
+              chmod 0755 /tmp/uruntime
+
+              curl --fail --location --retry 3 \
+                --output /tmp/mkdwarfs \
+                https://github.com/mhx/dwarfs/releases/download/v0.15.6/dwarfs-universal-0.15.6-Linux-x86_64
+              echo "50891c38ba359db8271819a6cbf6aaa8068681523f0c4f2b8242007a45edaa28  /tmp/mkdwarfs" | \
+                sha256sum --check --strict
+              chmod 0755 /tmp/mkdwarfs
 
               curl --fail --location --retry 3 \
                 --output /tmp/android-build-tools.zip \
@@ -85,11 +113,16 @@ jobs:
               git config --global --add safe.directory /workspace
               git config --global --add safe.directory /workspace/third_party/Vulkan-Headers
               git config --global --add safe.directory /workspace/third_party/libjnivm
-              export APPIMAGE_EXTRACT_AND_RUN=1
               export MOCKTAIL_ANDROID_BUILD_TOOLS_ROOT="$android_tools_root"
+              export MOCKTAIL_ANYLINUX_SHARUN=/tmp/sharun
+              export MOCKTAIL_ANYLINUX_C_SOURCE=/tmp/anylinux.c
+              export RUNTIME=/tmp/uruntime
+              export DWARFS_CMD=/tmp/mkdwarfs
               make appimage BUILD_DIR=build-appimage JOBS=4 \
                 APPIMAGE=dist/Mocktail-x86_64.AppImage \
-                PORTABLE_MODE=standalone
+                PORTABLE_MODE=standalone APPIMAGE_FORMAT=anylinux \
+                ANYLINUX_PACKAGER=/tmp/quick-sharun \
+                ANYLINUX_APPIMAGETOOL=/tmp/appimagetool
               test -x dist/Mocktail-x86_64.AppImage
             '
 

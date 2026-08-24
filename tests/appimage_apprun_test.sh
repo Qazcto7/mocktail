@@ -23,4 +23,21 @@ grep -Fq 'argc=2' <<<"${output}"
 grep -Fq 'first=--launch-uri' <<<"${output}"
 grep -Fq "second=${launch_uri}" <<<"${output}"
 
+mkdir -p -- "${app_dir}/bin" \
+  "${app_dir}/usr/share/mocktail-bundle/mocktail/scripts"
+printf '%s\n' '#!/bin/sh' 'exec /usr/bin/bash "$@"' \
+  >"${app_dir}/bin/bash"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'printf "anylinux=%s bundle=%s first=%s\n" "${MOCKTAIL_ANYLINUX_BIN_DIR}" "${MOCKTAIL_BUNDLE_ROOT}" "$1"' \
+  >"${app_dir}/usr/share/mocktail-bundle/mocktail/scripts/portable_launcher.sh"
+chmod 0755 "${app_dir}/bin/bash" \
+  "${app_dir}/usr/share/mocktail-bundle/mocktail/scripts/portable_launcher.sh"
+
+output="$(APPDIR="${app_dir}" SHARUN_DIR="${app_dir}" \
+  "${app_run}" --launch-uri "${launch_uri}")"
+grep -Fq "anylinux=${app_dir}/bin" <<<"${output}"
+grep -Fq "bundle=${app_dir}/usr/share/mocktail-bundle" <<<"${output}"
+grep -Fq 'first=--launch-uri' <<<"${output}"
+
 printf 'AppImage AppRun test passed\n'
