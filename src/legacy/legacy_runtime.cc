@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <dlfcn.h>
+#include <link.h>
 #include <iomanip>
 #include <iostream>
 #include <csignal>
@@ -2651,6 +2652,29 @@ struct SymbolResolveResult {
   SymbolResolveSource source = SymbolResolveSource::kMissing;
 };
 
+// dlsym searches the object and its dependency chain, so a
+// stub that transitively links SDL or another host library would
+// satisfy EGL/GL/Vulkan lookups with unrelated host symbols
+//
+// So, we should only accept the symbol if its stub owns it.
+bool StubOwnsSymbolAddress(void* handle, void* address) {
+  if (handle == nullptr || address == nullptr) {
+    return false;
+  }
+
+  Dl_info info = {};
+  if (::dladdr(address, &info) == 0 || info.dli_fbase == nullptr) {
+    return false;
+  }
+
+	link_map* map = nullptr;
+  if (::dlinfo(handle, RTLD_DI_LINKMAP, &map) != 0 || map == nullptr) {
+    return false;
+  }
+
+  return reinterpret_cast<void*>(map->l_addr) == info.dli_fbase;
+}
+
 SymbolResolveResult ResolveSymbolForBionic(const char* name, bool has_window,
                                           void* real_gles_handle,
                                           const std::vector<void*>& stub_handles) {
@@ -2677,8 +2701,8 @@ SymbolResolveResult ResolveSymbolForBionic(const char* name, bool has_window,
   }
 
   for (void* h : stub_handles) {
-    result.address = ::dlsym(h, name);
-    if (result.address != nullptr) {
+    if (void *candidate = ::dlsym(h, name); candidate != nullptr && StubOwnsSymbolAddress(h, candidate)) {
+      result.address = candidate;
       result.source = SymbolResolveSource::kStub;
       return result;
     }
@@ -30398,6 +30422,32 @@ void* DelayedSendGameLoadedThread(void* arg) {
   return nullptr;
 }
 
+// Resolve the exact Android Vulkan loader adapter shipped next to this
+// runtime binary. Never resolve it by SONAME: an unversioned host
+// libvulkan.so on the search path (for example distribution or Nix wrappers)
+// would win, silently drop VK_KHR_android_surface support, and break
+// direct-Vulkan mode with "Unable to create Vulkan instance".
+static std::string RuntimeVulkanAdapterPath() {
+  const char* override_dir = std::getenv("MOCKTAIL_RUNTIME_LIBRARY_DIR");
+  std::string directory;
+  if (override_dir != nullptr && override_dir[0] != '\0') {
+    directory = override_dir;
+  } else {
+    char executable_path[4097] = {};
+    const ssize_t length =
+        ::readlink("/proc/self/exe", executable_path,
+                   sizeof(executable_path) - 1U);
+    if (length <= 0) return {};
+    executable_path[length] = '\0';
+    std::string path(executable_path);
+    const std::string::size_type separator = path.find_last_of('/');
+    if (separator == std::string::npos) return {};
+    directory = separator == 0 ? "/" : path.substr(0, separator);
+  }
+  if (directory.empty()) return {};
+  return directory + "/libvulkan.so";
+}
+
 void* EngineStartupThread(void* arg) {
   auto* context = static_cast<EngineStartupContext*>(arg);
   if (context == nullptr) {
@@ -32267,17 +32317,25 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
   void* bionic_vulkan_adapter_handle = nullptr;
   for (const char* name : stub_names) {
     void* h = nullptr;
+    bool exact_adapter = false;
     if (std::strcmp(name, "libEGL.so") == 0 &&
         bionic_egl_bridge.IsLoaded()) {
       h = bionic_egl_bridge.handle();
-    } else {
+      exact_adapter = true;
+    } else if (std::strcmp(name, "libvulkan.so") == 0) {
+      const std::string vulkan_adapter = RuntimeVulkanAdapterPath();
+      if (!vulkan_adapter.empty()) {
+        h = ::dlopen(vulkan_adapter.c_str(), RTLD_LAZY | RTLD_GLOBAL);
+        exact_adapter = h != nullptr;
+      }
+    }
+    if (h == nullptr) {
       h = ::dlopen(name, RTLD_LAZY | RTLD_GLOBAL | RTLD_NOLOAD);
       if (!h) h = ::dlopen(name, RTLD_LAZY | RTLD_GLOBAL);
     }
     if (h) {
       std::cout << "  [stubs] Preloaded " << name;
-      if (std::strcmp(name, "libEGL.so") == 0 &&
-          bionic_egl_bridge.IsLoaded()) {
+      if (exact_adapter) {
         std::cout << " via exact Mocktail adapter";
       }
       std::cout << '\n';
@@ -32806,7 +32864,8 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
     size_t vulkan_exports = 0;
     for (const char* name : kVulkanAdapterExports) {
       void* address = ::dlsym(bionic_vulkan_adapter_handle, name);
-      if (address == nullptr) {
+      if (address == nullptr ||
+          !StubOwnsSymbolAddress(bionic_vulkan_adapter_handle, address)) {
         continue;
       }
       linker::RegisterSyntheticSymbol("libvulkan.so", name, address);

@@ -318,6 +318,14 @@ CanaryResult RunReadinessCanary(const CanaryOptions& options) {
            "__NV_PRIME_RENDER_OFFLOAD",
            "__VK_LAYER_NV_optimus",
            "__GLX_VENDOR_LIBRARY_NAME",
+           // Dynamic-library search state and graphics library overrides
+           // must reach the isolated runtime so that distributions which
+           // resolve shared libraries through the launcher environment
+           // (for example NixOS wrappers) still find libGLESv2/libEGL.
+           "LD_LIBRARY_PATH",
+           "MOCKTAIL_EGL_LIBRARY",
+           "MOCKTAIL_GLES_LIBRARY",
+           "MOCKTAIL_ANGLE_LIB_DIR",
        }) {
     AddInherited(name, &environment);
   }
