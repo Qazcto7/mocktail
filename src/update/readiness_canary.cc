@@ -326,6 +326,11 @@ CanaryResult RunReadinessCanary(const CanaryOptions& options) {
            "MOCKTAIL_EGL_LIBRARY",
            "MOCKTAIL_GLES_LIBRARY",
            "MOCKTAIL_ANGLE_LIB_DIR",
+           "GDK_PIXBUF_MODULE_FILE",
+           "XDG_DATA_DIRS",
+           "GSETTINGS_SCHEMA_DIR",
+           "GIO_EXTRA_MODULES",
+           "GTK_PATH",
        }) {
     AddInherited(name, &environment);
   }
