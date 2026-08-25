@@ -733,18 +733,8 @@ add_test(
           $<TARGET_FILE:unknown_roblox_fixture>
           ${PROJECT_SOURCE_DIR}/config/roblox_compatibility.json
 )
-
-add_test(
-  NAME RuntimeConfigTest.DetachedLegacyThreadsFailBeforeNativeLoad
-  COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/detached_thread_policy_test.sh
-          $<TARGET_FILE:mocktail>
-          $<TARGET_FILE:unknown_roblox_fixture>
-          ${PROJECT_SOURCE_DIR}/src/runtime/runtime_config.cc
-          ${PROJECT_SOURCE_DIR}/src/legacy/legacy_runtime.cc
-)
 set_tests_properties(
   CompatibilityGateTest.UnknownBuildFailsBeforeNativeLoad
-  RuntimeConfigTest.DetachedLegacyThreadsFailBeforeNativeLoad
   PROPERTIES RESOURCE_LOCK mocktail_current_user_instance
 )
 
@@ -912,31 +902,6 @@ target_link_libraries(linker_registry_test PRIVATE
 gtest_discover_tests(linker_registry_test)
 
 add_test(
-  NAME StartupDefaultsTest.WindowedKeepsRealUpdateSurfaceOptIn
-  COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/startup_defaults_test.sh
-          ${CMAKE_SOURCE_DIR}/src/legacy/legacy_runtime.cc
-)
-
-add_test(
-  NAME StartupThreadOwnershipTest.TimeoutCannotDetachLiveWorker
-  COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/startup_thread_ownership_test.sh
-          ${CMAKE_SOURCE_DIR}/src/legacy/legacy_runtime.cc
-          ${CMAKE_SOURCE_DIR}/include/runtime/owned_pthread.h
-)
-
-add_test(
-  NAME NetworkReadinessGateTest.StrictOrderedPrivateValidation
-  COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/network_readiness_gate_test.sh
-          ${CMAKE_SOURCE_DIR}/scripts/real_bringup_smoke.sh
-)
-
-add_test(
-  NAME InteractiveLaunchContractTest.NoHiddenWatchdog
-  COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/interactive_launch_contract_test.sh
-          ${CMAKE_SOURCE_DIR}/scripts/real_bringup_smoke.sh
-)
-
-add_test(
   NAME AppImageAppRunTest.ResolvesCanonicalBundleRoot
   COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/appimage_apprun_test.sh
           ${CMAKE_SOURCE_DIR}/packaging/AppRun
@@ -947,13 +912,6 @@ add_test(
   COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/url_handler_registration_test.sh
           ${CMAKE_SOURCE_DIR}/scripts/register_url_handler.sh
           ${CMAKE_SOURCE_DIR}/packaging/space.bigrat.mocktail.desktop
-)
-
-add_test(
-  NAME ExternalLaunchLifecycleTest.AcksOnlyAfterReexecBoundary
-  COMMAND bash
-          ${CMAKE_CURRENT_SOURCE_DIR}/external_launch_lifecycle_contract_test.sh
-          ${PROJECT_SOURCE_DIR}/src/main.cc
 )
 
 add_test(

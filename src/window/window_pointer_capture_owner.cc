@@ -67,10 +67,9 @@ bool WindowPointerCaptureOwner::Pump(bool text_input_active) {
   if (wait_for_native_unlock_after_right_drag_ && !native_lock_active) {
     wait_for_native_unlock_after_right_drag_ = false;
   }
-  const bool client_active = query_ok && focused_;
-  const bool native_capture_active = client_active && native_lock_active &&
-                                     !wait_for_native_unlock_after_right_drag_;
-  const bool right_drag_active = focused_ && right_button_held_;
+  const bool client_active = query_ok;
+  const bool native_capture_active = client_active && native_lock_active;
+  const bool right_drag_active = right_button_held_;
   const bool capture_requested =
       (right_drag_active || native_capture_active) && !text_input_active;
   const bool cursor_visible =
@@ -80,45 +79,25 @@ bool WindowPointerCaptureOwner::Pump(bool text_input_active) {
 
 bool WindowPointerCaptureOwner::OnRightButton(bool pressed,
                                               bool text_input_active) {
-  if (pressed && !right_button_held_) {
-    // nativeGetMainWindowIsMouseLockedCenter may start returning true as soon
-    // as Roblox receives RMB down. Remember only a lock observed before the
-    // drag so a stale post-release value cannot capture SDL again.
-    native_lock_was_active_before_right_drag_ =
-        native_lock_observed_ && !wait_for_native_unlock_after_right_drag_;
-    shift_key_pressed_during_right_drag_ = false;
-    discard_next_motion_after_right_drag_ = false;
-  } else if (!pressed && right_button_held_) {
-    const bool native_lock_should_survive_right_drag =
-        native_lock_was_active_before_right_drag_ ||
-        (shift_key_pressed_during_right_drag_ && native_lock_observed_);
-    const bool transient_right_drag = !native_lock_should_survive_right_drag;
-    wait_for_native_unlock_after_right_drag_ = transient_right_drag;
-    discard_next_motion_after_right_drag_ = transient_right_drag;
-    native_lock_was_active_before_right_drag_ = false;
-    shift_key_pressed_during_right_drag_ = false;
+  if (pressed) {
+    focused_ = true;
   }
-  right_button_held_ = focused_ && pressed;
+  right_button_held_ = pressed;
   return Pump(text_input_active);
 }
 
 bool WindowPointerCaptureOwner::OnShiftKeyPressed(bool text_input_active) {
-  if (!focused_ || !right_button_held_) {
-    return true;
-  }
-  shift_key_pressed_during_right_drag_ = true;
+  focused_ = true;
   return Pump(text_input_active);
 }
 
 bool WindowPointerCaptureOwner::NeedsRightButtonReleaseRecovery(
-    bool observed_pressed) const {
-  return right_button_held_ && !observed_pressed;
+    bool /*observed_pressed*/) const {
+  return false;
 }
 
 bool WindowPointerCaptureOwner::ShouldDispatchMouseMotion() {
-  const bool discard_motion = discard_next_motion_after_right_drag_;
-  discard_next_motion_after_right_drag_ = false;
-  return !discard_motion && !wait_for_native_unlock_after_right_drag_;
+  return true;
 }
 
 bool WindowPointerCaptureOwner::OnFocusGained(bool text_input_active) {

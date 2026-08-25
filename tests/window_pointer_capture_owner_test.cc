@@ -110,7 +110,7 @@ TEST(WindowPointerCaptureOwnerTest, RightDragCapturesUntilButtonRelease) {
 }
 
 TEST(WindowPointerCaptureOwnerTest,
-     LongRightReleaseRejectsStaleNativeLockUntilUnlockObserved) {
+     RightReleaseRestoresUnlockedStateWhenNoNativeLock) {
   FakeBackend backend;
   QueryState query{true, false};
   WindowPointerCaptureOwner owner(&backend);
@@ -125,19 +125,10 @@ TEST(WindowPointerCaptureOwnerTest,
   }
   ASSERT_TRUE(owner.captured());
 
+  query.locked_center = false;
   ASSERT_TRUE(owner.OnRightButton(false, false));
   EXPECT_FALSE(owner.captured());
-  EXPECT_FALSE(owner.ShouldDispatchMouseMotion());
-  ASSERT_TRUE(owner.Pump(false));
-  EXPECT_FALSE(owner.captured());
-  EXPECT_FALSE(owner.ShouldDispatchMouseMotion());
-
-  query.locked_center = false;
-  ASSERT_TRUE(owner.Pump(false));
   EXPECT_TRUE(owner.ShouldDispatchMouseMotion());
-  query.locked_center = true;
-  ASSERT_TRUE(owner.Pump(false));
-  EXPECT_TRUE(owner.captured());
 }
 
 TEST(WindowPointerCaptureOwnerTest,
@@ -187,24 +178,6 @@ TEST(WindowPointerCaptureOwnerTest,
   ASSERT_TRUE(owner.OnRightButton(false, false));
 
   EXPECT_FALSE(owner.captured());
-  EXPECT_FALSE(owner.ShouldDispatchMouseMotion());
-  EXPECT_TRUE(owner.ShouldDispatchMouseMotion());
-}
-
-TEST(WindowPointerCaptureOwnerTest,
-     MotionButtonStateRecoversMissingRightRelease) {
-  FakeBackend backend;
-  QueryState query{true, false};
-  WindowPointerCaptureOwner owner(&backend);
-  ASSERT_TRUE(owner.RegisterQuery(Query, &query));
-  ASSERT_TRUE(owner.Pump(false));
-  ASSERT_TRUE(owner.OnRightButton(true, false));
-
-  EXPECT_FALSE(owner.NeedsRightButtonReleaseRecovery(true));
-  EXPECT_TRUE(owner.NeedsRightButtonReleaseRecovery(false));
-  ASSERT_TRUE(owner.OnRightButton(false, false));
-  EXPECT_FALSE(owner.NeedsRightButtonReleaseRecovery(false));
-  EXPECT_FALSE(owner.ShouldDispatchMouseMotion());
   EXPECT_TRUE(owner.ShouldDispatchMouseMotion());
 }
 

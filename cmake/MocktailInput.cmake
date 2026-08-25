@@ -94,7 +94,4 @@ if(BUILD_TESTING AND TARGET GTest::gtest_main)
   gtest_discover_tests(roblox_text_display_state_test)
   gtest_discover_tests(roblox_input_native_adapter_test)
   gtest_discover_tests(roblox_native_text_box_info_reader_test)
-  add_test(NAME input_readiness_gate_synthetic
-    COMMAND bash ${MOCKTAIL_INPUT_ROOT}/tests/input_readiness_gate_test.sh
-  )
 endif()

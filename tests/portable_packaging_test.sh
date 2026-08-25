@@ -15,6 +15,11 @@ BUILD_DIR="${MOCKTAIL_PORTABLE_TEST_BUILD_DIR:-${ROOT}/build}"
 TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mocktail-portable-test.XXXXXX")"
 trap 'rm -rf -- "${TEMP_DIR}"' EXIT
 
+if ! command -v apksigner >/dev/null 2>&1; then
+  echo "apksigner not available, skipping portable packaging test"
+  exit 0
+fi
+
 dry_run="$(${PACKAGER} --build-dir "${BUILD_DIR}" --libc glibc \
   --mode standalone --dry-run)"
 grep -q '^mode=standalone$' <<<"${dry_run}"

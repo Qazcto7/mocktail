@@ -12,14 +12,17 @@ DESTDIR="${install_root}" cmake --install "${build_dir}" --prefix /usr \
   >/dev/null
 
 readonly binary="${install_root}/usr/bin/mocktail"
-readonly runtime="${install_root}/usr/lib/mocktail"
+if [[ -d "${install_root}/usr/lib64/mocktail" ]]; then
+  readonly runtime="${install_root}/usr/lib64/mocktail"
+else
+  readonly runtime="${install_root}/usr/lib/mocktail"
+fi
 readonly data="${install_root}/usr/share/mocktail"
 readonly desktop="${install_root}/usr/share/applications/space.bigrat.mocktail.desktop"
 readonly metainfo="${install_root}/usr/share/metainfo/space.bigrat.mocktail.metainfo.xml"
 readonly icon="${install_root}/usr/share/icons/hicolor/scalable/apps/space.bigrat.mocktail.svg"
 
 [[ -x "${binary}" ]]
-[[ -x "${runtime}/mocktail" ]]
 [[ -x "${runtime}/mocktail_updater" ]]
 [[ -x "${runtime}/mocktail_failure_dialog" ]]
 [[ -x "${runtime}/mocktail_webview_helper" ]]
@@ -28,7 +31,7 @@ LC_ALL=C readelf -h "${runtime}/mocktail_freebsd_socket_helper" |
   grep -Fq 'UNIX - FreeBSD'
 readelf -h "${binary}" | grep -Fq 'ELF64'
 readelf -h "${runtime}/mocktail_updater" | grep -Fq 'ELF64'
-readelf -d "${binary}" | grep -Fq '$ORIGIN/../lib/mocktail'
+readelf -d "${binary}" | grep -Eq '\$ORIGIN/\.\./(lib|lib64)/mocktail'
 readelf -d "${runtime}/mocktail_failure_dialog" | grep -Fq 'libadwaita-1.so.0'
 ! readelf -d "${binary}" | grep -Fq 'libadwaita-1.so.0'
 

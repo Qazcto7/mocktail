@@ -362,13 +362,10 @@ TEST_F(RobloxInputRouterTest, FocusLossReleasesAllPressedInputs) {
   EXPECT_EQ(router_.Snapshot().active_touches, 0U);
   EXPECT_EQ(router_.Snapshot().active_keys, 0U);
 
-  const size_t before = probe_.CallCount();
-  EXPECT_EQ(router_
-                .HandleEvent(Event(
-                    platform::MouseMotionEvent{1.0f, 2.0f, 1.0f, 1.0f, 0}))
-                .state,
-            RobloxInputDispatchState::kIgnoredUnfocused);
-  EXPECT_EQ(probe_.CallCount(), before);
+  const auto motion = router_.HandleEvent(
+      Event(platform::MouseMotionEvent{1.0f, 2.0f, 1.0f, 1.0f, 0}));
+  EXPECT_EQ(motion.state, RobloxInputDispatchState::kDispatched);
+  EXPECT_TRUE(router_.Snapshot().focused);
 }
 
 TEST_F(RobloxInputRouterTest, TextFailsClosedWithoutTextboxHandle) {
@@ -502,7 +499,7 @@ TEST_F(RobloxInputRouterTest, WindowFocusLossReleasesFocusedTextbox) {
   EXPECT_EQ(result.state, RobloxInputDispatchState::kStateUpdated);
   EXPECT_EQ(probe_.text_operations, (std::vector<std::string>{"handle"}));
   const auto text = router_.HandleEvent(Event(platform::TextInputEvent{"x"}));
-  EXPECT_EQ(text.state, RobloxInputDispatchState::kIgnoredUnfocused);
+  EXPECT_EQ(text.state, RobloxInputDispatchState::kIgnoredUnsupported);
 }
 
 TEST_F(RobloxInputRouterTest, DeactivatePreventsAllLaterNativeCalls) {

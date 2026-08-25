@@ -17,10 +17,13 @@ temporary_root="$(mktemp -d)"
 trap 'rm -rf "${temporary_root}"' EXIT
 
 set +e
+mkdir -p "${temporary_root}/run"
 output="$(
   env -i \
     PATH="${PATH}" \
     HOME="${HOME}" \
+    XDG_RUNTIME_DIR="${temporary_root}/run" \
+    MOCKTAIL_ISOLATED_CANARY=1 \
     MOCKTAIL_ALLOW_NO_COOKIE_LUA_APP=1 \
     MOCKTAIL_CONFIG_ROOT="${temporary_root}/config" \
     MOCKTAIL_DATA_ROOT="${temporary_root}/data" \
@@ -39,13 +42,11 @@ if (( status == 0 )); then
   printf 'unknown payload unexpectedly succeeded\n%s\n' "${output}" >&2
   exit 1
 fi
-if ! rg --fixed-strings --quiet 'Unsupported Roblox Build ID' \
-    <<<"${output}"; then
+if ! grep -Fq 'Unsupported Roblox Build ID' <<<"${output}"; then
   printf 'missing fail-closed Build-ID diagnostic\n%s\n' "${output}" >&2
   exit 1
 fi
-if rg --fixed-strings --quiet \
-    'unknown Roblox fixture reached native loading' <<<"${output}"; then
+if grep -Fq 'unknown Roblox fixture reached native loading' <<<"${output}"; then
   printf 'unknown payload reached native loading\n%s\n' "${output}" >&2
   exit 1
 fi

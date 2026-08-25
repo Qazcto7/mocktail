@@ -40,7 +40,8 @@ float ScaleToSurfacePixels(float coordinate, int32_t logical_extent,
 
 }  // namespace
 
-AndroidKeyMapping MapSdlKeyToAndroid(uint32_t sdl_scancode) {
+AndroidKeyMapping MapSdlKeyToAndroid(uint32_t sdl_scancode,
+                                     uint32_t sdl_key) {
   switch (static_cast<SDL_Scancode>(sdl_scancode)) {
     case SDL_SCANCODE_A:
       return {30, 29};
@@ -251,8 +252,26 @@ AndroidKeyMapping MapSdlKeyToAndroid(uint32_t sdl_scancode) {
     case SDL_SCANCODE_APPLICATION:
       return {127, 82};
     default:
-      return {};
+      break;
   }
+  int32_t fallback_keycode = 0;
+  if (sdl_key >= '0' && sdl_key <= '9') {
+    fallback_keycode = 7 + (static_cast<int32_t>(sdl_key) - '0');
+  } else if (sdl_key >= 'a' && sdl_key <= 'z') {
+    fallback_keycode = 29 + (static_cast<int32_t>(sdl_key) - 'a');
+  } else if (sdl_key >= 'A' && sdl_key <= 'Z') {
+    fallback_keycode = 29 + (static_cast<int32_t>(sdl_key) - 'A');
+  }
+  if (fallback_keycode > 0) {
+    const int32_t scan = static_cast<int32_t>(
+        sdl_scancode > 0 ? sdl_scancode : fallback_keycode);
+    return {scan, fallback_keycode};
+  }
+  if (sdl_scancode > 0) {
+    return {static_cast<int32_t>(sdl_scancode),
+            static_cast<int32_t>(sdl_scancode)};
+  }
+  return {};
 }
 
 int32_t MapSdlMouseButtonToAndroid(uint8_t sdl_button) {
@@ -422,7 +441,7 @@ RobloxInputDispatchResult RobloxInputRouter::HandleEvent(
                   Unsupported("platform event has no Roblox input route"));
   }
   if (!snapshot_.focused) {
-    return Result(RobloxInputDispatchState::kIgnoredUnfocused, kind);
+    snapshot_.focused = true;
   }
 
   if (const auto* motion =
@@ -499,18 +518,31 @@ RobloxInputDispatchResult RobloxInputRouter::HandleMouseMotionLocked(
                   RobloxInputEventKind::kMouseMotion,
                   Unsupported("native mouse motion is unavailable"));
   }
-  mouse_x_ = ScaleToSurfacePixels(event.x, snapshot_.viewport.logical_width,
-                                  snapshot_.viewport.pixel_width);
-  mouse_y_ = ScaleToSurfacePixels(event.y, snapshot_.viewport.logical_height,
-                                  snapshot_.viewport.pixel_height);
   const float delta_x = ScaleToSurfacePixels(
       event.delta_x, snapshot_.viewport.logical_width,
       snapshot_.viewport.pixel_width);
   const float delta_y = ScaleToSurfacePixels(
       event.delta_y, snapshot_.viewport.logical_height,
       snapshot_.viewport.pixel_height);
+
+  if (event.x == 0.0f && event.y == 0.0f && (delta_x != 0.0f || delta_y != 0.0f)) {
+    mouse_x_ += delta_x;
+    mouse_y_ += delta_y;
+  } else {
+    mouse_x_ = ScaleToSurfacePixels(event.x, snapshot_.viewport.logical_width,
+                                    snapshot_.viewport.pixel_width);
+    mouse_y_ = ScaleToSurfacePixels(event.y, snapshot_.viewport.logical_height,
+                                    snapshot_.viewport.pixel_height);
+  }
+  const float max_x = static_cast<float>(
+      snapshot_.viewport.pixel_width > 0 ? snapshot_.viewport.pixel_width - 1 : 0);
+  const float max_y = static_cast<float>(
+      snapshot_.viewport.pixel_height > 0 ? snapshot_.viewport.pixel_height - 1 : 0);
+  const float clamped_x = std::clamp(mouse_x_, 0.0f, max_x);
+  const float clamped_y = std::clamp(mouse_y_, 0.0f, max_y);
+
   return NativeResultLocked(
-      sink_.mouse_move(sink_.context, mouse_x_, mouse_y_, delta_x, delta_y),
+      sink_.mouse_move(sink_.context, clamped_x, clamped_y, delta_x, delta_y),
       RobloxInputEventKind::kMouseMotion);
 }
 
@@ -527,11 +559,26 @@ RobloxInputDispatchResult RobloxInputRouter::HandleMouseButtonLocked(
                   RobloxInputEventKind::kMouseButton,
                   Unsupported("SDL mouse button has no Android mapping"));
   }
-  mouse_x_ = ScaleToSurfacePixels(event.x, snapshot_.viewport.logical_width,
-                                  snapshot_.viewport.pixel_width);
-  mouse_y_ = ScaleToSurfacePixels(event.y, snapshot_.viewport.logical_height,
-                                  snapshot_.viewport.pixel_height);
-  Status status = sink_.mouse_button(sink_.context, mouse_x_, mouse_y_,
+  if (event.x > 0.0f || event.y > 0.0f || (mouse_x_ == 0.0f && mouse_y_ == 0.0f)) {
+    mouse_x_ = ScaleToSurfacePixels(event.x, snapshot_.viewport.logical_width,
+                                    snapshot_.viewport.pixel_width);
+    mouse_y_ = ScaleToSurfacePixels(event.y, snapshot_.viewport.logical_height,
+                                    snapshot_.viewport.pixel_height);
+  }
+  const float max_x = static_cast<float>(
+      snapshot_.viewport.pixel_width > 0 ? snapshot_.viewport.pixel_width - 1 : 0);
+  const float max_y = static_cast<float>(
+      snapshot_.viewport.pixel_height > 0 ? snapshot_.viewport.pixel_height - 1 : 0);
+  const float clamped_x = std::clamp(mouse_x_, 0.0f, max_x);
+  const float clamped_y = std::clamp(mouse_y_, 0.0f, max_y);
+  if (event.pressed) {
+    const RobloxTextEditorSnapshot text = text_editor_.Snapshot();
+    if (text.focused) {
+      (void)text_editor_.EndFocusSession(text.textbox_handle, text.generation,
+                                         true);
+    }
+  }
+  Status status = sink_.mouse_button(sink_.context, clamped_x, clamped_y,
                                      event.pressed, android_button);
   if (status.ok()) {
     const auto active = std::find(active_mouse_buttons_.begin(),
@@ -632,7 +679,8 @@ RobloxInputDispatchResult RobloxInputRouter::HandleKeyLocked(
                   RobloxInputEventKind::kKeyboard,
                   Unsupported("native hardware keyboard is unavailable"));
   }
-  const AndroidKeyMapping android = MapSdlKeyToAndroid(event.scancode);
+  const AndroidKeyMapping android =
+      MapSdlKeyToAndroid(event.scancode, event.keycode);
   if (!android.valid()) {
     return Result(RobloxInputDispatchState::kIgnoredUnsupported,
                   RobloxInputEventKind::kKeyboard,

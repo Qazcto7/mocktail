@@ -1926,8 +1926,22 @@ bool PumpEvents() {
                                      g_text_input_owner->active())) {
     fprintf(stderr, "  [input] SDL pointer capture state update failed\n");
   }
+  platform::PlatformEvent pending_motion{};
+  bool has_pending_motion = false;
+
+  auto flush_motion = [&]() {
+    if (has_pending_motion) {
+      g_platform_event_observer.Notify(pending_motion);
+      has_pending_motion = false;
+      pending_motion = {};
+    }
+  };
+
   SDL_Event event;
   while (SDL_PollEvent(&event)) {
+    if (event.type != SDL_EVENT_MOUSE_MOTION) {
+      flush_motion();
+    }
     if (SdlEventTraceEnabled()) {
       fprintf(stderr, "  [window] SDL event type=%u\n", event.type);
     }
@@ -1980,27 +1994,6 @@ bool PumpEvents() {
     }
 
     const bool fullscreen_shortcut = HandleFullscreenShortcut(event);
-    bool recovered_right_button_release = false;
-    if (event.type == SDL_EVENT_MOUSE_MOTION &&
-        g_pointer_capture_owner != nullptr &&
-        g_pointer_capture_owner->NeedsRightButtonReleaseRecovery(
-            (event.motion.state & SDL_BUTTON_RMASK) != 0)) {
-      platform::PlatformEvent recovered_release;
-      recovered_release.timestamp_ns = event.common.timestamp;
-      recovered_release.payload = platform::MouseButtonEvent{
-          false, SDL_BUTTON_RIGHT, 0, event.motion.x, event.motion.y};
-      g_platform_event_observer.Notify(recovered_release);
-      recovered_right_button_release = true;
-      if (!g_pointer_capture_owner->OnRightButton(
-              false,
-              g_text_input_owner != nullptr && g_text_input_owner->active())) {
-        fprintf(stderr, "  [input] SDL lost-right-release recovery failed\n");
-      } else {
-        fprintf(stderr,
-                "  [input] recovered missing right-button release from "
-                "motion state\n");
-      }
-    }
     platform::PlatformEvent platform_event;
     const bool converted =
         platform::ConvertSdlEvent(g_state.sdl_window, event, &platform_event);
@@ -2055,13 +2048,32 @@ bool PumpEvents() {
         }
       }
     }
-    const bool dispatch_mouse_motion =
-        event.type != SDL_EVENT_MOUSE_MOTION ||
-        g_pointer_capture_owner == nullptr ||
-        g_pointer_capture_owner->ShouldDispatchMouseMotion();
-    if (converted && !fullscreen_shortcut && !recovered_right_button_release &&
-        dispatch_mouse_motion) {
-      g_platform_event_observer.Notify(platform_event);
+    if (converted && !fullscreen_shortcut) {
+      if (event.type == SDL_EVENT_MOUSE_MOTION) {
+        if (!has_pending_motion) {
+          pending_motion = platform_event;
+          has_pending_motion = true;
+        } else {
+          auto* cur =
+              std::get_if<platform::MouseMotionEvent>(&pending_motion.payload);
+          const auto* nxt =
+              std::get_if<platform::MouseMotionEvent>(&platform_event.payload);
+          if (cur != nullptr && nxt != nullptr) {
+            cur->delta_x += nxt->delta_x;
+            cur->delta_y += nxt->delta_y;
+            cur->x = nxt->x;
+            cur->y = nxt->y;
+            cur->buttons = nxt->buttons;
+            pending_motion.timestamp_ns = platform_event.timestamp_ns;
+          } else {
+            flush_motion();
+            pending_motion = platform_event;
+            has_pending_motion = true;
+          }
+        }
+      } else {
+        g_platform_event_observer.Notify(platform_event);
+      }
     }
     if (converted && !fullscreen_shortcut && event.type == SDL_EVENT_KEY_DOWN &&
         !event.key.repeat &&
@@ -2084,6 +2096,7 @@ bool PumpEvents() {
               "  [input] SDL right-button pointer capture update failed\n");
     }
   }
+  flush_motion();
   MaybePersistWindowState();
   MaybeRecoverVulkanSurface();
   MaybeReportVulkanPresentStall();

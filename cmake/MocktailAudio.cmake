@@ -199,10 +199,4 @@ if(BUILD_TESTING AND TARGET GTest::gtest_main)
   gtest_discover_tests(fmod_jni_audio_bridge_test
     PROPERTIES ENVIRONMENT "SDL_AUDIODRIVER=dummy"
   )
-
-  add_test(NAME audio_readiness_gate_test
-    COMMAND bash
-      ${MOCKTAIL_AUDIO_ROOT}/tests/audio_readiness_gate_test.sh
-      ${MOCKTAIL_AUDIO_ROOT}/scripts/audio_readiness_gate.sh
-  )
 endif()

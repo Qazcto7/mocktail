@@ -34,7 +34,7 @@ struct AndroidKeyMapping {
 // Maps SDL's USB scancode to the Linux evdev scan code and Android KeyEvent
 // keycode observed by the APK. Unmapped keys are rejected rather than passed
 // through with an ABI-incompatible numeric value.
-AndroidKeyMapping MapSdlKeyToAndroid(uint32_t sdl_scancode);
+AndroidKeyMapping MapSdlKeyToAndroid(uint32_t sdl_scancode, uint32_t sdl_key = 0);
 
 // Mirrors the APK's MotionEvent.getActionButton() - 1 conversion. SDL button
 // numbers are not numerically compatible with Android button bit values.
