@@ -766,6 +766,23 @@ void ClearSensitiveString(std::string* value) {
 
 }  // namespace
 
+bool PersistRobloxCookie(const std::filesystem::path& path,
+                         std::string_view cookie_value) {
+  if (cookie_value.empty()) {
+    return false;
+  }
+  std::string formatted;
+  constexpr std::string_view kPrefix = ".ROBLOSECURITY=";
+  if (cookie_value.compare(0, kPrefix.size(), kPrefix) != 0) {
+    formatted = std::string(kPrefix) + std::string(cookie_value) + "\n";
+  } else {
+    formatted = std::string(cookie_value) + "\n";
+  }
+  const bool result = WritePrivateFileAtomically(path, formatted);
+  ClearSensitiveString(&formatted);
+  return result;
+}
+
 void SecurelyClearString(std::string* value) { ClearSensitiveString(value); }
 
 SecureRobloxCredential::SecureRobloxCredential(std::string canonical_header) {

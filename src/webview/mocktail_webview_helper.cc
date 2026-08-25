@@ -318,10 +318,23 @@ bool IsRobloxCookieDomain(const char* domain) {
 }
 
 bool IsBrowserLoginUrl(std::string_view url) {
-  constexpr std::string_view kLoginUrl = "https://www.roblox.com/login";
-  return url.compare(0, kLoginUrl.size(), kLoginUrl) == 0 &&
-         (url.size() == kLoginUrl.size() || url[kLoginUrl.size()] == '?' ||
-          url[kLoginUrl.size()] == '#');
+  std::string_view normalized = url;
+  if (normalized.compare(0, 23, "https://www.roblox.com/") == 0) {
+    normalized.remove_prefix(23);
+  } else if (normalized.compare(0, 19, "https://roblox.com/") == 0) {
+    normalized.remove_prefix(19);
+  } else if (normalized.compare(0, 4, "www:") == 0) {
+    normalized.remove_prefix(4);
+  } else if (!normalized.empty() && normalized.front() == '/') {
+    normalized.remove_prefix(1);
+  }
+  constexpr std::string_view kLogin = "login";
+  return (normalized.compare(0, kLogin.size(), kLogin) == 0 ||
+          normalized.compare(0, kLogin.size(), "Login") == 0) &&
+         (normalized.size() == kLogin.size() ||
+          normalized[kLogin.size()] == '/' ||
+          normalized[kLogin.size()] == '?' ||
+          normalized[kLogin.size()] == '#');
 }
 
 void FinishRobloxCookieQuery(GObject* source, GAsyncResult* result,
@@ -801,6 +814,10 @@ void OnLoadChanged(WebKitWebView* web_view, WebKitLoadEvent event,
             << " scheme=" << policy.scheme << " host=" << policy.host << '\n';
   if (event == WEBKIT_LOAD_COMMITTED || event == WEBKIT_LOAD_FINISHED) {
     UpdateDomainTitle(web_view, static_cast<SurfaceState*>(user_data));
+    auto* surface = static_cast<SurfaceState*>(user_data);
+    if (surface != nullptr && surface->app != nullptr) {
+      RequestRobloxCookie(surface->app);
+    }
   }
 }
 

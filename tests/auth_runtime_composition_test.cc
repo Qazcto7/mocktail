@@ -865,6 +865,52 @@ TEST(AuthRuntimeCompositionTest,
       dependencies.jni_vm()->CopyRobloxCredentialFromProvider(nullptr));
 }
 
+TEST(AuthRuntimeCompositionTest,
+     GuestRuntimePromotesDispatchedCredentialAndExposesToJava) {
+  const TempDirectory directory;
+  MapEnvironment environment;
+  environment.Set("HOME", directory.path().string());
+  environment.Set("MOCKTAIL_ALLOW_NO_COOKIE_LUA_APP", "1");
+  auto http = std::make_shared<FakeHttpClient>();
+  http->response = {
+      true,
+      200,
+      R"({"id":999,"name":"GuestPromotedUser","displayName":"GuestPromoted"})",
+      {}};
+  services::AuthService auth_service(*http);
+  AuthRuntimeComposition composition = ComposeAuthRuntime(
+      environment, PathsFor(environment, directory), auth_service, http);
+  ASSERT_TRUE(composition);
+  EXPECT_EQ(composition.status, AuthRuntimeStatus::kGuest);
+
+  std::shared_ptr<jnivm::VM> vm = composition.jni_vm;
+  ASSERT_NE(vm, nullptr);
+  EXPECT_EQ(vm->GetRobloxAuthIdentitySnapshot().user_id, -1);
+
+  const std::string dispatched_header =
+      std::string(".ROBLOSECURITY=") + kCredential;
+  EXPECT_TRUE(vm->DispatchRobloxCredential(dispatched_header.c_str(),
+                                           dispatched_header.size()));
+
+  const jnivm::RobloxAuthIdentity promoted_identity =
+      vm->GetRobloxAuthIdentitySnapshot();
+  EXPECT_EQ(promoted_identity.user_id, 999);
+  EXPECT_EQ(promoted_identity.username, "GuestPromotedUser");
+
+  std::string read_credential;
+  EXPECT_TRUE(vm->CopyRobloxCredentialFromProvider(&read_credential));
+  EXPECT_EQ(read_credential, dispatched_header);
+
+  JNIEnv* env = vm->GetJNIEnv();
+  jclass cookie_manager =
+      env->FindClass("com/roblox/universalapp/cookie/JNICookieManager");
+  jmethodID get_cookie = env->GetStaticMethodID(
+      cookie_manager, "getCookie", "(Ljava/lang/String;)Ljava/lang/String;");
+  auto java_cookie = static_cast<jstring>(env->CallStaticObjectMethod(
+      cookie_manager, get_cookie, env->NewStringUTF("roblox.com")));
+  EXPECT_EQ(ReadJavaString(env, java_cookie), dispatched_header);
+}
+
 }  // namespace
 }  // namespace runtime
 }  // namespace mocktail

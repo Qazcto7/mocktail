@@ -705,6 +705,48 @@ TEST(RobloxWebViewBridgeTest,
   g_web_view_probe = nullptr;
 }
 
+TEST(RobloxWebViewBridgeTest,
+     RoutesGenericChallengesAndApiChallengesToBrowserSignIn) {
+  jnivm::VM vm;
+  JNIEnv* env = vm.GetJNIEnv();
+  jclass bus_class =
+      env->FindClass("com/roblox/universalapp/messagebus/MessageBus");
+  jobject bus = env->AllocObject(bus_class);
+  WebViewBridgeProbe probe;
+  g_web_view_probe = &probe;
+  RobloxWebViewBridge bridge = MakeBridge(&vm, bus, &probe);
+  ASSERT_TRUE(bridge.Initialize().ok());
+
+  ASSERT_TRUE(
+      bridge
+          .HandleOwnedMessage(
+              R"({"url":"https://www.roblox.com/view-generic-challenge?subdomain=login"})")
+          .ok());
+  EXPECT_EQ(probe.request.url, "https://www.roblox.com/login");
+  EXPECT_EQ(probe.request.title, "Roblox sign in");
+  EXPECT_TRUE(bridge.HandleCloseWindow().ok());
+  EXPECT_EQ(probe.close_dispatches, 0);
+  probe.exit_observer.on_exit(probe.exit_observer.context.get());
+  ASSERT_TRUE(bridge.DrainHostWindowEvents().ok());
+  EXPECT_EQ(probe.close_publications, 1);
+
+  ASSERT_TRUE(
+      bridge
+          .HandleOwnedMessage(
+              R"({"url":"https://apis.roblox.com/challenge/v1/render?type=captcha"})")
+          .ok());
+  EXPECT_EQ(probe.request.url, "https://www.roblox.com/login");
+  EXPECT_EQ(probe.request.title, "Roblox sign in");
+  EXPECT_TRUE(bridge.HandleCloseWindow().ok());
+  EXPECT_EQ(probe.close_dispatches, 0);
+  probe.exit_observer.on_exit(probe.exit_observer.context.get());
+  ASSERT_TRUE(bridge.DrainHostWindowEvents().ok());
+  EXPECT_EQ(probe.close_publications, 2);
+
+  EXPECT_TRUE(bridge.Shutdown().ok());
+  g_web_view_probe = nullptr;
+}
+
 TEST(RobloxWebViewBridgeTest, MainGameActivityOpensThroughHostSink) {
   jnivm::VM vm;
   JNIEnv* env = vm.GetJNIEnv();

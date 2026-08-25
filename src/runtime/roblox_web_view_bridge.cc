@@ -35,16 +35,62 @@ constexpr char kConnectionPointerField[] = "a";
 constexpr std::size_t kMaximumPendingHostWindowEvents = 256;
 constexpr std::string_view kBrowserLoginUrl = "https://www.roblox.com/login";
 
-bool IsLoginCaptchaUrl(std::string_view url) {
-  constexpr std::string_view kHttpsPrefix =
-      "https://www.roblox.com/captcha/app/login";
-  constexpr std::string_view kInternalPrefix = "www:captcha/app/login";
-  const auto matches = [url](std::string_view prefix) {
-    return url.compare(0, prefix.size(), prefix) == 0 &&
-           (url.size() == prefix.size() || url[prefix.size()] == '?' ||
-            url[prefix.size()] == '#');
+bool EqualsIgnoreCase(std::string_view a, std::string_view b) {
+  if (a.size() != b.size()) return false;
+  for (std::size_t i = 0; i < a.size(); ++i) {
+    if (std::tolower(static_cast<unsigned char>(a[i])) !=
+        std::tolower(static_cast<unsigned char>(b[i]))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool StartsWithIgnoreCase(std::string_view text, std::string_view prefix) {
+  if (text.size() < prefix.size()) return false;
+  return EqualsIgnoreCase(text.substr(0, prefix.size()), prefix);
+}
+
+bool IsLoginChallengeUrl(std::string_view url) {
+  std::string_view normalized = url;
+  if (StartsWithIgnoreCase(normalized, "https://www.roblox.com/")) {
+    normalized.remove_prefix(23);
+  } else if (StartsWithIgnoreCase(normalized, "https://roblox.com/")) {
+    normalized.remove_prefix(19);
+  } else if (StartsWithIgnoreCase(normalized, "https://apis.roblox.com/")) {
+    normalized.remove_prefix(24);
+  } else if (StartsWithIgnoreCase(normalized, "https://arkose.roblox.com/")) {
+    normalized.remove_prefix(26);
+  } else if (StartsWithIgnoreCase(normalized, "www:")) {
+    normalized.remove_prefix(4);
+  } else if (!normalized.empty() && normalized.front() == '/') {
+    normalized.remove_prefix(1);
+  }
+
+  constexpr std::string_view kChallengePrefixes[] = {
+      "captcha",
+      "view-generic-challenge",
+      "generic-challenge",
+      "login/challenge",
+      "challenge",
+      "arkose",
+      "login/twostepverification",
+      "twostepverification",
+      "login/two-step-verification",
+      "two-step-verification",
+      "reauthenticate",
   };
-  return matches(kHttpsPrefix) || matches(kInternalPrefix);
+
+  for (const std::string_view prefix : kChallengePrefixes) {
+    if (StartsWithIgnoreCase(normalized, prefix) &&
+        (normalized.size() == prefix.size() ||
+         normalized[prefix.size()] == '/' ||
+         normalized[prefix.size()] == '?' ||
+         normalized[prefix.size()] == '#')) {
+      return true;
+    }
+  }
+  return false;
 }
 
 Status Invalid(std::string message) {
@@ -1161,7 +1207,7 @@ Status RobloxWebViewBridge::DispatchOpenRequest(
   if (!status.ok()) {
     return status;
   }
-  const bool browser_login_fallback = IsLoginCaptchaUrl(request.url);
+  const bool browser_login_fallback = IsLoginChallengeUrl(request.url);
   if (browser_login_fallback) {
     request.url = kBrowserLoginUrl;
     request.title = "Roblox sign in";

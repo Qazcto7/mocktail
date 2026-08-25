@@ -1,6 +1,7 @@
 #ifndef MOCKTAIL_RUNTIME_AUTH_RUNTIME_COMPOSITION_H_
 #define MOCKTAIL_RUNTIME_AUTH_RUNTIME_COMPOSITION_H_
 
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -97,6 +98,10 @@ AuthRuntimeComposition ComposeAuthRuntime(
     const Environment& environment, const RuntimePaths& paths,
     services::AuthService& auth_service,
     std::shared_ptr<services::HttpClient> live_auth_http_client);
+
+// Persists a raw or prefixed Roblox credential to the given cookie file atomically.
+bool PersistRobloxCookie(const std::filesystem::path& path,
+                         std::string_view cookie_value);
 
 }  // namespace runtime
 }  // namespace mocktail

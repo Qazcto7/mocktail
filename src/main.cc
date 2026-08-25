@@ -1,14 +1,17 @@
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -42,6 +45,7 @@
 #include "runtime/support_bundle.h"
 #include "runtime/supported_launch_policy.h"
 #include "runtime/system_proxy.h"
+#include "runtime/webview_helper_launcher.h"
 #include "services/auth_service.h"
 #include "services/browser_tracker_service.h"
 #include "services/client_settings_service.h"
@@ -100,6 +104,110 @@ mocktail::Status ShutdownPlatformBridges(jnivm::VM* vm) {
   }
   vm->ClearAndroidWindowCallbacks();
   return mocktail::audio::ShutdownFmodJniAudioBridge(vm);
+}
+
+void PromptFirstLaunchSignIn(
+    const mocktail::runtime::ProcessEnvironment& environment,
+    const mocktail::runtime::RuntimePaths& paths,
+    mocktail::services::AuthService& auth_service,
+    const std::shared_ptr<mocktail::services::HttpClient>& http_client,
+    mocktail::runtime::AuthRuntimeComposition* composition) {
+  if (composition == nullptr ||
+      composition->status != mocktail::runtime::AuthRuntimeStatus::kGuest ||
+      environment.Get("MOCKTAIL_GUEST") == "1" ||
+      environment.Get("MOCKTAIL_SKIP_FIRST_LAUNCH_LOGIN") == "1") {
+    return;
+  }
+
+  std::filesystem::path helper;
+  const char* helper_override = std::getenv("MOCKTAIL_WEBVIEW_HELPER");
+  if (helper_override != nullptr && helper_override[0] != '\0') {
+    helper = helper_override;
+  } else {
+    std::error_code error;
+    const std::filesystem::path executable =
+        std::filesystem::read_symlink("/proc/self/exe", error);
+    if (!error && !executable.empty()) {
+      helper = executable.parent_path() / "mocktail_webview_helper";
+    }
+  }
+  if (helper.empty() || !std::filesystem::exists(helper)) {
+    return;
+  }
+
+  std::cout << "\n======================================================\n"
+            << "  First-Time Setup: Roblox Sign-In\n"
+            << "======================================================\n"
+            << "  [auth] no saved session found; opening desktop sign-in window...\n"
+            << "  [auth] tip: you can use Quick Log In (QR code) or username/password\n"
+            << "  [auth] (close the sign-in window to play as guest)\n\n";
+
+  struct FirstLaunchContext {
+    std::mutex mutex;
+    std::string captured_cookie;
+    bool finished = false;
+  };
+  auto context = std::make_shared<FirstLaunchContext>();
+
+  mocktail::runtime::WebViewHelperExitObserver exit_observer;
+  exit_observer.context = context;
+  exit_observer.on_exit = [](void* ctx) {
+    auto* c = static_cast<FirstLaunchContext*>(ctx);
+    std::lock_guard<std::mutex> lock(c->mutex);
+    c->finished = true;
+  };
+
+  const auto launched = mocktail::runtime::LaunchWebViewHelper(
+      helper, "https://www.roblox.com/login", exit_observer);
+  if (!launched || launched.process == nullptr) {
+    return;
+  }
+  if (!launched.process->WaitUntilReady(std::chrono::milliseconds(5000))) {
+    (void)launched.process->RequestClose();
+    return;
+  }
+  (void)launched.process->SetRobloxCookie("");
+  (void)launched.process->SetTitle("Roblox sign in");
+  (void)launched.process->SetVisible(true);
+
+  std::vector<mocktail::runtime::WebViewHelperEvent> events;
+  while (true) {
+    {
+      std::lock_guard<std::mutex> lock(context->mutex);
+      if (context->finished) {
+        break;
+      }
+    }
+    if (launched.process->DrainEvents(&events)) {
+      for (const auto& event : events) {
+        if (event.type ==
+            mocktail::runtime::WebViewHelperEventType::kRobloxCookie) {
+          std::lock_guard<std::mutex> lock(context->mutex);
+          context->captured_cookie = event.payload;
+          (void)launched.process->RequestClose();
+          break;
+        }
+      }
+      events.clear();
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  }
+
+  if (!context->captured_cookie.empty()) {
+    if (mocktail::runtime::PersistRobloxCookie(paths.cookie_file(),
+                                               context->captured_cookie)) {
+      mocktail::runtime::AuthRuntimeComposition new_comp =
+          mocktail::runtime::ComposeAuthRuntime(environment, paths,
+                                                auth_service, http_client);
+      if (new_comp.status ==
+          mocktail::runtime::AuthRuntimeStatus::kAuthenticated) {
+        *composition = std::move(new_comp);
+        std::cout << "  [auth] desktop sign-in successful; launching authenticated session\n";
+      }
+    }
+  } else {
+    std::cout << "  [auth] desktop sign-in window closed; continuing as guest\n";
+  }
 }
 
 }  // namespace
@@ -743,6 +851,12 @@ int main(int argc, char* argv[]) {
     mocktail::runtime::AuthRuntimeComposition composition =
         mocktail::runtime::ComposeAuthRuntime(environment, paths, auth_service,
                                               http_client);
+    if (!external_launch_request.has_value() &&
+        command_line.options.window_mode !=
+            mocktail::runtime::WindowMode::kHeadless) {
+      PromptFirstLaunchSignIn(environment, paths, auth_service, http_client,
+                              &composition);
+    }
     if (!composition) {
       std::cerr << "[FATAL] Typed Roblox authentication preflight failed: "
                 << composition.error;

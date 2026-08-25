@@ -5015,6 +5015,12 @@ void VM::ClearRobloxCredentialProvider() {
 
 bool VM::CopyRobloxCredentialFromProvider(std::string* credential) const {
   std::lock_guard<std::mutex> lock(roblox_credential_provider_mutex_);
+  if (!roblox_credential_override_.empty()) {
+    if (credential != nullptr) {
+      credential->assign(roblox_credential_override_);
+    }
+    return true;
+  }
   if (roblox_credential_provider_ == nullptr) {
     if (credential != nullptr) {
       credential->clear();
@@ -5022,10 +5028,6 @@ bool VM::CopyRobloxCredentialFromProvider(std::string* credential) const {
     return false;
   }
   if (credential == nullptr) {
-    return true;
-  }
-  if (!roblox_credential_override_.empty()) {
-    credential->assign(roblox_credential_override_);
     return true;
   }
   const RobloxCredentialView view =
@@ -5109,10 +5111,8 @@ bool VM::DispatchRobloxCredential(const char* data, std::size_t size) {
   std::string accepted(data, size);
   {
     std::lock_guard<std::mutex> lock(roblox_credential_provider_mutex_);
-    if (roblox_credential_provider_ != nullptr) {
-      ClearCookieString(&roblox_credential_override_);
-      roblox_credential_override_ = std::move(accepted);
-    }
+    ClearCookieString(&roblox_credential_override_);
+    roblox_credential_override_ = std::move(accepted);
   }
   ClearCookieString(&accepted);
   return true;
