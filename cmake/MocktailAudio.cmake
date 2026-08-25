@@ -24,6 +24,7 @@ set_target_properties(mocktail_audio_core PROPERTIES
 add_library(Mocktail::AudioCore ALIAS mocktail_audio_core)
 
 add_library(mocktail_audio_sdl SHARED
+  ${MOCKTAIL_AUDIO_ROOT}/src/audio/sdl_audio_capture.cc
   ${MOCKTAIL_AUDIO_ROOT}/src/audio/sdl_audio_sink.cc
 )
 target_include_directories(mocktail_audio_sdl PUBLIC
@@ -62,6 +63,7 @@ add_library(Mocktail::FmodJavaAudioRuntime ALIAS
 
 add_library(mocktail_fmod_jni_audio_bridge STATIC
   ${MOCKTAIL_AUDIO_ROOT}/src/audio/fmod_jni_audio_bridge.cc
+  ${MOCKTAIL_AUDIO_ROOT}/src/audio/webrtc_jni_audio_bridge.cc
 )
 target_include_directories(mocktail_fmod_jni_audio_bridge PUBLIC
   ${MOCKTAIL_AUDIO_ROOT}/include

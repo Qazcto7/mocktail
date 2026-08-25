@@ -62,6 +62,15 @@ bool MergeRuntimeClientSettingsOverrides(const FrameRatePolicy& frame_rate,
                                          std::string* merged_json,
                                          std::string* error);
 
+// The Android APK normally answers PermissionsProtocol. Mocktail has no APK,
+// so enabled host capture authorizes Roblox's microphone gate while `disabled`
+// keeps it denied. The host device is opened only when WebRTC initializes a
+// recording session, never during normal startup.
+bool MergeAudioCaptureClientSettingsOverrides(bool microphone_enabled,
+                                              std::string_view base_json,
+                                              std::string* merged_json,
+                                              std::string* error);
+
 }  // namespace runtime
 }  // namespace mocktail
 

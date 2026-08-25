@@ -177,6 +177,7 @@ bool ValidateAndMap(const ValueMap& yaml, ValueMap* environment,
       "performance.memory_limit_mb",
       "performance.gamemode",
       "audio.output_device",
+      "audio.input_device",
       "window.width",
       "window.height",
       "window.title",
@@ -378,6 +379,16 @@ bool ValidateAndMap(const ValueMap& yaml, ValueMap* environment,
       return false;
     }
     (*environment)["MOCKTAIL_AUDIO_OUTPUT_DEVICE"] = *output_device;
+  }
+  if (const auto input_device = value("audio.input_device");
+      input_device.has_value()) {
+    if (!IsValidDeviceProfileValue(*input_device, 512)) {
+      *error =
+          "audio.input_device must be non-empty, bounded, and contain no "
+          "control bytes";
+      return false;
+    }
+    (*environment)["MOCKTAIL_AUDIO_INPUT_DEVICE"] = *input_device;
   }
   for (const auto& [key, variable] : {
            std::pair<std::string_view, std::string_view>("window.width",
@@ -717,6 +728,8 @@ RuntimeConfigLoadResult LoadRuntimeConfig(
     result.error = "VSync policy is invalid";
   } else if (!result.config.audio_output_device_valid()) {
     result.error = "audio output device is invalid";
+  } else if (!result.config.audio_input_device_valid()) {
+    result.error = "audio input device is invalid";
   } else if (!result.config.performance().memory_limit_valid) {
     result.error = "memory-limit policy is invalid";
   } else if (!result.config.performance().game_mode_valid) {
@@ -742,6 +755,12 @@ bool ExportRuntimeConfigEnvironment(const RuntimeConfig& config,
   if (!config.audio_output_device_valid()) {
     if (error != nullptr) {
       *error = "cannot export an invalid audio output device";
+    }
+    return false;
+  }
+  if (!config.audio_input_device_valid()) {
+    if (error != nullptr) {
+      *error = "cannot export an invalid audio input device";
     }
     return false;
   }
@@ -839,6 +858,8 @@ bool ExportRuntimeConfigEnvironment(const RuntimeConfig& config,
                           error) &&
       SetEnvironmentValue("MOCKTAIL_AUDIO_OUTPUT_DEVICE",
                           config.audio_output_device(), error) &&
+      SetEnvironmentValue("MOCKTAIL_AUDIO_INPUT_DEVICE",
+                          config.audio_input_device(), error) &&
       SetEnvironmentValue("MOCKTAIL_USE_SYSTEM_PROXY",
                           config.use_system_proxy() ? "1" : "0", error) &&
       SetEnvironmentValue("MOCKTAIL_DISCORD_RPC_ENABLED",

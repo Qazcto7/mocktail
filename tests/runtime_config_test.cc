@@ -64,6 +64,9 @@ TEST(RuntimeConfigTest, UsesSupportedDefaults) {
   EXPECT_TRUE(config.performance().physics_worker_mode_valid);
   EXPECT_EQ(config.audio_output_device(), "default");
   EXPECT_TRUE(config.audio_output_device_valid());
+  EXPECT_EQ(config.audio_input_device(), "default");
+  EXPECT_TRUE(config.audio_input_device_valid());
+  EXPECT_TRUE(config.microphone_enabled());
   EXPECT_FALSE(config.use_system_proxy());
   EXPECT_FALSE(config.network_proxy().has_value());
   EXPECT_FALSE(config.discord_rpc().enabled);
@@ -99,6 +102,7 @@ TEST(RuntimeConfigTest, ReadsTypedRuntimeValues) {
       {"MOCKTAIL_GAMEMODE", "off"},
       {"MOCKTAIL_PHYSICS_WORKER_MODE", "latency"},
       {"MOCKTAIL_AUDIO_OUTPUT_DEVICE", "USB Headset"},
+      {"MOCKTAIL_AUDIO_INPUT_DEVICE", "id:42"},
       {"MOCKTAIL_HTTP_PROXY_HOST", "proxy.example.test"},
       {"MOCKTAIL_HTTP_PROXY_PORT", "3128"},
       {"MOCKTAIL_DISCORD_RPC_ENABLED", "1"},
@@ -132,6 +136,8 @@ TEST(RuntimeConfigTest, ReadsTypedRuntimeValues) {
             PhysicsWorkerMode::kLatency);
   EXPECT_EQ(config.audio_output_device(), "USB Headset");
   EXPECT_TRUE(config.audio_output_device_valid());
+  EXPECT_EQ(config.audio_input_device(), "id:42");
+  EXPECT_TRUE(config.audio_input_device_valid());
   ASSERT_TRUE(config.network_proxy().has_value());
   EXPECT_EQ(config.network_proxy()->host, "proxy.example.test");
   EXPECT_EQ(config.network_proxy()->port, 3128);
@@ -375,6 +381,23 @@ TEST(RuntimeConfigTest, RejectsUnsafeAudioOutputDevice) {
   const RuntimeConfig control = RuntimeConfig::FromEnvironment(
       MapEnvironment({{"MOCKTAIL_AUDIO_OUTPUT_DEVICE", "Speaker\nInjected"}}));
   EXPECT_FALSE(control.audio_output_device_valid());
+}
+
+TEST(RuntimeConfigTest, ValidatesAudioInputDeviceAndMicrophonePolicy) {
+  const RuntimeConfig empty = RuntimeConfig::FromEnvironment(
+      MapEnvironment({{"MOCKTAIL_AUDIO_INPUT_DEVICE", ""}}));
+  EXPECT_TRUE(empty.audio_input_device_valid());
+  EXPECT_EQ(empty.audio_input_device(), "default");
+  EXPECT_TRUE(empty.microphone_enabled());
+
+  const RuntimeConfig disabled = RuntimeConfig::FromEnvironment(
+      MapEnvironment({{"MOCKTAIL_AUDIO_INPUT_DEVICE", "disabled"}}));
+  EXPECT_TRUE(disabled.audio_input_device_valid());
+  EXPECT_FALSE(disabled.microphone_enabled());
+
+  const RuntimeConfig control = RuntimeConfig::FromEnvironment(
+      MapEnvironment({{"MOCKTAIL_AUDIO_INPUT_DEVICE", "Mic\nInjected"}}));
+  EXPECT_FALSE(control.audio_input_device_valid());
 }
 
 TEST(RuntimeConfigTest, PreservesUnknownBackendName) {

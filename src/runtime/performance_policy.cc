@@ -279,5 +279,29 @@ bool MergeRuntimeClientSettingsOverrides(const FrameRatePolicy& frame_rate,
                                                  merged_json, error);
 }
 
+bool MergeAudioCaptureClientSettingsOverrides(bool microphone_enabled,
+                                              std::string_view base_json,
+                                              std::string* merged_json,
+                                              std::string* error) {
+  if (merged_json == nullptr) {
+    if (error != nullptr) {
+      *error = "audio capture client-settings output is required";
+    }
+    return false;
+  }
+  nlohmann::json overrides = nlohmann::json::parse(
+      base_json.empty() ? "{}" : base_json, nullptr, false, true);
+  if (overrides.is_discarded() || !overrides.is_object()) {
+    if (error != nullptr) {
+      *error = "audio capture client-settings input must be a JSON object";
+    }
+    return false;
+  }
+  overrides["DFFlagVoiceChatSkipPermissionCheckForTests"] =
+      microphone_enabled ? "True" : "False";
+  *merged_json = overrides.dump();
+  return true;
+}
+
 }  // namespace runtime
 }  // namespace mocktail

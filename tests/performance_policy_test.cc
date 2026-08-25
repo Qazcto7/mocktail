@@ -231,6 +231,23 @@ TEST(PerformancePolicyTest, RejectsConflictingOrMalformedOverrides) {
             std::string::npos);
 }
 
+TEST(PerformancePolicyTest, AppliesHostMicrophonePermissionPolicy) {
+  std::string merged;
+  std::string error;
+  ASSERT_TRUE(MergeAudioCaptureClientSettingsOverrides(
+      true, R"({"DFFlagVoiceChatSkipPermissionCheckForTests":"False"})",
+      &merged, &error))
+      << error;
+  nlohmann::json parsed = nlohmann::json::parse(merged);
+  EXPECT_EQ(parsed.at("DFFlagVoiceChatSkipPermissionCheckForTests"), "True");
+
+  ASSERT_TRUE(MergeAudioCaptureClientSettingsOverrides(false, merged, &merged,
+                                                       &error))
+      << error;
+  parsed = nlohmann::json::parse(merged);
+  EXPECT_EQ(parsed.at("DFFlagVoiceChatSkipPermissionCheckForTests"), "False");
+}
+
 }  // namespace
 }  // namespace runtime
 }  // namespace mocktail

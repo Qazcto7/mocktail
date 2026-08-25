@@ -66,6 +66,10 @@ audio:
   # String (default: default): `default` follows the host system output.
   # To pin output, copy an exact SDL device name printed during startup.
   output_device: default
+  # String (default: default): input device name, `id:<number>` printed during
+  # startup, or `disabled`. IDs disambiguate duplicate names but may change
+  # between boots; prefer the exact device name when it is unique.
+  input_device: default
 
 integrations:
   discord_rpc:

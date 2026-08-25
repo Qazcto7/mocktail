@@ -48,6 +48,13 @@ struct SdlAudioSinkOptions {
   // Zero selects the configured process target.
   std::uint32_t playback_device_id = 0;
   bool start_paused = true;
+
+  // Optional pull provider for the host device. Each call fills one source
+  // buffer whose address remains valid until the next provider call. SDL
+  // copies as many buffers as the current device request needs.
+  bool (*data_needed_callback)(void *context, const void **data,
+                               std::size_t *size_bytes) = nullptr;
+  void *data_needed_context = nullptr;
 };
 
 // SDL owns conversion, resampling, and borrowed-buffer consumption.

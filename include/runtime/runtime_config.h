@@ -104,6 +104,9 @@ class RuntimeConfig {
     return audio_output_device_;
   }
   bool audio_output_device_valid() const { return audio_output_device_valid_; }
+  const std::string& audio_input_device() const { return audio_input_device_; }
+  bool audio_input_device_valid() const { return audio_input_device_valid_; }
+  bool microphone_enabled() const { return audio_input_device_ != "disabled"; }
   const std::optional<NetworkProxyConfig>& network_proxy() const {
     return network_proxy_;
   }
@@ -142,6 +145,8 @@ class RuntimeConfig {
   PerformancePolicy performance_;
   std::string audio_output_device_ = "default";
   bool audio_output_device_valid_ = true;
+  std::string audio_input_device_ = "default";
+  bool audio_input_device_valid_ = true;
   bool use_system_proxy_ = false;
   std::optional<NetworkProxyConfig> network_proxy_;
   std::optional<std::filesystem::path> ca_bundle_;

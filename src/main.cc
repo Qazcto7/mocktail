@@ -21,6 +21,7 @@
 #include "legacy/legacy_runtime.h"
 #include "libc_shim/libc_shim.h"
 #include "mocktail/audio/fmod_jni_audio_bridge.h"
+#include "mocktail/audio/webrtc_jni_audio_bridge.h"
 #include "mocktail/audio/roblox_output_device_bridge.h"
 #include "runtime/auth_runtime_composition.h"
 #include "runtime/command_line.h"
@@ -103,7 +104,11 @@ mocktail::Status ShutdownPlatformBridges(jnivm::VM* vm) {
                                    "platform bridge shutdown requires a VM");
   }
   vm->ClearAndroidWindowCallbacks();
-  return mocktail::audio::ShutdownFmodJniAudioBridge(vm);
+  const mocktail::Status voice_status =
+      mocktail::audio::ShutdownWebRtcJniAudioBridge(vm);
+  const mocktail::Status playback_status =
+      mocktail::audio::ShutdownFmodJniAudioBridge(vm);
+  return !voice_status.ok() ? voice_status : playback_status;
 }
 
 void PromptFirstLaunchSignIn(
@@ -714,8 +719,17 @@ int main(int argc, char* argv[]) {
                 << command_line_error << '\n';
       return EXIT_FAILURE;
     }
+    std::string audio_capture_overrides;
+    if (!mocktail::runtime::MergeAudioCaptureClientSettingsOverrides(
+            runtime_config.config.microphone_enabled(),
+            client_settings_overrides, &audio_capture_overrides,
+            &command_line_error)) {
+      std::cerr << "[FATAL] Cannot apply microphone permission policy: "
+                << command_line_error << '\n';
+      return EXIT_FAILURE;
+    }
     if (setenv("MOCKTAIL_CLIENT_SETTINGS_OVERRIDES_JSON",
-               client_settings_overrides.c_str(), 1) != 0) {
+               audio_capture_overrides.c_str(), 1) != 0) {
       std::cerr << "[FATAL] Cannot export runtime client-settings policy\n";
       return EXIT_FAILURE;
     }
@@ -953,6 +967,16 @@ int main(int argc, char* argv[]) {
     if (!audio_status.ok()) {
       std::cerr << "[FATAL] Typed FMOD Java audio composition failed: "
                 << audio_status.message() << '\n';
+      return EXIT_FAILURE;
+    }
+    const mocktail::Status voice_status =
+        mocktail::audio::InstallWebRtcJniAudioBridge(
+            composition.jni_vm.get());
+    if (!voice_status.ok()) {
+      (void)mocktail::audio::ShutdownFmodJniAudioBridge(
+          composition.jni_vm.get());
+      std::cerr << "[FATAL] WebRTC voice audio composition failed: "
+                << voice_status.message() << '\n';
       return EXIT_FAILURE;
     }
     dependencies = mocktail::legacy::RuntimeDependencies(

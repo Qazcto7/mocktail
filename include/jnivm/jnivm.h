@@ -82,6 +82,41 @@ struct FmodAudioDeviceCallbacks {
   void (*shutdown)(void *context) = nullptr;
 };
 
+using WebRtcAudioRecordDataCallback = void (*)(void *context,
+                                               const void *identity,
+                                               std::size_t size_bytes);
+
+// Host implementation of org/webrtc/voiceengine/WebRtcAudioRecord. Init
+// returns the number of PCM frames in the stable direct buffer, or -1.
+struct WebRtcAudioRecordCallbacks {
+  int (*init)(void *context, const void *identity, int sample_rate_hz,
+              int channels, WebRtcAudioRecordDataCallback data_callback,
+              void *data_context, void **direct_buffer,
+              std::size_t *direct_buffer_capacity) = nullptr;
+  bool (*start)(void *context, const void *identity) = nullptr;
+  bool (*stop)(void *context, const void *identity) = nullptr;
+  void (*close)(void *context, const void *identity) = nullptr;
+  void (*shutdown)(void *context) = nullptr;
+};
+
+using WebRtcAudioTrackDataCallback = void (*)(void *context,
+                                              const void *identity,
+                                              std::size_t size_bytes);
+
+// Host implementation of org/webrtc/voiceengine/WebRtcAudioTrack. Init
+// returns the emulated Android AudioTrack buffer size in bytes, or -1.
+struct WebRtcAudioTrackCallbacks {
+  int (*init)(void *context, const void *identity, int sample_rate_hz,
+              int channels, double buffer_size_factor,
+              WebRtcAudioTrackDataCallback data_callback, void *data_context,
+              void **direct_buffer,
+              std::size_t *direct_buffer_capacity) = nullptr;
+  int (*buffer_size_frames)(void *context, const void *identity) = nullptr;
+  bool (*start)(void *context, const void *identity) = nullptr;
+  bool (*stop)(void *context, const void *identity) = nullptr;
+  void (*close)(void *context, const void *identity) = nullptr;
+};
+
 // Guest JNI threads only publish Android window flags. The host callback must
 // marshal SDL work onto the main thread.
 struct AndroidWindowCallbacks {
@@ -255,6 +290,43 @@ public:
                                     const std::uint8_t *data, std::size_t size);
   bool DispatchFmodAudioDeviceClose(const void *identity);
 
+  void
+  SetWebRtcAudioRecordCallbacks(std::shared_ptr<void> context,
+                                const WebRtcAudioRecordCallbacks &callbacks);
+  void ClearWebRtcAudioRecordCallbacks();
+  int DispatchWebRtcAudioRecordInit(const void *identity, int sample_rate_hz,
+                                    int channels, void **direct_buffer,
+                                    std::size_t *direct_buffer_capacity);
+  bool DispatchWebRtcAudioRecordStart(const void *identity);
+  bool DispatchWebRtcAudioRecordStop(const void *identity);
+  void DispatchWebRtcAudioRecordClose(const void *identity);
+  void DispatchWebRtcAudioRecordData(const void *identity,
+                                     std::size_t size_bytes);
+
+  // RegisterNatives stores these exact WebRTC callbacks so the host capture
+  // thread can emulate the Java AudioRecord thread.
+  void RegisterWebRtcAudioRecordNative(const char *name, const char *signature,
+                                       void *function);
+
+  void SetWebRtcAudioTrackCallbacks(std::shared_ptr<void> context,
+                                    const WebRtcAudioTrackCallbacks &callbacks);
+  void ClearWebRtcAudioTrackCallbacks();
+  int DispatchWebRtcAudioTrackInit(const void *identity, int sample_rate_hz,
+                                   int channels, double buffer_size_factor,
+                                   void **direct_buffer,
+                                   std::size_t *direct_buffer_capacity);
+  int DispatchWebRtcAudioTrackBufferSizeFrames(const void *identity);
+  bool DispatchWebRtcAudioTrackStart(const void *identity);
+  bool DispatchWebRtcAudioTrackStop(const void *identity);
+  void DispatchWebRtcAudioTrackClose(const void *identity);
+  void DispatchWebRtcAudioTrackData(const void *identity,
+                                    std::size_t size_bytes);
+
+  // RegisterNatives stores the exact WebRTC playout callbacks so the host
+  // thread can emulate AudioTrackJavaThread.
+  void RegisterWebRtcAudioTrackNative(const char *name, const char *signature,
+                                      void *function);
+
   void SetAndroidWindowCallbacks(std::shared_ptr<void> context,
                                  const AndroidWindowCallbacks &callbacks);
   void ClearAndroidWindowCallbacks();
@@ -359,6 +431,28 @@ private:
   };
   mutable std::mutex fmod_audio_device_mutex_;
   FmodAudioDeviceBinding fmod_audio_device_binding_;
+
+  struct WebRtcAudioRecordBinding {
+    std::shared_ptr<void> context;
+    WebRtcAudioRecordCallbacks callbacks;
+  };
+  mutable std::mutex webrtc_audio_record_mutex_;
+  WebRtcAudioRecordBinding webrtc_audio_record_binding_;
+
+  mutable std::mutex webrtc_audio_record_native_mutex_;
+  void *webrtc_cache_direct_buffer_native_ = nullptr;
+  void *webrtc_data_is_recorded_native_ = nullptr;
+
+  struct WebRtcAudioTrackBinding {
+    std::shared_ptr<void> context;
+    WebRtcAudioTrackCallbacks callbacks;
+  };
+  mutable std::mutex webrtc_audio_track_mutex_;
+  WebRtcAudioTrackBinding webrtc_audio_track_binding_;
+
+  mutable std::mutex webrtc_audio_track_native_mutex_;
+  void *webrtc_track_cache_direct_buffer_native_ = nullptr;
+  void *webrtc_get_playout_data_native_ = nullptr;
 
   struct AndroidWindowBinding {
     std::shared_ptr<void> context;

@@ -1,5 +1,7 @@
 #include "mocktail/audio/sdl_audio_sink.h"
 
+#include "mocktail/audio/sdl_audio_capture.h"
+
 #include <SDL3/SDL.h>
 
 #include <algorithm>
@@ -132,11 +134,16 @@ class SdlAudioSink final : public AudioSink {
  public:
   SdlAudioSink(PcmSpec spec, SDL_AudioStream* stream,
                SDL_AudioDeviceID logical_device_id,
-               std::uint32_t physical_device_id)
+               std::uint32_t physical_device_id,
+               bool (*data_needed_callback)(void*, const void**,
+                                            std::size_t*),
+               void* data_needed_context)
       : source_spec_(spec),
         stream_(stream),
         logical_device_id_(logical_device_id),
-        physical_device_id_(physical_device_id) {}
+        physical_device_id_(physical_device_id),
+        data_needed_callback_(data_needed_callback),
+        data_needed_context_(data_needed_context) {}
 
   ~SdlAudioSink() override { Shutdown(); }
 
@@ -345,6 +352,33 @@ class SdlAudioSink final : public AudioSink {
     shutdown_cv_.notify_all();
   }
 
+  static void SDLCALL OnDataNeeded(void* userdata, SDL_AudioStream* stream,
+                                   int additional_amount, int) {
+    auto* sink = static_cast<SdlAudioSink*>(userdata);
+    if (sink == nullptr || sink->data_needed_callback_ == nullptr ||
+        additional_amount <= 0) {
+      return;
+    }
+    constexpr std::size_t kMaximumBuffersPerCallback = 32;
+    std::size_t supplied = 0;
+    for (std::size_t index = 0;
+         supplied < static_cast<std::size_t>(additional_amount) &&
+         index < kMaximumBuffersPerCallback;
+         ++index) {
+      const void* data = nullptr;
+      std::size_t size_bytes = 0;
+      if (!sink->data_needed_callback_(sink->data_needed_context_, &data,
+                                       &size_bytes) ||
+          data == nullptr || size_bytes == 0 ||
+          size_bytes >
+              static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+          !SDL_PutAudioStreamData(stream, data, static_cast<int>(size_bytes))) {
+        break;
+      }
+      supplied += size_bytes;
+    }
+  }
+
  private:
   template <typename Operation>
   Status WithStream(const char* name, Operation operation) {
@@ -385,6 +419,8 @@ class SdlAudioSink final : public AudioSink {
   SDL_AudioStream* stream_ = nullptr;
   SDL_AudioDeviceID logical_device_id_ = 0;
   std::uint32_t physical_device_id_ = 0;
+  bool (*data_needed_callback_)(void*, const void**, std::size_t*) = nullptr;
+  void* data_needed_context_ = nullptr;
   mutable bool switching_device_ = false;
   bool shutting_down_ = false;
   bool shutdown_complete_ = false;
@@ -614,6 +650,10 @@ Status ShutdownSdlAudioSubsystem() {
     return Status::Error(StatusCode::kFailedPrecondition,
                          "SDL audio shutdown requires every sink to close");
   }
+  const Status capture_status = PrepareSdlAudioCaptureSubsystemShutdown();
+  if (!capture_status.ok()) {
+    return capture_status;
+  }
   SDL_QuitSubSystem(SDL_INIT_AUDIO);
   state.configured_playback_device_id = 0;
   state.configured_playback_device_name = "default";
@@ -672,12 +712,20 @@ Status CreateSdlAudioSink(const SdlAudioSinkOptions& options,
   }
 
   auto* implementation = new (std::nothrow) SdlAudioSink(
-      options.source_spec, stream, logical_device, playback_device_id);
+      options.source_spec, stream, logical_device, playback_device_id,
+      options.data_needed_callback, options.data_needed_context);
   if (implementation == nullptr) {
     SDL_DestroyAudioStream(stream);
     SDL_CloseAudioDevice(logical_device);
     return Status::Error(StatusCode::kUnavailable,
                          "unable to allocate SDL audio sink");
+  }
+  if (options.data_needed_callback != nullptr &&
+      !SDL_SetAudioStreamGetCallback(stream, &SdlAudioSink::OnDataNeeded,
+                                     implementation)) {
+    status = SdlError("SDL_SetAudioStreamGetCallback");
+    delete implementation;
+    return status;
   }
   status = RegisterSdlAudioSink(implementation);
   if (!status.ok()) {

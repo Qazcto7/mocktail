@@ -258,6 +258,7 @@ std::unordered_map<jmethodID, const char*> g_method_names;
 std::unordered_map<jmethodID, const char*> g_method_signatures;
 std::vector<std::unique_ptr<PseudoArray>> g_array_storage;
 std::unordered_map<jarray, PseudoArray*> g_arrays;
+std::unordered_map<jobject, jlong> g_direct_buffer_capacities;
 std::unordered_map<std::string, jobject> g_static_object_fields;
 jobject g_app_bridge_notification_listener = nullptr;
 jobject g_engine_java_callback = nullptr;
@@ -2680,6 +2681,22 @@ bool IsFmodAudioDeviceMethod(jobject obj, jmethodID method_id,
          std::strcmp(MethodSignature(method_id), signature) == 0;
 }
 
+bool IsWebRtcAudioRecordMethod(jobject obj, jmethodID method_id,
+                               const char *name, const char *signature) {
+  return obj != nullptr && method_id != nullptr &&
+         ObjectClassName(obj) == "org/webrtc/voiceengine/WebRtcAudioRecord" &&
+         std::strcmp(MethodName(method_id), name) == 0 &&
+         std::strcmp(MethodSignature(method_id), signature) == 0;
+}
+
+bool IsWebRtcAudioTrackMethod(jobject obj, jmethodID method_id,
+                              const char *name, const char *signature) {
+  return obj != nullptr && method_id != nullptr &&
+         ObjectClassName(obj) == "org/webrtc/voiceengine/WebRtcAudioTrack" &&
+         std::strcmp(MethodName(method_id), name) == 0 &&
+         std::strcmp(MethodSignature(method_id), signature) == 0;
+}
+
 constexpr char kRobloxNativeGlJavaInterfaceClass[] =
     "com/roblox/engine/jni/NativeGLJavaInterface";
 constexpr char kRobloxEngineJavaCallbackClass[] =
@@ -3139,6 +3156,220 @@ bool HandleFmodAudioDeviceBooleanMethodA(jobject obj, jmethodID method_id,
   }
   if (result != nullptr) {
     *result = initialized ? JNI_TRUE : JNI_FALSE;
+  }
+  return true;
+}
+
+bool HandleWebRtcAudioRecordIntMethodV(jobject obj, jmethodID method_id,
+                                       va_list args, jint *result) {
+  if (!IsWebRtcAudioRecordMethod(obj, method_id, "initRecording", "(II)I")) {
+    return false;
+  }
+  const jint sample_rate_hz = va_arg(args, jint);
+  const jint channels = va_arg(args, jint);
+  void *direct_buffer = nullptr;
+  std::size_t direct_buffer_capacity = 0;
+  VM *vm = CurrentVM();
+  const int frames = vm != nullptr
+                         ? vm->DispatchWebRtcAudioRecordInit(
+                               obj, sample_rate_hz, channels, &direct_buffer,
+                               &direct_buffer_capacity)
+                         : -1;
+  if (result != nullptr) {
+    *result = frames;
+  }
+  return true;
+}
+
+bool HandleWebRtcAudioRecordIntMethodA(jobject obj, jmethodID method_id,
+                                       const jvalue *args, jint *result) {
+  if (!IsWebRtcAudioRecordMethod(obj, method_id, "initRecording", "(II)I")) {
+    return false;
+  }
+  void *direct_buffer = nullptr;
+  std::size_t direct_buffer_capacity = 0;
+  VM *vm = CurrentVM();
+  const int frames = vm != nullptr && args != nullptr
+                         ? vm->DispatchWebRtcAudioRecordInit(
+                               obj, args[0].i, args[1].i, &direct_buffer,
+                               &direct_buffer_capacity)
+                         : -1;
+  if (result != nullptr) {
+    *result = frames;
+  }
+  return true;
+}
+
+bool HandleWebRtcAudioRecordBooleanMethodV(jobject obj, jmethodID method_id,
+                                           va_list args, jboolean *result) {
+  bool handled = true;
+  bool value = false;
+  VM *vm = CurrentVM();
+  if (IsWebRtcAudioRecordMethod(obj, method_id, "startRecording", "()Z")) {
+    value = vm != nullptr && vm->DispatchWebRtcAudioRecordStart(obj);
+  } else if (IsWebRtcAudioRecordMethod(obj, method_id, "stopRecording",
+                                       "()Z")) {
+    value = vm != nullptr && vm->DispatchWebRtcAudioRecordStop(obj);
+  } else if (IsWebRtcAudioRecordMethod(obj, method_id, "enableBuiltInAEC",
+                                       "(Z)Z") ||
+             IsWebRtcAudioRecordMethod(obj, method_id, "enableBuiltInNS",
+                                       "(Z)Z") ||
+             IsWebRtcAudioRecordMethod(obj, method_id, "enableBuiltInAGC",
+                                       "(Z)Z")) {
+    (void)va_arg(args, jint);
+    // WebRTC's software processing remains active; these Android controls are
+    // accepted as compatibility no-ops.
+    value = true;
+  } else if (IsWebRtcAudioRecordMethod(obj, method_id, "isAudioConfigVerified",
+                                       "()Z") ||
+             IsWebRtcAudioRecordMethod(obj, method_id,
+                                       "isAudioSourceMatchingRecordingSession",
+                                       "()Z")) {
+    value = true;
+  } else {
+    handled = false;
+  }
+  if (handled && result != nullptr) {
+    *result = value ? JNI_TRUE : JNI_FALSE;
+  }
+  return handled;
+}
+
+bool HandleWebRtcAudioRecordBooleanMethodA(jobject obj, jmethodID method_id,
+                                           const jvalue * /*args*/,
+                                           jboolean *result) {
+  bool handled = true;
+  bool value = false;
+  VM *vm = CurrentVM();
+  if (IsWebRtcAudioRecordMethod(obj, method_id, "startRecording", "()Z")) {
+    value = vm != nullptr && vm->DispatchWebRtcAudioRecordStart(obj);
+  } else if (IsWebRtcAudioRecordMethod(obj, method_id, "stopRecording",
+                                       "()Z")) {
+    value = vm != nullptr && vm->DispatchWebRtcAudioRecordStop(obj);
+  } else if (IsWebRtcAudioRecordMethod(obj, method_id, "enableBuiltInAEC",
+                                       "(Z)Z") ||
+             IsWebRtcAudioRecordMethod(obj, method_id, "enableBuiltInNS",
+                                       "(Z)Z") ||
+             IsWebRtcAudioRecordMethod(obj, method_id, "enableBuiltInAGC",
+                                       "(Z)Z") ||
+             IsWebRtcAudioRecordMethod(obj, method_id, "isAudioConfigVerified",
+                                       "()Z") ||
+             IsWebRtcAudioRecordMethod(obj, method_id,
+                                       "isAudioSourceMatchingRecordingSession",
+                                       "()Z")) {
+    value = true;
+  } else {
+    handled = false;
+  }
+  if (handled && result != nullptr) {
+    *result = value ? JNI_TRUE : JNI_FALSE;
+  }
+  return handled;
+}
+
+bool HandleWebRtcAudioTrackIntMethodV(jobject obj, jmethodID method_id,
+                                      va_list args, jint *result) {
+  VM *vm = CurrentVM();
+  jint value = 0;
+  if (IsWebRtcAudioTrackMethod(obj, method_id, "initPlayout", "(IID)I")) {
+    const jint sample_rate_hz = va_arg(args, jint);
+    const jint channels = va_arg(args, jint);
+    const jdouble buffer_size_factor = va_arg(args, jdouble);
+    void *direct_buffer = nullptr;
+    std::size_t direct_buffer_capacity = 0;
+    value = vm != nullptr
+                ? vm->DispatchWebRtcAudioTrackInit(
+                      obj, sample_rate_hz, channels, buffer_size_factor,
+                      &direct_buffer, &direct_buffer_capacity)
+                : -1;
+  } else if (IsWebRtcAudioTrackMethod(obj, method_id, "getBufferSizeInFrames",
+                                      "()I")) {
+    value =
+        vm != nullptr ? vm->DispatchWebRtcAudioTrackBufferSizeFrames(obj) : 0;
+  } else if (IsWebRtcAudioTrackMethod(obj, method_id, "getStreamMaxVolume",
+                                      "()I") ||
+             IsWebRtcAudioTrackMethod(obj, method_id, "getStreamVolume",
+                                      "()I")) {
+    // Host volume remains under SDL/the desktop mixer. Return a stable,
+    // internally consistent Android-style range to WebRTC.
+    value = 100;
+  } else {
+    return false;
+  }
+  if (result != nullptr) {
+    *result = value;
+  }
+  return true;
+}
+
+bool HandleWebRtcAudioTrackIntMethodA(jobject obj, jmethodID method_id,
+                                      const jvalue *args, jint *result) {
+  VM *vm = CurrentVM();
+  jint value = 0;
+  if (IsWebRtcAudioTrackMethod(obj, method_id, "initPlayout", "(IID)I")) {
+    void *direct_buffer = nullptr;
+    std::size_t direct_buffer_capacity = 0;
+    value = vm != nullptr && args != nullptr
+                ? vm->DispatchWebRtcAudioTrackInit(obj, args[0].i, args[1].i,
+                                                   args[2].d, &direct_buffer,
+                                                   &direct_buffer_capacity)
+                : -1;
+  } else if (IsWebRtcAudioTrackMethod(obj, method_id, "getBufferSizeInFrames",
+                                      "()I")) {
+    value =
+        vm != nullptr ? vm->DispatchWebRtcAudioTrackBufferSizeFrames(obj) : 0;
+  } else if (IsWebRtcAudioTrackMethod(obj, method_id, "getStreamMaxVolume",
+                                      "()I") ||
+             IsWebRtcAudioTrackMethod(obj, method_id, "getStreamVolume",
+                                      "()I")) {
+    value = 100;
+  } else {
+    return false;
+  }
+  if (result != nullptr) {
+    *result = value;
+  }
+  return true;
+}
+
+bool HandleWebRtcAudioTrackBooleanMethodV(jobject obj, jmethodID method_id,
+                                          va_list args, jboolean *result) {
+  VM *vm = CurrentVM();
+  bool value = false;
+  if (IsWebRtcAudioTrackMethod(obj, method_id, "startPlayout", "()Z")) {
+    value = vm != nullptr && vm->DispatchWebRtcAudioTrackStart(obj);
+  } else if (IsWebRtcAudioTrackMethod(obj, method_id, "stopPlayout", "()Z")) {
+    value = vm != nullptr && vm->DispatchWebRtcAudioTrackStop(obj);
+  } else if (IsWebRtcAudioTrackMethod(obj, method_id, "setStreamVolume",
+                                      "(I)Z")) {
+    (void)va_arg(args, jint);
+    value = true;
+  } else {
+    return false;
+  }
+  if (result != nullptr) {
+    *result = value ? JNI_TRUE : JNI_FALSE;
+  }
+  return true;
+}
+
+bool HandleWebRtcAudioTrackBooleanMethodA(jobject obj, jmethodID method_id,
+                                          const jvalue * /*args*/,
+                                          jboolean *result) {
+  VM *vm = CurrentVM();
+  bool value = false;
+  if (IsWebRtcAudioTrackMethod(obj, method_id, "startPlayout", "()Z")) {
+    value = vm != nullptr && vm->DispatchWebRtcAudioTrackStart(obj);
+  } else if (IsWebRtcAudioTrackMethod(obj, method_id, "stopPlayout", "()Z")) {
+    value = vm != nullptr && vm->DispatchWebRtcAudioTrackStop(obj);
+  } else if (IsWebRtcAudioTrackMethod(obj, method_id, "setStreamVolume",
+                                      "(I)Z")) {
+    value = true;
+  } else {
+    return false;
+  }
+  if (result != nullptr) {
+    *result = value ? JNI_TRUE : JNI_FALSE;
   }
   return true;
 }
@@ -3999,7 +4230,14 @@ jboolean JNICALL CallBooleanMethod(JNIEnv* /*env*/, jobject obj,
   va_start(args, methodID);
   jboolean result = JNI_FALSE;
   bool handled =
-      HandleFmodAudioDeviceBooleanMethodV(obj, methodID, args, &result);
+      HandleWebRtcAudioRecordBooleanMethodV(obj, methodID, args, &result);
+  if (!handled) {
+    handled =
+        HandleWebRtcAudioTrackBooleanMethodV(obj, methodID, args, &result);
+  }
+  if (!handled) {
+    handled = HandleFmodAudioDeviceBooleanMethodV(obj, methodID, args, &result);
+  }
   if (!handled) {
     handled =
         PackageManagerBooleanResultForMethodV(obj, methodID, args, &result);
@@ -4020,7 +4258,17 @@ jint JNICALL CallIntMethod(JNIEnv* /*env*/, jobject obj, jmethodID methodID, ...
   if (TraceEnabled()) {
     std::cout << "  [JNI] CallIntMethod: " << MethodName(methodID) << '\n';
   }
-  return IntResultForReceiverMethod(obj, MethodName(methodID));
+  va_list args;
+  va_start(args, methodID);
+  jint result = 0;
+  bool handled =
+      HandleWebRtcAudioRecordIntMethodV(obj, methodID, args, &result);
+  if (!handled) {
+    handled = HandleWebRtcAudioTrackIntMethodV(obj, methodID, args, &result);
+  }
+  va_end(args);
+  return handled ? result
+                 : IntResultForReceiverMethod(obj, MethodName(methodID));
 }
 
 jlong JNICALL CallLongMethod(JNIEnv* /*env*/, jobject obj,
@@ -4054,6 +4302,16 @@ jobject ConstructObjectV(jclass clazz, jmethodID methodID, va_list args) {
              std::strcmp(MethodName(methodID), "<init>") == 0 &&
              std::strcmp(MethodSignature(methodID), "(J)V") == 0) {
     SetLongFieldRaw(object, "ref", va_arg(args, jlong));
+  } else if (object_class->GetName() ==
+                 "org/webrtc/voiceengine/WebRtcAudioRecord" &&
+             std::strcmp(MethodName(methodID), "<init>") == 0 &&
+             std::strcmp(MethodSignature(methodID), "(J)V") == 0) {
+    SetLongFieldRaw(object, "nativeAudioRecord", va_arg(args, jlong));
+  } else if (object_class->GetName() ==
+                 "org/webrtc/voiceengine/WebRtcAudioTrack" &&
+             std::strcmp(MethodName(methodID), "<init>") == 0 &&
+             std::strcmp(MethodSignature(methodID), "(J)V") == 0) {
+    SetLongFieldRaw(object, "nativeAudioTrack", va_arg(args, jlong));
   } else if (object_class->GetName() ==
                  "com/roblox/engine/jni/model/NativeTextBoxInfo" &&
              IsRobloxTextBoxInfoConstructor(methodID)) {
@@ -4126,6 +4384,16 @@ jobject ConstructObjectA(jclass clazz, jmethodID methodID, const jvalue *args) {
              std::strcmp(MethodName(methodID), "<init>") == 0 &&
              std::strcmp(MethodSignature(methodID), "(J)V") == 0) {
     SetLongFieldRaw(object, "ref", args[0].j);
+  } else if (object_class->GetName() ==
+                 "org/webrtc/voiceengine/WebRtcAudioRecord" &&
+             std::strcmp(MethodName(methodID), "<init>") == 0 &&
+             std::strcmp(MethodSignature(methodID), "(J)V") == 0) {
+    SetLongFieldRaw(object, "nativeAudioRecord", args[0].j);
+  } else if (object_class->GetName() ==
+                 "org/webrtc/voiceengine/WebRtcAudioTrack" &&
+             std::strcmp(MethodName(methodID), "<init>") == 0 &&
+             std::strcmp(MethodSignature(methodID), "(J)V") == 0) {
+    SetLongFieldRaw(object, "nativeAudioTrack", args[0].j);
   } else if (object_class->GetName() ==
                  "com/roblox/engine/jni/model/NativeTextBoxInfo" &&
              IsRobloxTextBoxInfoConstructor(methodID)) {
@@ -4339,6 +4607,8 @@ VM::~VM() {
   ClearRobloxCredentialProvider();
   ClearRobloxTextInputCallbacks();
   ClearAndroidWindowCallbacks();
+  ClearWebRtcAudioTrackCallbacks();
+  ClearWebRtcAudioRecordCallbacks();
   ClearFmodAudioDeviceCallbacks();
   if (g_thread_vm_instance == this) {
     g_thread_vm_instance = nullptr;
@@ -4944,6 +5214,332 @@ bool VM::DispatchFmodAudioDeviceClose(const void* identity) {
          binding.callbacks.close(binding.context.get(), identity);
 }
 
+namespace {
+
+void OnWebRtcAudioRecordData(void *context, const void *identity,
+                             std::size_t size_bytes) {
+  auto *vm = static_cast<VM *>(context);
+  if (vm != nullptr) {
+    vm->DispatchWebRtcAudioRecordData(identity, size_bytes);
+  }
+}
+
+} // namespace
+
+void VM::SetWebRtcAudioRecordCallbacks(
+    std::shared_ptr<void> context,
+    const WebRtcAudioRecordCallbacks &callbacks) {
+  WebRtcAudioRecordBinding old_binding;
+  {
+    std::lock_guard<std::mutex> lock(webrtc_audio_record_mutex_);
+    old_binding = std::move(webrtc_audio_record_binding_);
+    webrtc_audio_record_binding_.context = std::move(context);
+    webrtc_audio_record_binding_.callbacks = callbacks;
+  }
+  if (old_binding.context != nullptr &&
+      old_binding.callbacks.shutdown != nullptr) {
+    old_binding.callbacks.shutdown(old_binding.context.get());
+  }
+}
+
+void VM::ClearWebRtcAudioRecordCallbacks() {
+  WebRtcAudioRecordBinding old_binding;
+  {
+    std::lock_guard<std::mutex> lock(webrtc_audio_record_mutex_);
+    old_binding = std::move(webrtc_audio_record_binding_);
+    webrtc_audio_record_binding_ = {};
+  }
+  if (old_binding.context != nullptr &&
+      old_binding.callbacks.shutdown != nullptr) {
+    old_binding.callbacks.shutdown(old_binding.context.get());
+  }
+}
+
+int VM::DispatchWebRtcAudioRecordInit(const void *identity, int sample_rate_hz,
+                                      int channels, void **direct_buffer,
+                                      std::size_t *direct_buffer_capacity) {
+  WebRtcAudioRecordBinding binding;
+  {
+    std::lock_guard<std::mutex> lock(webrtc_audio_record_mutex_);
+    binding = webrtc_audio_record_binding_;
+  }
+  if (binding.context == nullptr || binding.callbacks.init == nullptr) {
+    return -1;
+  }
+  const int frames = binding.callbacks.init(
+      binding.context.get(), identity, sample_rate_hz, channels,
+      &OnWebRtcAudioRecordData, this, direct_buffer, direct_buffer_capacity);
+  if (frames < 0 || direct_buffer == nullptr || *direct_buffer == nullptr ||
+      direct_buffer_capacity == nullptr || *direct_buffer_capacity == 0) {
+    return -1;
+  }
+
+  void *native = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(webrtc_audio_record_native_mutex_);
+    native = webrtc_cache_direct_buffer_native_;
+  }
+  const jlong native_audio_record =
+      LongFieldValue(reinterpret_cast<jobject>(const_cast<void *>(identity)),
+                     "nativeAudioRecord");
+  if (native == nullptr || native_audio_record == 0 ||
+      *direct_buffer_capacity >
+          static_cast<std::size_t>(std::numeric_limits<jlong>::max())) {
+    if (binding.callbacks.close != nullptr) {
+      binding.callbacks.close(binding.context.get(), identity);
+    }
+    return -1;
+  }
+  JNIEnv *env = GetJNIEnv();
+  jobject byte_buffer = env->NewDirectByteBuffer(
+      *direct_buffer, static_cast<jlong>(*direct_buffer_capacity));
+  if (byte_buffer == nullptr) {
+    if (binding.callbacks.close != nullptr) {
+      binding.callbacks.close(binding.context.get(), identity);
+    }
+    return -1;
+  }
+  using CacheDirectBuffer = void(JNICALL *)(JNIEnv *, jobject, jobject, jlong);
+  reinterpret_cast<CacheDirectBuffer>(native)(
+      env, reinterpret_cast<jobject>(const_cast<void *>(identity)), byte_buffer,
+      native_audio_record);
+  return frames;
+}
+
+bool VM::DispatchWebRtcAudioRecordStart(const void *identity) {
+  WebRtcAudioRecordBinding binding;
+  {
+    std::lock_guard<std::mutex> lock(webrtc_audio_record_mutex_);
+    binding = webrtc_audio_record_binding_;
+  }
+  return binding.context != nullptr && binding.callbacks.start != nullptr &&
+         binding.callbacks.start(binding.context.get(), identity);
+}
+
+bool VM::DispatchWebRtcAudioRecordStop(const void *identity) {
+  WebRtcAudioRecordBinding binding;
+  {
+    std::lock_guard<std::mutex> lock(webrtc_audio_record_mutex_);
+    binding = webrtc_audio_record_binding_;
+  }
+  return binding.context != nullptr && binding.callbacks.stop != nullptr &&
+         binding.callbacks.stop(binding.context.get(), identity);
+}
+
+void VM::DispatchWebRtcAudioRecordClose(const void *identity) {
+  WebRtcAudioRecordBinding binding;
+  {
+    std::lock_guard<std::mutex> lock(webrtc_audio_record_mutex_);
+    binding = webrtc_audio_record_binding_;
+  }
+  if (binding.context != nullptr && binding.callbacks.close != nullptr) {
+    binding.callbacks.close(binding.context.get(), identity);
+  }
+}
+
+void VM::RegisterWebRtcAudioRecordNative(const char *name,
+                                         const char *signature,
+                                         void *function) {
+  if (name == nullptr || signature == nullptr || function == nullptr) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(webrtc_audio_record_native_mutex_);
+  if (std::strcmp(name, "nativeCacheDirectBufferAddress") == 0 &&
+      std::strcmp(signature, "(Ljava/nio/ByteBuffer;J)V") == 0) {
+    webrtc_cache_direct_buffer_native_ = function;
+  } else if (std::strcmp(name, "nativeDataIsRecorded") == 0 &&
+             std::strcmp(signature, "(IJ)V") == 0) {
+    webrtc_data_is_recorded_native_ = function;
+  }
+}
+
+void VM::DispatchWebRtcAudioRecordData(const void *identity,
+                                       std::size_t size_bytes) {
+  void *native = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(webrtc_audio_record_native_mutex_);
+    native = webrtc_data_is_recorded_native_;
+  }
+  if (native == nullptr || identity == nullptr ||
+      size_bytes > static_cast<std::size_t>(std::numeric_limits<jint>::max())) {
+    return;
+  }
+  const jlong native_audio_record =
+      LongFieldValue(reinterpret_cast<jobject>(const_cast<void *>(identity)),
+                     "nativeAudioRecord");
+  if (native_audio_record == 0) {
+    return;
+  }
+  using DataIsRecorded = void(JNICALL *)(JNIEnv *, jobject, jint, jlong);
+  reinterpret_cast<DataIsRecorded>(native)(
+      GetJNIEnv(), reinterpret_cast<jobject>(const_cast<void *>(identity)),
+      static_cast<jint>(size_bytes), native_audio_record);
+}
+
+namespace {
+
+void OnWebRtcAudioTrackData(void *context, const void *identity,
+                            std::size_t size_bytes) {
+  auto *vm = static_cast<VM *>(context);
+  if (vm != nullptr) {
+    vm->DispatchWebRtcAudioTrackData(identity, size_bytes);
+  }
+}
+
+} // namespace
+
+void VM::SetWebRtcAudioTrackCallbacks(
+    std::shared_ptr<void> context, const WebRtcAudioTrackCallbacks &callbacks) {
+  std::lock_guard<std::mutex> lock(webrtc_audio_track_mutex_);
+  webrtc_audio_track_binding_.context = std::move(context);
+  webrtc_audio_track_binding_.callbacks = callbacks;
+}
+
+void VM::ClearWebRtcAudioTrackCallbacks() {
+  std::lock_guard<std::mutex> lock(webrtc_audio_track_mutex_);
+  webrtc_audio_track_binding_ = {};
+}
+
+int VM::DispatchWebRtcAudioTrackInit(const void *identity, int sample_rate_hz,
+                                     int channels, double buffer_size_factor,
+                                     void **direct_buffer,
+                                     std::size_t *direct_buffer_capacity) {
+  WebRtcAudioTrackBinding binding;
+  {
+    std::lock_guard<std::mutex> lock(webrtc_audio_track_mutex_);
+    binding = webrtc_audio_track_binding_;
+  }
+  if (binding.context == nullptr || binding.callbacks.init == nullptr ||
+      direct_buffer == nullptr || direct_buffer_capacity == nullptr) {
+    return -1;
+  }
+  const int buffer_size_bytes = binding.callbacks.init(
+      binding.context.get(), identity, sample_rate_hz, channels,
+      buffer_size_factor, &OnWebRtcAudioTrackData, this, direct_buffer,
+      direct_buffer_capacity);
+  if (buffer_size_bytes < 0 || *direct_buffer == nullptr ||
+      *direct_buffer_capacity == 0 ||
+      *direct_buffer_capacity >
+          static_cast<std::size_t>(std::numeric_limits<jlong>::max())) {
+    if (binding.callbacks.close != nullptr) {
+      binding.callbacks.close(binding.context.get(), identity);
+    }
+    return -1;
+  }
+
+  void *native = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(webrtc_audio_track_native_mutex_);
+    native = webrtc_track_cache_direct_buffer_native_;
+  }
+  const jlong native_audio_track =
+      LongFieldValue(reinterpret_cast<jobject>(const_cast<void *>(identity)),
+                     "nativeAudioTrack");
+  if (native == nullptr || native_audio_track == 0) {
+    if (binding.callbacks.close != nullptr) {
+      binding.callbacks.close(binding.context.get(), identity);
+    }
+    return -1;
+  }
+
+  JNIEnv *env = GetJNIEnv();
+  jobject byte_buffer = env->NewDirectByteBuffer(
+      *direct_buffer, static_cast<jlong>(*direct_buffer_capacity));
+  if (byte_buffer == nullptr) {
+    if (binding.callbacks.close != nullptr) {
+      binding.callbacks.close(binding.context.get(), identity);
+    }
+    return -1;
+  }
+  using CacheDirectBuffer = void(JNICALL *)(JNIEnv *, jobject, jobject, jlong);
+  reinterpret_cast<CacheDirectBuffer>(native)(
+      env, reinterpret_cast<jobject>(const_cast<void *>(identity)), byte_buffer,
+      native_audio_track);
+  return buffer_size_bytes;
+}
+
+int VM::DispatchWebRtcAudioTrackBufferSizeFrames(const void *identity) {
+  WebRtcAudioTrackBinding binding;
+  {
+    std::lock_guard<std::mutex> lock(webrtc_audio_track_mutex_);
+    binding = webrtc_audio_track_binding_;
+  }
+  return binding.context != nullptr &&
+                 binding.callbacks.buffer_size_frames != nullptr
+             ? binding.callbacks.buffer_size_frames(binding.context.get(),
+                                                    identity)
+             : 0;
+}
+
+bool VM::DispatchWebRtcAudioTrackStart(const void *identity) {
+  WebRtcAudioTrackBinding binding;
+  {
+    std::lock_guard<std::mutex> lock(webrtc_audio_track_mutex_);
+    binding = webrtc_audio_track_binding_;
+  }
+  return binding.context != nullptr && binding.callbacks.start != nullptr &&
+         binding.callbacks.start(binding.context.get(), identity);
+}
+
+bool VM::DispatchWebRtcAudioTrackStop(const void *identity) {
+  WebRtcAudioTrackBinding binding;
+  {
+    std::lock_guard<std::mutex> lock(webrtc_audio_track_mutex_);
+    binding = webrtc_audio_track_binding_;
+  }
+  return binding.context != nullptr && binding.callbacks.stop != nullptr &&
+         binding.callbacks.stop(binding.context.get(), identity);
+}
+
+void VM::DispatchWebRtcAudioTrackClose(const void *identity) {
+  WebRtcAudioTrackBinding binding;
+  {
+    std::lock_guard<std::mutex> lock(webrtc_audio_track_mutex_);
+    binding = webrtc_audio_track_binding_;
+  }
+  if (binding.context != nullptr && binding.callbacks.close != nullptr) {
+    binding.callbacks.close(binding.context.get(), identity);
+  }
+}
+
+void VM::RegisterWebRtcAudioTrackNative(const char *name, const char *signature,
+                                        void *function) {
+  if (name == nullptr || signature == nullptr || function == nullptr) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(webrtc_audio_track_native_mutex_);
+  if (std::strcmp(name, "nativeCacheDirectBufferAddress") == 0 &&
+      std::strcmp(signature, "(Ljava/nio/ByteBuffer;J)V") == 0) {
+    webrtc_track_cache_direct_buffer_native_ = function;
+  } else if (std::strcmp(name, "nativeGetPlayoutData") == 0 &&
+             std::strcmp(signature, "(IJ)V") == 0) {
+    webrtc_get_playout_data_native_ = function;
+  }
+}
+
+void VM::DispatchWebRtcAudioTrackData(const void *identity,
+                                      std::size_t size_bytes) {
+  void *native = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(webrtc_audio_track_native_mutex_);
+    native = webrtc_get_playout_data_native_;
+  }
+  if (native == nullptr || identity == nullptr ||
+      size_bytes > static_cast<std::size_t>(std::numeric_limits<jint>::max())) {
+    return;
+  }
+  const jlong native_audio_track =
+      LongFieldValue(reinterpret_cast<jobject>(const_cast<void *>(identity)),
+                     "nativeAudioTrack");
+  if (native_audio_track == 0) {
+    return;
+  }
+  using GetPlayoutData = void(JNICALL *)(JNIEnv *, jobject, jint, jlong);
+  reinterpret_cast<GetPlayoutData>(native)(
+      GetJNIEnv(), reinterpret_cast<jobject>(const_cast<void *>(identity)),
+      static_cast<jint>(size_bytes), native_audio_track);
+}
+
 void VM::SetAndroidWindowCallbacks(
     std::shared_ptr<void> context,
     const AndroidWindowCallbacks& callbacks) {
@@ -5373,7 +5969,24 @@ void VM::InitJNIFunctionTables() {
 	      } else if (std::strcmp(name, "onSurfaceRedrawNeededNative") == 0) {
 	        mocktail_gameactivity_on_surface_redraw_needed_native = methods[i].fnPtr;
 	      }
-	    }
+              if (cls != nullptr &&
+                  cls->GetName() ==
+                      "org/webrtc/voiceengine/WebRtcAudioRecord") {
+                VM *vm = CurrentVM();
+                if (vm != nullptr) {
+                  vm->RegisterWebRtcAudioRecordNative(
+                      methods[i].name, methods[i].signature, methods[i].fnPtr);
+                }
+              }
+              if (cls != nullptr &&
+                  cls->GetName() == "org/webrtc/voiceengine/WebRtcAudioTrack") {
+                VM *vm = CurrentVM();
+                if (vm != nullptr) {
+                  vm->RegisterWebRtcAudioTrackNative(
+                      methods[i].name, methods[i].signature, methods[i].fnPtr);
+                }
+              }
+            }
 	    if (TraceEnabled()) {
 	      std::cout << "  [JNI] RegisterNatives for class "
 	                << (cls ? cls->GetName() : "unknown") << " ("
@@ -5793,6 +6406,12 @@ void VM::InitJNIFunctionTables() {
       std::cout << "  [JNI] CallBooleanMethodV: " << MethodName(methodID) << '\n';
     }
     jboolean result = JNI_FALSE;
+    if (HandleWebRtcAudioRecordBooleanMethodV(obj, methodID, args, &result)) {
+      return result;
+    }
+    if (HandleWebRtcAudioTrackBooleanMethodV(obj, methodID, args, &result)) {
+      return result;
+    }
     if (HandleFmodAudioDeviceBooleanMethodV(obj, methodID, args, &result)) {
       return result;
     }
@@ -5816,6 +6435,12 @@ void VM::InitJNIFunctionTables() {
       std::cout << "  [JNI] CallBooleanMethodA: " << MethodName(methodID) << '\n';
     }
     jboolean result = JNI_FALSE;
+    if (HandleWebRtcAudioRecordBooleanMethodA(obj, methodID, args, &result)) {
+      return result;
+    }
+    if (HandleWebRtcAudioTrackBooleanMethodA(obj, methodID, args, &result)) {
+      return result;
+    }
     if (HandleFmodAudioDeviceBooleanMethodA(obj, methodID, args, &result)) {
       return result;
     }
@@ -5858,19 +6483,30 @@ void VM::InitJNIFunctionTables() {
 
   native_interface_.CallIntMethod = CallIntMethod;
 
-  native_interface_.CallIntMethodV =
-      [](JNIEnv* /*env*/, jobject obj, jmethodID methodID, va_list /*args*/) -> jint {
+  native_interface_.CallIntMethodV = [](JNIEnv * /*env*/, jobject obj,
+                                        jmethodID methodID,
+                                        va_list args) -> jint {
     if (TraceEnabled()) {
       std::cout << "  [JNI] CallIntMethodV: " << MethodName(methodID) << '\n';
+    }
+    jint result = 0;
+    if (HandleWebRtcAudioRecordIntMethodV(obj, methodID, args, &result) ||
+        HandleWebRtcAudioTrackIntMethodV(obj, methodID, args, &result)) {
+      return result;
     }
     return IntResultForReceiverMethod(obj, MethodName(methodID));
   };
 
-  native_interface_.CallIntMethodA =
-      [](JNIEnv* /*env*/, jobject obj, jmethodID methodID,
-         const jvalue* /*args*/) -> jint {
+  native_interface_.CallIntMethodA = [](JNIEnv * /*env*/, jobject obj,
+                                        jmethodID methodID,
+                                        const jvalue *args) -> jint {
     if (TraceEnabled()) {
       std::cout << "  [JNI] CallIntMethodA: " << MethodName(methodID) << '\n';
+    }
+    jint result = 0;
+    if (HandleWebRtcAudioRecordIntMethodA(obj, methodID, args, &result) ||
+        HandleWebRtcAudioTrackIntMethodA(obj, methodID, args, &result)) {
+      return result;
     }
     return IntResultForReceiverMethod(obj, MethodName(methodID));
   };
@@ -6329,9 +6965,15 @@ void VM::InitJNIFunctionTables() {
   native_interface_.ReleasePrimitiveArrayCritical =
       [](JNIEnv* /*env*/, jarray /*array*/, void* /*carray*/, jint /*mode*/) {};
 
-  native_interface_.NewDirectByteBuffer =
-      [](JNIEnv* /*env*/, void* address, jlong /*capacity*/) -> jobject {
-    return reinterpret_cast<jobject>(address);
+  native_interface_.NewDirectByteBuffer = [](JNIEnv * /*env*/, void *address,
+                                             jlong capacity) -> jobject {
+    if (address == nullptr || capacity < 0) {
+      return nullptr;
+    }
+    const jobject buffer = reinterpret_cast<jobject>(address);
+    std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
+    g_direct_buffer_capacities[buffer] = capacity;
+    return buffer;
   };
 
   native_interface_.GetDirectBufferAddress =
@@ -6339,9 +6981,11 @@ void VM::InitJNIFunctionTables() {
     return reinterpret_cast<void*>(buf);
   };
 
-  native_interface_.GetDirectBufferCapacity =
-      [](JNIEnv* /*env*/, jobject /*buf*/) -> jlong {
-    return 0;
+  native_interface_.GetDirectBufferCapacity = [](JNIEnv * /*env*/,
+                                                 jobject buf) -> jlong {
+    std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
+    const auto found = g_direct_buffer_capacities.find(buf);
+    return found != g_direct_buffer_capacities.end() ? found->second : -1;
   };
 
   native_interface_.MonitorEnter =

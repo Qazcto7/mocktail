@@ -108,6 +108,7 @@ TEST(RuntimeConfigBootstrapTest, CreatesCompletePrivateFirstRunFile) {
   EXPECT_EQ(loaded.config.performance().physics_worker_mode,
             PhysicsWorkerMode::kThroughput);
   EXPECT_EQ(loaded.config.audio_output_device(), "default");
+  EXPECT_EQ(loaded.config.audio_input_device(), "default");
   EXPECT_FALSE(loaded.config.input_capabilities().touch_enabled);
   EXPECT_TRUE(loaded.config.desktop_playability());
   EXPECT_EQ(loaded.config.device_profile().name, "pc-windows-11");
@@ -146,6 +147,8 @@ TEST(RuntimeConfigBootstrapTest,
            "auto, on, off.\n  gamemode: auto",
            "# To pin output, copy an exact SDL device name printed during "
            "startup.\n  output_device: default",
+           "# between boots; prefer the exact device name when it is unique.\n"
+           "  input_device: default",
            "# Boolean (default: false): publish Mocktail activity to Discord "
            "Desktop.\n    # This never signs in to Discord and never reads an "
            "account token.\n    enabled: false",
@@ -382,6 +385,7 @@ performance:
   gamemode: on
 audio:
   output_device: YAML Speakers
+  input_device: YAML Microphone
 input:
   touch_enabled: true
 compatibility:
@@ -399,6 +403,7 @@ network:
       {"MOCKTAIL_MEMORY_LIMIT_MB", "8192"},
       {"MOCKTAIL_GAMEMODE", "off"},
       {"MOCKTAIL_AUDIO_OUTPUT_DEVICE", "Environment Headset"},
+      {"MOCKTAIL_AUDIO_INPUT_DEVICE", "Environment Microphone"},
       {"MOCKTAIL_TOUCH_MODE", "off"},
       {"MOCKTAIL_DESKTOP_PLAYABILITY", "1"},
       {"MOCKTAIL_HTTP_PROXY_HOST", "env-proxy.example.test"},
@@ -417,6 +422,7 @@ network:
   EXPECT_EQ(loaded.config.performance().memory_limit_mb, 8192U);
   EXPECT_EQ(loaded.config.performance().game_mode, GameModePolicy::kOff);
   EXPECT_EQ(loaded.config.audio_output_device(), "Environment Headset");
+  EXPECT_EQ(loaded.config.audio_input_device(), "Environment Microphone");
   EXPECT_FALSE(loaded.config.input_capabilities().touch_enabled);
   EXPECT_TRUE(loaded.config.desktop_playability());
   ASSERT_TRUE(loaded.config.roblox_http_user_agent().has_value());
@@ -444,6 +450,25 @@ audio:
   std::string error;
   EXPECT_FALSE(ExportRuntimeConfigEnvironment(from_environment, &error));
   EXPECT_NE(error.find("invalid audio output device"), std::string::npos);
+}
+
+TEST(RuntimeConfigFileTest, RejectsUnsafeAudioInputDevice) {
+  TemporaryDirectory temporary;
+  const std::filesystem::path empty = temporary.Write(R"yaml(
+version: 1
+audio:
+  input_device: ""
+)yaml");
+  RuntimeConfigLoadResult loaded = LoadRuntimeConfig(MapEnvironment(), empty);
+  EXPECT_FALSE(loaded);
+  EXPECT_NE(loaded.error.find("audio.input_device"), std::string::npos);
+
+  const RuntimeConfig from_environment = RuntimeConfig::FromEnvironment(
+      MapEnvironment({{"MOCKTAIL_AUDIO_INPUT_DEVICE", "Mic\nInjected"}}));
+  EXPECT_FALSE(from_environment.audio_input_device_valid());
+  std::string error;
+  EXPECT_FALSE(ExportRuntimeConfigEnvironment(from_environment, &error));
+  EXPECT_NE(error.find("invalid audio input device"), std::string::npos);
 }
 
 TEST(RuntimeConfigFileTest, RejectsIncompleteOrInvalidNetworkProxy) {
@@ -628,6 +653,17 @@ TEST(RuntimeConfigFileTest, ExportsAudioOutputDevice) {
   ASSERT_NE(getenv("MOCKTAIL_AUDIO_OUTPUT_DEVICE"), nullptr);
   EXPECT_STREQ(getenv("MOCKTAIL_AUDIO_OUTPUT_DEVICE"), "USB Headset");
   unsetenv("MOCKTAIL_AUDIO_OUTPUT_DEVICE");
+}
+
+TEST(RuntimeConfigFileTest, ExportsAudioInputDevice) {
+  unsetenv("MOCKTAIL_AUDIO_INPUT_DEVICE");
+  std::string error;
+  const RuntimeConfig configured = RuntimeConfig::FromEnvironment(
+      MapEnvironment({{"MOCKTAIL_AUDIO_INPUT_DEVICE", "USB Microphone"}}));
+  ASSERT_TRUE(ExportRuntimeConfigEnvironment(configured, &error)) << error;
+  ASSERT_NE(getenv("MOCKTAIL_AUDIO_INPUT_DEVICE"), nullptr);
+  EXPECT_STREQ(getenv("MOCKTAIL_AUDIO_INPUT_DEVICE"), "USB Microphone");
+  unsetenv("MOCKTAIL_AUDIO_INPUT_DEVICE");
 }
 
 TEST(RuntimeConfigFileTest, ExportsDesktopPlayabilityUserAgent) {

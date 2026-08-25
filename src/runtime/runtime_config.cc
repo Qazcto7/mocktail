@@ -276,6 +276,10 @@ RuntimeConfig RuntimeConfig::FromEnvironment(const Environment& environment) {
       "MOCKTAIL_AUDIO_OUTPUT_DEVICE", config.audio_output_device_);
   config.audio_output_device_valid_ =
       IsValidDeviceProfileValue(config.audio_output_device_, 512);
+  config.audio_input_device_ = environment.GetOr(
+      "MOCKTAIL_AUDIO_INPUT_DEVICE", config.audio_input_device_);
+  config.audio_input_device_valid_ =
+      IsValidDeviceProfileValue(config.audio_input_device_, 512);
   config.use_system_proxy_ =
       LegacyEnabled(environment, "MOCKTAIL_USE_SYSTEM_PROXY");
   config.network_proxy_ = ReadNetworkProxy(environment);
