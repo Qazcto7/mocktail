@@ -1485,9 +1485,14 @@ bool SwapBuffers() {
   if (swap_count == 1) {
     fprintf(stderr, "  [window] first Roblox frame presented\n");
   }
-  if (swap_count == 1 || swap_count % 240 == 0) {
-    fprintf(stderr, "  [perf] present_sample frame=%d monotonic_ns=%llu\n",
-            swap_count, static_cast<unsigned long long>(now_ticks_ns));
+  {
+    int sample_interval = 240;
+    ParsePositiveInt("MOCKTAIL_PRESENT_SAMPLE_INTERVAL", 240,
+                     &sample_interval);
+    if (swap_count == 1 || swap_count % sample_interval == 0) {
+      fprintf(stderr, "  [perf] present_sample frame=%d monotonic_ns=%llu\n",
+              swap_count, static_cast<unsigned long long>(now_ticks_ns));
+    }
   }
   if (WindowTraceEnabled() && (swap_count <= 20 || swap_count % 60 == 0)) {
     fprintf(stderr,
@@ -1538,9 +1543,14 @@ void NoteVulkanPresent() {
   if (present_count == 1) {
     fprintf(stderr, "  [window] first Roblox Vulkan frame presented\n");
   }
-  if (present_count == 1 || present_count % 240 == 0) {
-    fprintf(stderr, "  [perf] present_sample frame=%d monotonic_ns=%llu\n",
-            present_count, static_cast<unsigned long long>(now_ticks_ns));
+  {
+    int sample_interval = 240;
+    ParsePositiveInt("MOCKTAIL_PRESENT_SAMPLE_INTERVAL", 240,
+                     &sample_interval);
+    if (present_count == 1 || present_count % sample_interval == 0) {
+      fprintf(stderr, "  [perf] present_sample frame=%d monotonic_ns=%llu\n",
+              present_count, static_cast<unsigned long long>(now_ticks_ns));
+    }
   }
   if (WindowTraceEnabled() &&
       (present_count <= 20 || present_count % 60 == 0)) {
