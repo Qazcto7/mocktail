@@ -299,6 +299,14 @@ private:
   std::deque<PendingHostWindowEvent> pending_host_window_events_;
 };
 
+// RobloxWebViewBridge lives in mocktail_runtime, which the window layer
+// (mocktail_window) depends on - not the other way around - so it cannot
+// call into window.cc directly. main.cc links both and registers
+// mocktail::window::RaiseAndFocus here at startup; if nothing is
+// registered (e.g. in a headless/test context), the call is simply a
+// no-op.
+void SetRaiseWindowCallback(void (*callback)());
+
 } // namespace runtime
 } // namespace mocktail
 

@@ -8,11 +8,11 @@
 #include <string>
 #include <utility>
 
+#include "window/window.h"
+
 namespace mocktail {
 namespace runtime {
 namespace {
-
-void (*g_raise_window_callback)() = nullptr;
 
 void ClearSensitiveString(std::string* value) {
   volatile char* bytes = value->empty() ? nullptr : value->data();
@@ -1339,7 +1339,7 @@ Status RobloxWebViewBridge::DrainHostWindowEvents() {
           // manager does not automatically hand keyboard/mouse focus
           // back to the main window just because that broadcast fired.
           // Raise it explicitly so input actually reaches Roblox.
-          if (g_raise_window_callback != nullptr) g_raise_window_callback();
+          mocktail::window::RaiseAndFocus();
         }
         break;
       case HostWindowEventType::kMessageBusWindowClose: {
@@ -1371,7 +1371,7 @@ Status RobloxWebViewBridge::DrainHostWindowEvents() {
             std::fprintf(stderr,
                          "  [webview] DataModel web surface focus returned "
                          "to Roblox\n");
-            if (g_raise_window_callback != nullptr) g_raise_window_callback();
+            mocktail::window::RaiseAndFocus();
           }
         }
         break;
@@ -1817,10 +1817,6 @@ void RobloxWebViewBridge::HostWindowExited(void *context) {
   }
   exit_context->target->close_queued = true;
   bridge->QueueHostWindowEvent(close_event, exit_context->generation);
-}
-
-void SetRaiseWindowCallback(void (*callback)()) {
-  g_raise_window_callback = callback;
 }
 
 } // namespace runtime

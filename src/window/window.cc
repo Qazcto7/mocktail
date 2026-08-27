@@ -1399,6 +1399,14 @@ void ShowIfHidden() {
   fprintf(stderr, "  [window] shown on first Roblox frame\n");
 }
 
+void RaiseAndFocus() {
+  if (!g_state.initialised || !g_state.sdl_window) {
+    return;
+  }
+  SDL_RaiseWindow(g_state.sdl_window);
+  fprintf(stderr, "  [window] raised and focused main window\n");
+}
+
 extern "C" void mocktail_window_show_if_hidden() { ShowIfHidden(); }
 
 extern "C" bool mocktail_window_swap_buffers() { return SwapBuffers(); }

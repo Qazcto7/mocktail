@@ -138,6 +138,14 @@ class ScopedPresentObserver final {
 
 void ShowIfHidden();
 
+// Raises and focuses the main window at the OS/window-manager level.
+// Unlike ShowIfHidden(), this is not gated on the window's initial
+// visibility - it is meant to be called any time something else (e.g.
+// a separate-process WebView window closing) may have left window-
+// manager input focus somewhere other than the main window, even
+// though the engine itself now believes it has focus again.
+void RaiseAndFocus();
+
 // The render thread must bind EGL before GLdispatch initializes its TLS.
 bool MakeCurrentOnThread();
 
