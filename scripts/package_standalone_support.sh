@@ -555,6 +555,22 @@ BuildJlinkRuntime() {
     --strip-debug --no-man-pages \
     --no-header-files --compress="${compression}" \
     --output "${SUPPORT_RUNTIME}/jre"
+
+  # apkanalyzer needs java.desktop data structures, but neither it nor
+  # apksigner uses Java Sound. Some OpenJDK builds link this optional native
+  # library against ALSA, which is intentionally absent from the AnyLinux
+  # build image and must not become a standalone runtime dependency.
+  local java_sound_library
+  for java_sound_library in \
+      "${SUPPORT_RUNTIME}/jre/lib/libjsound.so" \
+      "${SUPPORT_RUNTIME}/jre/lib/libjsoundalsa.so"; do
+    if [[ -e "${java_sound_library}" || -L "${java_sound_library}" ]]; then
+      [[ ! -d "${java_sound_library}" ]] ||
+        Die "Java Sound library path is unexpectedly a directory"
+      rm -f -- "${java_sound_library}"
+    fi
+  done
+
   [[ -x "${SUPPORT_RUNTIME}/jre/bin/java" ]] ||
     Die "jlink did not produce a Java launcher"
   ln -s -- "../jre/bin/java" "${SUPPORT_RUNTIME}/bin/java"

@@ -419,6 +419,8 @@ PYTHONNOUSERSITE=1 "${standalone_runtime}/runtime/bin/python3" -s -c \
 ! find "${standalone_runtime}/runtime/python" \
   \( -type d \( -name tkinter -o -name idlelib -o -name turtledemo \) -o \
      -type f -name '_tkinter*.so' \) -print -quit | grep -q .
+! find "${standalone_runtime}/runtime/jre" -name 'libjsound*.so' \
+  -print -quit | grep -q .
 [[ -s "${standalone_runtime}/webkit.env" ]]
 [[ ! -e "${standalone_runtime}/scripts/mocktail_login_webview.py" ]]
 [[ ! -e "${standalone_runtime}/libexec/webkit2gtk-4.1" ]]
