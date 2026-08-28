@@ -416,6 +416,9 @@ done
 [[ -x "${standalone_runtime}/runtime/bin/bash" ]]
 PYTHONNOUSERSITE=1 "${standalone_runtime}/runtime/bin/python3" -s -c \
   'import capstone; assert capstone.cs_version()[0] == 5'
+! find "${standalone_runtime}/runtime/python" \
+  \( -type d \( -name tkinter -o -name idlelib -o -name turtledemo \) -o \
+     -type f -name '_tkinter*.so' \) -print -quit | grep -q .
 [[ -s "${standalone_runtime}/webkit.env" ]]
 [[ ! -e "${standalone_runtime}/scripts/mocktail_login_webview.py" ]]
 [[ ! -e "${standalone_runtime}/libexec/webkit2gtk-4.1" ]]

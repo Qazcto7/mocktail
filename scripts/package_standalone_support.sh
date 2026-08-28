@@ -298,10 +298,16 @@ CopyTree() {
     fi
   done < <(
     if [[ "${prune_python_packages}" == true ]]; then
+      # Tk is an optional Python GUI stack and is not used by Mocktail's
+      # support scripts. Keeping _tkinter in the copied standard library
+      # makes the later ELF closure require Tcl/Tk even when the build image
+      # intentionally does not install those libraries.
       find -P "${source_root}" -mindepth 1 \
         \( -type d \( -name site-packages -o -name dist-packages -o \
-                       -name __pycache__ \) -prune \) -o \
-        \( -type f -name '*.pyc' -prune \) -o -print0
+                       -name __pycache__ -o -name tkinter -o \
+                       -name idlelib -o -name turtledemo \) -prune \) -o \
+        \( -type f \( -name '*.pyc' -o -name '_tkinter*.so' \) \
+           -prune \) -o -print0
     else
       find -P "${source_root}" -mindepth 1 \
         \( -type d -name __pycache__ -prune \) -o \
