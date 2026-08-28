@@ -187,3 +187,4 @@ lsan.log*
 # Test fixtures
 !/third_party/mcpelauncher-linker/core/libziparchive/**/*.zip
 !/third_party/mcpelauncher-linker/core/libziparchive/**/*.apk
+*.orig
