@@ -3,8 +3,9 @@
 
 #include <semaphore.h>
 
-// Bionic and glibc use different sem_t representations. These exports keep
-// host semaphore objects out of guest storage and key them by guest address.
+// Bionic sem_t is a count word in guest storage (value << 1, shared bit 0).
+// Wait/post use __atomic_* and futex on that word so inlined guest futex
+// waiters wake. Process-shared semaphores are rejected.
 extern "C" {
 
 int mocktail_bionic_sem_init(sem_t* semaphore, int process_shared,

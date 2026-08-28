@@ -34,6 +34,12 @@ RobloxInputDispatchResult Result(RobloxInputDispatchState state,
 
 float ScaleToSurfacePixels(float coordinate, int32_t logical_extent,
                            int32_t pixel_extent) {
+  if (__builtin_expect(logical_extent == pixel_extent, 1)) {
+    return coordinate;
+  }
+  if (__builtin_expect(logical_extent <= 0, 0)) {
+    return coordinate;
+  }
   return coordinate * static_cast<float>(pixel_extent) /
          static_cast<float>(logical_extent);
 }

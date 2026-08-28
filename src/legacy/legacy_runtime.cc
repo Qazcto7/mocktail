@@ -2,6 +2,7 @@
 #include <atomic>
 #include <cctype>
 #include <cerrno>
+#include <chrono>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -13,8 +14,10 @@
 #include <csignal>
 #include <netdb.h>
 #include <memory>
+#include <mutex>
 #include <new>
 #include <poll.h>
+#include <unordered_map>
 #include <pthread.h>
 #include <setjmp.h>
 #include <signal.h>
@@ -147,6 +150,8 @@ volatile uintptr_t g_stage6_jni_env = 0;
 volatile uintptr_t g_stage6_jni_functions = 0;
 volatile uintptr_t g_libroblox_base = 0;
 volatile uintptr_t g_game_activity_native_handle = 0;
+jobject g_saved_game_activity = nullptr;
+extern "C" void* mocktail_gameactivity_on_trim_memory_native;
 const char g_empty_c_string[] = "";
 volatile uintptr_t g_stage5_last_fallback_rip = 0;
 volatile sig_atomic_t g_jni_onload_in_progress = 0;
@@ -2610,13 +2615,32 @@ bool IsLegacyBinaryCompatibilityToggle(const char* name) {
   return false;
 }
 
+const char* CachedGetenv(const char* name) {
+  if (name == nullptr) {
+    return nullptr;
+  }
+  // Launch flags are string literals and do not change after startup. Cache by
+  // pointer identity so the main-thread pump does not walk environ + allocate
+  // on every tick.
+  static std::mutex mutex;
+  static std::unordered_map<const char*, const char*> cache;
+  std::lock_guard<std::mutex> lock(mutex);
+  const auto existing = cache.find(name);
+  if (existing != cache.end()) {
+    return existing->second;
+  }
+  const char* value = std::getenv(name);
+  cache.emplace(name, value);
+  return value;
+}
+
 bool IsEnabled(const char* name) {
   if (!g_allow_legacy_binary_patches.load(std::memory_order_acquire) &&
       IsLegacyBinaryCompatibilityToggle(name)) {
     return false;
   }
-  const char* value = std::getenv(name);
-  return value != nullptr && value[0] != '\0' && std::string(value) != "0";
+  const char* value = CachedGetenv(name);
+  return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
 }
 
 bool IsDisabled(const char* name) {
@@ -2624,8 +2648,8 @@ bool IsDisabled(const char* name) {
       IsLegacyBinaryCompatibilityToggle(name)) {
     return true;
   }
-  const char* value = std::getenv(name);
-  return value != nullptr && std::string(value) == "0";
+  const char* value = CachedGetenv(name);
+  return value != nullptr && std::strcmp(value, "0") == 0;
 }
 
 bool StartsWith(const char* value, const char* prefix) {
@@ -2920,7 +2944,7 @@ bool ShouldRunStartupStep(const char* step_env, bool default_value) {
 }
 
 int GetEnvInt(const char* name, int default_value) {
-  const char* value = std::getenv(name);
+  const char* value = CachedGetenv(name);
   if (value == nullptr || value[0] == '\0') {
     return default_value;
   }
@@ -2933,7 +2957,7 @@ int GetEnvInt(const char* name, int default_value) {
 }
 
 uintptr_t GetEnvAddress(const char* name, uintptr_t default_value) {
-  const char* value = std::getenv(name);
+  const char* value = CachedGetenv(name);
   if (value == nullptr || value[0] == '\0') {
     return default_value;
   }
@@ -2946,7 +2970,7 @@ uintptr_t GetEnvAddress(const char* name, uintptr_t default_value) {
 }
 
 jlong GetEnvLong(const char* name, jlong default_value) {
-  const char* value = std::getenv(name);
+  const char* value = CachedGetenv(name);
   if (value == nullptr || value[0] == '\0') {
     return default_value;
   }
@@ -2965,6 +2989,15 @@ uint64_t MonotonicMillis() {
   }
   return static_cast<uint64_t>(ts.tv_sec) * 1000ULL +
          static_cast<uint64_t>(ts.tv_nsec) / 1000000ULL;
+}
+
+uint64_t MonotonicNanos() {
+  timespec ts{};
+  if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+    return 0;
+  }
+  return static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL +
+         static_cast<uint64_t>(ts.tv_nsec);
 }
 
 JNIEnv* AttachMainThreadJniEnv() {
@@ -3111,11 +3144,41 @@ bool RunTaskSchedulerForegroundOnMainThread(
   }
 }
 
+typedef void (*GameActivityTrimMemoryFn)(JNIEnv* env, jobject activity,
+                                         jlong handle, jint level);
+
+void MocktailTrimEngineMemory(int level) {
+  if (mocktail_gameactivity_on_trim_memory_native == nullptr ||
+      g_game_activity_native_handle == 0) {
+    return;
+  }
+  JNIEnv* env = AttachMainThreadJniEnv();
+  if (env == nullptr) {
+    return;
+  }
+  auto* on_trim = reinterpret_cast<GameActivityTrimMemoryFn>(
+      mocktail_gameactivity_on_trim_memory_native);
+  if (on_trim != nullptr) {
+    static sigjmp_buf s_trim_jmp_buf;
+    if (sigsetjmp(s_trim_jmp_buf, 1) == 0) {
+      on_trim(env, g_saved_game_activity,
+              static_cast<jlong>(g_game_activity_native_handle), level);
+    }
+  }
+}
+
 void PumpRobloxMainThreadMessagesOnce() {
-  if (g_main_thread_message_pump_ready.load() == 0 &&
-      !IsEnabled("MOCKTAIL_FORCE_EARLY_MAIN_THREAD_MESSAGE_PUMP")) {
+  static const bool force_early =
+      IsEnabled("MOCKTAIL_FORCE_EARLY_MAIN_THREAD_MESSAGE_PUMP");
+  static const bool pump_disabled =
+      IsDisabled("MOCKTAIL_MAIN_THREAD_MESSAGE_PUMP");
+  static const bool trace_pump =
+      IsEnabled("MOCKTAIL_TRACE_MAIN_THREAD_PUMP");
+  static const int pump_limit =
+      GetEnvInt("MOCKTAIL_MAIN_THREAD_MESSAGE_PUMP_LIMIT", 0);
+  if (g_main_thread_message_pump_ready.load() == 0 && !force_early) {
     static bool logged_not_ready = false;
-    if (!logged_not_ready && IsEnabled("MOCKTAIL_TRACE_MAIN_THREAD_PUMP")) {
+    if (!logged_not_ready && trace_pump) {
       logged_not_ready = true;
       std::cerr << "  [main] nativeCallMessagesFromMainThread pump not ready\n"
                 << std::flush;
@@ -3125,10 +3188,9 @@ void PumpRobloxMainThreadMessagesOnce() {
 
   if (g_native_call_messages_from_main_thread == nullptr ||
       g_vm_for_main_thread_pump == nullptr ||
-      g_native_gl_class_for_main_thread == nullptr ||
-      IsDisabled("MOCKTAIL_MAIN_THREAD_MESSAGE_PUMP")) {
+      g_native_gl_class_for_main_thread == nullptr || pump_disabled) {
     static bool logged_unavailable = false;
-    if (!logged_unavailable && IsEnabled("MOCKTAIL_TRACE_MAIN_THREAD_PUMP")) {
+    if (!logged_unavailable && trace_pump) {
       logged_unavailable = true;
       std::cerr << "  [main] nativeCallMessagesFromMainThread pump unavailable"
                 << " fn="
@@ -3138,9 +3200,7 @@ void PumpRobloxMainThreadMessagesOnce() {
                 << " class="
                 << reinterpret_cast<const void*>(
                        g_native_gl_class_for_main_thread)
-                << " disabled="
-                << IsDisabled("MOCKTAIL_MAIN_THREAD_MESSAGE_PUMP")
-                << '\n'
+                << " disabled=" << pump_disabled << '\n'
                 << std::flush;
     }
     return;
@@ -3149,7 +3209,7 @@ void PumpRobloxMainThreadMessagesOnce() {
   JNIEnv* env = AttachMainThreadJniEnv();
   if (env == nullptr) {
     static bool logged_missing_env = false;
-    if (!logged_missing_env && IsEnabled("MOCKTAIL_TRACE_MAIN_THREAD_PUMP")) {
+    if (!logged_missing_env && trace_pump) {
       logged_missing_env = true;
       std::cerr << "  [main] nativeCallMessagesFromMainThread pump has no JNIEnv\n"
                 << std::flush;
@@ -3158,24 +3218,23 @@ void PumpRobloxMainThreadMessagesOnce() {
   }
   static int pump_count = 0;
   ++pump_count;
-  int pump_limit = GetEnvInt("MOCKTAIL_MAIN_THREAD_MESSAGE_PUMP_LIMIT", 0);
   if (pump_limit > 0 && pump_count > pump_limit) {
     return;
   }
-  if (IsEnabled("MOCKTAIL_TRACE_MAIN_THREAD_PUMP")) {
+  if (trace_pump) {
     if (pump_count <= 10 || pump_count % 100 == 0) {
       std::cerr << "  [main] nativeCallMessagesFromMainThread pump #"
                 << pump_count << " env=" << static_cast<void*>(env) << '\n'
                 << std::flush;
     }
   }
-  if (sigsetjmp(g_call_messages_from_main_thread_jmp_buf, 1) == 0) {
+  if (sigsetjmp(g_call_messages_from_main_thread_jmp_buf, 0) == 0) {
     g_call_messages_from_main_thread_recovery_in_progress = 1;
     g_stage6_empty_gl_helper_returns = 0;
     g_native_call_messages_from_main_thread(
         env, g_native_gl_class_for_main_thread);
     g_call_messages_from_main_thread_recovery_in_progress = 0;
-    if (IsEnabled("MOCKTAIL_TRACE_MAIN_THREAD_PUMP")) {
+    if (trace_pump) {
       if (pump_count <= 10 || pump_count % 100 == 0) {
         std::cerr << "  [main] nativeCallMessagesFromMainThread returned #"
                   << pump_count << '\n'
@@ -3195,7 +3254,7 @@ void PumpStartupOwnerThread(void* /*context*/) {
 }
 
 std::string GetEnvString(const char* name, const char* default_value) {
-  const char* value = std::getenv(name);
+  const char* value = CachedGetenv(name);
   if (value == nullptr || value[0] == '\0') {
     return default_value ? default_value : "";
   }
@@ -3203,7 +3262,7 @@ std::string GetEnvString(const char* name, const char* default_value) {
 }
 
 bool HasEnvValue(const char* name) {
-  const char* value = std::getenv(name);
+  const char* value = CachedGetenv(name);
   return value != nullptr && value[0] != '\0';
 }
 
@@ -29119,16 +29178,20 @@ jobject BuildDeviceParams(JNIEnv* env) {
   SetStringField(env, params, "appBuildVariant", "googleProdRelease");
   SetStringField(env, params, "testDeviceName", device_name.c_str());
 
-  SetIntField(env, params, "deviceTotalMemoryMB", 4096);
+  const bool is_low_ram = !IsEnabled("MOCKTAIL_DISABLE_LOW_RAM_DEVICE");
+  SetIntField(env, params, "deviceTotalMemoryMB", is_low_ram ? 2048 : 4096);
   SetIntField(env, params, "displayPhysicalWidthPixels", 1280);
   SetIntField(env, params, "displayPhysicalHeightPixels", 720);
-  SetIntField(env, params, "memoryClass", 512);
-  SetIntField(env, params, "largeMemoryClass", 1024);
-  SetLongField(env, params, "lowMemoryKillerBackgroundAppThreshold", 0);
-  SetLongField(env, params, "lowMemoryKillerForegroundAppThreshold", 0);
+  SetIntField(env, params, "memoryClass", is_low_ram ? 256 : 512);
+  SetIntField(env, params, "largeMemoryClass", is_low_ram ? 512 : 1024);
+  SetLongField(env, params, "lowMemoryKillerBackgroundAppThreshold",
+               is_low_ram ? 256 : 0);
+  SetLongField(env, params, "lowMemoryKillerForegroundAppThreshold",
+               is_low_ram ? 512 : 0);
   SetBooleanField(env, params, "cpu64Bit", JNI_TRUE);
   SetBooleanField(env, params, "isChrome", JNI_FALSE);
-  SetBooleanField(env, params, "isLowRamDevice", JNI_FALSE);
+  SetBooleanField(env, params, "isLowRamDevice",
+                  is_low_ram ? JNI_TRUE : JNI_FALSE);
   return params;
 }
 
@@ -30675,6 +30738,7 @@ void* EngineStartupThread(void* arg) {
         env->NewStringUTF("/sdcard/Android/data/com.roblox.client/files");
     if (sigsetjmp(g_game_activity_init_jmp_buf, 1) == 0) {
       g_game_activity_init_recovery_in_progress = 1;
+      g_saved_game_activity = game_activity;
       game_activity_handle = context->native_game_activity_init(
           env, game_activity, internal_data_dir, obb_dir, external_data_dir,
           game_activity_asset_manager, nullptr, game_activity_config);
@@ -32919,6 +32983,25 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
                          reinterpret_cast<void*>(mocktail_pthread_mutex_trylock));
   linker::RegisterSymbol("pthread_mutex_unlock",
                          reinterpret_cast<void*>(mocktail_pthread_mutex_unlock));
+  linker::RegisterSymbol("pthread_once",
+                         reinterpret_cast<void*>(mocktail_pthread_once));
+  linker::RegisterSymbol("pthread_spin_init",
+                         reinterpret_cast<void*>(mocktail_pthread_spin_init));
+  linker::RegisterSymbol("pthread_spin_destroy",
+                         reinterpret_cast<void*>(mocktail_pthread_spin_destroy));
+  linker::RegisterSymbol("pthread_spin_lock",
+                         reinterpret_cast<void*>(mocktail_pthread_spin_lock));
+  linker::RegisterSymbol("pthread_spin_trylock",
+                         reinterpret_cast<void*>(mocktail_pthread_spin_trylock));
+  linker::RegisterSymbol("pthread_spin_unlock",
+                         reinterpret_cast<void*>(mocktail_pthread_spin_unlock));
+  linker::RegisterSymbol("pthread_barrier_init",
+                         reinterpret_cast<void*>(mocktail_pthread_barrier_init));
+  linker::RegisterSymbol(
+      "pthread_barrier_destroy",
+      reinterpret_cast<void*>(mocktail_pthread_barrier_destroy));
+  linker::RegisterSymbol("pthread_barrier_wait",
+                         reinterpret_cast<void*>(mocktail_pthread_barrier_wait));
   linker::RegisterSymbol(
       "pthread_create",
       reinterpret_cast<void*>(mocktail_bionic_pthread_create));
@@ -34362,14 +34445,26 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
       return true;
     };
     int main_loop_ticks = 0;
+    const bool fps_trace = IsEnabled("MOCKTAIL_TRACE_FPS");
+    const bool trace_main_loop = IsEnabled("MOCKTAIL_TRACE_MAIN_LOOP");
+    uint64_t fps_window_start_ns = fps_trace ? MonotonicNanos() : 0;
+    uint64_t fps_samples = 0;
+    uint64_t fps_tick_ns = 0;
+    uint64_t fps_sdl_ns = 0;
+    uint64_t fps_platform_ns = 0;
+    uint64_t fps_engine_ns = 0;
+    uint64_t fps_launch_ns = 0;
+    uint64_t fps_pace_sleep_ns = 0;
     while (true) {
+      const uint64_t fps_tick_start_ns = fps_trace ? MonotonicNanos() : 0;
       const bool keep_window_open = mocktail::window::PumpEvents();
       game_surface_events_completed = drain_game_surface_events();
+      const uint64_t fps_after_sdl_ns = fps_trace ? MonotonicNanos() : 0;
       if (!game_surface_events_completed || !keep_window_open) {
         break;
       }
       ++main_loop_ticks;
-      if (IsEnabled("MOCKTAIL_TRACE_MAIN_LOOP") &&
+      if (trace_main_loop &&
           (main_loop_ticks <= 10 || main_loop_ticks % 100 == 0)) {
         std::cerr << "  [main] SDL event loop tick #" << main_loop_ticks
                   << '\n'
@@ -34408,7 +34503,10 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
           break;
         }
       }
+      const uint64_t fps_after_platform_ns =
+          fps_trace ? MonotonicNanos() : 0;
       PumpRobloxMainThreadMessagesOnce();
+      const uint64_t fps_after_engine_ns = fps_trace ? MonotonicNanos() : 0;
       if (experience_composition != nullptr &&
           experience_composition->subscribed()) {
         const mocktail::Status launch_status =
@@ -34420,7 +34518,46 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
           break;
         }
       }
-      mocktail::window::PaceInputPump();
+      const uint64_t fps_after_launch_ns = fps_trace ? MonotonicNanos() : 0;
+      const uint64_t fps_pace_ns = mocktail::window::PaceInputPump();
+      if (fps_trace) {
+        const uint64_t fps_tick_end_ns = MonotonicNanos();
+        ++fps_samples;
+        fps_tick_ns += fps_tick_end_ns - fps_tick_start_ns;
+        fps_sdl_ns += fps_after_sdl_ns - fps_tick_start_ns;
+        fps_platform_ns += fps_after_platform_ns - fps_after_sdl_ns;
+        fps_engine_ns += fps_after_engine_ns - fps_after_platform_ns;
+        fps_launch_ns += fps_after_launch_ns - fps_after_engine_ns;
+        fps_pace_sleep_ns += fps_pace_ns;
+        if (fps_tick_end_ns - fps_window_start_ns >= 1000000000ULL &&
+            fps_samples != 0) {
+          std::fprintf(stderr,
+                       "  [fps] main n=%llu tick=%llu us sdl=%llu us "
+                       "drain=%llu us engine=%llu us launch=%llu us "
+                       "pace_sleep=%llu us\n",
+                       static_cast<unsigned long long>(fps_samples),
+                       static_cast<unsigned long long>(fps_tick_ns /
+                                                       fps_samples / 1000ULL),
+                       static_cast<unsigned long long>(fps_sdl_ns /
+                                                       fps_samples / 1000ULL),
+                       static_cast<unsigned long long>(fps_platform_ns /
+                                                       fps_samples / 1000ULL),
+                       static_cast<unsigned long long>(fps_engine_ns /
+                                                       fps_samples / 1000ULL),
+                       static_cast<unsigned long long>(fps_launch_ns /
+                                                       fps_samples / 1000ULL),
+                       static_cast<unsigned long long>(fps_pace_sleep_ns /
+                                                       fps_samples / 1000ULL));
+          fps_window_start_ns = fps_tick_end_ns;
+          fps_samples = 0;
+          fps_tick_ns = 0;
+          fps_sdl_ns = 0;
+          fps_platform_ns = 0;
+          fps_engine_ns = 0;
+          fps_launch_ns = 0;
+          fps_pace_sleep_ns = 0;
+        }
+      }
     }
     std::cout << "  [main] window closed, shutting down\n" << std::flush;
     real_frame_presented = mocktail::window::HasPresentedFrame();

@@ -67,9 +67,16 @@ bool TestGraphicsStubsEnabled() {
 }
 
 template <typename Fn>
-Fn ResolveDefault(const char* name) {
-  void* symbol = dlsym(RTLD_DEFAULT, name);
-  return reinterpret_cast<Fn>(symbol);
+Fn ResolveCached(Fn* slot, const char* name) {
+  Fn fn = __atomic_load_n(slot, __ATOMIC_ACQUIRE);
+  if (__builtin_expect(fn == nullptr, 0)) {
+    void* symbol = dlsym(RTLD_DEFAULT, name);
+    fn = reinterpret_cast<Fn>(symbol);
+    if (fn != nullptr) {
+      __atomic_store_n(slot, fn, __ATOMIC_RELEASE);
+    }
+  }
+  return fn;
 }
 
 EGLDisplay FallbackDisplay() {
@@ -90,61 +97,71 @@ EGLSurface FallbackSurface() {
 
 EGLDisplay WindowDisplay() {
   using Fn = void* (*)();
-  Fn fn = ResolveDefault<Fn>("mocktail_egl_display");
+  static Fn cached_fn = nullptr;
+  Fn fn = ResolveCached(&cached_fn, "mocktail_egl_display");
   return fn != nullptr ? fn() : nullptr;
 }
 
 EGLConfig WindowConfig() {
   using Fn = void* (*)();
-  Fn fn = ResolveDefault<Fn>("mocktail_egl_config");
+  static Fn cached_fn = nullptr;
+  Fn fn = ResolveCached(&cached_fn, "mocktail_egl_config");
   return fn != nullptr ? fn() : nullptr;
 }
 
 EGLContext WindowContext() {
   using Fn = void* (*)();
-  Fn fn = ResolveDefault<Fn>("mocktail_egl_context");
+  static Fn cached_fn = nullptr;
+  Fn fn = ResolveCached(&cached_fn, "mocktail_egl_context");
   return fn != nullptr ? fn() : nullptr;
 }
 
 EGLSurface WindowSurface() {
   using Fn = void* (*)();
-  Fn fn = ResolveDefault<Fn>("mocktail_egl_surface");
+  static Fn cached_fn = nullptr;
+  Fn fn = ResolveCached(&cached_fn, "mocktail_egl_surface");
   return fn != nullptr ? fn() : nullptr;
 }
 
 bool MakeWindowCurrent() {
   using Fn = bool (*)();
-  Fn fn = ResolveDefault<Fn>("mocktail_window_make_current");
+  static Fn cached_fn = nullptr;
+  Fn fn = ResolveCached(&cached_fn, "mocktail_window_make_current");
   return fn != nullptr && fn();
 }
 
 bool ReleaseWindowCurrent() {
   using Fn = bool (*)();
-  Fn fn = ResolveDefault<Fn>("mocktail_window_release_current");
+  static Fn cached_fn = nullptr;
+  Fn fn = ResolveCached(&cached_fn, "mocktail_window_release_current");
   return fn != nullptr && fn();
 }
 
 bool SwapWindowBuffers() {
   using Fn = bool (*)();
-  Fn fn = ResolveDefault<Fn>("mocktail_window_swap_buffers");
+  static Fn cached_fn = nullptr;
+  Fn fn = ResolveCached(&cached_fn, "mocktail_window_swap_buffers");
   return fn != nullptr && fn();
 }
 
 void* WindowGlProcAddress(const char* name) {
   using Fn = void* (*)(const char*);
-  Fn fn = ResolveDefault<Fn>("mocktail_gl_proc_address");
+  static Fn cached_fn = nullptr;
+  Fn fn = ResolveCached(&cached_fn, "mocktail_gl_proc_address");
   return fn != nullptr ? fn(name) : nullptr;
 }
 
 int WindowWidth() {
   using Fn = int (*)();
-  Fn fn = ResolveDefault<Fn>("mocktail_window_width");
+  static Fn cached_fn = nullptr;
+  Fn fn = ResolveCached(&cached_fn, "mocktail_window_width");
   return fn != nullptr ? fn() : 1280;
 }
 
 int WindowHeight() {
   using Fn = int (*)();
-  Fn fn = ResolveDefault<Fn>("mocktail_window_height");
+  static Fn cached_fn = nullptr;
+  Fn fn = ResolveCached(&cached_fn, "mocktail_window_height");
   return fn != nullptr ? fn() : 720;
 }
 

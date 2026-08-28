@@ -426,6 +426,7 @@ target_link_libraries(mocktail_linker PUBLIC
   linker
   mocktail_compat
   mocktail_bionic_stdio_runtime
+  mocktail_bionic_abi_exports
 )
 mocktail_apply_compile_options(mocktail_linker)
 target_compile_definitions(mocktail_linker PUBLIC MOCKTAIL_USE_BIONIC_LINKER=1)

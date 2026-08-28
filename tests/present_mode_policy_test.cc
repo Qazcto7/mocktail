@@ -25,6 +25,20 @@ TEST(PresentModePolicyTest, FiltersWithoutFabricatingHostModes) {
             (std::vector<VkPresentModeKHR>{VK_PRESENT_MODE_FIFO_KHR}));
 }
 
+TEST(PresentModePolicyTest, RequestsExtraSwapchainImagesWhenUnthrottled) {
+  EXPECT_EQ(PreferSwapchainMinImageCount(PresentModePolicy::kVsync, 2, 2, 8),
+            2U);
+  EXPECT_EQ(
+      PreferSwapchainMinImageCount(PresentModePolicy::kUnthrottled, 2, 2, 8),
+      5U);
+  EXPECT_EQ(
+      PreferSwapchainMinImageCount(PresentModePolicy::kUnthrottled, 1, 2, 2),
+      2U);
+  EXPECT_EQ(
+      PreferSwapchainMinImageCount(PresentModePolicy::kUnthrottled, 2, 2, 0),
+      5U);
+}
+
 } // namespace
 } // namespace graphics
 } // namespace mocktail

@@ -55,5 +55,23 @@ const char *PresentModePolicyName(PresentModePolicy policy) {
   return "unknown";
 }
 
+std::uint32_t PreferSwapchainMinImageCount(PresentModePolicy policy,
+                                           std::uint32_t requested,
+                                           std::uint32_t min_images,
+                                           std::uint32_t max_images) {
+  std::uint32_t count = std::max(requested, min_images);
+  if (policy == PresentModePolicy::kUnthrottled) {
+    constexpr std::uint32_t kUnthrottledImages = 5;
+    count = std::max(count, kUnthrottledImages);
+    if (min_images != 0) {
+      count = std::max(count, min_images + 2);
+    }
+  }
+  if (max_images != 0) {
+    count = std::min(count, max_images);
+  }
+  return count;
+}
+
 } // namespace graphics
 } // namespace mocktail

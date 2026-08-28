@@ -17,9 +17,9 @@ FILE* g_bionic_stdin = reinterpret_cast<FILE*>(&__sF[0]);
 FILE* g_bionic_stdout = reinterpret_cast<FILE*>(&__sF[1]);
 FILE* g_bionic_stderr = reinterpret_cast<FILE*>(&__sF[2]);
 
-FILE* RequireHostStream(FILE* stream) {
+inline FILE* RequireHostStream(FILE* stream) {
   FILE* host_stream = mocktail::compat::TranslateBionicFile(stream);
-  if (host_stream != nullptr) {
+  if (__builtin_expect(host_stream != nullptr, 1)) {
     return host_stream;
   }
   errno = EINVAL;
@@ -29,20 +29,6 @@ FILE* RequireHostStream(FILE* stream) {
 }  // namespace
 
 namespace mocktail::compat {
-
-FILE* TranslateBionicFile(FILE* stream) noexcept {
-  const uintptr_t address = reinterpret_cast<uintptr_t>(stream);
-  if (address == reinterpret_cast<uintptr_t>(&__sF[0])) {
-    return stdin;
-  }
-  if (address == reinterpret_cast<uintptr_t>(&__sF[1])) {
-    return stdout;
-  }
-  if (address == reinterpret_cast<uintptr_t>(&__sF[2])) {
-    return stderr;
-  }
-  return stream;
-}
 
 void* BionicFileArraySymbolAddress() noexcept { return &__sF[0]; }
 

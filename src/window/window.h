@@ -26,8 +26,13 @@ bool Init(int width, int height, const char* title);
 // Returns false after the user requests quit.
 bool PumpEvents();
 
-// Paces SDL polling at 240 Hz without smoothing raw input.
-void PaceInputPump();
+// Paces SDL polling at 240 Hz without smoothing raw input. Returns the
+// nanoseconds actually spent in SDL_DelayPrecise (0 if the tick already
+// missed the slot or SDL still has events).
+uint64_t PaceInputPump();
+
+// True when MOCKTAIL_VSYNC is off/0 or MOCKTAIL_FRAME_RATE_LIMIT is unlimited.
+bool UnthrottledPresentationRequested();
 
 // Queues supported GameActivity fullscreen flags for the SDL thread.
 bool RequestFullscreenFromAndroidWindowFlags(int flags, int mask);

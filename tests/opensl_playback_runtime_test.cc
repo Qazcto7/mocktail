@@ -301,5 +301,60 @@ TEST(OpenSlPlaybackRuntimeTest, RecorderFailsClosed) {
   EXPECT_EQ(recorder, nullptr);
 }
 
+TEST(OpenSlPlaybackRuntimeTest, EngineDestructionCascadesToChildrenSafely) {
+  ASSERT_TRUE(InitializeSdlAudioSubsystem().ok());
+  abi::Object engine_obj = nullptr;
+  ASSERT_EQ(slCreateEngine(&engine_obj, 0, nullptr, 0, nullptr, nullptr),
+            abi::kResultSuccess);
+  ASSERT_NE(engine_obj, nullptr);
+  ASSERT_EQ((*engine_obj)->Realize(engine_obj, abi::kBooleanFalse),
+            abi::kResultSuccess);
+
+  abi::Engine engine = nullptr;
+  ASSERT_EQ((*engine_obj)->GetInterface(engine_obj, SL_IID_ENGINE, &engine),
+            abi::kResultSuccess);
+  ASSERT_NE(engine, nullptr);
+
+  abi::Object output_mix = nullptr;
+  ASSERT_EQ((*engine)->CreateOutputMix(engine, &output_mix, 0, nullptr, nullptr),
+            abi::kResultSuccess);
+  ASSERT_NE(output_mix, nullptr);
+  ASSERT_EQ((*output_mix)->Realize(output_mix, abi::kBooleanFalse),
+            abi::kResultSuccess);
+
+  const abi::DataLocatorAndroidSimpleBufferQueue queue_locator{
+      abi::kDataLocatorAndroidSimpleBufferQueue, 4};
+  const abi::DataFormatPcm format{
+      abi::kDataFormatPcm, 2, 48000000,
+      abi::kPcmSampleFormatFixed16, abi::kPcmSampleFormatFixed16,
+      abi::kSpeakerFrontLeft | abi::kSpeakerFrontRight,
+      abi::kByteOrderLittleEndian};
+  const abi::DataSource source{const_cast<void*>(static_cast<const void*>(&queue_locator)),
+                               const_cast<void*>(static_cast<const void*>(&format))};
+  const abi::DataLocatorOutputMix output_locator{abi::kDataLocatorOutputMix, output_mix};
+  const abi::DataSink sink{const_cast<void*>(static_cast<const void*>(&output_locator)), nullptr};
+  const abi::InterfaceId interfaces[] = {SL_IID_ANDROIDSIMPLEBUFFERQUEUE};
+  const abi::Boolean required[] = {abi::kBooleanTrue};
+
+  abi::Object player = nullptr;
+  ASSERT_EQ((*engine)->CreateAudioPlayer(engine, &player,
+                                         const_cast<abi::DataSource*>(&source),
+                                         const_cast<abi::DataSink*>(&sink),
+                                         1, interfaces, required),
+            abi::kResultSuccess);
+  ASSERT_NE(player, nullptr);
+  ASSERT_EQ((*player)->Realize(player, abi::kBooleanFalse), abi::kResultSuccess);
+
+  // Destroying the engine must cascade to children and destroy player and output mix.
+  (*engine_obj)->Destroy(engine_obj);
+
+  // Calling Destroy again on orphaned child handles must safely no-op without crashes.
+  (*player)->Destroy(player);
+  (*output_mix)->Destroy(output_mix);
+  (*engine_obj)->Destroy(engine_obj);
+
+  EXPECT_TRUE(ShutdownSdlAudioSubsystem().ok());
+}
+
 }  // namespace
 }  // namespace mocktail::audio

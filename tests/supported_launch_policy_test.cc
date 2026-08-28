@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include <cstdlib>
+#include <fstream>
 #include <string>
 
 namespace mocktail {
@@ -90,6 +91,8 @@ int RunGraphicsPolicyProbe(const char* backend) {
            "MOCKTAIL_SOFTWARE_WINDOW_FALLBACK",
            "MOCKTAIL_REQUIRE_REAL_GRAPHICS",
            "MOCKTAIL_CLIENT_SETTINGS_OVERRIDES_JSON",
+           "ANV_SYS_MEM_LIMIT",
+           "MESA_VK_ENABLE_SUBMIT_THREAD",
        }) {
     if (unsetenv(name) != 0) return 20;
   }
@@ -117,12 +120,32 @@ int RunGraphicsPolicyProbe(const char* backend) {
     return disable_angle != nullptr && software != nullptr &&
                    std::string(disable_angle) == "1" &&
                    std::string(software) == "0" &&
-                   getenv("MOCKTAIL_CLIENT_SETTINGS_OVERRIDES_JSON") == nullptr
+                   getenv("MOCKTAIL_CLIENT_SETTINGS_OVERRIDES_JSON") == nullptr &&
+                   getenv("ANV_SYS_MEM_LIMIT") == nullptr &&
+                   getenv("MESA_VK_ENABLE_SUBMIT_THREAD") == nullptr
                ? 0
                : 24;
   }
   const char* overrides = getenv("MOCKTAIL_CLIENT_SETTINGS_OVERRIDES_JSON");
-  return overrides != nullptr &&
+  const char* anv_memory_limit = getenv("ANV_SYS_MEM_LIMIT");
+  const char* submit_thread = getenv("MESA_VK_ENABLE_SUBMIT_THREAD");
+  std::string expected_anv_limit = "50";
+  {
+    std::ifstream input("/proc/meminfo");
+    std::string key;
+    unsigned long kb = 0;
+    std::string unit;
+    while (input >> key >> kb >> unit) {
+      if (key == "MemTotal:") {
+        expected_anv_limit = kb > 4UL * 1024UL * 1024UL ? "75" : "50";
+        break;
+      }
+    }
+  }
+  return overrides != nullptr && anv_memory_limit != nullptr &&
+                 submit_thread != nullptr &&
+                 std::string(anv_memory_limit) == expected_anv_limit &&
+                 std::string(submit_thread) == "1" &&
                  std::string(overrides).find(
                      "FStringGraphicsVulkanShaderMTDenyPattern") !=
                      std::string::npos

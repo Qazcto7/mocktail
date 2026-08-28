@@ -3,8 +3,9 @@
 
 #include <pthread.h>
 
-// Bionic and glibc pthread_rwlock_t storage is not ABI-compatible. The guest
-// address is an opaque key; the host object lives entirely in this runtime.
+// Bionic pthread_rwlock_t is a state word in guest storage. rdlock/wrlock/
+// unlock use __atomic_* and futex on that word. Zero-initialized storage
+// still locks.
 extern "C" {
 
 int mocktail_bionic_pthread_rwlock_init(pthread_rwlock_t* rwlock,

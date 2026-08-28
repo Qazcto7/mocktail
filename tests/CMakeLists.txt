@@ -409,6 +409,22 @@ target_link_libraries(vulkan_present_progress_gate_test PRIVATE
 )
 mocktail_apply_compile_options(vulkan_present_progress_gate_test)
 
+if(NOT TARGET PkgConfig::LIBPLACEBO)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(LIBPLACEBO REQUIRED IMPORTED_TARGET libplacebo)
+endif()
+add_executable(vulkan_text_overlay_compositor_test
+  vulkan_text_overlay_compositor_test.cc
+  ${PROJECT_SOURCE_DIR}/src/graphics/vulkan_text_overlay_compositor.cc
+)
+target_link_libraries(vulkan_text_overlay_compositor_test PRIVATE
+  Mocktail::SdlVulkanWsi
+  PkgConfig::LIBPLACEBO
+  GTest::gtest_main
+  ${CMAKE_DL_LIBS}
+)
+mocktail_apply_compile_options(vulkan_text_overlay_compositor_test)
+
 add_executable(video_driver_policy_test
   video_driver_policy_test.cc
 )
@@ -706,6 +722,7 @@ add_executable(bionic_abi_exports_test bionic_abi_exports_test.cc)
 target_link_libraries(bionic_abi_exports_test PRIVATE
   mocktail_bionic_abi_exports
   GTest::gtest_main
+  Threads::Threads
 )
 mocktail_apply_compile_options(bionic_abi_exports_test)
 
@@ -781,6 +798,15 @@ target_link_libraries(asset_manager_test PRIVATE
   GTest::gtest_main
 )
 
+add_executable(android_looper_test
+  android_looper_test.cc
+)
+target_link_libraries(android_looper_test PRIVATE
+  stub_android
+  GTest::gtest_main
+  Threads::Threads
+)
+
 add_executable(android_native_window_test
   android_native_window_test.cc
 )
@@ -849,6 +875,7 @@ gtest_discover_tests(vulkan_present_observer_test)
 gtest_discover_tests(input_pump_pacer_test)
 gtest_discover_tests(vulkan_surface_recovery_gate_test)
 gtest_discover_tests(vulkan_present_progress_gate_test)
+gtest_discover_tests(vulkan_text_overlay_compositor_test)
 gtest_discover_tests(video_driver_policy_test)
 gtest_discover_tests(window_surface_lifecycle_test)
 gtest_discover_tests(window_game_surface_bridge_test)
@@ -889,6 +916,7 @@ endif()
 gtest_discover_tests(libc_shim_test)
 gtest_discover_tests(discord_rpc_test)
 gtest_discover_tests(asset_manager_test)
+gtest_discover_tests(android_looper_test)
 gtest_discover_tests(android_native_window_test)
 gtest_discover_tests(headless_graphics_test)
 

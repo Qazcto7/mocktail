@@ -14,6 +14,7 @@
 #include <mutex>
 #include <new>
 #include <stdexcept>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -46,6 +47,7 @@ void* mocktail_gameactivity_on_resume_native = nullptr;
 void* mocktail_gameactivity_on_surface_created_native = nullptr;
 void* mocktail_gameactivity_on_surface_changed_native = nullptr;
 void* mocktail_gameactivity_on_surface_redraw_needed_native = nullptr;
+void* mocktail_gameactivity_on_trim_memory_native = nullptr;
 }
 
 namespace {
@@ -75,6 +77,8 @@ bool IsThreadLocalEnvValid() {
   return g_thread_local_env == &g_thread_env_storage &&
          g_thread_local_env->functions != nullptr;
 }
+
+void ReleaseJniReference(jobject obj);
 
 struct PseudoArray {
   std::vector<jbyte> bytes;
@@ -218,32 +222,53 @@ std::vector<jchar> ModifiedUtf8ToUtf16(const char* input) {
   return output;
 }
 
+static std::unordered_set<std::string> g_interned_string_pool;
+
+static const char* InternString(const std::string& str) {
+  auto [it, _] = g_interned_string_pool.insert(str);
+  return it->c_str();
+}
+
+static std::vector<jchar> MakeUtf16Vector(const jchar* utf16, jsize length) {
+  if (utf16 != nullptr && length > 0) {
+    return std::vector<jchar>(utf16, utf16 + length);
+  }
+  return {};
+}
+
 struct PseudoStringObject : PseudoJavaObject {
   PseudoStringObject(std::shared_ptr<Class> cls, const char* utf)
       : PseudoJavaObject(std::move(cls)),
         chars(ModifiedUtf8ToUtf16(utf)),
         value(Utf16ToUtf8(chars)),
-        modified_utf8(Utf16ToModifiedUtf8(chars)) {}
+        modified_utf8(InternString(Utf16ToModifiedUtf8(chars))) {}
 
   PseudoStringObject(std::shared_ptr<Class> cls, const jchar* utf16,
                      jsize length)
-      : PseudoJavaObject(std::move(cls)) {
-    if (utf16 != nullptr && length > 0) {
-      chars.assign(utf16, utf16 + length);
-    }
-    value = Utf16ToUtf8(chars);
-    modified_utf8 = Utf16ToModifiedUtf8(chars);
-  }
+      : PseudoJavaObject(std::move(cls)),
+        chars(MakeUtf16Vector(utf16, length)),
+        value(Utf16ToUtf8(chars)),
+        modified_utf8(InternString(Utf16ToModifiedUtf8(chars))) {}
 
   std::vector<jchar> chars;
   std::string value;
-  std::string modified_utf8;
+  const char* modified_utf8 = nullptr;
 };
 
 using jnivm::my_segment;
 using jnivm::g_jni_ref_index;
 
-std::vector<std::unique_ptr<Object>> g_object_storage;
+static bool g_shutting_down_jnivm = false;
+
+struct JniVmShutdownHook {
+  JniVmShutdownHook() {
+    std::atexit([]() { g_shutting_down_jnivm = true; });
+  }
+};
+static JniVmShutdownHook g_shutdown_hook;
+
+std::unordered_map<jobject, std::unique_ptr<Object>> g_object_storage;
+std::unordered_map<jobject, uint32_t> g_jni_ref_counts;
 std::shared_ptr<void> g_segment_owners[100000];
 std::unordered_set<jobject> g_known_objects;
 std::unordered_set<jclass> g_known_classes;
@@ -256,7 +281,7 @@ std::list<std::string> g_method_signature_storage;
 std::unordered_map<std::string, jmethodID> g_method_ids;
 std::unordered_map<jmethodID, const char*> g_method_names;
 std::unordered_map<jmethodID, const char*> g_method_signatures;
-std::vector<std::unique_ptr<PseudoArray>> g_array_storage;
+std::unordered_map<jarray, std::unique_ptr<PseudoArray>> g_array_storage;
 std::unordered_map<jarray, PseudoArray*> g_arrays;
 std::unordered_map<jobject, jlong> g_direct_buffer_capacities;
 std::unordered_map<std::string, jobject> g_static_object_fields;
@@ -296,7 +321,8 @@ std::shared_ptr<Class> FallbackClassForName(const std::string& class_name) {
 }
 
 bool TraceEnabled() {
-  return std::getenv("MOCKTAIL_JNI_TRACE") != nullptr;
+  static const bool enabled = std::getenv("MOCKTAIL_JNI_TRACE") != nullptr;
+  return enabled;
 }
 
 bool EnvironmentTraceEnabled(const char* name) {
@@ -305,9 +331,11 @@ bool EnvironmentTraceEnabled(const char* name) {
 }
 
 bool StringTraceEnabled() {
-  return EnvironmentTraceEnabled("MOCKTAIL_JNI_STRING_TRACE") ||
-         EnvironmentTraceEnabled("MOCKTAIL_TRACE_ALL") ||
-         EnvironmentTraceEnabled("MOCKTAIL_FULL_TRACE");
+  static const bool enabled =
+      EnvironmentTraceEnabled("MOCKTAIL_JNI_STRING_TRACE") ||
+      EnvironmentTraceEnabled("MOCKTAIL_TRACE_ALL") ||
+      EnvironmentTraceEnabled("MOCKTAIL_FULL_TRACE");
+  return enabled;
 }
 
 void Trace(const char* name) {
@@ -316,13 +344,34 @@ void Trace(const char* name) {
   }
 }
 
+struct JniMethodDescriptor {
+  const char* name = nullptr;
+  const char* signature = nullptr;
+};
+
+static std::list<JniMethodDescriptor> g_method_descriptors;
+
 const char* MethodName(jmethodID method_id) {
+  if (__builtin_expect(method_id == nullptr, 0)) {
+    return "unknown";
+  }
+  const auto* desc = reinterpret_cast<const JniMethodDescriptor*>(method_id);
+  if (__builtin_expect(desc->name != nullptr, 1)) {
+    return desc->name;
+  }
   std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
   auto it = g_method_names.find(method_id);
   return it == g_method_names.end() ? "unknown" : it->second;
 }
 
 const char* MethodSignature(jmethodID method_id) {
+  if (__builtin_expect(method_id == nullptr, 0)) {
+    return "";
+  }
+  const auto* desc = reinterpret_cast<const JniMethodDescriptor*>(method_id);
+  if (__builtin_expect(desc->signature != nullptr, 1)) {
+    return desc->signature;
+  }
   std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
   auto it = g_method_signatures.find(method_id);
   return it == g_method_signatures.end() ? "" : it->second;
@@ -344,8 +393,9 @@ jmethodID StoreMethodId(const char* name, const char* sig) {
   g_method_signature_storage.emplace_back(sig ? sig : "");
   const char* stored_name = g_method_name_storage.back().c_str();
   const char* stored_signature = g_method_signature_storage.back().c_str();
+  g_method_descriptors.push_back({stored_name, stored_signature});
   jmethodID method_id =
-      reinterpret_cast<jmethodID>(const_cast<char*>(stored_name));
+      reinterpret_cast<jmethodID>(&g_method_descriptors.back());
   g_method_ids[key] = method_id;
   g_method_names[method_id] = stored_name;
   g_method_signatures[method_id] = stored_signature;
@@ -558,13 +608,63 @@ static jclass StoreClass(std::shared_ptr<Class> cls) {
 
 jobject StoreObject(std::unique_ptr<Object> object) {
   std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
-  g_object_storage.push_back(std::move(object));
-  Object* raw_ptr = g_object_storage.back().get();
+  Object* raw_ptr = object.get();
   int index = AllocateSegmentSlot(raw_ptr);
   jobject handle =
       reinterpret_cast<jobject>(static_cast<uintptr_t>(index << 16));
   g_known_objects.insert(handle);
+  g_object_storage[handle] = std::move(object);
+  g_jni_ref_counts[handle] = 1;
   return handle;
+}
+
+void ReleaseJniReference(jobject obj) {
+  if (obj == nullptr || g_shutting_down_jnivm) {
+    return;
+  }
+  std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
+  if (g_shutting_down_jnivm) {
+    return;
+  }
+  auto ref_it = g_jni_ref_counts.find(obj);
+  if (ref_it != g_jni_ref_counts.end()) {
+    if (ref_it->second > 1) {
+      --ref_it->second;
+      return;
+    }
+    g_jni_ref_counts.erase(ref_it);
+  }
+
+  auto arr_it = g_array_storage.find(reinterpret_cast<jarray>(obj));
+  if (arr_it != g_array_storage.end()) {
+    std::unique_ptr<PseudoArray> dying_array = std::move(arr_it->second);
+    g_arrays.erase(arr_it->first);
+    g_array_storage.erase(arr_it);
+    return;
+  }
+  if (g_known_classes.find(reinterpret_cast<jclass>(obj)) !=
+      g_known_classes.end()) {
+    return;
+  }
+  for (const auto& pair : g_singleton_objects) {
+    if (pair.second == obj) {
+      return;
+    }
+  }
+  uintptr_t uobj = reinterpret_cast<uintptr_t>(obj);
+  uint32_t index = uobj >> 16;
+  if (index > 0 && index < 100000) {
+    my_segment[index] = nullptr;
+    g_segment_owners[index].reset();
+  }
+  g_known_objects.erase(obj);
+  g_known_strings.erase(reinterpret_cast<jstring>(obj));
+  std::unique_ptr<Object> dying_object;
+  auto obj_it = g_object_storage.find(obj);
+  if (obj_it != g_object_storage.end()) {
+    dying_object = std::move(obj_it->second);
+    g_object_storage.erase(obj_it);
+  }
 }
 
 PseudoJavaObject* PseudoObjectFromRef(jobject obj) {
@@ -610,11 +710,10 @@ jobject SingletonObject(const std::string& class_name) {
   return object;
 }
 
-std::string ObjectClassName(jobject obj) {
-  std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
+std::string_view ObjectClassName(jobject obj) {
   PseudoJavaObject* pseudo_object = PseudoObjectFromRef(obj);
   if (!pseudo_object || !pseudo_object->GetClass()) {
-    return "";
+    return {};
   }
   return pseudo_object->GetClass()->GetName();
 }
@@ -647,7 +746,20 @@ void SetObjectFieldRaw(jobject obj, const char* field_name, jobject value) {
   std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
   PseudoJavaObject* pseudo_object = PseudoObjectFromRef(obj);
   if (pseudo_object && field_name) {
+    if (value != nullptr) {
+      auto it = g_jni_ref_counts.find(value);
+      if (it != g_jni_ref_counts.end()) {
+        ++it->second;
+      } else {
+        g_jni_ref_counts[value] = 2;
+      }
+    }
+    auto it = pseudo_object->object_fields.find(field_name);
+    jobject prev = (it != pseudo_object->object_fields.end()) ? it->second : nullptr;
     pseudo_object->object_fields[field_name] = value;
+    if (prev != nullptr) {
+      ReleaseJniReference(prev);
+    }
   }
 }
 
@@ -797,7 +909,7 @@ std::string StringFromJString(jstring str) {
     return {};
   }
   if (g_known_strings.find(str) != g_known_strings.end()) {
-    auto* string_object = dynamic_cast<PseudoStringObject*>(
+    auto* string_object = static_cast<PseudoStringObject*>(
         PseudoObjectFromRef(reinterpret_cast<jobject>(str)));
     return string_object ? string_object->value : std::string();
   }
@@ -885,15 +997,31 @@ jbyteArray JavaStringGetUtf8Bytes(jobject obj, jstring charset_name) {
   return result;
 }
 
+static inline bool IsRawStringPointer(jstring str) {
+  uintptr_t val = reinterpret_cast<uintptr_t>(str);
+  if (val < 0x10000) {
+    return false;
+  }
+  if (val < 0x10000000ULL && (val & 0xffff) == 0) {
+    return false;
+  }
+  return true;
+}
+
 const char* StringChars(jstring str) {
   std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
   if (!str) {
     return nullptr;
   }
   if (g_known_strings.find(str) != g_known_strings.end()) {
-    auto* string_object = dynamic_cast<PseudoStringObject*>(
+    auto* string_object = static_cast<PseudoStringObject*>(
         PseudoObjectFromRef(reinterpret_cast<jobject>(str)));
-    return string_object ? string_object->modified_utf8.c_str() : "";
+    return string_object && string_object->modified_utf8
+               ? string_object->modified_utf8
+               : "";
+  }
+  if (!IsRawStringPointer(str)) {
+    return "";
   }
   return reinterpret_cast<const char*>(str);
 }
@@ -904,11 +1032,14 @@ const jchar* StringUtf16Chars(jstring str) {
     return nullptr;
   }
   if (g_known_strings.find(str) != g_known_strings.end()) {
-    auto* string_object = dynamic_cast<PseudoStringObject*>(
+    auto* string_object = static_cast<PseudoStringObject*>(
         PseudoObjectFromRef(reinterpret_cast<jobject>(str)));
     return string_object && !string_object->chars.empty()
                ? string_object->chars.data()
                : kEmptyUtf16;
+  }
+  if (!IsRawStringPointer(str)) {
+    return kEmptyUtf16;
   }
   return reinterpret_cast<const jchar*>(str);
 }
@@ -916,11 +1047,14 @@ const jchar* StringUtf16Chars(jstring str) {
 jsize StringUtf16Length(jstring str) {
   std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
   if (g_known_strings.find(str) != g_known_strings.end()) {
-    auto* string_object = dynamic_cast<PseudoStringObject*>(
+    auto* string_object = static_cast<PseudoStringObject*>(
         PseudoObjectFromRef(reinterpret_cast<jobject>(str)));
     return string_object != nullptr
                ? static_cast<jsize>(string_object->chars.size())
                : 0;
+  }
+  if (!IsRawStringPointer(str)) {
+    return 0;
   }
   const char* bytes = reinterpret_cast<const char*>(str);
   return bytes != nullptr ? static_cast<jsize>(std::strlen(bytes)) : 0;
@@ -929,11 +1063,14 @@ jsize StringUtf16Length(jstring str) {
 jsize StringModifiedUtf8Length(jstring str) {
   std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
   if (g_known_strings.find(str) != g_known_strings.end()) {
-    auto* string_object = dynamic_cast<PseudoStringObject*>(
+    auto* string_object = static_cast<PseudoStringObject*>(
         PseudoObjectFromRef(reinterpret_cast<jobject>(str)));
-    return string_object != nullptr
-               ? static_cast<jsize>(string_object->modified_utf8.size())
+    return string_object != nullptr && string_object->modified_utf8 != nullptr
+               ? static_cast<jsize>(std::strlen(string_object->modified_utf8))
                : 0;
+  }
+  if (!IsRawStringPointer(str)) {
+    return 0;
   }
   const char* bytes = reinterpret_cast<const char*>(str);
   return bytes != nullptr ? static_cast<jsize>(std::strlen(bytes)) : 0;
@@ -944,7 +1081,7 @@ void CopyStringRegion(jstring str, jsize start, jsize length, jchar* output) {
     return;
   }
   std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
-  auto* string_object = dynamic_cast<PseudoStringObject*>(
+  auto* string_object = static_cast<PseudoStringObject*>(
       PseudoObjectFromRef(reinterpret_cast<jobject>(str)));
   if (string_object == nullptr ||
       static_cast<std::size_t>(start) >= string_object->chars.size()) {
@@ -962,7 +1099,7 @@ void CopyStringModifiedUtf8Region(jstring str, jsize start, jsize length,
     return;
   }
   std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
-  auto* string_object = dynamic_cast<PseudoStringObject*>(
+  auto* string_object = static_cast<PseudoStringObject*>(
       PseudoObjectFromRef(reinterpret_cast<jobject>(str)));
   if (string_object == nullptr ||
       static_cast<std::size_t>(start) >= string_object->chars.size()) {
@@ -1682,9 +1819,9 @@ void HandleVoidMethod(jobject obj, jmethodID method_id, va_list args) {
   if (HandleAndroidSetWindowFlagsMethodV(obj, method_id, args)) {
     return;
   }
+  const std::string_view class_name = ObjectClassName(obj);
   if (std::strcmp(name, "run") == 0 &&
-      ObjectClassName(obj) ==
-          "com/roblox/universalapp/messagebus/RawCallback") {
+      class_name == "com/roblox/universalapp/messagebus/RawCallback") {
     jstring message = va_arg(args, jstring);
     VM *vm = CurrentVM();
     if (vm != nullptr) {
@@ -1693,7 +1830,7 @@ void HandleVoidMethod(jobject obj, jmethodID method_id, va_list args) {
     return;
   }
   if (std::strcmp(name, "a") == 0) {
-    if (ObjectClassName(obj) !=
+    if (class_name !=
         "com/roblox/engine/jni/OnAppBridgeNotificationListener") {
       return;
     }
@@ -1705,13 +1842,13 @@ void HandleVoidMethod(jobject obj, jmethodID method_id, va_list args) {
   if (std::strcmp(name, "f") == 0 &&
       std::strcmp(MethodSignature(method_id),
                   "(Ljava/lang/String;Ljava/lang/String;)V") == 0 &&
-      ObjectClassName(obj) == "com/roblox/engine/jni/EngineJavaCallback2") {
+      class_name == "com/roblox/engine/jni/EngineJavaCallback2") {
     auto type = va_arg(args, jstring);
     auto data = va_arg(args, jstring);
     RecordDataModelNotification(obj, type, data);
     return;
   }
-  if (ObjectClassName(obj) == "com/roblox/engine/jni/EngineJavaCallback2" &&
+  if (class_name == "com/roblox/engine/jni/EngineJavaCallback2" &&
       std::strlen(name) == 1 && name[0] >= 'b' && name[0] <= 'o') {
     return;
   }
@@ -3446,7 +3583,8 @@ jbyteArray MakeByteArray(jsize len) {
   }
   jbyteArray ref = reinterpret_cast<jbyteArray>(array.get());
   g_arrays[ref] = array.get();
-  g_array_storage.push_back(std::move(array));
+  g_array_storage[ref] = std::move(array);
+  g_jni_ref_counts[reinterpret_cast<jobject>(ref)] = 1;
   return ref;
 }
 
@@ -3458,7 +3596,8 @@ jfloatArray MakeFloatArray(jsize len) {
   }
   jfloatArray ref = reinterpret_cast<jfloatArray>(array.get());
   g_arrays[ref] = array.get();
-  g_array_storage.push_back(std::move(array));
+  g_array_storage[ref] = std::move(array);
+  g_jni_ref_counts[reinterpret_cast<jobject>(ref)] = 1;
   return ref;
 }
 
@@ -3470,7 +3609,8 @@ jobjectArray MakeObjectArray(jsize len, jobject init) {
   }
   jobjectArray ref = reinterpret_cast<jobjectArray>(array.get());
   g_arrays[ref] = array.get();
-  g_array_storage.push_back(std::move(array));
+  g_array_storage[ref] = std::move(array);
+  g_jni_ref_counts[reinterpret_cast<jobject>(ref)] = 1;
   return ref;
 }
 
@@ -3937,7 +4077,7 @@ bool HandleRobloxOpenWebActivityMethodA(jobject obj, jmethodID method_id,
 bool IsAndroidSetWindowFlagsMethod(jobject obj, jmethodID method_id) {
   const char* name = MethodName(method_id);
   const char* signature = MethodSignature(method_id);
-  const std::string class_name = ObjectClassName(obj);
+  const std::string_view class_name = ObjectClassName(obj);
   return obj != nullptr && name != nullptr && signature != nullptr &&
          (class_name == "android/app/Activity" ||
           class_name == "com/roblox/client/RobloxActivity" ||
@@ -3988,9 +4128,9 @@ void HandleVoidMethodA(jobject obj, jmethodID method_id, const jvalue *args) {
   if (!args) {
     return;
   }
+  const std::string_view class_name = ObjectClassName(obj);
   if (std::strcmp(name, "run") == 0 &&
-      ObjectClassName(obj) ==
-          "com/roblox/universalapp/messagebus/RawCallback") {
+      class_name == "com/roblox/universalapp/messagebus/RawCallback") {
     VM *vm = CurrentVM();
     if (vm != nullptr) {
       vm->DispatchMessageBusRawCallback(obj, vm->GetJNIEnv(),
@@ -3999,7 +4139,7 @@ void HandleVoidMethodA(jobject obj, jmethodID method_id, const jvalue *args) {
     return;
   }
   if (std::strcmp(name, "a") == 0) {
-    if (ObjectClassName(obj) !=
+    if (class_name !=
         "com/roblox/engine/jni/OnAppBridgeNotificationListener") {
       return;
     }
@@ -4010,12 +4150,12 @@ void HandleVoidMethodA(jobject obj, jmethodID method_id, const jvalue *args) {
   if (std::strcmp(name, "f") == 0 &&
       std::strcmp(MethodSignature(method_id),
                   "(Ljava/lang/String;Ljava/lang/String;)V") == 0 &&
-      ObjectClassName(obj) == "com/roblox/engine/jni/EngineJavaCallback2") {
+      class_name == "com/roblox/engine/jni/EngineJavaCallback2") {
     RecordDataModelNotification(obj, static_cast<jstring>(args[0].l),
                                 static_cast<jstring>(args[1].l));
     return;
   }
-  if (ObjectClassName(obj) == "com/roblox/engine/jni/EngineJavaCallback2" &&
+  if (class_name == "com/roblox/engine/jni/EngineJavaCallback2" &&
       std::strlen(name) == 1 && name[0] >= 'a' && name[0] <= 'o') {
     return;
   }
@@ -5968,6 +6108,8 @@ void VM::InitJNIFunctionTables() {
 	        mocktail_gameactivity_on_surface_changed_native = methods[i].fnPtr;
 	      } else if (std::strcmp(name, "onSurfaceRedrawNeededNative") == 0) {
 	        mocktail_gameactivity_on_surface_redraw_needed_native = methods[i].fnPtr;
+	      } else if (std::strcmp(name, "onTrimMemoryNative") == 0) {
+	        mocktail_gameactivity_on_trim_memory_native = methods[i].fnPtr;
 	      }
               if (cls != nullptr &&
                   cls->GetName() ==
@@ -6669,14 +6811,14 @@ void VM::InitJNIFunctionTables() {
          jdouble /*value*/) {};
 
   native_interface_.GetObjectField =
-      [](JNIEnv* /*env*/, jobject obj, jfieldID fieldID) -> jobject {
+      [](JNIEnv* env, jobject obj, jfieldID fieldID) -> jobject {
     auto* name = reinterpret_cast<const char*>(fieldID);
     jobject value = ObjectFieldValue(obj, name);
     if (TraceEnabled()) {
       std::cout << "  [JNI] GetObjectField: "
                 << (name ? name : "unknown") << " -> " << value << '\n';
     }
-    return value;
+    return env != nullptr && value != nullptr ? env->NewLocalRef(value) : value;
   };
   native_interface_.GetBooleanField =
       [](JNIEnv* /*env*/, jobject obj, jfieldID fieldID) -> jboolean {
@@ -6714,11 +6856,7 @@ void VM::InitJNIFunctionTables() {
   native_interface_.SetObjectField =
       [](JNIEnv* /*env*/, jobject obj, jfieldID fieldID,
          jobject val) {
-    auto* name = reinterpret_cast<const char*>(fieldID);
-    auto* pseudo_object = PseudoObjectFromRef(obj);
-    if (pseudo_object && name) {
-      pseudo_object->object_fields[name] = val;
-    }
+    SetObjectFieldRaw(obj, reinterpret_cast<const char*>(fieldID), val);
   };
   native_interface_.SetBooleanField =
       [](JNIEnv* /*env*/, jobject obj, jfieldID fieldID,
@@ -6760,28 +6898,61 @@ void VM::InitJNIFunctionTables() {
 
   native_interface_.NewGlobalRef =
       [](JNIEnv* /*env*/, jobject obj) -> jobject {
+    if (obj != nullptr) {
+      std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
+      auto it = g_jni_ref_counts.find(obj);
+      if (it != g_jni_ref_counts.end()) {
+        ++it->second;
+      } else {
+        g_jni_ref_counts[obj] = 2;
+      }
+    }
     return obj;
   };
 
   native_interface_.DeleteGlobalRef =
-      [](JNIEnv* /*env*/, jobject /*obj*/) {};
+      [](JNIEnv* /*env*/, jobject obj) {
+    ReleaseJniReference(obj);
+  };
 
   native_interface_.NewLocalRef =
       [](JNIEnv* /*env*/, jobject obj) -> jobject {
+    if (obj != nullptr) {
+      std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
+      auto it = g_jni_ref_counts.find(obj);
+      if (it != g_jni_ref_counts.end()) {
+        ++it->second;
+      } else {
+        g_jni_ref_counts[obj] = 2;
+      }
+    }
     return obj;
   };
 
   native_interface_.DeleteLocalRef =
-      [](JNIEnv* /*env*/, jobject /*obj*/) {};
+      [](JNIEnv* /*env*/, jobject obj) {
+    ReleaseJniReference(obj);
+  };
 
   native_interface_.NewWeakGlobalRef =
       [](JNIEnv* /*env*/, jobject obj) -> jweak {
     Trace("NewWeakGlobalRef");
+    if (obj != nullptr) {
+      std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
+      auto it = g_jni_ref_counts.find(obj);
+      if (it != g_jni_ref_counts.end()) {
+        ++it->second;
+      } else {
+        g_jni_ref_counts[obj] = 2;
+      }
+    }
     return reinterpret_cast<jweak>(obj);
   };
 
   native_interface_.DeleteWeakGlobalRef =
-      [](JNIEnv* /*env*/, jweak /*ref*/) {};
+      [](JNIEnv* /*env*/, jweak ref) {
+    ReleaseJniReference(ref);
+  };
 
   native_interface_.GetObjectRefType =
       [](JNIEnv* /*env*/, jobject obj) -> jobjectRefType {
@@ -6840,23 +7011,31 @@ void VM::InitJNIFunctionTables() {
   };
 
   native_interface_.GetObjectArrayElement =
-      [](JNIEnv* /*env*/, jobjectArray array, jsize index) -> jobject {
+      [](JNIEnv* env, jobjectArray array, jsize index) -> jobject {
     PseudoArray* pseudo_array = ArrayFromRef(array);
     if (!pseudo_array || index < 0 ||
         static_cast<std::size_t>(index) >= pseudo_array->objects.size()) {
       return nullptr;
     }
-    return pseudo_array->objects[static_cast<std::size_t>(index)];
+    jobject obj = pseudo_array->objects[static_cast<std::size_t>(index)];
+    return env != nullptr && obj != nullptr ? env->NewLocalRef(obj) : obj;
   };
 
   native_interface_.SetObjectArrayElement =
-      [](JNIEnv* /*env*/, jobjectArray array, jsize index, jobject val) {
+      [](JNIEnv* env, jobjectArray array, jsize index, jobject val) {
     PseudoArray* pseudo_array = ArrayFromRef(array);
     if (!pseudo_array || index < 0 ||
         static_cast<std::size_t>(index) >= pseudo_array->objects.size()) {
       return;
     }
+    if (val != nullptr && env != nullptr) {
+      env->NewLocalRef(val);
+    }
+    jobject prev = pseudo_array->objects[static_cast<std::size_t>(index)];
     pseudo_array->objects[static_cast<std::size_t>(index)] = val;
+    if (prev != nullptr && env != nullptr) {
+      env->DeleteLocalRef(prev);
+    }
   };
 
   native_interface_.NewByteArray =

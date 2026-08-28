@@ -24,8 +24,13 @@ class InputPumpPacer final {
     if (interval_ns_ == 0) {
       return 0;
     }
-    if (next_deadline_ns_ == 0 || now_ns > next_deadline_ns_) {
+    // A tick that already missed (or met) the deadline must not sleep. Sleeping
+    // a full interval after a late engine/present frame adds 4ms on top of
+    // vsync and caps gameplay below refresh. Rebase so the next idle spin is
+    // still limited to 240 Hz.
+    if (next_deadline_ns_ == 0 || now_ns >= next_deadline_ns_) {
       next_deadline_ns_ = AddSaturating(now_ns, interval_ns_);
+      return 0;
     }
     const uint64_t delay_ns = next_deadline_ns_ - now_ns;
     next_deadline_ns_ = AddSaturating(next_deadline_ns_, interval_ns_);

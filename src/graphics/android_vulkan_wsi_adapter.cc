@@ -31,37 +31,75 @@ VkResult NormalizeAndroidSwapchainResult(VkResult result) {
   return result == VK_SUBOPTIMAL_KHR ? VK_SUCCESS : result;
 }
 
+std::uint64_t BoundHostImageAcquireTimeout(std::uint64_t requested_timeout,
+                                           bool unthrottled) {
+  if (requested_timeout != std::numeric_limits<std::uint64_t>::max()) {
+    return requested_timeout;
+  }
+  return unthrottled ? kHostImageAcquireUnthrottledTimeoutNs
+                     : kHostImageAcquireWatchdogTimeoutNs;
+}
+
 std::uint64_t BoundHostImageAcquireTimeout(std::uint64_t requested_timeout) {
-  return requested_timeout == std::numeric_limits<std::uint64_t>::max()
-             ? kHostImageAcquireWatchdogTimeoutNs
-             : requested_timeout;
+  return BoundHostImageAcquireTimeout(requested_timeout, false);
+}
+
+bool IsHostImageAcquireWatchdogTimeout(std::uint64_t requested_timeout,
+                                       VkResult host_result,
+                                       bool unthrottled) {
+  return !unthrottled &&
+         requested_timeout == std::numeric_limits<std::uint64_t>::max() &&
+         host_result == VK_TIMEOUT;
 }
 
 bool IsHostImageAcquireWatchdogTimeout(std::uint64_t requested_timeout,
                                        VkResult host_result) {
-  return requested_timeout == std::numeric_limits<std::uint64_t>::max() &&
-         host_result == VK_TIMEOUT;
+  return IsHostImageAcquireWatchdogTimeout(requested_timeout, host_result,
+                                           false);
 }
 
 VkResult NormalizeHostImageAcquireResult(std::uint64_t requested_timeout,
-                                         VkResult host_result) {
-  if (IsHostImageAcquireWatchdogTimeout(requested_timeout, host_result)) {
+                                         VkResult host_result,
+                                         bool unthrottled) {
+  if (IsHostImageAcquireWatchdogTimeout(requested_timeout, host_result,
+                                        unthrottled)) {
     return VK_ERROR_OUT_OF_DATE_KHR;
   }
   return NormalizeAndroidSwapchainResult(host_result);
 }
 
+VkResult NormalizeHostImageAcquireResult(std::uint64_t requested_timeout,
+                                         VkResult host_result) {
+  return NormalizeHostImageAcquireResult(requested_timeout, host_result,
+                                         false);
+}
+
+std::uint64_t BoundHostSynchronizationWaitTimeout(
+    std::uint64_t requested_timeout, bool unthrottled) {
+  static_cast<void>(unthrottled);
+  if (requested_timeout != std::numeric_limits<std::uint64_t>::max()) {
+    return requested_timeout;
+  }
+  return kHostInfiniteWaitDiagnosticSliceNs;
+}
+
 std::uint64_t BoundHostSynchronizationWaitTimeout(
     std::uint64_t requested_timeout) {
-  return requested_timeout == std::numeric_limits<std::uint64_t>::max()
-             ? kHostInfiniteWaitDiagnosticSliceNs
-             : requested_timeout;
+  return BoundHostSynchronizationWaitTimeout(requested_timeout, false);
+}
+
+bool ShouldContinueHostSynchronizationWait(std::uint64_t requested_timeout,
+                                           VkResult host_result,
+                                           bool unthrottled) {
+  static_cast<void>(unthrottled);
+  return requested_timeout == std::numeric_limits<std::uint64_t>::max() &&
+         host_result == VK_TIMEOUT;
 }
 
 bool ShouldContinueHostSynchronizationWait(std::uint64_t requested_timeout,
                                            VkResult host_result) {
-  return requested_timeout == std::numeric_limits<std::uint64_t>::max() &&
-         host_result == VK_TIMEOUT;
+  return ShouldContinueHostSynchronizationWait(requested_timeout, host_result,
+                                               false);
 }
 
 Status TranslateAndroidVulkanInstanceExtensions(

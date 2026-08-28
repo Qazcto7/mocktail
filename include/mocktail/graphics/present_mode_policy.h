@@ -1,6 +1,7 @@
 #ifndef MOCKTAIL_GRAPHICS_PRESENT_MODE_POLICY_H_
 #define MOCKTAIL_GRAPHICS_PRESENT_MODE_POLICY_H_
 
+#include <cstdint>
 #include <string_view>
 #include <vector>
 
@@ -21,6 +22,12 @@ std::vector<VkPresentModeKHR>
 FilterPresentModes(PresentModePolicy policy,
                    const std::vector<VkPresentModeKHR> &host_modes);
 const char *PresentModePolicyName(PresentModePolicy policy);
+
+// Extra images so acquire does not wait on the compositor-held buffer.
+std::uint32_t PreferSwapchainMinImageCount(PresentModePolicy policy,
+                                           std::uint32_t requested,
+                                           std::uint32_t min_images,
+                                           std::uint32_t max_images);
 
 } // namespace graphics
 } // namespace mocktail

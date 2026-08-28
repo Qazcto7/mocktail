@@ -3,6 +3,8 @@
 #include <gtest/gtest.h>
 
 #include <fcntl.h>
+#include <linux/futex.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include <array>
@@ -10,6 +12,7 @@
 #include <cstdarg>
 #include <cerrno>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <thread>
@@ -137,6 +140,211 @@ TEST(BionicAbiExportsTest, AdaptsManyIndependentGuestMutexAddresses) {
        ++iterator) {
     EXPECT_EQ(0, mocktail_pthread_mutex_destroy(&*iterator));
   }
+}
+
+TEST(BionicAbiExportsTest, CondSignalWakesRawGuestFutexWait) {
+  pthread_cond_t guest_cond{};
+  ASSERT_EQ(0, mocktail_pthread_cond_init(&guest_cond, nullptr));
+  auto* state = reinterpret_cast<uint32_t*>(&guest_cond);
+  std::atomic<bool> loaded{false};
+  std::atomic<int> wait_result{EINVAL};
+  std::thread waiter([&] {
+    const uint32_t old_state = __atomic_load_n(state, __ATOMIC_RELAXED);
+    loaded.store(true, std::memory_order_release);
+    wait_result.store(
+        static_cast<int>(::syscall(SYS_futex, state, FUTEX_WAIT_PRIVATE,
+                                   old_state, nullptr, nullptr, 0)),
+        std::memory_order_release);
+  });
+  while (!loaded.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  ASSERT_EQ(0, mocktail_pthread_cond_signal(&guest_cond));
+  waiter.join();
+  EXPECT_EQ(0, wait_result.load(std::memory_order_acquire));
+  EXPECT_EQ(0, mocktail_pthread_cond_destroy(&guest_cond));
+}
+
+TEST(BionicAbiExportsTest, CondWaitWakesFromRawGuestFutexWake) {
+  pthread_mutex_t guest_mutex{};
+  pthread_cond_t guest_cond{};
+  ASSERT_EQ(0, mocktail_pthread_mutex_init(&guest_mutex, nullptr));
+  ASSERT_EQ(0, mocktail_pthread_cond_init(&guest_cond, nullptr));
+
+  std::atomic<bool> waiting{false};
+  std::atomic<int> wait_result{EINVAL};
+  std::thread waiter([&] {
+    ASSERT_EQ(0, mocktail_pthread_mutex_lock(&guest_mutex));
+    waiting.store(true, std::memory_order_release);
+    wait_result.store(mocktail_pthread_cond_wait(&guest_cond, &guest_mutex),
+                      std::memory_order_release);
+    mocktail_pthread_mutex_unlock(&guest_mutex);
+  });
+  while (!waiting.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  auto* state = reinterpret_cast<uint32_t*>(&guest_cond);
+  __atomic_fetch_add(state, 4, __ATOMIC_RELAXED);
+  EXPECT_GE(::syscall(SYS_futex, state, FUTEX_WAKE_PRIVATE, 1, nullptr, nullptr,
+                      0),
+            1);
+  waiter.join();
+  EXPECT_EQ(0, wait_result.load(std::memory_order_acquire));
+  EXPECT_EQ(0, mocktail_pthread_cond_destroy(&guest_cond));
+  EXPECT_EQ(0, mocktail_pthread_mutex_destroy(&guest_mutex));
+}
+
+TEST(BionicAbiExportsTest, SameThreadRepeatCondSignalAndWait) {
+  pthread_mutex_t guest_mutex{};
+  pthread_cond_t guest_cond{};
+  ASSERT_EQ(0, mocktail_pthread_mutex_init(&guest_mutex, nullptr));
+  ASSERT_EQ(0, mocktail_pthread_cond_init(&guest_cond, nullptr));
+  ASSERT_EQ(0, mocktail_pthread_cond_signal(&guest_cond));
+  ASSERT_EQ(0, mocktail_pthread_cond_signal(&guest_cond));
+
+  std::atomic<bool> waiting{false};
+  std::atomic<int> wait_result{EINVAL};
+  std::thread waiter([&] {
+    ASSERT_EQ(0, mocktail_pthread_mutex_lock(&guest_mutex));
+    waiting.store(true, std::memory_order_release);
+    wait_result.store(mocktail_pthread_cond_wait(&guest_cond, &guest_mutex),
+                      std::memory_order_release);
+    mocktail_pthread_mutex_unlock(&guest_mutex);
+  });
+  while (!waiting.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  ASSERT_EQ(0, mocktail_pthread_mutex_lock(&guest_mutex));
+  ASSERT_EQ(0, mocktail_pthread_cond_signal(&guest_cond));
+  ASSERT_EQ(0, mocktail_pthread_mutex_unlock(&guest_mutex));
+  waiter.join();
+  EXPECT_EQ(0, wait_result.load(std::memory_order_acquire));
+  EXPECT_EQ(0, mocktail_pthread_cond_destroy(&guest_cond));
+  EXPECT_EQ(0, mocktail_pthread_mutex_destroy(&guest_mutex));
+}
+
+TEST(BionicAbiExportsTest, MutexUnlockWakesRawGuestFutexWait) {
+  pthread_mutex_t guest_mutex{};
+  ASSERT_EQ(0, mocktail_pthread_mutex_init(&guest_mutex, nullptr));
+  ASSERT_EQ(0, mocktail_pthread_mutex_lock(&guest_mutex));
+  auto* state = reinterpret_cast<uint16_t*>(&guest_mutex);
+  std::atomic<bool> waiting{false};
+  std::atomic<int> wait_result{EINVAL};
+  std::thread waiter([&] {
+    uint16_t old_state = __atomic_load_n(state, __ATOMIC_RELAXED);
+    const uint16_t contended = static_cast<uint16_t>((old_state & ~0x3u) | 2u);
+    __atomic_store_n(state, contended, __ATOMIC_RELAXED);
+    waiting.store(true, std::memory_order_release);
+    wait_result.store(
+        static_cast<int>(::syscall(SYS_futex, &guest_mutex, FUTEX_WAIT_PRIVATE,
+                                   static_cast<uint32_t>(contended), nullptr,
+                                   nullptr, 0)),
+        std::memory_order_release);
+  });
+  while (!waiting.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  ASSERT_EQ(0, mocktail_pthread_mutex_unlock(&guest_mutex));
+  waiter.join();
+  EXPECT_EQ(0, wait_result.load(std::memory_order_acquire));
+  EXPECT_EQ(0, mocktail_pthread_mutex_destroy(&guest_mutex));
+}
+
+TEST(BionicAbiExportsTest, OnceRunsInitRoutineExactlyOnce) {
+  pthread_once_t once = PTHREAD_ONCE_INIT;
+  static std::atomic<int> runs{0};
+  runs.store(0);
+  const auto init_routine = []() {
+    runs.fetch_add(1, std::memory_order_relaxed);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  };
+  std::thread first([&] {
+    EXPECT_EQ(0, mocktail_pthread_once(&once, init_routine));
+  });
+  std::thread second([&] {
+    EXPECT_EQ(0, mocktail_pthread_once(&once, init_routine));
+  });
+  first.join();
+  second.join();
+  EXPECT_EQ(1, runs.load());
+  EXPECT_EQ(0, mocktail_pthread_once(&once, init_routine));
+  EXPECT_EQ(1, runs.load());
+}
+
+TEST(BionicAbiExportsTest, SpinLockParksUntilUnlock) {
+  pthread_spinlock_t lock{};
+  ASSERT_EQ(0, mocktail_pthread_spin_init(&lock, 0));
+  ASSERT_EQ(0, mocktail_pthread_spin_lock(&lock));
+
+  std::atomic<bool> started{false};
+  std::atomic<bool> acquired{false};
+  std::thread waiter([&] {
+    started.store(true, std::memory_order_release);
+    EXPECT_EQ(0, mocktail_pthread_spin_lock(&lock));
+    acquired.store(true, std::memory_order_release);
+    EXPECT_EQ(0, mocktail_pthread_spin_unlock(&lock));
+  });
+  while (!started.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  EXPECT_FALSE(acquired.load(std::memory_order_acquire));
+  ASSERT_EQ(0, mocktail_pthread_spin_unlock(&lock));
+  waiter.join();
+  EXPECT_TRUE(acquired.load(std::memory_order_acquire));
+  EXPECT_EQ(0, mocktail_pthread_spin_destroy(&lock));
+}
+
+TEST(BionicAbiExportsTest, BarrierWaitReleasesBothThreads) {
+  pthread_barrier_t barrier{};
+  ASSERT_EQ(0, mocktail_pthread_barrier_init(&barrier, nullptr, 2));
+  std::atomic<int> finished{0};
+  std::thread other([&] {
+    const int result = mocktail_pthread_barrier_wait(&barrier);
+    EXPECT_TRUE(result == 0 || result == PTHREAD_BARRIER_SERIAL_THREAD);
+    finished.fetch_add(1, std::memory_order_release);
+  });
+  const int result = mocktail_pthread_barrier_wait(&barrier);
+  EXPECT_TRUE(result == 0 || result == PTHREAD_BARRIER_SERIAL_THREAD);
+  other.join();
+  EXPECT_EQ(1, finished.load(std::memory_order_acquire));
+  EXPECT_EQ(0, mocktail_pthread_barrier_destroy(&barrier));
+}
+
+TEST(BionicAbiExportsTest, SameThreadRepeatLockUnlockOfOneGuestMutex) {
+  pthread_mutex_t guest_mutex{};
+  ASSERT_EQ(0, mocktail_pthread_mutex_init(&guest_mutex, nullptr));
+  ASSERT_EQ(0, mocktail_pthread_mutex_lock(&guest_mutex));
+  ASSERT_EQ(0, mocktail_pthread_mutex_unlock(&guest_mutex));
+  ASSERT_EQ(0, mocktail_pthread_mutex_lock(&guest_mutex));
+  ASSERT_EQ(0, mocktail_pthread_mutex_unlock(&guest_mutex));
+  ASSERT_EQ(0, mocktail_pthread_mutex_trylock(&guest_mutex));
+  ASSERT_EQ(0, mocktail_pthread_mutex_unlock(&guest_mutex));
+
+  std::atomic<int> waiter_result{EINVAL};
+  std::atomic<bool> waiter_started{false};
+  ASSERT_EQ(0, mocktail_pthread_mutex_lock(&guest_mutex));
+  std::thread waiter([&] {
+    waiter_started.store(true, std::memory_order_release);
+    waiter_result.store(mocktail_pthread_mutex_lock(&guest_mutex),
+                        std::memory_order_release);
+    if (waiter_result.load(std::memory_order_relaxed) == 0) {
+      mocktail_pthread_mutex_unlock(&guest_mutex);
+    }
+  });
+  while (!waiter_started.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  EXPECT_EQ(EINVAL, waiter_result.load(std::memory_order_acquire));
+  ASSERT_EQ(0, mocktail_pthread_mutex_unlock(&guest_mutex));
+  waiter.join();
+  EXPECT_EQ(0, waiter_result.load(std::memory_order_acquire));
+  EXPECT_EQ(0, mocktail_pthread_mutex_destroy(&guest_mutex));
 }
 
 TEST(BionicAbiExportsTest, SerializesConcurrentAccessToOneGuestMutex) {
@@ -376,6 +584,51 @@ TEST(BionicAbiExportsTest, InvalidatesRemoteMutexCacheAcrossAddressReuse) {
   EXPECT_EQ(0, mocktail_pthread_mutex_unlock(&guest_mutex));
   EXPECT_EQ(0, mocktail_pthread_mutex_destroy(&guest_mutex));
   EXPECT_EQ(0, mocktail_pthread_mutex_destroy(&allocator_spacer));
+}
+
+TEST(BionicAbiExportsTest, InvalidatesRemoteConditionCacheAcrossAddressReuse) {
+  pthread_cond_t guest_condition{};
+  pthread_cond_t allocator_spacer{};
+  pthread_mutex_t guest_mutex{};
+  ASSERT_EQ(0, mocktail_pthread_cond_init(&guest_condition, nullptr));
+  ASSERT_EQ(0, mocktail_pthread_mutex_init(&guest_mutex, nullptr));
+
+  std::atomic<bool> cache_ready{false};
+  std::atomic<bool> replacement_ready{false};
+  std::atomic<int> signal_result{EINVAL};
+  std::thread worker([&] {
+    ASSERT_EQ(0, mocktail_pthread_cond_signal(&guest_condition));
+    cache_ready.store(true, std::memory_order_release);
+    while (!replacement_ready.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+    ASSERT_EQ(0, mocktail_pthread_mutex_lock(&guest_mutex));
+    signal_result.store(mocktail_pthread_cond_signal(&guest_condition),
+                        std::memory_order_release);
+    EXPECT_EQ(0, mocktail_pthread_mutex_unlock(&guest_mutex));
+  });
+
+  while (!cache_ready.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+  ASSERT_EQ(0, mocktail_pthread_cond_destroy(&guest_condition));
+  ASSERT_EQ(0, mocktail_pthread_cond_init(&allocator_spacer, nullptr));
+  ASSERT_EQ(0, mocktail_pthread_cond_init(&guest_condition, nullptr));
+
+  ASSERT_EQ(0, mocktail_pthread_mutex_lock(&guest_mutex));
+  replacement_ready.store(true, std::memory_order_release);
+  timespec deadline{};
+  ASSERT_EQ(0, clock_gettime(CLOCK_REALTIME, &deadline));
+  deadline.tv_sec += 2;
+  EXPECT_EQ(0, mocktail_pthread_cond_timedwait(
+                   &guest_condition, &guest_mutex, &deadline));
+  EXPECT_EQ(0, mocktail_pthread_mutex_unlock(&guest_mutex));
+  worker.join();
+
+  EXPECT_EQ(0, signal_result.load(std::memory_order_acquire));
+  EXPECT_EQ(0, mocktail_pthread_cond_destroy(&guest_condition));
+  EXPECT_EQ(0, mocktail_pthread_cond_destroy(&allocator_spacer));
+  EXPECT_EQ(0, mocktail_pthread_mutex_destroy(&guest_mutex));
 }
 
 }  // namespace

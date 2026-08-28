@@ -1,62 +1,68 @@
 #include "compat/bionic_semaphore_runtime.h"
 
 #include <errno.h>
-#include <pthread.h>
+#include <linux/futex.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 
+#include <climits>
 #include <cstdint>
-#include <cstdlib>
 
 namespace {
 
-struct HostSemaphoreEntry {
-  uintptr_t guest_address;
-  sem_t host_semaphore;
-  HostSemaphoreEntry* next;
-};
+// Bionic encodes the signed count in bits 31:1 and a process-shared flag in
+// bit 0. Waiters park while the count is -1 (all value bits set, shared=0).
+constexpr unsigned kSemValueMask = 0xfffffffeu;
+constexpr unsigned kSemValueShift = 1u;
+constexpr unsigned kSemOne = 1u << kSemValueShift;
+constexpr unsigned kSemMinusOne = kSemValueMask;
 
-pthread_mutex_t g_table_mutex = PTHREAD_MUTEX_INITIALIZER;
-HostSemaphoreEntry* g_table = nullptr;
+unsigned* SemCount(sem_t* semaphore) {
+  return reinterpret_cast<unsigned*>(semaphore);
+}
 
-sem_t* FindOrCreateHostSemaphore(sem_t* guest_semaphore, bool create,
-                                 unsigned int initial_value) noexcept {
-  if (guest_semaphore == nullptr) {
-    return nullptr;
-  }
+int SemValue(unsigned encoded) {
+  return static_cast<int>(encoded) >> static_cast<int>(kSemValueShift);
+}
 
-  const uintptr_t guest_address =
-      reinterpret_cast<uintptr_t>(guest_semaphore);
-  ::pthread_mutex_lock(&g_table_mutex);
-  for (HostSemaphoreEntry* entry = g_table; entry != nullptr;
-       entry = entry->next) {
-    if (entry->guest_address == guest_address) {
-      ::pthread_mutex_unlock(&g_table_mutex);
-      return &entry->host_semaphore;
+unsigned SemEncode(unsigned value) {
+  return (value << kSemValueShift) & kSemValueMask;
+}
+
+int SemFutex(unsigned* count, int op, unsigned val) {
+  return static_cast<int>(
+      ::syscall(SYS_futex, count, op | FUTEX_PRIVATE_FLAG, val, nullptr,
+                nullptr, 0));
+}
+
+int SemDec(unsigned* count) {
+  unsigned old_value = __atomic_load_n(count, __ATOMIC_RELAXED);
+  do {
+    if (SemValue(old_value) < 0) {
+      break;
     }
-  }
+  } while (!__atomic_compare_exchange_n(
+      count, &old_value, (old_value - kSemOne) & kSemValueMask, true,
+      __ATOMIC_SEQ_CST, __ATOMIC_RELAXED));
+  return SemValue(old_value);
+}
 
-  if (!create) {
-    ::pthread_mutex_unlock(&g_table_mutex);
-    return nullptr;
-  }
-
-  auto* entry = static_cast<HostSemaphoreEntry*>(
-      std::calloc(1, sizeof(HostSemaphoreEntry)));
-  if (entry == nullptr) {
-    ::pthread_mutex_unlock(&g_table_mutex);
-    errno = ENOMEM;
-    return nullptr;
-  }
-  if (::sem_init(&entry->host_semaphore, 0, initial_value) != 0) {
-    std::free(entry);
-    ::pthread_mutex_unlock(&g_table_mutex);
-    return nullptr;
-  }
-
-  entry->guest_address = guest_address;
-  entry->next = g_table;
-  g_table = entry;
-  ::pthread_mutex_unlock(&g_table_mutex);
-  return &entry->host_semaphore;
+int SemInc(unsigned* count) {
+  unsigned old_value = __atomic_load_n(count, __ATOMIC_RELAXED);
+  unsigned new_value = 0;
+  do {
+    const int value = SemValue(old_value);
+    if (value == SEM_VALUE_MAX) {
+      break;
+    }
+    if (value < 0) {
+      new_value = kSemOne;
+    } else {
+      new_value = (old_value + kSemOne) & kSemValueMask;
+    }
+  } while (!__atomic_compare_exchange_n(count, &old_value, new_value, true,
+                                        __ATOMIC_SEQ_CST, __ATOMIC_RELAXED));
+  return SemValue(old_value);
 }
 
 }  // namespace
@@ -69,7 +75,12 @@ int mocktail_bionic_sem_init(sem_t* semaphore, int process_shared,
     errno = EINVAL;
     return -1;
   }
-  return FindOrCreateHostSemaphore(semaphore, true, value) != nullptr ? 0 : -1;
+  if (value > static_cast<unsigned>(SEM_VALUE_MAX)) {
+    errno = EINVAL;
+    return -1;
+  }
+  __atomic_store_n(SemCount(semaphore), SemEncode(value), __ATOMIC_RELAXED);
+  return 0;
 }
 
 int mocktail_bionic_sem_destroy(sem_t* semaphore) {
@@ -77,46 +88,40 @@ int mocktail_bionic_sem_destroy(sem_t* semaphore) {
     errno = EINVAL;
     return -1;
   }
-
-  const uintptr_t guest_address = reinterpret_cast<uintptr_t>(semaphore);
-  ::pthread_mutex_lock(&g_table_mutex);
-  HostSemaphoreEntry** link = &g_table;
-  while (*link != nullptr) {
-    HostSemaphoreEntry* entry = *link;
-    if (entry->guest_address == guest_address) {
-      *link = entry->next;
-      ::pthread_mutex_unlock(&g_table_mutex);
-      const int result = ::sem_destroy(&entry->host_semaphore);
-      std::free(entry);
-      return result;
-    }
-    link = &entry->next;
-  }
-  ::pthread_mutex_unlock(&g_table_mutex);
   return 0;
 }
 
 int mocktail_bionic_sem_wait(sem_t* semaphore) {
-  sem_t* host_semaphore = FindOrCreateHostSemaphore(semaphore, false, 0);
-  if (host_semaphore == nullptr) {
+  if (semaphore == nullptr) {
     errno = EINVAL;
     return -1;
   }
-
-  int result = 0;
-  do {
-    result = ::sem_wait(host_semaphore);
-  } while (result != 0 && errno == EINTR);
-  return result;
+  unsigned* count = SemCount(semaphore);
+  for (;;) {
+    if (SemDec(count) > 0) {
+      return 0;
+    }
+    const int rc = SemFutex(count, FUTEX_WAIT, kSemMinusOne);
+    if (rc != 0 && errno == EINTR) {
+      continue;
+    }
+  }
 }
 
 int mocktail_bionic_sem_post(sem_t* semaphore) {
-  sem_t* host_semaphore = FindOrCreateHostSemaphore(semaphore, false, 0);
-  if (host_semaphore == nullptr) {
+  if (semaphore == nullptr) {
     errno = EINVAL;
     return -1;
   }
-  return ::sem_post(host_semaphore);
+  unsigned* count = SemCount(semaphore);
+  const int old_value = SemInc(count);
+  if (old_value < 0) {
+    (void)SemFutex(count, FUTEX_WAKE, static_cast<unsigned>(INT_MAX));
+  } else if (old_value == SEM_VALUE_MAX) {
+    errno = EOVERFLOW;
+    return -1;
+  }
+  return 0;
 }
 
 }  // extern "C"

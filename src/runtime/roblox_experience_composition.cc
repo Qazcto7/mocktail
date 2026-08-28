@@ -933,10 +933,16 @@ Status RobloxExperienceComposition::RouteCurrentWebSurfaceEvent(
 Status RobloxExperienceComposition::DrainPlatformEvents() {
   RobloxWebViewBridge* web_view_bridge = nullptr;
   RobloxBrowserServiceBridge* browser_service_bridge = nullptr;
+  std::shared_ptr<WebViewHelperProcess> web_surface_process;
+  uint64_t process_generation = 0;
+  uint64_t logical_generation = 0;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     web_view_bridge = web_view_bridge_.get();
     browser_service_bridge = browser_service_bridge_.get();
+    web_surface_process = web_surface_process_;
+    process_generation = web_surface_process_generation_;
+    logical_generation = web_surface_logical_generation_;
   }
   const auto drain_helper =
       [&](const std::shared_ptr<WebViewHelperProcess>& process,
@@ -967,15 +973,6 @@ Status RobloxExperienceComposition::DrainPlatformEvents() {
                       ? web_view_bridge->DrainHostWindowEvents()
                       : Status::Ok();
   if (status.ok()) {
-    std::shared_ptr<WebViewHelperProcess> web_surface_process;
-    uint64_t process_generation = 0;
-    uint64_t logical_generation = 0;
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      web_surface_process = web_surface_process_;
-      process_generation = web_surface_process_generation_;
-      logical_generation = web_surface_logical_generation_;
-    }
     status = drain_helper(web_surface_process, process_generation,
                           logical_generation);
   }

@@ -17,7 +17,14 @@ temporary_root="$(mktemp -d)"
 trap 'rm -rf "${temporary_root}"' EXIT
 
 set +e
-mkdir -p "${temporary_root}/run"
+mkdir -p \
+  "${temporary_root}/run" \
+  "${temporary_root}/assets" \
+  "${temporary_root}/config" \
+  "${temporary_root}/data" \
+  "${temporary_root}/cache" \
+  "${temporary_root}/state" \
+  "${temporary_root}/auth"
 output="$(
   env -i \
     PATH="${PATH}" \
@@ -31,6 +38,9 @@ output="$(
     MOCKTAIL_STATE_ROOT="${temporary_root}/state" \
     MOCKTAIL_AUTH_ROOT="${temporary_root}/auth" \
     MOCKTAIL_COOKIE_FILE="${temporary_root}" \
+    MOCKTAIL_ASSET_PATH="${temporary_root}/assets" \
+    MOCKTAIL_SKIP_UPDATE_CHECK=1 \
+    MOCKTAIL_AUTO_EXIT_AFTER_PRESENT_MS=5000 \
     ROBLOX_LIB_PATH="${unknown_elf}" \
     MOCKTAIL_COMPATIBILITY_MANIFEST="${compatibility_manifest}" \
     "${mocktail_binary}" 2>&1
