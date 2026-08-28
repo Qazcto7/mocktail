@@ -595,14 +595,45 @@ endif()
 unset(_mocktail_execinfo_link_probe)
 
 add_library(mocktail_legacy_runtime STATIC
-  src/legacy/legacy_runtime.cc
+  # ABI and platform foundations.
+  src/legacy/bionic_runtime_wrappers.cc
+  src/legacy/host_abi_runtime.cc
+  src/legacy/memory_inspection.cc
+  src/legacy/runtime_environment.cc
+  src/legacy/runtime_paths.cc
+  src/legacy/symbol_resolver.cc
+
+  # Headless recovery and diagnostics.
+  src/legacy/headless_patches.cc
+  src/legacy/headless_signal_handler.cc
+  src/legacy/headless_signal_support.cc
+  src/legacy/runtime_diagnostics.cc
+
+  # Runtime entry, orchestration, and adapters.
+  src/legacy/engine_startup.cc
+  src/legacy/legacy_runtime_entry.cc
+  src/legacy/legacy_runtime_runner.cc
+  src/legacy/main_thread_runtime.cc
+  src/legacy/rbxm_diagnostics.cc
+  src/legacy/runtime_adapters.cc
+
+  # Stage 6 compatibility and recovery.
+  src/legacy/stage6_binary_patches.cc
+  src/legacy/stage6_platform_patches.cc
+  src/legacy/stage6_rbxm_fallbacks.cc
+  src/legacy/stage6_start_lua_fallbacks.cc
+  src/legacy/stage6_start_lua_signal_recovery.cc
   src/runtime/roblox_text_input_jni_bridge.cc
 )
 target_include_directories(mocktail_legacy_runtime PRIVATE include src)
 mocktail_apply_compile_options(mocktail_legacy_runtime)
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
   # Diagnostics from signal handlers cannot handle a failed write.
-  set_property(SOURCE src/legacy/legacy_runtime.cc APPEND PROPERTY
+  set_property(SOURCE
+    src/legacy/headless_signal_handler.cc
+    src/legacy/headless_signal_support.cc
+    src/legacy/stage6_start_lua_signal_recovery.cc
+    APPEND PROPERTY
     COMPILE_OPTIONS -Wno-unused-result
   )
 endif()
