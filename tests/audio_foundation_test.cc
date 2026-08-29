@@ -587,6 +587,58 @@ TEST(OpenSlQueueTest, ShutdownWaitsForInFlightCallback) {
             opensl_abi::kResultPreconditionsViolated);
 }
 
+TEST(OpenSlQueueTest, GetStatePollsWhilePlaybackReleasesBuffers) {
+  auto controlled = std::make_unique<ControlledAudioSink>();
+  ControlledAudioSink* controlled_view = controlled.get();
+  std::unique_ptr<OpenSlSimpleBufferQueueAdapter> adapter;
+  ASSERT_TRUE(OpenSlSimpleBufferQueueAdapter::Create(std::move(controlled), {},
+                                                     &adapter)
+                  .ok());
+  auto queue = adapter->interface();
+  CallbackProbe probe;
+  ASSERT_EQ((*queue)->RegisterCallback(queue, OpenSlQueueCallback, &probe),
+            opensl_abi::kResultSuccess);
+
+  std::atomic<bool> stop_polling{false};
+  std::atomic<int> polls{0};
+  std::atomic<int> poll_failures{0};
+  std::thread poller([&] {
+    while (!stop_polling.load(std::memory_order_relaxed)) {
+      opensl_abi::AndroidSimpleBufferQueueState queue_state{};
+      if ((*queue)->GetState(queue, &queue_state) !=
+          opensl_abi::kResultSuccess) {
+        poll_failures.fetch_add(1, std::memory_order_relaxed);
+      }
+      polls.fetch_add(1, std::memory_order_relaxed);
+    }
+  });
+
+  const std::vector<std::int16_t> samples(32 * 2, 321);
+  ASSERT_EQ((*queue)->Enqueue(queue, samples.data(),
+                              static_cast<opensl_abi::Uint32>(
+                                  samples.size() * sizeof(samples.front()))),
+            opensl_abi::kResultSuccess);
+  opensl_abi::AndroidSimpleBufferQueueState queued{};
+  ASSERT_EQ((*queue)->GetState(queue, &queued), opensl_abi::kResultSuccess);
+  EXPECT_EQ(queued.count, 1u);
+  controlled_view->ReleaseOne();
+  {
+    std::unique_lock<std::mutex> lock(probe.mutex);
+    ASSERT_TRUE(
+        probe.cv.wait_for(lock, 2s, [&probe] { return probe.calls == 1; }));
+  }
+
+  stop_polling.store(true, std::memory_order_relaxed);
+  poller.join();
+  EXPECT_GT(polls.load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(poll_failures.load(std::memory_order_relaxed), 0);
+
+  opensl_abi::AndroidSimpleBufferQueueState drained{};
+  ASSERT_EQ((*queue)->GetState(queue, &drained), opensl_abi::kResultSuccess);
+  EXPECT_EQ(drained.count, 0u);
+  EXPECT_EQ(drained.index, 1u);
+}
+
 TEST(OpenSlQueueTest, RecorderIsExplicitlyUnsupported) {
   const Status status = OpenSlRecorderSupportStatus();
   EXPECT_FALSE(status.ok());

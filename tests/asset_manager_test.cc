@@ -8,6 +8,7 @@
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -32,22 +33,35 @@ namespace {
 class AssetManagerTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    char path[] = "/tmp/mocktail-assets-XXXXXX";
-    char* dir = mkdtemp(path);
-    ASSERT_NE(dir, nullptr);
-    root_ = dir;
+    root_ = MakeTempRoot();
+    ASSERT_FALSE(root_.empty());
     setenv("MOCKTAIL_ASSET_ROOT", root_.c_str(), 1);
   }
 
   void TearDown() override {
     unsetenv("MOCKTAIL_ASSET_ROOT");
-    if (!root_.empty()) {
-      std::filesystem::remove_all(root_);
+    for (const std::string& root : roots_to_remove_) {
+      std::filesystem::remove_all(root);
     }
   }
 
+  std::string MakeTempRoot() {
+    char path[] = "/tmp/mocktail-assets-XXXXXX";
+    char* dir = mkdtemp(path);
+    if (dir == nullptr) {
+      return {};
+    }
+    roots_to_remove_.emplace_back(dir);
+    return dir;
+  }
+
   void WriteAsset(const std::string& name, const char* data) {
-    std::string path = root_ + "/" + name;
+    WriteAssetAt(root_, name, data);
+  }
+
+  void WriteAssetAt(const std::string& root, const std::string& name,
+                    const char* data) {
+    std::string path = root + "/" + name;
     std::filesystem::create_directories(
         std::filesystem::path(path).parent_path());
     FILE* file = std::fopen(path.c_str(), "wb");
@@ -58,6 +72,7 @@ class AssetManagerTest : public ::testing::Test {
   }
 
   std::string root_;
+  std::vector<std::string> roots_to_remove_;
 };
 
 TEST_F(AssetManagerTest, FromJavaReturnsSingletonManager) {
@@ -145,6 +160,43 @@ TEST_F(AssetManagerTest, MissingOrUnsafeAssetsReturnNull) {
   EXPECT_EQ(AAssetManager_open(manager, "missing.bin", 0), nullptr);
   EXPECT_EQ(AAssetManager_open(manager, "../config.json", 0), nullptr);
   EXPECT_EQ(AAssetManager_open(manager, "/tmp/config.json", 0), nullptr);
+}
+
+TEST_F(AssetManagerTest, MissingAssetCanBeCreatedAndOpenedLater) {
+  AAssetManager* manager = AAssetManager_fromJava(nullptr, nullptr);
+  EXPECT_EQ(AAssetManager_open(manager, "created-later.txt", 0), nullptr);
+
+  WriteAsset("created-later.txt", "now-present");
+  AAsset* asset = AAssetManager_open(manager, "created-later.txt", 0);
+  ASSERT_NE(asset, nullptr);
+  EXPECT_EQ(AAsset_getLength(asset), 11);
+  EXPECT_EQ(std::string(static_cast<const char*>(AAsset_getBuffer(asset)),
+                        static_cast<std::size_t>(AAsset_getLength(asset))),
+            "now-present");
+  AAsset_close(asset);
+}
+
+TEST_F(AssetManagerTest, CacheSeparatesRuntimeAssetRootChanges) {
+  WriteAsset("same-name.txt", "first-root");
+  AAssetManager* manager = AAssetManager_fromJava(nullptr, nullptr);
+  AAsset* first = AAssetManager_open(manager, "same-name.txt", 0);
+  ASSERT_NE(first, nullptr);
+  EXPECT_EQ(std::string(static_cast<const char*>(AAsset_getBuffer(first)),
+                        static_cast<std::size_t>(AAsset_getLength(first))),
+            "first-root");
+  AAsset_close(first);
+
+  const std::string second_root = MakeTempRoot();
+  ASSERT_FALSE(second_root.empty());
+  WriteAssetAt(second_root, "same-name.txt", "second-root");
+  ASSERT_EQ(setenv("MOCKTAIL_ASSET_ROOT", second_root.c_str(), 1), 0);
+
+  AAsset* second = AAssetManager_open(manager, "same-name.txt", 0);
+  ASSERT_NE(second, nullptr);
+  EXPECT_EQ(std::string(static_cast<const char*>(AAsset_getBuffer(second)),
+                        static_cast<std::size_t>(AAsset_getLength(second))),
+            "second-root");
+  AAsset_close(second);
 }
 
 }  // namespace

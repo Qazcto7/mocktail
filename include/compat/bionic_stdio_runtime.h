@@ -5,6 +5,7 @@
 
 #include <cstdarg>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cwchar>
 
@@ -17,12 +18,6 @@ namespace mocktail::compat {
 constexpr size_t kBionicFileSize = 152;
 constexpr size_t kBionicStandardStreamCount = 3;
 
-FILE* TranslateBionicFile(FILE* stream) noexcept;
-void* BionicFileArraySymbolAddress() noexcept;
-void* BionicStdinSymbolAddress() noexcept;
-void* BionicStdoutSymbolAddress() noexcept;
-void* BionicStderrSymbolAddress() noexcept;
-
 }  // namespace mocktail::compat
 
 extern "C" {
@@ -31,7 +26,30 @@ alignas(sizeof(void*)) extern unsigned char
     __sF[mocktail::compat::kBionicStandardStreamCount]
         [mocktail::compat::kBionicFileSize];
 
+}  // extern "C"
+
+namespace mocktail::compat {
+
+inline FILE* TranslateBionicFile(FILE* stream) noexcept {
+  const uintptr_t address = reinterpret_cast<uintptr_t>(stream);
+  if (__builtin_expect(address == reinterpret_cast<uintptr_t>(&__sF[0]), 0)) {
+    return stdin;
+  }
+  if (__builtin_expect(address == reinterpret_cast<uintptr_t>(&__sF[1]), 0)) {
+    return stdout;
+  }
+  if (__builtin_expect(address == reinterpret_cast<uintptr_t>(&__sF[2]), 0)) {
+    return stderr;
+  }
+  return stream;
 }
+
+void* BionicFileArraySymbolAddress() noexcept;
+void* BionicStdinSymbolAddress() noexcept;
+void* BionicStdoutSymbolAddress() noexcept;
+void* BionicStderrSymbolAddress() noexcept;
+
+}  // namespace mocktail::compat
 
 // FILE values returned by host fopen/fdopen pass through unchanged. Pointers
 // into Bionic's ABI-sized __sF array are translated to the corresponding host

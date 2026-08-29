@@ -1,6 +1,7 @@
 // Android Vulkan loader ABI -> host Vulkan loader + SDL3 WSI.
 
 #include <dlfcn.h>
+#include <time.h>
 #include <vulkan/vulkan.h>
 
 #include <algorithm>
@@ -137,12 +138,19 @@ using WindowDimensionFn = int (*)();
 struct AdapterState {
   struct DeviceDispatch {
     VkDevice device = VK_NULL_HANDLE;
+    VkPhysicalDevice physical_device = VK_NULL_HANDLE;
     PFN_vkQueuePresentKHR queue_present = nullptr;
     PFN_vkQueueSubmit queue_submit = nullptr;
     PFN_vkQueueSubmit2 queue_submit2 = nullptr;
     PFN_vkQueueSubmit2KHR queue_submit2_khr = nullptr;
     PFN_vkQueueBindSparse queue_bind_sparse = nullptr;
     PFN_vkQueueWaitIdle queue_wait_idle = nullptr;
+    PFN_vkAcquireNextImageKHR acquire_next_image = nullptr;
+    PFN_vkAcquireNextImage2KHR acquire_next_image2 = nullptr;
+    PFN_vkWaitForFences wait_for_fences = nullptr;
+    PFN_vkWaitSemaphores wait_semaphores = nullptr;
+    PFN_vkWaitSemaphoresKHR wait_semaphores_khr = nullptr;
+    PFN_vkDeviceWaitIdle device_wait_idle = nullptr;
     PFN_vkResetFences reset_fences = nullptr;
     PFN_vkResetCommandPool reset_command_pool = nullptr;
     PFN_vkGetQueryPoolResults get_query_pool_results = nullptr;
@@ -169,7 +177,7 @@ struct AdapterState {
   mocktail::graphics::SdlVulkanWsi host_wsi;
   mocktail::graphics::AndroidVulkanWsiAdapter android_wsi;
   PFN_vkGetInstanceProcAddr host_get_instance_proc_addr = nullptr;
-  PFN_vkGetDeviceProcAddr host_get_device_proc_addr = nullptr;
+  std::atomic<PFN_vkGetDeviceProcAddr> host_get_device_proc_addr{nullptr};
   std::vector<DeviceDispatch> device_dispatches;
   std::vector<QueueBinding> queue_bindings;
   std::vector<CommandBufferBinding> command_buffer_bindings;
@@ -190,6 +198,8 @@ struct AdapterState {
   bool present_policy_logged = false;
   bool initialized = false;
 };
+
+static std::atomic<bool> g_vulkan_call_observation_active{false};
 
 AdapterState& State() {
   static AdapterState state;
@@ -214,7 +224,7 @@ bool EnsureInitialized() {
       ResolveProcessFunction<UsesDirectVulkanFn>(
           "mocktail_window_uses_direct_vulkan");
   state.note_present.store(ResolveProcessFunction<NotePresentFn>(
-                               "mocktail_window_note_vulkan_present"),
+                                "mocktail_window_note_vulkan_present"),
                            std::memory_order_release);
   state.note_host_present_begin.store(
       ResolveProcessFunction<NoteHostPresentBeginFn>(
@@ -224,14 +234,14 @@ bool EnsureInitialized() {
       ResolveProcessFunction<NoteHostPresentEndFn>(
           "mocktail_window_note_vulkan_host_present_end"),
       std::memory_order_release);
-  state.note_vulkan_call_begin.store(
-      ResolveProcessFunction<NoteVulkanCallBeginFn>(
-          "mocktail_window_note_vulkan_call_begin"),
-      std::memory_order_release);
-  state.note_vulkan_call_end.store(
-      ResolveProcessFunction<NoteVulkanCallEndFn>(
-          "mocktail_window_note_vulkan_call_end"),
-      std::memory_order_release);
+  const auto call_begin = ResolveProcessFunction<NoteVulkanCallBeginFn>(
+      "mocktail_window_note_vulkan_call_begin");
+  const auto call_end = ResolveProcessFunction<NoteVulkanCallEndFn>(
+      "mocktail_window_note_vulkan_call_end");
+  state.note_vulkan_call_begin.store(call_begin, std::memory_order_release);
+  state.note_vulkan_call_end.store(call_end, std::memory_order_release);
+  g_vulkan_call_observation_active.store(
+      call_begin != nullptr && call_end != nullptr, std::memory_order_release);
   state.note_surface_out_of_date.store(
       ResolveProcessFunction<NoteSurfaceOutOfDateFn>(
           "mocktail_window_note_vulkan_surface_out_of_date"),
@@ -299,18 +309,50 @@ PFN_vkVoidFunction HostDeviceProc(VkDevice device, const char* name) {
   if (!EnsureInitialized() || name == nullptr) {
     return nullptr;
   }
-  PFN_vkGetDeviceProcAddr host_get_device_proc_addr = nullptr;
-  {
-    AdapterState& state = State();
-    std::lock_guard<std::mutex> lock(state.mutex);
-    host_get_device_proc_addr = state.host_get_device_proc_addr;
-  }
+  const PFN_vkGetDeviceProcAddr host_get_device_proc_addr =
+      State().host_get_device_proc_addr.load(std::memory_order_acquire);
   return host_get_device_proc_addr != nullptr
              ? host_get_device_proc_addr(device, name)
              : nullptr;
 }
 
-AdapterState::DeviceDispatch HostDispatchForQueue(VkQueue queue) {
+static std::atomic<uint64_t> g_dispatch_generation{1};
+
+struct ThreadQueueDispatchCache {
+  uint64_t generation = 0;
+  VkQueue queue = VK_NULL_HANDLE;
+  AdapterState::DeviceDispatch dispatch{};
+};
+static thread_local ThreadQueueDispatchCache t_queue_cache;
+
+struct ThreadDeviceDispatchCache {
+  uint64_t generation = 0;
+  VkDevice device = VK_NULL_HANDLE;
+  AdapterState::DeviceDispatch dispatch{};
+};
+static thread_local ThreadDeviceDispatchCache t_device_cache;
+
+struct ThreadCommandBufferDispatchCache {
+  uint64_t generation = 0;
+  VkCommandBuffer command_buffer = VK_NULL_HANDLE;
+  AdapterState::DeviceDispatch dispatch{};
+};
+static thread_local ThreadCommandBufferDispatchCache t_command_buffer_cache;
+
+void InvalidateFastDispatchCaches() {
+  g_dispatch_generation.fetch_add(1, std::memory_order_release);
+}
+
+static const AdapterState::DeviceDispatch kEmptyDeviceDispatch{};
+
+const AdapterState::DeviceDispatch& HostDispatchForQueue(VkQueue queue) {
+  const uint64_t gen = g_dispatch_generation.load(std::memory_order_acquire);
+  if (__builtin_expect(queue != VK_NULL_HANDLE &&
+                           t_queue_cache.queue == queue &&
+                           t_queue_cache.generation == gen,
+                       1)) {
+    return t_queue_cache.dispatch;
+  }
   AdapterState& state = State();
   std::lock_guard<std::mutex> lock(state.mutex);
   const auto binding =
@@ -319,18 +361,30 @@ AdapterState::DeviceDispatch HostDispatchForQueue(VkQueue queue) {
                      return candidate.queue == queue;
                    });
   if (binding == state.queue_bindings.end()) {
-    return {};
+    return kEmptyDeviceDispatch;
   }
   const auto dispatch = std::find_if(
       state.device_dispatches.begin(), state.device_dispatches.end(),
       [binding](const AdapterState::DeviceDispatch& candidate) {
         return candidate.device == binding->device;
       });
-  return dispatch != state.device_dispatches.end() ? *dispatch
-                                                    : AdapterState::DeviceDispatch{};
+  if (dispatch != state.device_dispatches.end()) {
+    t_queue_cache.generation = gen;
+    t_queue_cache.queue = queue;
+    t_queue_cache.dispatch = *dispatch;
+    return t_queue_cache.dispatch;
+  }
+  return kEmptyDeviceDispatch;
 }
 
-AdapterState::DeviceDispatch HostDispatchForDevice(VkDevice device) {
+const AdapterState::DeviceDispatch& HostDispatchForDevice(VkDevice device) {
+  const uint64_t gen = g_dispatch_generation.load(std::memory_order_acquire);
+  if (__builtin_expect(device != VK_NULL_HANDLE &&
+                           t_device_cache.device == device &&
+                           t_device_cache.generation == gen,
+                       1)) {
+    return t_device_cache.dispatch;
+  }
   AdapterState& state = State();
   std::lock_guard<std::mutex> lock(state.mutex);
   const auto dispatch = std::find_if(
@@ -338,13 +392,25 @@ AdapterState::DeviceDispatch HostDispatchForDevice(VkDevice device) {
       [device](const AdapterState::DeviceDispatch& candidate) {
         return candidate.device == device;
       });
-  return dispatch != state.device_dispatches.end()
-             ? *dispatch
-             : AdapterState::DeviceDispatch{};
+  if (dispatch != state.device_dispatches.end()) {
+    t_device_cache.generation = gen;
+    t_device_cache.device = device;
+    t_device_cache.dispatch = *dispatch;
+    return t_device_cache.dispatch;
+  }
+  return kEmptyDeviceDispatch;
 }
 
-AdapterState::DeviceDispatch HostDispatchForCommandBuffer(
+const AdapterState::DeviceDispatch& HostDispatchForCommandBuffer(
     VkCommandBuffer command_buffer) {
+  const uint64_t gen = g_dispatch_generation.load(std::memory_order_acquire);
+  if (__builtin_expect(command_buffer != VK_NULL_HANDLE &&
+                           t_command_buffer_cache.command_buffer ==
+                               command_buffer &&
+                           t_command_buffer_cache.generation == gen,
+                       1)) {
+    return t_command_buffer_cache.dispatch;
+  }
   AdapterState& state = State();
   std::lock_guard<std::mutex> lock(state.mutex);
   const auto binding = std::find_if(
@@ -354,25 +420,31 @@ AdapterState::DeviceDispatch HostDispatchForCommandBuffer(
         return candidate.command_buffer == command_buffer;
       });
   if (binding == state.command_buffer_bindings.end()) {
-    return {};
+    return kEmptyDeviceDispatch;
   }
   const auto dispatch = std::find_if(
       state.device_dispatches.begin(), state.device_dispatches.end(),
       [binding](const AdapterState::DeviceDispatch& candidate) {
         return candidate.device == binding->device;
       });
-  return dispatch != state.device_dispatches.end()
-             ? *dispatch
-             : AdapterState::DeviceDispatch{};
+  if (dispatch != state.device_dispatches.end()) {
+    t_command_buffer_cache.generation = gen;
+    t_command_buffer_cache.command_buffer = command_buffer;
+    t_command_buffer_cache.dispatch = *dispatch;
+    return t_command_buffer_cache.dispatch;
+  }
+  return kEmptyDeviceDispatch;
 }
 
 void RegisterHostDeviceDispatch(VkDevice device,
+                                VkPhysicalDevice physical_device,
                                 PFN_vkGetDeviceProcAddr get_device_proc_addr) {
   if (device == VK_NULL_HANDLE || get_device_proc_addr == nullptr) {
     return;
   }
   AdapterState::DeviceDispatch dispatch;
   dispatch.device = device;
+  dispatch.physical_device = physical_device;
   dispatch.queue_present = reinterpret_cast<PFN_vkQueuePresentKHR>(
       get_device_proc_addr(device, "vkQueuePresentKHR"));
   dispatch.queue_submit = reinterpret_cast<PFN_vkQueueSubmit>(
@@ -385,6 +457,18 @@ void RegisterHostDeviceDispatch(VkDevice device,
       get_device_proc_addr(device, "vkQueueBindSparse"));
   dispatch.queue_wait_idle = reinterpret_cast<PFN_vkQueueWaitIdle>(
       get_device_proc_addr(device, "vkQueueWaitIdle"));
+  dispatch.acquire_next_image = reinterpret_cast<PFN_vkAcquireNextImageKHR>(
+      get_device_proc_addr(device, "vkAcquireNextImageKHR"));
+  dispatch.acquire_next_image2 = reinterpret_cast<PFN_vkAcquireNextImage2KHR>(
+      get_device_proc_addr(device, "vkAcquireNextImage2KHR"));
+  dispatch.wait_for_fences = reinterpret_cast<PFN_vkWaitForFences>(
+      get_device_proc_addr(device, "vkWaitForFences"));
+  dispatch.wait_semaphores = reinterpret_cast<PFN_vkWaitSemaphores>(
+      get_device_proc_addr(device, "vkWaitSemaphores"));
+  dispatch.wait_semaphores_khr = reinterpret_cast<PFN_vkWaitSemaphoresKHR>(
+      get_device_proc_addr(device, "vkWaitSemaphoresKHR"));
+  dispatch.device_wait_idle = reinterpret_cast<PFN_vkDeviceWaitIdle>(
+      get_device_proc_addr(device, "vkDeviceWaitIdle"));
   dispatch.reset_fences = reinterpret_cast<PFN_vkResetFences>(
       get_device_proc_addr(device, "vkResetFences"));
   dispatch.reset_command_pool = reinterpret_cast<PFN_vkResetCommandPool>(
@@ -418,6 +502,7 @@ void RegisterHostDeviceDispatch(VkDevice device,
   } else {
     state.device_dispatches.push_back(dispatch);
   }
+  InvalidateFastDispatchCaches();
 }
 
 void RegisterHostQueueBinding(VkDevice device, VkQueue queue) {
@@ -436,6 +521,7 @@ void RegisterHostQueueBinding(VkDevice device, VkQueue queue) {
   } else {
     state.queue_bindings.push_back({queue, device});
   }
+  InvalidateFastDispatchCaches();
 }
 
 void RegisterHostCommandBuffers(VkDevice device, VkCommandPool command_pool,
@@ -465,6 +551,7 @@ void RegisterHostCommandBuffers(VkDevice device, VkCommandPool command_pool,
           {command_buffer, device, command_pool});
     }
   }
+  InvalidateFastDispatchCaches();
 }
 
 void RemoveHostCommandBuffers(VkDevice device, VkCommandPool command_pool,
@@ -489,6 +576,7 @@ void RemoveHostCommandBuffers(VkDevice device, VkCommandPool command_pool,
                        command_buffers + command_buffer_count;
           }),
       state.command_buffer_bindings.end());
+  InvalidateFastDispatchCaches();
 }
 
 void RemoveHostCommandPoolBindings(VkDevice device,
@@ -505,6 +593,7 @@ void RemoveHostCommandPoolBindings(VkDevice device,
                    binding.command_pool == command_pool;
           }),
       state.command_buffer_bindings.end());
+  InvalidateFastDispatchCaches();
 }
 
 void RemoveHostDeviceDispatch(VkDevice device) {
@@ -531,6 +620,7 @@ void RemoveHostDeviceDispatch(VkDevice device) {
             return dispatch.device == device;
           }),
       state.device_dispatches.end());
+  InvalidateFastDispatchCaches();
 }
 
 bool IsHostWsiExtension(const char* name) {
@@ -780,16 +870,20 @@ class VulkanCallObservation final {
  public:
   explicit VulkanCallObservation(const char* call_name)
       : call_name_(call_name) {
-    AdapterState& state = State();
-    begin_ = state.note_vulkan_call_begin.load(std::memory_order_acquire);
-    end_ = state.note_vulkan_call_end.load(std::memory_order_acquire);
-    if (begin_ != nullptr && end_ != nullptr) {
-      sequence_ = begin_(call_name);
+    if (__builtin_expect(
+            g_vulkan_call_observation_active.load(std::memory_order_relaxed),
+            0)) {
+      AdapterState& state = State();
+      begin_ = state.note_vulkan_call_begin.load(std::memory_order_acquire);
+      end_ = state.note_vulkan_call_end.load(std::memory_order_acquire);
+      if (begin_ != nullptr && end_ != nullptr) {
+        sequence_ = begin_(call_name);
+      }
     }
   }
 
   ~VulkanCallObservation() {
-    if (sequence_ != 0 && end_ != nullptr) {
+    if (__builtin_expect(sequence_ != 0 && end_ != nullptr, 0)) {
       end_(sequence_, static_cast<std::int32_t>(result_));
     }
   }
@@ -799,16 +893,18 @@ class VulkanCallObservation final {
 
   void SetResult(VkResult result) {
     result_ = result;
-    std::uint64_t occurrence = 0;
-    if (result < VK_SUCCESS && result != VK_ERROR_OUT_OF_DATE_KHR &&
-        ShouldLogNegativeVulkanResult(result, &occurrence)) {
-      std::fprintf(stderr,
-                   "  [vulkan] unexpected negative result: call=%s "
-                   "result=%d device_lost=%u occurrence=%llu\n",
-                   call_name_ != nullptr ? call_name_ : "unknown",
-                   static_cast<int>(result),
-                   result == VK_ERROR_DEVICE_LOST ? 1U : 0U,
-                   static_cast<unsigned long long>(occurrence));
+    if (__builtin_expect(
+            result < VK_SUCCESS && result != VK_ERROR_OUT_OF_DATE_KHR, 0)) {
+      std::uint64_t occurrence = 0;
+      if (ShouldLogNegativeVulkanResult(result, &occurrence)) {
+        std::fprintf(stderr,
+                     "  [vulkan] unexpected negative result: call=%s "
+                     "result=%d device_lost=%u occurrence=%llu\n",
+                     call_name_ != nullptr ? call_name_ : "unknown",
+                     static_cast<int>(result),
+                     result == VK_ERROR_DEVICE_LOST ? 1U : 0U,
+                     static_cast<unsigned long long>(occurrence));
+      }
     }
   }
 
@@ -819,6 +915,17 @@ class VulkanCallObservation final {
   std::uint64_t sequence_ = 0;
   VkResult result_ = VK_ERROR_UNKNOWN;
 };
+
+mocktail::graphics::PresentModePolicy CachedPresentPolicy() {
+  static const mocktail::graphics::PresentModePolicy policy = [] {
+    const char* vsync = std::getenv("MOCKTAIL_VSYNC");
+    const char* frame_rate = std::getenv("MOCKTAIL_FRAME_RATE_LIMIT");
+    return mocktail::graphics::ResolvePresentModePolicy(
+        vsync != nullptr ? vsync : "auto",
+        frame_rate != nullptr ? frame_rate : "display");
+  }();
+  return policy;
+}
 
 VkResult WaitForSemaphoresObserved(const char* call_name,
                                    PFN_vkWaitSemaphores host_wait,
@@ -832,14 +939,18 @@ VkResult WaitForSemaphoresObserved(const char* call_name,
     }
     return VK_ERROR_INITIALIZATION_FAILED;
   }
+  const bool unthrottled =
+      CachedPresentPolicy() ==
+      mocktail::graphics::PresentModePolicy::kUnthrottled;
   const std::uint64_t host_timeout =
-      mocktail::graphics::BoundHostSynchronizationWaitTimeout(timeout);
+      mocktail::graphics::BoundHostSynchronizationWaitTimeout(timeout,
+                                                             unthrottled);
   std::uint64_t timeout_slices = 0;
   VkResult result = VK_SUCCESS;
   do {
     result = host_wait(device, wait_info, host_timeout);
-    if (!mocktail::graphics::ShouldContinueHostSynchronizationWait(timeout,
-                                                                   result)) {
+    if (!mocktail::graphics::ShouldContinueHostSynchronizationWait(
+            timeout, result, unthrottled)) {
       break;
     }
     ++timeout_slices;
@@ -859,6 +970,23 @@ VkResult WaitForSemaphoresObserved(const char* call_name,
   return result;
 }
 
+bool FpsTraceEnabled() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("MOCKTAIL_TRACE_FPS");
+    return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+  }();
+  return enabled;
+}
+
+std::uint64_t MonotonicNanos() {
+  timespec ts{};
+  if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+    return 0;
+  }
+  return static_cast<std::uint64_t>(ts.tv_sec) * 1000000000ULL +
+         static_cast<std::uint64_t>(ts.tv_nsec);
+}
+
 VkResult VKAPI_CALL
 ObservedHostQueuePresent(VkQueue queue, const VkPresentInfoKHR* present_info) {
   AdapterState& state = State();
@@ -872,7 +1000,47 @@ ObservedHostQueuePresent(VkQueue queue, const VkPresentInfoKHR* present_info) {
   if (note_begin != nullptr) {
     note_begin();
   }
+  const bool fps_trace = FpsTraceEnabled();
+  const std::uint64_t present_start_ns = fps_trace ? MonotonicNanos() : 0;
   const VkResult result = host_present(queue, present_info);
+  if (fps_trace) {
+    const std::uint64_t present_ns = MonotonicNanos() - present_start_ns;
+    static std::atomic<std::uint64_t> present_samples{0};
+    static std::atomic<std::uint64_t> present_total_ns{0};
+    static std::atomic<std::uint64_t> present_max_ns{0};
+    static std::atomic<std::uint64_t> window_start_ns{0};
+    present_total_ns.fetch_add(present_ns, std::memory_order_relaxed);
+    std::uint64_t max_ns = present_max_ns.load(std::memory_order_relaxed);
+    while (present_ns > max_ns &&
+           !present_max_ns.compare_exchange_weak(max_ns, present_ns,
+                                                 std::memory_order_relaxed)) {
+    }
+    const std::uint64_t samples =
+        present_samples.fetch_add(1, std::memory_order_relaxed) + 1;
+    std::uint64_t start_ns = window_start_ns.load(std::memory_order_relaxed);
+    if (start_ns == 0) {
+      window_start_ns.compare_exchange_strong(start_ns, present_start_ns,
+                                              std::memory_order_relaxed);
+      start_ns = window_start_ns.load(std::memory_order_relaxed);
+    }
+    if (present_start_ns - start_ns >= 1000000000ULL && samples != 0) {
+      const std::uint64_t total =
+          present_total_ns.exchange(0, std::memory_order_relaxed);
+      const std::uint64_t max_wait =
+          present_max_ns.exchange(0, std::memory_order_relaxed);
+      const std::uint64_t n =
+          present_samples.exchange(0, std::memory_order_relaxed);
+      window_start_ns.store(present_start_ns, std::memory_order_relaxed);
+      if (n != 0) {
+        std::fprintf(stderr,
+                     "  [fps] vkQueuePresentKHR n=%llu avg=%llu us max=%llu "
+                     "us\n",
+                     static_cast<unsigned long long>(n),
+                     static_cast<unsigned long long>(total / n / 1000ULL),
+                     static_cast<unsigned long long>(max_wait / 1000ULL));
+      }
+    }
+  }
   const NoteHostPresentEndFn note_end =
       state.note_host_present_end.load(std::memory_order_acquire);
   if (note_end != nullptr) {
@@ -947,8 +1115,10 @@ vkCreateInstance(const VkInstanceCreateInfo* create_info,
     std::lock_guard<std::mutex> lock(state.mutex);
     ++state.active_instance_count;
     state.latest_instance = *instance;
-    state.host_get_device_proc_addr = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
-        state.host_get_instance_proc_addr(*instance, "vkGetDeviceProcAddr"));
+    state.host_get_device_proc_addr.store(
+        reinterpret_cast<PFN_vkGetDeviceProcAddr>(
+            state.host_get_instance_proc_addr(*instance, "vkGetDeviceProcAddr")),
+        std::memory_order_release);
     std::fprintf(stderr, "  [vulkan] host VkInstance created\n");
     if (host_application_info.apiVersion != requested_api) {
       std::fprintf(stderr,
@@ -975,10 +1145,11 @@ vkDestroyInstance(VkInstance instance, const VkAllocationCallbacks* allocator) {
     state.android_wsi.Shutdown();
     state.host_wsi.Shutdown();
     state.host_get_instance_proc_addr = nullptr;
-    state.host_get_device_proc_addr = nullptr;
+    state.host_get_device_proc_addr.store(nullptr, std::memory_order_release);
     state.device_dispatches.clear();
     state.queue_bindings.clear();
     state.command_buffer_bindings.clear();
+    InvalidateFastDispatchCaches();
     state.host_surface_capabilities = nullptr;
     state.host_surface_present_modes = nullptr;
     state.latest_instance = VK_NULL_HANDLE;
@@ -987,6 +1158,7 @@ vkDestroyInstance(VkInstance instance, const VkAllocationCallbacks* allocator) {
     state.note_host_present_end.store(nullptr, std::memory_order_release);
     state.note_vulkan_call_begin.store(nullptr, std::memory_order_release);
     state.note_vulkan_call_end.store(nullptr, std::memory_order_release);
+    g_vulkan_call_observation_active.store(false, std::memory_order_release);
     state.note_surface_out_of_date.store(nullptr, std::memory_order_release);
     state.extent_translation_logged = false;
     state.present_policy_logged = false;
@@ -1096,12 +1268,8 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device,
   if (name == nullptr || !EnsureInitialized()) {
     return nullptr;
   }
-  AdapterState& state = State();
-  PFN_vkGetDeviceProcAddr host_get_device_proc_addr = nullptr;
-  {
-    std::lock_guard<std::mutex> lock(state.mutex);
-    host_get_device_proc_addr = state.host_get_device_proc_addr;
-  }
+  const PFN_vkGetDeviceProcAddr host_get_device_proc_addr =
+      State().host_get_device_proc_addr.load(std::memory_order_acquire);
   const PFN_vkVoidFunction host = host_get_device_proc_addr != nullptr
                                       ? host_get_device_proc_addr(device, name)
                                       : nullptr;
@@ -1125,7 +1293,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(
     std::lock_guard<std::mutex> lock(state.mutex);
     instance = state.latest_instance;
     host_get_instance_proc_addr = state.host_get_instance_proc_addr;
-    host_get_device_proc_addr = state.host_get_device_proc_addr;
+    host_get_device_proc_addr =
+        state.host_get_device_proc_addr.load(std::memory_order_acquire);
   }
   const auto host_create = reinterpret_cast<PFN_vkCreateDevice>(
       HostInstanceProc(instance, "vkCreateDevice"));
@@ -1182,7 +1351,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(
   if (result != VK_SUCCESS) {
     return result;
   }
-  RegisterHostDeviceDispatch(*device, host_get_device_proc_addr);
+  RegisterHostDeviceDispatch(*device, physical_device,
+                             host_get_device_proc_addr);
 
   std::uint32_t queue_family_count = 0;
   const auto host_get_queue_families =
@@ -1287,8 +1457,41 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(
       swapchain == nullptr) {
     return VK_ERROR_INITIALIZATION_FAILED;
   }
+  VkSwapchainCreateInfoKHR host_info = *create_info;
+  const mocktail::graphics::PresentModePolicy present_policy =
+      CachedPresentPolicy();
+  if (present_policy == mocktail::graphics::PresentModePolicy::kUnthrottled) {
+    PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR host_caps = nullptr;
+    {
+      AdapterState& state = State();
+      std::lock_guard<std::mutex> lock(state.mutex);
+      host_caps = state.host_surface_capabilities;
+    }
+    const VkPhysicalDevice physical_device =
+        HostDispatchForDevice(device).physical_device;
+    VkSurfaceCapabilitiesKHR capabilities{};
+    if (host_caps != nullptr && physical_device != VK_NULL_HANDLE &&
+        host_caps(physical_device, create_info->surface, &capabilities) ==
+            VK_SUCCESS) {
+      const std::uint32_t preferred =
+          mocktail::graphics::PreferSwapchainMinImageCount(
+              present_policy, create_info->minImageCount,
+              capabilities.minImageCount, capabilities.maxImageCount);
+      if (preferred != host_info.minImageCount) {
+        host_info.minImageCount = preferred;
+        static std::atomic<bool> logged{false};
+        if (!logged.exchange(true, std::memory_order_relaxed)) {
+          std::fprintf(stderr,
+                       "  [vulkan] unthrottled swapchain minImageCount=%u "
+                       "(requested=%u max=%u)\n",
+                       preferred, create_info->minImageCount,
+                       capabilities.maxImageCount);
+        }
+      }
+    }
+  }
   const VkResult result =
-      host_create(device, create_info, allocator, swapchain);
+      host_create(device, &host_info, allocator, swapchain);
   if (result != VK_SUCCESS) {
     return result;
   }
@@ -1327,21 +1530,31 @@ VKAPI_ATTR VkResult VKAPI_CALL vkAcquireNextImageKHR(
     VkDevice device, VkSwapchainKHR swapchain, std::uint64_t timeout,
     VkSemaphore semaphore, VkFence fence, std::uint32_t* image_index) {
   VulkanCallObservation observation("vkAcquireNextImageKHR");
-  const auto host_acquire = reinterpret_cast<PFN_vkAcquireNextImageKHR>(
-      HostDeviceProc(device, "vkAcquireNextImageKHR"));
+  const PFN_vkAcquireNextImageKHR host_acquire =
+      HostDispatchForDevice(device).acquire_next_image;
   if (host_acquire == nullptr) {
     observation.SetResult(VK_ERROR_INITIALIZATION_FAILED);
     return VK_ERROR_INITIALIZATION_FAILED;
   }
+  const bool unthrottled =
+      CachedPresentPolicy() ==
+      mocktail::graphics::PresentModePolicy::kUnthrottled;
   const std::uint64_t host_timeout =
-      mocktail::graphics::BoundHostImageAcquireTimeout(timeout);
-  const VkResult host_result = host_acquire(device, swapchain, host_timeout,
-                                            semaphore, fence, image_index);
+      mocktail::graphics::BoundHostImageAcquireTimeout(timeout, unthrottled);
+  VkResult host_result = host_acquire(device, swapchain, host_timeout,
+                                      semaphore, fence, image_index);
+  if (host_result == VK_NOT_READY &&
+      timeout == std::numeric_limits<std::uint64_t>::max()) {
+    host_result = host_acquire(device, swapchain,
+                               std::numeric_limits<std::uint64_t>::max(),
+                               semaphore, fence, image_index);
+  }
   const bool watchdog_timeout =
-      mocktail::graphics::IsHostImageAcquireWatchdogTimeout(timeout,
-                                                            host_result);
+      mocktail::graphics::IsHostImageAcquireWatchdogTimeout(
+          timeout, host_result, unthrottled);
   const VkResult result =
-      mocktail::graphics::NormalizeHostImageAcquireResult(timeout, host_result);
+      mocktail::graphics::NormalizeHostImageAcquireResult(
+          timeout, host_result, unthrottled);
   if (watchdog_timeout) {
     static std::atomic<std::uint64_t> watchdog_timeout_count{0};
     const std::uint64_t count =
@@ -1366,22 +1579,31 @@ VKAPI_ATTR VkResult VKAPI_CALL vkAcquireNextImage2KHR(
     VkDevice device, const VkAcquireNextImageInfoKHR* acquire_info,
     std::uint32_t* image_index) {
   VulkanCallObservation observation("vkAcquireNextImage2KHR");
-  const auto host_acquire = reinterpret_cast<PFN_vkAcquireNextImage2KHR>(
-      HostDeviceProc(device, "vkAcquireNextImage2KHR"));
+  const PFN_vkAcquireNextImage2KHR host_acquire =
+      HostDispatchForDevice(device).acquire_next_image2;
   if (host_acquire == nullptr || acquire_info == nullptr) {
     observation.SetResult(VK_ERROR_INITIALIZATION_FAILED);
     return VK_ERROR_INITIALIZATION_FAILED;
   }
+  const bool unthrottled =
+      CachedPresentPolicy() ==
+      mocktail::graphics::PresentModePolicy::kUnthrottled;
   VkAcquireNextImageInfoKHR host_info = *acquire_info;
-  host_info.timeout =
-      mocktail::graphics::BoundHostImageAcquireTimeout(acquire_info->timeout);
-  const VkResult host_result = host_acquire(device, &host_info, image_index);
+  host_info.timeout = mocktail::graphics::BoundHostImageAcquireTimeout(
+      acquire_info->timeout, unthrottled);
+  VkResult host_result = host_acquire(device, &host_info, image_index);
+  if (host_result == VK_NOT_READY &&
+      acquire_info->timeout == std::numeric_limits<std::uint64_t>::max()) {
+    VkAcquireNextImageInfoKHR blocking_info = host_info;
+    blocking_info.timeout = std::numeric_limits<std::uint64_t>::max();
+    host_result = host_acquire(device, &blocking_info, image_index);
+  }
   const bool watchdog_timeout =
       mocktail::graphics::IsHostImageAcquireWatchdogTimeout(
-          acquire_info->timeout, host_result);
+          acquire_info->timeout, host_result, unthrottled);
   const VkResult result =
       mocktail::graphics::NormalizeHostImageAcquireResult(
-          acquire_info->timeout, host_result);
+          acquire_info->timeout, host_result, unthrottled);
   if (watchdog_timeout) {
     static std::atomic<std::uint64_t> watchdog_timeout_count{0};
     const std::uint64_t count =
@@ -1406,20 +1628,24 @@ VKAPI_ATTR VkResult VKAPI_CALL vkWaitForFences(
     VkDevice device, std::uint32_t fence_count, const VkFence* fences,
     VkBool32 wait_all, std::uint64_t timeout) {
   VulkanCallObservation observation("vkWaitForFences");
-  const auto host_wait = reinterpret_cast<PFN_vkWaitForFences>(
-      HostDeviceProc(device, "vkWaitForFences"));
+  const PFN_vkWaitForFences host_wait =
+      HostDispatchForDevice(device).wait_for_fences;
   if (host_wait == nullptr) {
     observation.SetResult(VK_ERROR_INITIALIZATION_FAILED);
     return VK_ERROR_INITIALIZATION_FAILED;
   }
+  const bool unthrottled =
+      CachedPresentPolicy() ==
+      mocktail::graphics::PresentModePolicy::kUnthrottled;
   const std::uint64_t host_timeout =
-      mocktail::graphics::BoundHostSynchronizationWaitTimeout(timeout);
+      mocktail::graphics::BoundHostSynchronizationWaitTimeout(timeout,
+                                                             unthrottled);
   std::uint64_t timeout_slices = 0;
   VkResult result = VK_SUCCESS;
   do {
     result = host_wait(device, fence_count, fences, wait_all, host_timeout);
-    if (!mocktail::graphics::ShouldContinueHostSynchronizationWait(timeout,
-                                                                   result)) {
+    if (!mocktail::graphics::ShouldContinueHostSynchronizationWait(
+            timeout, result, unthrottled)) {
       break;
     }
     ++timeout_slices;
@@ -1585,8 +1811,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkWaitSemaphores(
     VkDevice device, const VkSemaphoreWaitInfo* wait_info,
     std::uint64_t timeout) {
   VulkanCallObservation observation("vkWaitSemaphores");
-  const auto host_wait = reinterpret_cast<PFN_vkWaitSemaphores>(
-      HostDeviceProc(device, "vkWaitSemaphores"));
+  const PFN_vkWaitSemaphores host_wait =
+      HostDispatchForDevice(device).wait_semaphores;
   return WaitForSemaphoresObserved("vkWaitSemaphores", host_wait, device,
                                    wait_info, timeout, &observation);
 }
@@ -1595,8 +1821,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkWaitSemaphoresKHR(
     VkDevice device, const VkSemaphoreWaitInfo* wait_info,
     std::uint64_t timeout) {
   VulkanCallObservation observation("vkWaitSemaphoresKHR");
-  const auto host_wait = reinterpret_cast<PFN_vkWaitSemaphoresKHR>(
-      HostDeviceProc(device, "vkWaitSemaphoresKHR"));
+  const PFN_vkWaitSemaphoresKHR host_wait =
+      HostDispatchForDevice(device).wait_semaphores_khr;
   return WaitForSemaphoresObserved(
       "vkWaitSemaphoresKHR", reinterpret_cast<PFN_vkWaitSemaphores>(host_wait),
       device, wait_info, timeout, &observation);
@@ -1683,8 +1909,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueueWaitIdle(VkQueue queue) {
 
 VKAPI_ATTR VkResult VKAPI_CALL vkDeviceWaitIdle(VkDevice device) {
   VulkanCallObservation observation("vkDeviceWaitIdle");
-  const auto host_wait = reinterpret_cast<PFN_vkDeviceWaitIdle>(
-      HostDeviceProc(device, "vkDeviceWaitIdle"));
+  const PFN_vkDeviceWaitIdle host_wait =
+      HostDispatchForDevice(device).device_wait_idle;
   if (host_wait == nullptr) {
     observation.SetResult(VK_ERROR_INITIALIZATION_FAILED);
     return VK_ERROR_INITIALIZATION_FAILED;
@@ -1770,12 +1996,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfacePresentModesKHR(
     }
     host_modes.resize(host_count);
   }
-  const char* vsync = std::getenv("MOCKTAIL_VSYNC");
-  const char* frame_rate = std::getenv("MOCKTAIL_FRAME_RATE_LIMIT");
-  const mocktail::graphics::PresentModePolicy policy =
-      mocktail::graphics::ResolvePresentModePolicy(
-          vsync != nullptr ? vsync : "auto",
-          frame_rate != nullptr ? frame_rate : "display");
+  const mocktail::graphics::PresentModePolicy policy = CachedPresentPolicy();
   const std::vector<VkPresentModeKHR> visible =
       mocktail::graphics::FilterPresentModes(policy, host_modes);
   {

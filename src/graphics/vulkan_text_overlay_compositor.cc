@@ -7,6 +7,7 @@
 #include <libplacebo/vulkan.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -146,6 +147,7 @@ struct VulkanTextOverlayCompositor::Impl {
     VkExtent2D extent{};
     VkImageUsageFlags usage = 0;
     bool enabled = true;
+    bool wrapped = false;
     std::vector<ImageState> images;
   };
 
@@ -192,6 +194,7 @@ struct VulkanTextOverlayCompositor::Impl {
   };
 
   std::mutex mutex;
+  std::atomic<bool> has_active_overlay{false};
   std::vector<std::unique_ptr<DeviceState>> devices;
   OverlayMayPresentFn overlay_may_present =
       reinterpret_cast<OverlayMayPresentFn>(
@@ -271,6 +274,51 @@ struct VulkanTextOverlayCompositor::Impl {
     }
   }
 
+  bool WrapSwapchainImages(DeviceState* device, SwapchainState* swapchain) {
+    if (device == nullptr || swapchain == nullptr ||
+        device->vulkan == nullptr || swapchain->images.empty()) {
+      return false;
+    }
+    if (swapchain->wrapped) {
+      return true;
+    }
+    for (ImageState& image : swapchain->images) {
+      if (image.image == VK_NULL_HANDLE) {
+        return false;
+      }
+      if (image.target != nullptr) {
+        continue;
+      }
+      pl_vulkan_wrap_params wrap{};
+      wrap.image = image.image;
+      wrap.width = static_cast<int>(swapchain->extent.width);
+      wrap.height = static_cast<int>(swapchain->extent.height);
+      wrap.format = swapchain->format;
+      wrap.usage = swapchain->usage;
+      image.target = pl_vulkan_wrap(device->vulkan->gpu, &wrap);
+      if (image.target == nullptr || !image.target->params.renderable ||
+          image.target->params.format == nullptr ||
+          (image.target->params.format->caps & PL_FMT_CAP_BLENDABLE) == 0) {
+        DestroyImage(device, &image);
+        return false;
+      }
+      pl_vulkan_sem_params semaphore{};
+      semaphore.type = VK_SEMAPHORE_TYPE_BINARY;
+      image.bridge = pl_vulkan_sem_create(device->vulkan->gpu, &semaphore);
+      image.done = pl_vulkan_sem_create(device->vulkan->gpu, &semaphore);
+      if (image.bridge == VK_NULL_HANDLE || image.done == VK_NULL_HANDLE) {
+        DestroyImage(device, &image);
+        return false;
+      }
+    }
+    swapchain->wrapped = true;
+    std::fprintf(stderr,
+                 "  [vulkan-overlay] wrapped %zu swapchain images for "
+                 "same-surface text\n",
+                 swapchain->images.size());
+    return true;
+  }
+
   void DestroyImage(DeviceState* device, ImageState* image) {
     if (device == nullptr || image == nullptr || device->vulkan == nullptr) {
       return;
@@ -298,6 +346,7 @@ struct VulkanTextOverlayCompositor::Impl {
       DestroyImage(device, &image);
     }
     swapchain->images.clear();
+    swapchain->wrapped = false;
   }
 
   void DestroyDeviceResources(DeviceState* device) {
@@ -494,6 +543,37 @@ struct VulkanTextOverlayCompositor::Impl {
       return nullptr;
     }
     return &device->queue_mutex;
+  }
+
+  bool OverlayInactive() const {
+    return !has_active_overlay.load(std::memory_order_acquire);
+  }
+
+  void SetOverlayActive(bool active) {
+    has_active_overlay.store(active, std::memory_order_release);
+  }
+
+  std::mutex* LookupSharedQueueMutex(VkQueue queue) {
+    QueueState* queue_state = nullptr;
+    DeviceState* device = FindQueue(queue, &queue_state);
+    return SharedQueueMutex(device, queue_state);
+  }
+
+  template <typename Fn>
+  VkResult CallWithSharedQueueIfNeeded(VkQueue queue, Fn&& fn) {
+    if (OverlayInactive()) {
+      return fn();
+    }
+    std::mutex* shared_queue_mutex = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      shared_queue_mutex = LookupSharedQueueMutex(queue);
+    }
+    if (shared_queue_mutex == nullptr) {
+      return fn();
+    }
+    std::lock_guard<std::mutex> queue_lock(*shared_queue_mutex);
+    return fn();
   }
 
   VkResult CallFallback(std::mutex* queue_mutex, VkQueue queue,
@@ -745,39 +825,10 @@ bool VulkanTextOverlayCompositor::RegisterSwapchain(
     }
     Impl::ImageState image;
     image.image = images[index];
-    pl_vulkan_wrap_params wrap{};
-    wrap.image = image.image;
-    wrap.width = static_cast<int>(candidate->extent.width);
-    wrap.height = static_cast<int>(candidate->extent.height);
-    wrap.format = candidate->format;
-    wrap.usage = candidate->usage;
-    image.target = pl_vulkan_wrap(state->vulkan->gpu, &wrap);
-    if (image.target == nullptr || !image.target->params.renderable ||
-        image.target->params.format == nullptr ||
-        (image.target->params.format->caps & PL_FMT_CAP_BLENDABLE) == 0) {
-      if (image.target != nullptr) {
-        pl_tex_destroy(state->vulkan->gpu, &image.target);
-      }
-      impl_->DestroySwapchainResources(state, candidate.get(), false);
-      return false;
-    }
-    pl_vulkan_sem_params semaphore{};
-    semaphore.type = VK_SEMAPHORE_TYPE_BINARY;
-    image.bridge = pl_vulkan_sem_create(state->vulkan->gpu, &semaphore);
-    image.done = pl_vulkan_sem_create(state->vulkan->gpu, &semaphore);
-    if (image.bridge == VK_NULL_HANDLE || image.done == VK_NULL_HANDLE) {
-      impl_->DestroyImage(state, &image);
-      impl_->DestroySwapchainResources(state, candidate.get(), false);
-      return false;
-    }
     candidate->images.push_back(image);
   }
 
   state->swapchains.push_back(std::move(candidate));
-  std::fprintf(stderr,
-               "  [vulkan-overlay] wrapped %u swapchain images for "
-               "same-surface text\n",
-               image_count);
   return true;
 }
 
@@ -814,18 +865,9 @@ VkResult VulkanTextOverlayCompositor::QueueSubmit(
   if (impl_ == nullptr || queue == VK_NULL_HANDLE) {
     return fallback(queue, submit_count, submits, fence);
   }
-  std::mutex* shared_queue_mutex = nullptr;
-  {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
-    Impl::QueueState* queue_state = nullptr;
-    Impl::DeviceState* device = impl_->FindQueue(queue, &queue_state);
-    shared_queue_mutex = impl_->SharedQueueMutex(device, queue_state);
-  }
-  if (shared_queue_mutex == nullptr) {
+  return impl_->CallWithSharedQueueIfNeeded(queue, [&] {
     return fallback(queue, submit_count, submits, fence);
-  }
-  std::lock_guard<std::mutex> queue_lock(*shared_queue_mutex);
-  return fallback(queue, submit_count, submits, fence);
+  });
 }
 
 VkResult VulkanTextOverlayCompositor::QueueSubmit2(
@@ -837,18 +879,9 @@ VkResult VulkanTextOverlayCompositor::QueueSubmit2(
   if (impl_ == nullptr || queue == VK_NULL_HANDLE) {
     return fallback(queue, submit_count, submits, fence);
   }
-  std::mutex* shared_queue_mutex = nullptr;
-  {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
-    Impl::QueueState* queue_state = nullptr;
-    Impl::DeviceState* device = impl_->FindQueue(queue, &queue_state);
-    shared_queue_mutex = impl_->SharedQueueMutex(device, queue_state);
-  }
-  if (shared_queue_mutex == nullptr) {
+  return impl_->CallWithSharedQueueIfNeeded(queue, [&] {
     return fallback(queue, submit_count, submits, fence);
-  }
-  std::lock_guard<std::mutex> queue_lock(*shared_queue_mutex);
-  return fallback(queue, submit_count, submits, fence);
+  });
 }
 
 VkResult VulkanTextOverlayCompositor::QueueBindSparse(
@@ -861,18 +894,9 @@ VkResult VulkanTextOverlayCompositor::QueueBindSparse(
   if (impl_ == nullptr || queue == VK_NULL_HANDLE) {
     return fallback(queue, bind_info_count, bind_info, fence);
   }
-  std::mutex* shared_queue_mutex = nullptr;
-  {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
-    Impl::QueueState* queue_state = nullptr;
-    Impl::DeviceState* device = impl_->FindQueue(queue, &queue_state);
-    shared_queue_mutex = impl_->SharedQueueMutex(device, queue_state);
-  }
-  if (shared_queue_mutex == nullptr) {
+  return impl_->CallWithSharedQueueIfNeeded(queue, [&] {
     return fallback(queue, bind_info_count, bind_info, fence);
-  }
-  std::lock_guard<std::mutex> queue_lock(*shared_queue_mutex);
-  return fallback(queue, bind_info_count, bind_info, fence);
+  });
 }
 
 VkResult VulkanTextOverlayCompositor::QueueWaitIdle(
@@ -883,18 +907,9 @@ VkResult VulkanTextOverlayCompositor::QueueWaitIdle(
   if (impl_ == nullptr || queue == VK_NULL_HANDLE) {
     return fallback(queue);
   }
-  std::mutex* shared_queue_mutex = nullptr;
-  {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
-    Impl::QueueState* queue_state = nullptr;
-    Impl::DeviceState* device = impl_->FindQueue(queue, &queue_state);
-    shared_queue_mutex = impl_->SharedQueueMutex(device, queue_state);
-  }
-  if (shared_queue_mutex == nullptr) {
+  return impl_->CallWithSharedQueueIfNeeded(queue, [&] {
     return fallback(queue);
-  }
-  std::lock_guard<std::mutex> queue_lock(*shared_queue_mutex);
-  return fallback(queue);
+  });
 }
 
 VkResult VulkanTextOverlayCompositor::DeviceWaitIdle(
@@ -903,6 +918,9 @@ VkResult VulkanTextOverlayCompositor::DeviceWaitIdle(
     return VK_ERROR_INITIALIZATION_FAILED;
   }
   if (impl_ == nullptr || device == VK_NULL_HANDLE) {
+    return fallback(device);
+  }
+  if (impl_->OverlayInactive()) {
     return fallback(device);
   }
   std::mutex* shared_queue_mutex = nullptr;
@@ -930,22 +948,16 @@ VkResult VulkanTextOverlayCompositor::QueuePresent(
     return fallback(queue, present_info);
   }
   // No compositor work has consumed the application's wait semaphores yet,
-  // so an inactive overlay forwards the original present. It still takes the
-  // imported queue lock because libplacebo and the application share VkQueue.
+  // so an inactive overlay forwards the original present without touching the
+  // registry or the imported queue lock. libplacebo only shares VkQueue while
+  // an overlay is actually compositing.
   if (impl_->overlay_may_present != nullptr &&
       !impl_->overlay_may_present()) {
-    std::mutex* shared_queue_mutex = nullptr;
-    {
-      std::lock_guard<std::mutex> lock(impl_->mutex);
-      Impl::QueueState* queue_state = nullptr;
-      Impl::DeviceState* device = impl_->FindQueue(queue, &queue_state);
-      shared_queue_mutex = impl_->SharedQueueMutex(device, queue_state);
-    }
-    if (shared_queue_mutex == nullptr) {
-      return fallback(queue, present_info);
-    }
-    std::lock_guard<std::mutex> queue_lock(*shared_queue_mutex);
+    impl_->SetOverlayActive(false);
     return fallback(queue, present_info);
+  }
+  if (impl_->overlay_may_present != nullptr) {
+    impl_->SetOverlayActive(true);
   }
 
   Impl::DeviceState* device = nullptr;
@@ -982,6 +994,20 @@ VkResult VulkanTextOverlayCompositor::QueuePresent(
     return impl_->CallFallback(shared_queue_mutex, queue, present_info,
                                fallback);
   }
+  if (present_info->pSwapchains == nullptr &&
+      present_info->swapchainCount != 0) {
+    return impl_->CallFallback(shared_queue_mutex, queue, present_info,
+                               fallback);
+  }
+  for (std::uint32_t index = 0; index < present_info->swapchainCount; ++index) {
+    Impl::SwapchainState* swapchain = impl_->FindSwapchain(
+        device, present_info->pSwapchains[index]);
+    if (swapchain == nullptr ||
+        !impl_->WrapSwapchainImages(device, swapchain)) {
+      return impl_->CallFallback(shared_queue_mutex, queue, present_info,
+                                 fallback);
+    }
+  }
 
   std::vector<Impl::WorkItem> work_items;
   work_items.reserve(present_info->swapchainCount);
@@ -990,6 +1016,7 @@ VkResult VulkanTextOverlayCompositor::QueuePresent(
     return impl_->CallFallback(shared_queue_mutex, queue, present_info,
                                fallback);
   }
+  impl_->SetOverlayActive(true);
 
   std::vector<VkSemaphore> bridge_semaphores;
   bridge_semaphores.reserve(work_items.size());

@@ -52,13 +52,15 @@ jobs:
             archlinux:base-devel bash -Eeuo pipefail -c '
               pacman -Syu --noconfirm --needed \
                 cmake git ninja pkgconf lld sdl3 sdl3_ttf curl openssl \
-                nlohmann-json libyaml libelf minizip-ng capstone gtk4 \
+                nlohmann-json libyaml libelf minizip minizip-ng capstone gtk4 \
                 libadwaita webkitgtk-6.0 libutf8proc fontconfig libglvnd \
                 vulkan-headers zlib libplacebo bubblewrap xdg-dbus-proxy \
                 patchelf jq unzip file ca-certificates jdk-openjdk giflib \
-                python python-capstone python-yaml python-requests \
-                python-urllib3 python-certifi python-charset-normalizer \
-                python-idna dbus
+                dbus
+
+              export JAVA_HOME=/usr/lib/jvm/default
+              export PATH="${JAVA_HOME}/bin:${PATH}"
+              test -x "${JAVA_HOME}/bin/jlink"
 
               curl --fail --location --retry 3 \
                 --output /tmp/quick-sharun \

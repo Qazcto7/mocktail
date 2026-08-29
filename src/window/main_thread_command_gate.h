@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <mutex>
+#include <thread>
 
 namespace mocktail {
 namespace window {
@@ -48,12 +49,17 @@ class MainThreadCommandGate final {
       }
       callback = callback_;
       context = context_;
+      invoking_thread_ = std::this_thread::get_id();
+      has_invoking_thread_ = true;
       ++in_flight_;
     }
     const bool success = callback(context);
     {
       std::lock_guard<std::mutex> lock(mutex_);
       --in_flight_;
+      if (in_flight_ == 0) {
+        has_invoking_thread_ = false;
+      }
     }
     condition_.notify_all();
     return success;
@@ -64,7 +70,12 @@ class MainThreadCommandGate final {
     registered_.store(false, std::memory_order_release);
     callback_ = nullptr;
     context_ = nullptr;
-    condition_.wait(lock, [this] { return in_flight_ == 0; });
+    const bool is_same_thread =
+        has_invoking_thread_ &&
+        invoking_thread_ == std::this_thread::get_id();
+    if (!is_same_thread) {
+      condition_.wait(lock, [this] { return in_flight_ == 0; });
+    }
   }
 
   void Deactivate() {
@@ -80,6 +91,8 @@ class MainThreadCommandGate final {
   MainThreadCommandCallback callback_ = nullptr;
   void* context_ = nullptr;
   std::size_t in_flight_ = 0;
+  std::thread::id invoking_thread_{};
+  bool has_invoking_thread_ = false;
   bool active_ = false;
 };
 

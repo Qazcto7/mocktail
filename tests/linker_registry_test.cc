@@ -5,6 +5,7 @@
 #include "compat/bionic_host_libc_runtime.h"
 #include "compat/bionic_large_file_runtime.h"
 #include "compat/bionic_pthread_key_runtime.h"
+#include "compat/bionic_abi_exports.h"
 #include "compat/bionic_rwlock_runtime.h"
 #include "compat/bionic_semaphore_runtime.h"
 #include "compat/bionic_stdio_runtime.h"
@@ -81,6 +82,24 @@ TEST(LinkerRegistryTest, KeepsBionicPthreadKeyAbiOwnedByLibc) {
             reinterpret_cast<void *>(mocktail_bionic_pthread_rwlock_wrlock));
   EXPECT_EQ(symbols.at("pthread_rwlock_unlock"),
             reinterpret_cast<void *>(mocktail_bionic_pthread_rwlock_unlock));
+  EXPECT_EQ(symbols.at("pthread_once"),
+            reinterpret_cast<void *>(mocktail_pthread_once));
+  EXPECT_EQ(symbols.at("pthread_spin_init"),
+            reinterpret_cast<void *>(mocktail_pthread_spin_init));
+  EXPECT_EQ(symbols.at("pthread_spin_destroy"),
+            reinterpret_cast<void *>(mocktail_pthread_spin_destroy));
+  EXPECT_EQ(symbols.at("pthread_spin_lock"),
+            reinterpret_cast<void *>(mocktail_pthread_spin_lock));
+  EXPECT_EQ(symbols.at("pthread_spin_trylock"),
+            reinterpret_cast<void *>(mocktail_pthread_spin_trylock));
+  EXPECT_EQ(symbols.at("pthread_spin_unlock"),
+            reinterpret_cast<void *>(mocktail_pthread_spin_unlock));
+  EXPECT_EQ(symbols.at("pthread_barrier_init"),
+            reinterpret_cast<void *>(mocktail_pthread_barrier_init));
+  EXPECT_EQ(symbols.at("pthread_barrier_destroy"),
+            reinterpret_cast<void *>(mocktail_pthread_barrier_destroy));
+  EXPECT_EQ(symbols.at("pthread_barrier_wait"),
+            reinterpret_cast<void *>(mocktail_pthread_barrier_wait));
 }
 
 TEST(LinkerRegistryTest, KeepsBionicAtForkAbiOwnedByLibc) {

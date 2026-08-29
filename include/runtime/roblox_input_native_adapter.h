@@ -3,6 +3,7 @@
 
 #include <jni.h>
 
+#include <atomic>
 #include <cstddef>
 #include <mutex>
 #include <string>
@@ -69,10 +70,12 @@ class RobloxInputNativeAdapter final {
   Status ReleaseFocus(int64_t textbox_handle);
   Status CheckJniException(JNIEnv* env, const char* operation) const;
   Status RequireReadyLocked(JNIEnv** env) const;
+  Status AcquireReadyEnv(JNIEnv** env) const;
 
   const JniEnvironmentProvider environment_;
   const RobloxInputSymbols symbols_;
   mutable std::mutex mutex_;
+  std::atomic<bool> ready_{false};
   jclass native_input_class_ = nullptr;
   jclass native_gl_class_ = nullptr;
   bool initialized_ = false;
