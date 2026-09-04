@@ -1,5 +1,7 @@
 #include "window/video_driver_policy.h"
 
+#include <algorithm>
+
 namespace mocktail {
 namespace window {
 
@@ -35,6 +37,27 @@ const char* VideoDriverChoiceName(VideoDriverChoice choice) {
       return nullptr;
   }
   return nullptr;
+}
+
+bool HasAvailableVideoDriverCandidate(
+    std::string_view requested,
+    const std::vector<std::string_view>& available_drivers) {
+  std::size_t begin = 0;
+  while (begin <= requested.size()) {
+    const std::size_t end = requested.find(',', begin);
+    const std::string_view candidate = requested.substr(
+        begin, end == requested.npos ? requested.npos : end - begin);
+    if (!candidate.empty() &&
+        std::find(available_drivers.begin(), available_drivers.end(),
+                  candidate) != available_drivers.end()) {
+      return true;
+    }
+    if (end == requested.npos) {
+      break;
+    }
+    begin = end + 1;
+  }
+  return false;
 }
 
 }  // namespace window

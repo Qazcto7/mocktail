@@ -206,13 +206,18 @@ bool DecodePolicy(const nlohmann::json& encoded, nlohmann::json* policy) {
 DesktopAppPolicyResult ApplyDesktopAppPolicy(
     const std::filesystem::path& app_storage_file,
     const std::filesystem::path& default_policy_file,
-    std::int64_t authenticated_user_id) {
+    std::int64_t authenticated_user_id, std::string_view theme_mode) {
   DesktopAppPolicyResult result;
   if (!app_storage_file.is_absolute() || !default_policy_file.is_absolute() ||
-      authenticated_user_id < -1) {
-    result.error = "desktop app-policy paths or user ID are invalid";
+      authenticated_user_id < -1 ||
+      (theme_mode != "roblox" && theme_mode != "system" &&
+       theme_mode != "light" && theme_mode != "dark")) {
+    result.error = "desktop app-policy paths, user ID, or theme are invalid";
     return result;
   }
+  const std::string forced_theme =
+      theme_mode == "light" || theme_mode == "dark" ? std::string(theme_mode)
+                                                     : std::string();
 
   JsonReadResult storage =
       ReadJsonObject(app_storage_file, "Roblox appStorage");
@@ -259,6 +264,7 @@ DesktopAppPolicyResult ApplyDesktopAppPolicy(
       return result;
     }
     NormalizeDesktopLayout(&policy);
+    policy["ForceTheme"] = forced_theme;
     entry.value() = policy.dump();
     if (!template_policy.is_object()) {
       template_policy = policy;
@@ -289,6 +295,7 @@ DesktopAppPolicyResult ApplyDesktopAppPolicy(
     }
     template_policy = fallback.value;
     NormalizeDesktopLayout(&template_policy);
+    template_policy["ForceTheme"] = forced_theme;
   }
 
   const std::string encoded_policy = template_policy.dump();

@@ -75,6 +75,28 @@ TEST(WindowStateStoreTest, RoundTripsGeometryAndPresentationState) {
   EXPECT_FALSE(loaded.state.maximized);
 }
 
+TEST(WindowStateStoreTest,
+     DefersMaximizedRestoreUntilAfterStartupConstraints) {
+  PersistedWindowState windowed;
+  WindowStartupPresentationPlan plan =
+      PlanWindowStartupPresentation(windowed);
+  EXPECT_FALSE(plan.fullscreen_at_creation);
+  EXPECT_FALSE(plan.maximize_after_constraints);
+
+  PersistedWindowState maximized;
+  maximized.maximized = true;
+  plan = PlanWindowStartupPresentation(maximized);
+  EXPECT_FALSE(plan.fullscreen_at_creation);
+  EXPECT_TRUE(plan.maximize_after_constraints);
+
+  PersistedWindowState fullscreen_and_maximized;
+  fullscreen_and_maximized.fullscreen = true;
+  fullscreen_and_maximized.maximized = true;
+  plan = PlanWindowStartupPresentation(fullscreen_and_maximized);
+  EXPECT_TRUE(plan.fullscreen_at_creation);
+  EXPECT_FALSE(plan.maximize_after_constraints);
+}
+
 TEST(WindowStateStoreTest, RejectsMalformedAndOutOfRangeState) {
   TemporaryDirectory temporary;
   const std::filesystem::path path = temporary.path() / "window-state.json";

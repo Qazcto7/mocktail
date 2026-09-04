@@ -21,7 +21,9 @@ bool ConvertSdlEvent(SDL_Window* window, const SDL_Event& source,
       return true;
     case SDL_EVENT_WINDOW_RESIZED:
     case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
-    case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED: {
+    case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
+    case SDL_EVENT_WINDOW_ENTER_FULLSCREEN:
+    case SDL_EVENT_WINDOW_LEAVE_FULLSCREEN: {
       WindowResizedEvent resized;
       if (!SDL_GetWindowSize(window, &resized.logical_width,
                              &resized.logical_height) ||
@@ -29,6 +31,8 @@ bool ConvertSdlEvent(SDL_Window* window, const SDL_Event& source,
                                      &resized.pixel_height)) {
         return false;
       }
+      const float density_scale = SDL_GetWindowDisplayScale(window);
+      resized.density_scale = density_scale > 0.0F ? density_scale : 1.0F;
       destination->payload = resized;
       return true;
     }

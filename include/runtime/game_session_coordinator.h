@@ -41,6 +41,9 @@ struct GameSurface {
   uintptr_t native_window = 0;
   uint32_t width = 0;
   uint32_t height = 0;
+  // Host content scale for Android PlatformParams.dpiScale. Zero means the
+  // producer has no scale information and the JNI configuration is used.
+  float dpi_scale = 0.0f;
 };
 
 enum class GamePresentBackend {

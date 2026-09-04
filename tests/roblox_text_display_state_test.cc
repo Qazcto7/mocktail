@@ -295,6 +295,30 @@ TEST(RobloxTextDisplayStateTest,
 }
 
 TEST(RobloxTextDisplayStateTest,
+     PublishesNativeTextGeometryInAndroidDensityCoordinates) {
+  RobloxTextSurfaceOverlay overlay;
+  ASSERT_TRUE(overlay.Initialize({1624, 811, 1.145833F}).ok());
+  RobloxTextDisplaySink sink = overlay.sink();
+  const std::string text = "density mapped";
+  RobloxTextDisplayUpdate show = Show(10, text, 0);
+  show.area_x = 943;
+  show.area_y = 527;
+  show.area_width = 409;
+  show.area_height = 76;
+  sink.update(sink.context, show);
+
+  MocktailTextOverlayFrameInfo frame;
+  ASSERT_TRUE(overlay.QueryFrame(&frame));
+  EXPECT_EQ(frame.coordinate_width, 1417U);
+  EXPECT_EQ(frame.coordinate_height, 708U);
+  EXPECT_EQ(frame.x, 943);
+  EXPECT_EQ(frame.y, 527);
+  EXPECT_EQ(frame.width, 409U);
+  EXPECT_EQ(frame.height, 76U);
+  EXPECT_TRUE(overlay.Shutdown().ok());
+}
+
+TEST(RobloxTextDisplayStateTest,
      InactiveOverlayCannotClearAnotherOverlayPublication) {
   RobloxTextSurfaceOverlay active;
   ASSERT_TRUE(active.Initialize({800, 600}).ok());
@@ -344,6 +368,45 @@ TEST(RobloxTextDisplayStateTest, MatchesApkHorizontalGravityEnum) {
   EXPECT_LT(center.minimum_x, right.minimum_x);
   EXPECT_GT(center.minimum_x - left.minimum_x, 40);
   EXPECT_GT(right.minimum_x - center.minimum_x, 40);
+  EXPECT_TRUE(overlay.Shutdown().ok());
+}
+
+TEST(RobloxTextDisplayStateTest,
+     KeepsTopNavigationSearchTextClearOfLeadingIcon) {
+  RobloxTextSurfaceOverlay overlay;
+  ASSERT_TRUE(overlay.Initialize({2560, 1440}).ok());
+  RobloxTextDisplaySink sink = overlay.sink();
+  const std::string text = "search text";
+
+  const auto render = [&](uint64_t generation, int32_t y, int32_t width,
+                          int32_t height) {
+    RobloxTextDisplayUpdate show = Show(generation, text, 0);
+    show.area_y = y;
+    show.area_width = width;
+    show.area_height = height;
+    show.font_size = 18.0F;
+    show.x_alignment = 0;
+    show.text_input_type = 1;
+    show.text_color = static_cast<int32_t>(0xFFFFFFFFU);
+    sink.update(sink.context, show);
+
+    MocktailTextOverlayFrameInfo frame;
+    EXPECT_TRUE(overlay.QueryFrame(&frame));
+    std::vector<std::uint8_t> rgba(frame.rgba_bytes);
+    EXPECT_TRUE(overlay.CopyFrame(frame.revision, rgba.data(), rgba.size()));
+    return FindAlphaBounds(frame, rgba);
+  };
+
+  // Geometry captured from the Roblox top navigation search field. Its
+  // NativeTextBoxInfo spans the magnifying-glass icon but exposes no padding.
+  const AlphaBounds search = render(1, 34, 1047, 36);
+  const AlphaBounds ordinary = render(2, 200, 1047, 36);
+  ASSERT_TRUE(search.valid());
+  ASSERT_TRUE(ordinary.valid());
+  EXPECT_GE(search.minimum_x, 38);
+  EXPECT_LE(search.minimum_x, 55);
+  EXPECT_GT(search.minimum_x - ordinary.minimum_x, 20);
+  EXPECT_LT(search.minimum_x - ordinary.minimum_x, 45);
   EXPECT_TRUE(overlay.Shutdown().ok());
 }
 

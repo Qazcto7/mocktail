@@ -14,6 +14,7 @@
   capstone,
   curl,
   fontconfig,
+  gamemode,
   glib,
   glib-networking,
   gtk4,
@@ -80,6 +81,9 @@ stdenv.mkDerivation (finalAttrs: {
     capstone
     curl
     fontconfig
+    # Loaded with dlmopen at runtime. Keeping it here also adds libgamemode.so.0
+    # to the wrapped binaries' and development shell's LD_LIBRARY_PATH.
+    gamemode
     glib
     glib-networking
     gtk4

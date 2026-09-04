@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
+#include <set>
 #include <string>
 #include <utility>
 
@@ -158,6 +159,48 @@ bool WriteAtomic(const std::filesystem::path& root,
     close(root_descriptor);
   }
   return true;
+}
+
+// CopyTree publishes payloads read-only, so the directories have to be made
+// writable again before anything in them can be unlinked.
+bool RemovePayloadTree(const std::filesystem::path& payload,
+                       std::uintmax_t* freed_bytes) {
+  std::error_code error;
+  std::filesystem::permissions(payload, std::filesystem::perms::owner_write,
+                               std::filesystem::perm_options::add, error);
+  std::filesystem::recursive_directory_iterator iterator(
+      payload, std::filesystem::directory_options::none, error);
+  const std::filesystem::recursive_directory_iterator end;
+  std::uintmax_t bytes = 0;
+  while (!error && iterator != end) {
+    std::error_code entry_error;
+    const auto status = iterator->symlink_status(entry_error);
+    if (!entry_error) {
+      if (std::filesystem::is_directory(status)) {
+        std::filesystem::permissions(iterator->path(),
+                                     std::filesystem::perms::owner_write,
+                                     std::filesystem::perm_options::add,
+                                     entry_error);
+      } else if (std::filesystem::is_regular_file(status)) {
+        bytes += std::filesystem::file_size(iterator->path(), entry_error);
+      }
+    }
+    iterator.increment(error);
+  }
+  std::error_code removal;
+  std::filesystem::remove_all(payload, removal);
+  if (removal) return false;
+  if (freed_bytes != nullptr) *freed_bytes += bytes;
+  return true;
+}
+
+bool SamePayloadContent(const PayloadMetadata& left,
+                        const PayloadMetadata& right) {
+  return left.library_sha256 == right.library_sha256 &&
+         left.base_apk_sha256 == right.base_apk_sha256 &&
+         left.split_apk_sha256 == right.split_apk_sha256 &&
+         left.asset_tree_sha256 == right.asset_tree_sha256 &&
+         left.asset_file_count == right.asset_file_count;
 }
 
 std::string TimestampSuffix() {
@@ -580,9 +623,11 @@ PayloadStoreResult PayloadStore::Stage(
   if (std::filesystem::exists(result.payload_directory, filesystem_error)) {
     const PayloadIntegrityResult existing =
         VerifyPreparedPayload(result.payload_directory);
+    // What the bytes are, not where they came from. The metadata records the
+    // moment of preparation, so comparing that file made every restage
+    // quarantine the payload the store was running from.
     if (existing && existing.payload_id == result.payload_id &&
-        HashRegularFile(prepared_payload / "roblox_payload.json") ==
-            HashRegularFile(result.payload_directory / "roblox_payload.json")) {
+        SamePayloadContent(existing.metadata, verified.metadata)) {
       return result;
     }
     if (!QuarantinePayloadCollision(root_, result.payload_directory,
@@ -592,17 +637,14 @@ PayloadStoreResult PayloadStore::Stage(
   const std::filesystem::path staging =
       root_ / "payloads" /
       (".stage-" + result.payload_id + "-" + std::to_string(getpid()));
-  std::filesystem::remove_all(staging, filesystem_error);
+  RemovePayloadTree(staging, nullptr);
   if (!CopyTree(prepared_payload, staging, &result.error)) {
-    std::filesystem::remove_all(staging, filesystem_error);
+    RemovePayloadTree(staging, nullptr);
     return result;
   }
   const PayloadIntegrityResult staged = VerifyPreparedPayload(staging);
   if (!staged || staged.payload_id != result.payload_id) {
-    std::filesystem::permissions(staging, std::filesystem::perms::owner_all,
-                                 std::filesystem::perm_options::add,
-                                 filesystem_error);
-    std::filesystem::remove_all(staging, filesystem_error);
+    RemovePayloadTree(staging, nullptr);
     result.error = staged ? "staged payload identity changed" : staged.error;
     return result;
   }
@@ -824,6 +866,69 @@ PayloadStoreResult PayloadStore::Rollback() {
   if (!WriteAtomic(root_, root_ / "current.json", previous.contents,
                    &result.error)) {
     return result;
+  }
+  return result;
+}
+
+PayloadGarbageResult PayloadStore::CollectGarbage(
+    const std::vector<std::string>& keep) {
+  PayloadGarbageResult result;
+  StoreLock lock(root_, &result.error);
+  if (!lock) return result;
+  std::set<std::string> retained(keep.begin(), keep.end());
+  for (const char* manifest : {"current.json", "previous_good.json"}) {
+    const ManifestIdentity identity = ReadManifest(root_ / manifest, true);
+    if (!identity.error.empty()) {
+      // Nothing is deleted from a store whose own manifests cannot be read.
+      result.error = identity.error;
+      return result;
+    }
+    if (!identity.payload_id.empty()) retained.insert(identity.payload_id);
+  }
+  std::error_code filesystem_error;
+  std::vector<std::filesystem::path> superseded;
+  std::filesystem::directory_iterator iterator(
+      root_ / "payloads", std::filesystem::directory_options::none,
+      filesystem_error);
+  const std::filesystem::directory_iterator end;
+  while (!filesystem_error && iterator != end) {
+    const std::filesystem::path entry = iterator->path();
+    const std::string name = entry.filename().string();
+    const auto status = iterator->symlink_status(filesystem_error);
+    if (filesystem_error) break;
+    // Also the workspace a killed Stage left behind, just as large.
+    const bool collectable =
+        (ValidPayloadId(name) && retained.find(name) == retained.end()) ||
+        name.rfind(".stage-", 0) == 0;
+    if (std::filesystem::is_directory(status) &&
+        !std::filesystem::is_symlink(status) && collectable) {
+      superseded.push_back(entry);
+    }
+    iterator.increment(filesystem_error);
+  }
+  if (filesystem_error) {
+    result.error = "cannot inspect the payload store";
+    return result;
+  }
+  // Nothing ever reads a quarantined tree back; it is a copy set aside by a
+  // collision and it is the same 600 MiB as a payload.
+  std::error_code quarantine_error;
+  std::filesystem::directory_iterator quarantine(
+      root_ / "quarantine", std::filesystem::directory_options::none,
+      quarantine_error);
+  while (!quarantine_error && quarantine != end) {
+    const auto status = quarantine->symlink_status(quarantine_error);
+    if (quarantine_error) break;
+    if (std::filesystem::is_directory(status) &&
+        !std::filesystem::is_symlink(status)) {
+      superseded.push_back(quarantine->path());
+    }
+    quarantine.increment(quarantine_error);
+  }
+  for (const std::filesystem::path& payload : superseded) {
+    if (RemovePayloadTree(payload, &result.freed_bytes)) {
+      result.removed.push_back(payload.filename().string());
+    }
   }
   return result;
 }

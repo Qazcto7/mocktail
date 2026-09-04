@@ -91,6 +91,22 @@ TEST(WindowSurfaceLifecycleTest,
 }
 
 TEST(WindowSurfaceLifecycleTest,
+     DisplayScaleChangeQueuesSameExtentChangedEvent) {
+  WindowSurfaceLifecycle lifecycle;
+  ASSERT_TRUE(lifecycle.Activate(0x44, 3840, 2160, 1.0f).ok());
+
+  ASSERT_TRUE(lifecycle.Observe(0x44, 3840, 2160, 2.0f).ok());
+
+  const std::vector<WindowSurfaceEvent> events = Drain(&lifecycle);
+  ASSERT_EQ(events.size(), 1U);
+  EXPECT_EQ(events[0].type, WindowSurfaceEventType::kChanged);
+  EXPECT_EQ(events[0].surface.width, 3840U);
+  EXPECT_EQ(events[0].surface.height, 2160U);
+  EXPECT_FLOAT_EQ(events[0].surface.dpi_scale, 2.0f);
+  EXPECT_FLOAT_EQ(lifecycle.Snapshot().dpi_scale, 2.0f);
+}
+
+TEST(WindowSurfaceLifecycleTest,
      RecreateQueuesDestroyedCreatedChangedWithNewGeneration) {
   WindowSurfaceLifecycle lifecycle;
   ASSERT_TRUE(lifecycle.Activate(0x44, 1280, 720).ok());

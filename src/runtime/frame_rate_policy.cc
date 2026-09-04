@@ -3,7 +3,7 @@
 #define JSON_NOEXCEPTION 1
 #include <nlohmann/json.hpp>
 
-#include <array>
+#include <charconv>
 #include <string>
 
 namespace mocktail {
@@ -29,17 +29,21 @@ bool SetCompatibleValue(nlohmann::json *object, const char *key,
 } // namespace
 
 FrameRatePolicy ParseFrameRatePolicy(std::string_view value) {
-  if (value.empty() || value == "display") {
+  if (value.empty() || value == "-1") {
     return {};
+  }
+  if (value == "display") {
+    return {FrameRateLimitMode::kDisplay, 0};
   }
   if (value == "unlimited") {
     return {FrameRateLimitMode::kUnlimited, 0};
   }
-  constexpr std::array<int, 5> kSupportedFixedRates = {30, 60, 120, 144, 240};
-  for (const int rate : kSupportedFixedRates) {
-    if (value == std::to_string(rate)) {
-      return {FrameRateLimitMode::kFixed, rate};
-    }
+  int fps = 0;
+  const auto parsed =
+      std::from_chars(value.data(), value.data() + value.size(), fps);
+  if (parsed.ec == std::errc() &&
+      parsed.ptr == value.data() + value.size() && fps > 0) {
+    return {FrameRateLimitMode::kFixed, fps};
   }
   return {FrameRateLimitMode::kInvalid, 0};
 }
@@ -62,7 +66,13 @@ bool MergeFrameRateClientSettingsOverrides(const FrameRatePolicy &policy,
     }
     return false;
   }
-  if (policy.mode == FrameRateLimitMode::kDisplay) {
+  if (!SetCompatibleValue(&overrides,
+                          "FFlagGameBasicSettingsFramerateCap5", "True",
+                          error)) {
+    return false;
+  }
+  if (policy.mode == FrameRateLimitMode::kUnmanaged ||
+      policy.mode == FrameRateLimitMode::kDisplay) {
     *merged_json = overrides.dump();
     return true;
   }

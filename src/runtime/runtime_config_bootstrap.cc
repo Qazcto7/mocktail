@@ -50,19 +50,22 @@ runtime:
   # roblox_library: /absolute/path/to/libroblox.so
 
 appearance:
-  theme: system
+  # String (default: roblox): use Roblox's saved account theme. Supported
+  # overrides: dark, light, or system (follow the desktop color scheme).
+  theme: roblox
 
 graphics:
   # String (default: direct-vulkan): graphics backend. Use opengl on hardware
   # without a working Vulkan driver; OpenGL ES 3.0 or newer is required.
   # Recommended values: direct-vulkan, opengl, system, angle-vulkan.
   backend: direct-vulkan
-  # String or integer (default: display): requested frame-rate policy.
-  # Supported values: display, unlimited, 30, 60, 120, 144, 240. Unlimited
-  # selects Roblox's unmodified 240-FPS scheduler maximum.
-  frame_rate_limit: display
-  # String (default: auto): presentation synchronization: auto, on, or off.
-  vsync: auto
+  # Optional string or integer: Mocktail frame-rate override. Leave commented
+  # (or use -1) to let Roblox Basic Settings own the cap. Supported overrides:
+  # display, unlimited, or any positive integer; fixed values are forwarded to
+  # DFIntTaskSchedulerTargetFps without a whitelist.
+  # frame_rate_limit: -1
+  # Optional presentation synchronization override: auto, on, or off.
+  # vsync: off
 
 performance:
   # Boolean (default: false): size Roblox scheduler/render queues from every
@@ -116,12 +119,15 @@ integrations:
     # application_id: 123456789012345678
 
 window:
-  # Integer (default: 1280): initial window width in pixels.
+  # Integer (default: 1280): initial window width in logical desktop units.
   width: 1280
-  # Integer (default: 720): initial window height in pixels.
+  # Integer (default: 720): initial window height in logical desktop units.
   height: 720
   # String (default: Roblox): window title.
   title: Roblox
+  # Boolean (default: false): render at physical display-pixel density instead
+  # of the logical desktop resolution. Enable only for sharper high-DPI output.
+  high_dpi: false
 
 network:
   # Boolean (default: false): follow the host HTTP/SOCKS5 proxy and

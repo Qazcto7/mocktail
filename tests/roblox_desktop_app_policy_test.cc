@@ -98,7 +98,7 @@ TEST(RobloxDesktopAppPolicyTest,
   ASSERT_TRUE(WriteJson(default_path, {{"PlatformGroup", "Unknown"}}));
 
   const DesktopAppPolicyResult result =
-      ApplyDesktopAppPolicy(storage_path, default_path, 42);
+      ApplyDesktopAppPolicy(storage_path, default_path, 42, "dark");
   ASSERT_TRUE(result) << result.error;
   EXPECT_TRUE(result.updated);
   EXPECT_EQ(result.normalized_policy_count, 1U);
@@ -115,10 +115,11 @@ TEST(RobloxDesktopAppPolicyTest,
   ExpectDesktopLayout(user_policy);
   EXPECT_EQ(user_policy["EligibleForVideoCapture"], false);
   EXPECT_EQ(user_policy["AccountOwnedMarker"], "preserve");
+  EXPECT_EQ(user_policy["ForceTheme"], "dark");
   ExpectDesktopLayout(DecodePolicy(updated, "GUAC:-1:app-policy"));
 
   const DesktopAppPolicyResult repeated =
-      ApplyDesktopAppPolicy(storage_path, default_path, 42);
+      ApplyDesktopAppPolicy(storage_path, default_path, 42, "dark");
   ASSERT_TRUE(repeated) << repeated.error;
   EXPECT_FALSE(repeated.updated);
   EXPECT_EQ(repeated.normalized_policy_count, 2U);
@@ -134,7 +135,7 @@ TEST(RobloxDesktopAppPolicyTest, SeedsMissingStorageFromPayloadDefault) {
                                        {"PayloadDefaultMarker", 7}}));
 
   const DesktopAppPolicyResult result =
-      ApplyDesktopAppPolicy(storage_path, default_path, -1);
+      ApplyDesktopAppPolicy(storage_path, default_path, -1, "dark");
   ASSERT_TRUE(result) << result.error;
   EXPECT_TRUE(result.app_storage_created);
   EXPECT_TRUE(result.updated);
@@ -145,9 +146,24 @@ TEST(RobloxDesktopAppPolicyTest, SeedsMissingStorageFromPayloadDefault) {
   const nlohmann::json policy =
       DecodePolicy(configurations, "GUAC:-1:app-policy");
   ExpectDesktopLayout(policy);
+  EXPECT_EQ(policy["ForceTheme"], "dark");
   EXPECT_EQ(policy["PayloadDefaultMarker"], 7);
   EXPECT_EQ(nlohmann::json::parse(result.policy_json)["PayloadDefaultMarker"],
             7);
+}
+
+TEST(RobloxDesktopAppPolicyTest, RobloxThemeDoesNotForceCachedPolicy) {
+  TemporaryDirectory temporary;
+  const std::filesystem::path storage_path = temporary.path() / "storage.json";
+  const std::filesystem::path default_path = temporary.path() / "default.json";
+  ASSERT_TRUE(WriteJson(default_path,
+                        {{"PlatformGroup", "Unknown"},
+                         {"ForceTheme", "dark"}}));
+
+  const DesktopAppPolicyResult result =
+      ApplyDesktopAppPolicy(storage_path, default_path, 42, "roblox");
+  ASSERT_TRUE(result) << result.error;
+  EXPECT_EQ(nlohmann::json::parse(result.policy_json)["ForceTheme"], "");
 }
 
 TEST(RobloxDesktopAppPolicyTest,
@@ -169,11 +185,12 @@ TEST(RobloxDesktopAppPolicyTest,
   ASSERT_TRUE(WriteJson(default_path, {{"PlatformGroup", "Unknown"}}));
 
   const DesktopAppPolicyResult result =
-      ApplyDesktopAppPolicy(storage_path, default_path, 42);
+      ApplyDesktopAppPolicy(storage_path, default_path, 42, "system");
   ASSERT_TRUE(result) << result.error;
   const nlohmann::json selected = nlohmann::json::parse(result.policy_json);
   ExpectDesktopLayout(selected);
   EXPECT_EQ(selected["Entitlement"], "authenticated");
+  EXPECT_EQ(selected["ForceTheme"], "");
 
   const nlohmann::json updated = DecodeConfigurations(ReadJson(storage_path));
   EXPECT_EQ(DecodePolicy(updated, "GUAC:-1:app-policy"), selected);
@@ -210,14 +227,16 @@ TEST(RobloxDesktopAppPolicyTest, RejectsMalformedOrSymlinkedStorage) {
     std::ofstream output(malformed);
     output << "not-json";
   }
-  EXPECT_FALSE(ApplyDesktopAppPolicy(malformed, default_path, 42));
+  EXPECT_FALSE(ApplyDesktopAppPolicy(malformed, default_path, 42, "dark"));
 
   const std::filesystem::path outside = temporary.path() / "outside.json";
   const std::filesystem::path linked = temporary.path() / "linked.json";
   ASSERT_TRUE(WriteJson(outside, {{"Preserve", true}}));
   ASSERT_EQ(symlink(outside.c_str(), linked.c_str()), 0);
-  EXPECT_FALSE(ApplyDesktopAppPolicy(linked, default_path, 42));
+  EXPECT_FALSE(ApplyDesktopAppPolicy(linked, default_path, 42, "dark"));
   EXPECT_EQ(ReadJson(outside)["Preserve"], true);
+
+  EXPECT_FALSE(ApplyDesktopAppPolicy(outside, default_path, 42, "invalid"));
 }
 
 }  // namespace

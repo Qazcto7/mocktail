@@ -85,15 +85,16 @@ runtime::GameSessionUpdateResult Destroyed(void* context,
 
 WindowSurfaceEvent Event(WindowSurfaceEventType type, uint64_t generation,
                          uintptr_t native_window, uint32_t width,
-                         uint32_t height, bool available) {
+                         uint32_t height, bool available,
+                         float dpi_scale = 1.0f) {
   return {type,
-          {generation, native_window, width, height, available}};
+          {generation, native_window, width, height, available, dpi_scale}};
 }
 
 TEST(WindowGameSurfaceBridgeTest, DrainsEventsInOrderAndPreservesSurfaceData) {
   SourceProbe source{{
       Event(WindowSurfaceEventType::kCreated, 2, 0x55, 1600, 900, true),
-      Event(WindowSurfaceEventType::kChanged, 2, 0x55, 1600, 900, true),
+      Event(WindowSurfaceEventType::kChanged, 2, 0x55, 1600, 900, true, 2.0f),
       Event(WindowSurfaceEventType::kDestroyed, 2, 0x55, 1600, 900, false),
   }};
   ConsumerProbe consumer;
@@ -116,6 +117,7 @@ TEST(WindowGameSurfaceBridgeTest, DrainsEventsInOrderAndPreservesSurfaceData) {
   EXPECT_EQ(consumer.changed_surfaces[0].native_window, 0x55U);
   EXPECT_EQ(consumer.changed_surfaces[0].width, 1600U);
   EXPECT_EQ(consumer.changed_surfaces[0].height, 900U);
+  EXPECT_FLOAT_EQ(consumer.changed_surfaces[0].dpi_scale, 2.0f);
   const WindowGameSurfaceBridgeSnapshot snapshot = bridge.Snapshot();
   EXPECT_EQ(snapshot.accepted_events, 3U);
   EXPECT_EQ(consumer.commits, 3);

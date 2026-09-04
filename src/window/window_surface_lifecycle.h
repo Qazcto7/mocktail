@@ -22,6 +22,7 @@ struct WindowSurfaceSnapshot {
   uint32_t width = 0;
   uint32_t height = 0;
   bool available = false;
+  float dpi_scale = 1.0f;
 };
 
 struct WindowSurfaceEvent {
@@ -35,9 +36,11 @@ struct WindowSurfaceEvent {
 // handle loss followed by restoration.
 class WindowSurfaceLifecycle final {
  public:
-  Status Activate(uintptr_t native_window, uint32_t width, uint32_t height);
+  Status Activate(uintptr_t native_window, uint32_t width, uint32_t height,
+                  float dpi_scale = 1.0f);
   void Deactivate();
-  Status Observe(uintptr_t native_window, uint32_t width, uint32_t height);
+  Status Observe(uintptr_t native_window, uint32_t width, uint32_t height,
+                 float dpi_scale = 1.0f);
   // Queues an authoritative same-generation Changed event. This is used when
   // a compositor changes presentation state (for example entering fullscreen)
   // without changing the final native handle or pixel extent.
@@ -55,7 +58,7 @@ class WindowSurfaceLifecycle final {
   void QueueLocked(WindowSurfaceEventType type,
                    const WindowSurfaceSnapshot& surface);
   Status RestoreLocked(uintptr_t native_window, uint32_t width,
-                       uint32_t height);
+                       uint32_t height, float dpi_scale);
 
   mutable std::mutex mutex_;
   std::deque<WindowSurfaceEvent> events_;

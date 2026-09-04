@@ -20,14 +20,15 @@ struct DesktopAppPolicyResult {
   explicit operator bool() const { return error.empty(); }
 };
 
-// Normalizes only Roblox UniversalApp layout coordinates for a PC profile.
-// Account eligibility and feature-entitlement fields remain server-owned.
+// Normalizes Roblox UniversalApp layout coordinates for a PC profile and
+// applies a fixed theme only when configured. Account eligibility and
+// feature-entitlement fields remain server-owned.
 // The guest and authenticated cache keys are both populated so user-switch
 // startup cannot fall back to the Android Unknown/mobile layout.
 DesktopAppPolicyResult ApplyDesktopAppPolicy(
     const std::filesystem::path& app_storage_file,
     const std::filesystem::path& default_policy_file,
-    std::int64_t authenticated_user_id);
+    std::int64_t authenticated_user_id, std::string_view theme_mode);
 
 // Routes the normalized policy through Roblox's supported runtime override so
 // a later GUAC response cannot replace the in-memory desktop layout with the

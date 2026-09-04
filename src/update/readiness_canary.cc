@@ -362,6 +362,7 @@ CanaryResult RunReadinessCanary(const CanaryOptions& options) {
                          "MOCKTAIL_SKIP_UPDATE_CHECK=1",
                          "MOCKTAIL_ISOLATED_CANARY=1",
                          "MOCKTAIL_ALLOW_NO_COOKIE_LUA_APP=1",
+                         "MOCKTAIL_SKIP_FIRST_LAUNCH_LOGIN=1",
                          "MOCKTAIL_VALIDATE_ROBLOX_COOKIE=0",
                          "MOCKTAIL_IGNORE_WINDOW_CLOSE=1",
                          "MOCKTAIL_DISABLE_SUPPORT_BUNDLE=1",

@@ -1,6 +1,7 @@
 #ifndef MOCKTAIL_RUNTIME_ROBLOX_INPUT_ROUTER_H_
 #define MOCKTAIL_RUNTIME_ROBLOX_INPUT_ROUTER_H_
 
+#include <cmath>
 #include <cstdint>
 #include <mutex>
 #include <vector>
@@ -17,10 +18,12 @@ struct RobloxInputViewport {
   int32_t logical_height = 0;
   int32_t pixel_width = 0;
   int32_t pixel_height = 0;
+  float density_scale = 1.0F;
 
   bool valid() const {
     return logical_width > 0 && logical_height > 0 && pixel_width > 0 &&
-           pixel_height > 0;
+           pixel_height > 0 && std::isfinite(density_scale) &&
+           density_scale > 0.0F;
   }
 };
 

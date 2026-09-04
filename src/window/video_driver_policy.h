@@ -1,6 +1,9 @@
 #ifndef MOCKTAIL_WINDOW_VIDEO_DRIVER_POLICY_H_
 #define MOCKTAIL_WINDOW_VIDEO_DRIVER_POLICY_H_
 
+#include <string_view>
+#include <vector>
+
 namespace mocktail {
 namespace window {
 
@@ -29,6 +32,12 @@ struct VideoDriverPolicyInput {
 VideoDriverChoice ResolveVideoDriverChoice(const VideoDriverPolicyInput& input);
 
 const char* VideoDriverChoiceName(VideoDriverChoice choice);
+
+// SDL accepts a comma-separated priority list. An inherited override is only
+// useful when at least one requested driver exists in the linked SDL build.
+bool HasAvailableVideoDriverCandidate(
+    std::string_view requested,
+    const std::vector<std::string_view>& available_drivers);
 
 }  // namespace window
 }  // namespace mocktail

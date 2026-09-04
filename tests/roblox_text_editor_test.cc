@@ -299,6 +299,24 @@ TEST(RobloxTextEditorTest, OutOfOrderHostEchoesCannotRewindCurrentText) {
   EXPECT_EQ(display_probe.calls.back().text, "ab");
 }
 
+TEST(RobloxTextEditorTest, EmptyEngineUpdateOverridesOlderEmptyHostEcho) {
+  Probe probe;
+  DisplayProbe display_probe;
+  RobloxTextEditor editor(Sink(&probe), DisplaySink(&display_probe));
+  ASSERT_TRUE(editor.BeginFocusSession(Session(42, 7, "x")).ok());
+  ASSERT_TRUE(editor.HandleKey(Key(SDL_SCANCODE_BACKSPACE)).status.ok());
+  ASSERT_TRUE(editor.HandleTextInput({"next"}).status.ok());
+
+  ASSERT_TRUE(editor.ReplaceFocusedTextFromEngine(7, {}).ok());
+
+  EXPECT_EQ(editor.Snapshot().text_bytes, 0u);
+  EXPECT_EQ(editor.Snapshot().cursor_utf16, 0);
+  ASSERT_FALSE(display_probe.calls.empty());
+  EXPECT_EQ(display_probe.calls.back().event,
+            RobloxTextDisplayEvent::kUpdate);
+  EXPECT_TRUE(display_probe.calls.back().text.empty());
+}
+
 TEST(RobloxTextEditorTest, UnknownEngineUpdateCancelsActiveComposition) {
   Probe probe;
   DisplayProbe display_probe;

@@ -16,7 +16,9 @@
 #include <mutex>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
+#include "mocktail/graphics/present_mode_policy.h"
 #include "mocktail/platform/display_refresh_capabilities.h"
 #include "mocktail/platform/sdl_application_metadata.h"
 #include "mocktail/platform/sdl_event_converter.h"
@@ -29,6 +31,7 @@
 #include "window/vulkan_surface_recovery_gate.h"
 #include "window/window_fullscreen_request_gate.h"
 #include "window/window_fullscreen_state_sync.h"
+#include "window/window_creation_policy.h"
 #include "window/window_pointer_capture_owner.h"
 #include "window/window_resize_readiness_gate.h"
 #include "window/window_state_store.h"
@@ -153,6 +156,13 @@ static char g_preferred_gles_library[4096];
 static bool g_auto_angle_retry_attempted = false;
 static std::filesystem::path g_window_state_path;
 
+WindowStartupPresentationPlan RestoredWindowPresentationPlan() {
+  if (!g_state.state_persistence_active) {
+    return {};
+  }
+  return PlanWindowStartupPresentation(g_state.persisted_window);
+}
+
 // Floors the live window at the size a restored geometry already has to clear.
 void ApplyMinimumWindowSize(SDL_Window* window) {
   if (window == nullptr) {
@@ -161,6 +171,17 @@ void ApplyMinimumWindowSize(SDL_Window* window) {
   if (!SDL_SetWindowMinimumSize(window, kMinimumWindowWidth,
                                 kMinimumWindowHeight)) {
     std::fprintf(stderr, "  [window] SDL minimum size rejected: %s\n",
+                 SDL_GetError());
+  }
+}
+
+void ApplyRestoredWindowMaximization(
+    SDL_Window* window, const WindowStartupPresentationPlan& plan) {
+  if (window == nullptr || !plan.maximize_after_constraints) {
+    return;
+  }
+  if (!SDL_MaximizeWindow(window)) {
+    std::fprintf(stderr, "  [window-state] SDL maximize restore failed: %s\n",
                  SDL_GetError());
   }
 }
@@ -453,6 +474,56 @@ VideoDriverChoice ResolveConfiguredVideoDriverChoice() {
   return ResolveVideoDriverChoice(input);
 }
 
+std::vector<std::string_view> AvailableSdlVideoDrivers() {
+  std::vector<std::string_view> drivers;
+  const int count = SDL_GetNumVideoDrivers();
+  if (count > 0) {
+    drivers.reserve(static_cast<std::size_t>(count));
+  }
+  for (int index = 0; index < count; ++index) {
+    const char* driver = SDL_GetVideoDriver(index);
+    if (driver != nullptr && driver[0] != '\0') {
+      drivers.emplace_back(driver);
+    }
+  }
+  return drivers;
+}
+
+bool DropUnavailableSdlVideoDriverOverride(
+    const char* variable,
+    const std::vector<std::string_view>& available_drivers) {
+  const char* requested = std::getenv(variable);
+  if (requested == nullptr || requested[0] == '\0' ||
+      HasAvailableVideoDriverCandidate(requested, available_drivers)) {
+    return false;
+  }
+  if (unsetenv(variable) != 0) {
+    std::fprintf(stderr,
+                 "  [window] cannot clear unavailable %s override: %s\n",
+                 variable, std::strerror(errno));
+    return false;
+  }
+  std::fprintf(stderr,
+               "  [window] ignoring unavailable %s override; using SDL "
+               "automatic video-driver detection\n",
+               variable);
+  return true;
+}
+
+void SanitizeSdlVideoDriverOverrides() {
+  const std::vector<std::string_view> available_drivers =
+      AvailableSdlVideoDrivers();
+  if (available_drivers.empty()) {
+    return;
+  }
+  (void)DropUnavailableSdlVideoDriverOverride("SDL_VIDEODRIVER",
+                                              available_drivers);
+  if (DropUnavailableSdlVideoDriverOverride("SDL_VIDEO_DRIVER",
+                                            available_drivers)) {
+    SDL_ResetHint(SDL_HINT_VIDEO_DRIVER);
+  }
+}
+
 bool ShouldShowWindowImmediately() {
   if (IsEnabledEnv("MOCKTAIL_HIDE_WINDOW_UNTIL_FIRST_SWAP")) {
     return false;
@@ -551,6 +622,8 @@ SDL_EGLAttrib* SDLCALL AnglePlatformAttributes(void* /*userdata*/) {
 void ConfigureGraphicsBackendBeforeSDL() {
   g_preferred_egl_library[0] = '\0';
   g_preferred_gles_library[0] = '\0';
+
+  SanitizeSdlVideoDriverOverrides();
 
   SDL_SetHint(SDL_HINT_VIDEO_FORCE_EGL, "1");
 
@@ -659,6 +732,14 @@ void* QueryNativeWindowHandle() {
   return g_state.direct_vulkan ? g_state.sdl_window : nullptr;
 }
 
+float QueryWindowDpiScale() {
+  if (g_state.sdl_window == nullptr) {
+    return 1.0f;
+  }
+  const float scale = SDL_GetWindowDisplayScale(g_state.sdl_window);
+  return scale > 0.0f ? scale : 1.0f;
+}
+
 void ResolveNativeWindowHandle() {
   g_state.native_window = QueryNativeWindowHandle();
   if (g_state.native_window == nullptr) {
@@ -691,7 +772,8 @@ bool ActivateWindowEventLifecycles() {
   }
   const Status surface_status = g_window_surface_lifecycle.Activate(
       reinterpret_cast<uintptr_t>(g_state.native_window),
-      static_cast<uint32_t>(pixel_width), static_cast<uint32_t>(pixel_height));
+      static_cast<uint32_t>(pixel_width), static_cast<uint32_t>(pixel_height),
+      QueryWindowDpiScale());
   if (!surface_status.ok()) {
     fprintf(stderr, "  [window] typed surface lifecycle failed: %s\n",
             surface_status.message().c_str());
@@ -801,15 +883,12 @@ bool CreateSoftwareWaitingWindow(int width, int height, const char* title) {
   fprintf(stderr,
           "  [window] TEST-ONLY graphics stubs explicitly enabled; creating "
           "a non-rendering waiting window\n");
-  SDL_WindowFlags window_flags = 0;
-  if (!IsEnabledEnv("MOCKTAIL_DISABLE_HIGH_DPI")) {
-    window_flags |= SDL_WINDOW_HIGH_PIXEL_DENSITY;
-  }
-  if (g_state.state_persistence_active && g_state.persisted_window.fullscreen) {
+  const WindowStartupPresentationPlan presentation =
+      RestoredWindowPresentationPlan();
+  SDL_WindowFlags window_flags = ApplyHighPixelDensityWindowFlag(
+      SDL_WINDOW_RESIZABLE, IsEnabledEnv("MOCKTAIL_WIN_HIGH_DPI"));
+  if (presentation.fullscreen_at_creation) {
     window_flags |= SDL_WINDOW_FULLSCREEN;
-  } else if (g_state.state_persistence_active &&
-             g_state.persisted_window.maximized) {
-    window_flags |= SDL_WINDOW_MAXIMIZED;
   }
   if (!ShouldShowWindowImmediately()) {
     window_flags |= SDL_WINDOW_HIDDEN;
@@ -825,6 +904,7 @@ bool CreateSoftwareWaitingWindow(int width, int height, const char* title) {
   ApplyWindowIcon(g_state.sdl_window);
   ApplyMinimumWindowSize(g_state.sdl_window);
   ApplyRestoredWindowPosition();
+  ApplyRestoredWindowMaximization(g_state.sdl_window, presentation);
 
   g_state.software_window = true;
   fprintf(stderr, "  [window] software SDL waiting window created (%dx%d)\n",
@@ -941,16 +1021,13 @@ bool Init(int width, int height, const char* title) {
       fprintf(stderr, "  [window] SDL_Init failed: %s\n", SDL_GetError());
       return false;
     }
-    SDL_WindowFlags window_flags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE;
-    if (!IsEnabledEnv("MOCKTAIL_DISABLE_HIGH_DPI")) {
-      window_flags |= SDL_WINDOW_HIGH_PIXEL_DENSITY;
-    }
-    if (g_state.state_persistence_active &&
-        g_state.persisted_window.fullscreen) {
+    const WindowStartupPresentationPlan presentation =
+        RestoredWindowPresentationPlan();
+    SDL_WindowFlags window_flags = ApplyHighPixelDensityWindowFlag(
+        SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE,
+        IsEnabledEnv("MOCKTAIL_WIN_HIGH_DPI"));
+    if (presentation.fullscreen_at_creation) {
       window_flags |= SDL_WINDOW_FULLSCREEN;
-    } else if (g_state.state_persistence_active &&
-               g_state.persisted_window.maximized) {
-      window_flags |= SDL_WINDOW_MAXIMIZED;
     }
     if (!ShouldShowWindowImmediately()) {
       window_flags |= SDL_WINDOW_HIDDEN;
@@ -966,6 +1043,7 @@ bool Init(int width, int height, const char* title) {
     ApplyWindowIcon(g_state.sdl_window);
     ApplyMinimumWindowSize(g_state.sdl_window);
     ApplyRestoredWindowPosition();
+    ApplyRestoredWindowMaximization(g_state.sdl_window, presentation);
     g_state.direct_vulkan = true;
     g_state.initialised = true;
     ResolveNativeWindowHandle();
@@ -974,7 +1052,11 @@ bool Init(int width, int height, const char* title) {
     if (g_state.native_window == nullptr) {
       g_state.native_window = g_state.sdl_window;
     }
-    // Wayland reports undefined currentExtent until the window is mapped.
+    // Wayland reports undefined currentExtent until the window is mapped and
+    // receives its initial configure. X11 has no equivalent requirement, and
+    // SDL_SyncWindow can time out there while waiting for an unrelated WM
+    // state request (notably restored maximization) even though the native
+    // window is already valid for Vulkan WSI.
     if (!SDL_ShowWindow(g_state.sdl_window)) {
       fprintf(stderr, "  [window] SDL_ShowWindow failed: %s\n", SDL_GetError());
       SDL_DestroyWindow(g_state.sdl_window);
@@ -984,8 +1066,13 @@ bool Init(int width, int height, const char* title) {
       g_state.initialised = false;
       return false;
     }
-    if (!SDL_SyncWindow(g_state.sdl_window)) {
-      fprintf(stderr, "  [window] SDL_SyncWindow failed: %s\n", SDL_GetError());
+    const char* active_video_driver = SDL_GetCurrentVideoDriver();
+    if (DirectVulkanWindowRequiresInitialSync(
+            active_video_driver != nullptr ? active_video_driver : "") &&
+        !SDL_SyncWindow(g_state.sdl_window)) {
+      fprintf(stderr,
+              "  [window] SDL_SyncWindow timed out waiting for the initial "
+              "Wayland configure\n");
       SDL_DestroyWindow(g_state.sdl_window);
       g_state.sdl_window = nullptr;
       SDL_Quit();
@@ -1085,15 +1172,13 @@ bool Init(int width, int height, const char* title) {
   SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
   SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-  SDL_WindowFlags window_flags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE;
-  if (!IsEnabledEnv("MOCKTAIL_DISABLE_HIGH_DPI")) {
-    window_flags |= SDL_WINDOW_HIGH_PIXEL_DENSITY;
-  }
-  if (g_state.state_persistence_active && g_state.persisted_window.fullscreen) {
+  const WindowStartupPresentationPlan presentation =
+      RestoredWindowPresentationPlan();
+  SDL_WindowFlags window_flags = ApplyHighPixelDensityWindowFlag(
+      SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE,
+      IsEnabledEnv("MOCKTAIL_WIN_HIGH_DPI"));
+  if (presentation.fullscreen_at_creation) {
     window_flags |= SDL_WINDOW_FULLSCREEN;
-  } else if (g_state.state_persistence_active &&
-             g_state.persisted_window.maximized) {
-    window_flags |= SDL_WINDOW_MAXIMIZED;
   }
   if (!ShouldShowWindowImmediately()) {
     window_flags |= SDL_WINDOW_HIDDEN;
@@ -1115,6 +1200,7 @@ bool Init(int width, int height, const char* title) {
   ApplyWindowIcon(g_state.sdl_window);
   ApplyMinimumWindowSize(g_state.sdl_window);
   ApplyRestoredWindowPosition();
+  ApplyRestoredWindowMaximization(g_state.sdl_window, presentation);
   fprintf(stderr, "  [window] SDL3 window created (%dx%d)\n", width, height);
   ShowWindowAccordingToStartupMode();
 
@@ -1364,6 +1450,7 @@ WindowViewportSnapshot GetWindowViewportSnapshot() {
                     &snapshot.logical_height);
   SDL_GetWindowSizeInPixels(g_state.sdl_window, &snapshot.pixel_width,
                             &snapshot.pixel_height);
+  snapshot.dpi_scale = QueryWindowDpiScale();
   return snapshot;
 }
 
@@ -2093,7 +2180,8 @@ bool PumpEvents() {
       const Status surface_status = g_window_surface_lifecycle.Observe(
           reinterpret_cast<uintptr_t>(observed_native_window),
           pixel_width > 0 ? static_cast<uint32_t>(pixel_width) : 0,
-          pixel_height > 0 ? static_cast<uint32_t>(pixel_height) : 0);
+          pixel_height > 0 ? static_cast<uint32_t>(pixel_height) : 0,
+          QueryWindowDpiScale());
       if (!surface_status.ok()) {
         fprintf(stderr, "  [window] surface event rejected: %s\n",
                 surface_status.message().c_str());
@@ -2125,6 +2213,7 @@ bool PumpEvents() {
         }
         if ((event.type == SDL_EVENT_WINDOW_RESIZED ||
              event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED ||
+             event.type == SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED ||
              event.type == SDL_EVENT_WINDOW_ENTER_FULLSCREEN ||
              event.type == SDL_EVENT_WINDOW_LEAVE_FULLSCREEN) &&
             g_text_input_owner != nullptr &&
@@ -2209,16 +2298,8 @@ bool PumpEvents() {
 }
 
 bool UnthrottledPresentationRequested() {
-  static const bool unthrottled = [] {
-    const char* vsync = GetEnvNonEmpty("MOCKTAIL_VSYNC");
-    if (vsync != nullptr &&
-        (std::strcmp(vsync, "off") == 0 || std::strcmp(vsync, "0") == 0)) {
-      return true;
-    }
-    const char* frame_rate = GetEnvNonEmpty("MOCKTAIL_FRAME_RATE_LIMIT");
-    return frame_rate != nullptr && std::strcmp(frame_rate, "unlimited") == 0;
-  }();
-  return unthrottled;
+  return graphics::CachedPresentModePolicy() ==
+         graphics::PresentModePolicy::kUnthrottled;
 }
 
 uint64_t PaceInputPump() {
@@ -2273,7 +2354,7 @@ void Shutdown() {
   g_pointer_capture_backend.reset();
   g_text_input_owner.reset();
   g_text_input_backend.reset();
-  if (!g_state.direct_vulkan) {
+  if (!g_state.direct_vulkan && g_state.egl_context != nullptr) {
     SDL_GL_MakeCurrent(g_state.sdl_window, nullptr);
   }
   if (!g_state.direct_vulkan && g_state.egl_context) {
@@ -2287,6 +2368,7 @@ void Shutdown() {
   SDL_Quit();
   g_state.initialised = false;
   g_state.native_window = nullptr;
+  g_state.software_window = false;
   g_state.direct_vulkan = false;
   g_state.display_refresh = {};
   g_state.input_test_sequence_queued = false;

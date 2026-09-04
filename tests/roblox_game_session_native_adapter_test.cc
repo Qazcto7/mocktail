@@ -462,6 +462,32 @@ TEST_F(RobloxGameSessionNativeAdapterTest,
 }
 
 TEST_F(RobloxGameSessionNativeAdapterTest,
+       SurfaceDpiScaleOverridesStartupFallbackDuringRebind) {
+  RobloxGameSurfaceJniConfig surface_config;
+  surface_config.dpi_scale = 1.5f;
+  RobloxGameSessionRuntime runtime(Environment(), Symbols(), surface_config);
+  ASSERT_TRUE(runtime
+                  .InitializeAndStart(Binding(), AuthenticatedPrincipal(),
+                                      NetworkRequest(), Surface())
+                  .ok());
+  GameSurface scaled_surface = Surface();
+  scaled_surface.dpi_scale = 2.0f;
+
+  const GameSessionUpdateResult result =
+      runtime.SurfaceChanged(scaled_surface);
+
+  ASSERT_TRUE(result.ok()) << result.cause.message();
+  ASSERT_EQ(probe_.update_platform_params.size(), 1U);
+  JNIEnv* env = vm_->GetJNIEnv();
+  jobject params = probe_.update_platform_params[0];
+  jclass params_class = env->GetObjectClass(params);
+  EXPECT_FLOAT_EQ(env->GetFloatField(
+                      params,
+                      env->GetFieldID(params_class, "dpiScale", "F")),
+                  2.0f);
+}
+
+TEST_F(RobloxGameSessionNativeAdapterTest,
        DestroyAndRecreateReplacesSurfaceThenResumesWithoutLeave) {
   RobloxGameSessionBinding binding = Binding();
   const jobject initial_surface = binding.objects.surface;

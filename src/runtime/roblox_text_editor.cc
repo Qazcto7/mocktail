@@ -230,6 +230,25 @@ Status RobloxTextEditor::ReplaceFocusedTextFromEngine(
     SecureClear(&authoritative_utf8);
     return InvalidArgument("engine TextBox text is invalid UTF-8 or too large");
   }
+  // Games can clear a TextBox from Lua after consuming its value. An empty
+  // engine update must win even when it matches an older host echo; otherwise
+  // the stale host buffer remains visible and the next word starts with it.
+  if (authoritative_utf8.empty()) {
+    ClearPendingNativeEchoesLocked();
+    SecureClear(&text_);
+    cursor_byte_ = 0;
+    selection_anchor_byte_ = 0;
+    composition_begin_byte_ = 0;
+    composition_end_byte_ = 0;
+    composition_original_cursor_byte_ = 0;
+    composition_original_anchor_byte_ = 0;
+    SecureClear(&composition_replaced_text_);
+    composition_active_ = false;
+    snapshot_.text_bytes = 0;
+    UpdateSelectionSnapshotLocked();
+    PublishDisplayLocked(RobloxTextDisplayEvent::kUpdate);
+    return Status::Ok();
+  }
   // EngineJavaCallback2.g may asynchronously reflect an earlier outbound
   // editor state. Consume any known snapshot instead of letting it replace a
   // newer host composition. Unknown values remain authoritative Lua-side

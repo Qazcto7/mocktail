@@ -21,7 +21,7 @@ namespace {
 
 constexpr std::size_t kMaximumPendingTextCommands = 64;
 constexpr std::size_t kMaximumPendingTextBytes = 4U * 1024U * 1024U;
-constexpr uint32_t kMissingGeometryRetryPumpInterval = 8;
+constexpr uint32_t kGeometryRefreshPumpInterval = 8;
 
 void SecureClear(std::string* value) {
   if (value == nullptr) {
@@ -47,6 +47,21 @@ int RoundedCoordinate(float value) {
 bool HasUsableGeometry(const jnivm::RobloxTextBoxInfo& info) {
   return RoundedCoordinate(info.width) > 0 &&
          RoundedCoordinate(info.height) > 0;
+}
+
+bool SameTextBoxInfo(const jnivm::RobloxTextBoxInfo& left,
+                     const jnivm::RobloxTextBoxInfo& right) {
+  return left.x == right.x && left.y == right.y &&
+         left.width == right.width && left.height == right.height &&
+         left.font_size == right.font_size &&
+         left.multiline == right.multiline &&
+         left.x_alignment == right.x_alignment &&
+         left.y_alignment == right.y_alignment &&
+         left.text_color == right.text_color && left.font == right.font &&
+         left.text_input_type == right.text_input_type &&
+         left.return_key_type == right.return_key_type &&
+         left.manual_focus_release == right.manual_focus_release &&
+         left.text_wrapped == right.text_wrapped;
 }
 
 void PreserveGeometry(const jnivm::RobloxTextBoxInfo& source,
@@ -205,7 +220,7 @@ struct RobloxTextInputJniBridge::State {
     desired_active = false;
     active_geometry = {};
     has_active_geometry = false;
-    missing_geometry_retry_pumps = 0;
+    geometry_refresh_pumps = 0;
     ClearCommandsLocked();
   }
 
@@ -329,13 +344,15 @@ struct RobloxTextInputJniBridge::State {
       if (HasUsableGeometry(effective_info)) {
         active_geometry = effective_info;
         has_active_geometry = true;
-        missing_geometry_retry_pumps = 0;
+        geometry_refresh_pumps = 0;
       }
       std::fprintf(stderr,
                    "  [input] TextBox focus snapshot native=%d "
-                   "handle_changed=%d geometry=%dx%d inherited=%d\n",
+                   "handle_changed=%d geometry=%d,%d %dx%d inherited=%d\n",
                    request.show_native_input ? 1 : 0,
                    refreshes_active_focus && !same_handle ? 1 : 0,
+                   RoundedCoordinate(effective_info.x),
+                   RoundedCoordinate(effective_info.y),
                    RoundedCoordinate(effective_info.width),
                    RoundedCoordinate(effective_info.height),
                    inherited_geometry ? 1 : 0);
@@ -354,7 +371,7 @@ struct RobloxTextInputJniBridge::State {
       active_generation = generation;
       active_handle = request.text_box;
       desired_active = true;
-      missing_geometry_retry_pumps = 0;
+      geometry_refresh_pumps = 0;
       command.type = CommandType::kShow;
       command.generation = generation;
       command.textbox_handle = request.text_box;
@@ -382,7 +399,7 @@ struct RobloxTextInputJniBridge::State {
     active_info = {};
     active_geometry = {};
     has_active_geometry = false;
-    missing_geometry_retry_pumps = 0;
+    geometry_refresh_pumps = 0;
   }
 
   void ReplaceText(const std::string& text) {
@@ -437,19 +454,21 @@ struct RobloxTextInputJniBridge::State {
     commands.push_back(std::move(command));
   }
 
-  // The first showKeyboard snapshot can precede Roblox's layout pass and
-  // contain a 0x0 rectangle. Keep the editor authoritative, then retry the
-  // typed native query on the main-thread pump until real bounds appear.
-  void AppendMissingGeometryRetry(std::deque<Command>* pending) {
+  // NativeTextBoxInfo can change without an EngineJavaCallback2 property
+  // notification when an ancestor GUI moves or the surface changes size.
+  // Android's RbxKeyboard follows that layout; keep the host overlay attached
+  // by polling only while a TextBox owns focus. Unchanged snapshots are
+  // discarded before they reach SDL or the rasterizer.
+  void AppendGeometryRefresh(std::deque<Command>* pending) {
     if (pending == nullptr) {
       return;
     }
     std::lock_guard<std::mutex> lock(mutex);
-    if (!accepting || !desired_active || has_active_geometry ||
-        active_generation == 0 || active_handle == 0 || !applied_active ||
+    if (!accepting || !desired_active || active_generation == 0 ||
+        active_handle == 0 || !applied_active ||
         applied_generation != active_generation ||
         applied_handle != active_handle) {
-      missing_geometry_retry_pumps = 0;
+      geometry_refresh_pumps = 0;
       return;
     }
     const auto already_refreshing =
@@ -460,11 +479,11 @@ struct RobloxTextInputJniBridge::State {
     if (already_refreshing != pending->end()) {
       return;
     }
-    ++missing_geometry_retry_pumps;
-    if (missing_geometry_retry_pumps < kMissingGeometryRetryPumpInterval) {
+    ++geometry_refresh_pumps;
+    if (geometry_refresh_pumps < kGeometryRefreshPumpInterval) {
       return;
     }
-    missing_geometry_retry_pumps = 0;
+    geometry_refresh_pumps = 0;
     Command command;
     command.type = CommandType::kRecoverGeometry;
     command.generation = active_generation;
@@ -483,10 +502,11 @@ struct RobloxTextInputJniBridge::State {
   bool CommitPropertySnapshotIfCurrent(
       uint64_t requested_generation, int64_t requested_handle,
       const RobloxNativeTextBoxInfoSnapshot& snapshot,
-      jnivm::RobloxTextBoxInfo* effective_info) {
-    if (effective_info == nullptr) {
+      jnivm::RobloxTextBoxInfo* effective_info, bool* properties_changed) {
+    if (effective_info == nullptr || properties_changed == nullptr) {
       return false;
     }
+    *properties_changed = false;
     std::lock_guard<std::mutex> lock(mutex);
     if (!accepting || !desired_active ||
         active_generation != requested_generation ||
@@ -502,8 +522,9 @@ struct RobloxTextInputJniBridge::State {
     } else {
       active_geometry = candidate;
       has_active_geometry = true;
-      missing_geometry_retry_pumps = 0;
+      geometry_refresh_pumps = 0;
     }
+    *properties_changed = !SameTextBoxInfo(active_info, candidate);
     active_info = candidate;
     *effective_info = candidate;
     return true;
@@ -517,7 +538,7 @@ struct RobloxTextInputJniBridge::State {
         active_handle == requested_handle) {
       active_geometry = {};
       has_active_geometry = false;
-      missing_geometry_retry_pumps = 0;
+      geometry_refresh_pumps = 0;
     }
   }
 
@@ -538,7 +559,7 @@ struct RobloxTextInputJniBridge::State {
       return CompleteTerminalOnMainThread("queue");
     }
 
-    AppendMissingGeometryRetry(&pending);
+    AppendGeometryRefresh(&pending);
 
     bool success = true;
     for (Command& command : pending) {
@@ -642,9 +663,12 @@ struct RobloxTextInputJniBridge::State {
         status = backend->QueryCurrentTextBoxInfo(&query);
         if (status.ok() && query.available) {
           jnivm::RobloxTextBoxInfo effective_info;
+          bool properties_changed = false;
           if (CommitPropertySnapshotIfCurrent(command.generation,
                                               command.textbox_handle,
-                                              query.info, &effective_info)) {
+                                              query.info, &effective_info,
+                                              &properties_changed) &&
+              properties_changed) {
             failure_stage = "update-properties";
             status = backend->UpdateTextFocusProperties(
                 command.generation, ToFocusProperties(effective_info));
@@ -662,8 +686,10 @@ struct RobloxTextInputJniBridge::State {
               logged_property_refresh = true;
               std::fprintf(stderr,
                            "  [input] native TextBox properties refreshed "
-                           "generation=%llu geometry=%dx%d\n",
+                           "generation=%llu geometry=%d,%d %dx%d\n",
                            static_cast<unsigned long long>(command.generation),
+                           RoundedCoordinate(effective_info.x),
+                           RoundedCoordinate(effective_info.y),
                            RoundedCoordinate(effective_info.width),
                            RoundedCoordinate(effective_info.height));
             }
@@ -746,7 +772,7 @@ struct RobloxTextInputJniBridge::State {
     active_info = {};
     active_geometry = {};
     has_active_geometry = false;
-    missing_geometry_retry_pumps = 0;
+    geometry_refresh_pumps = 0;
     ClearCommandsLocked();
   }
 
@@ -786,7 +812,7 @@ struct RobloxTextInputJniBridge::State {
   jnivm::RobloxTextBoxInfo active_info;
   jnivm::RobloxTextBoxInfo active_geometry;
   bool has_active_geometry = false;
-  uint32_t missing_geometry_retry_pumps = 0;
+  uint32_t geometry_refresh_pumps = 0;
   bool desired_active = false;
   std::size_t pending_text_bytes = 0;
   bool accepting = true;

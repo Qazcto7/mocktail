@@ -701,7 +701,8 @@ bool GameSessionCoordinator::SameSurface(const GameSurface& left,
                                          const GameSurface& right) {
   return left.generation == right.generation &&
          left.native_window == right.native_window &&
-         left.width == right.width && left.height == right.height;
+         left.width == right.width && left.height == right.height &&
+         left.dpi_scale == right.dpi_scale;
 }
 
 const char* GameSessionStateName(GameSessionState state) {

@@ -8,6 +8,15 @@
 namespace mocktail {
 namespace window {
 
+namespace {
+
+// ClearQuery may be called by teardown reached from the native query itself.
+// Such a call owns the in-flight marker and must not wait for its own stack to
+// unwind.
+thread_local WindowPointerCaptureOwner* t_pointer_query_owner = nullptr;
+
+}  // namespace
+
 WindowPointerCaptureOwner::WindowPointerCaptureOwner(
     PointerCaptureBackend* backend)
     : backend_(backend) {}
@@ -34,7 +43,9 @@ void WindowPointerCaptureOwner::ClearQuery() {
   clearing_ = true;
   callback_ = nullptr;
   context_ = nullptr;
-  condition_.wait(lock, [this] { return in_flight_ == 0; });
+  condition_.wait(lock, [this] {
+    return in_flight_ == 0 || t_pointer_query_owner == this;
+  });
   clearing_ = false;
   lock.unlock();
   condition_.notify_all();
@@ -54,7 +65,19 @@ bool WindowPointerCaptureOwner::Pump(bool text_input_active) {
 
   bool locked_center = false;
   const bool query_ok =
-      callback != nullptr && callback(context, &locked_center);
+      callback != nullptr &&
+      [&] {
+        WindowPointerCaptureOwner* previous_query_owner =
+            t_pointer_query_owner;
+        t_pointer_query_owner = this;
+        struct ResetCallbackMarker {
+          WindowPointerCaptureOwner* previous_query_owner;
+          ~ResetCallbackMarker() {
+            t_pointer_query_owner = previous_query_owner;
+          }
+        } reset_callback_marker{previous_query_owner};
+        return callback(context, &locked_center);
+      }();
   if (callback != nullptr) {
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -168,16 +191,19 @@ bool SdlPointerCaptureBackend::Apply(bool relative_mode, bool cursor_visible) {
   if (relative_mode && !relative_mode_) {
     SDL_GetMouseState(&capture_anchor_x_, &capture_anchor_y_);
     capture_anchor_valid_ = true;
+    SDL_SetWindowMouseGrab(window, true);
   }
   if (!relative_mode && relative_mode_ && capture_anchor_valid_) {
     // SDL requires the warp before relative mode is disabled. This preserves
     // the desktop pointer position across Roblox's transient RMB camera drag.
     SDL_WarpMouseInWindow(window, capture_anchor_x_, capture_anchor_y_);
+    SDL_SetWindowMouseGrab(window, false);
   }
   if (relative_mode != relative_mode_ &&
       !SDL_SetWindowRelativeMouseMode(window, relative_mode)) {
     if (relative_mode) {
       capture_anchor_valid_ = false;
+      SDL_SetWindowMouseGrab(window, false);
     }
     return false;
   }

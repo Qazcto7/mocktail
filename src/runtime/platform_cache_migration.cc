@@ -341,6 +341,68 @@ PlatformCacheMigrationResult MigratePlatformProfileCaches(
   return result;
 }
 
+RobloxThemeCacheResult ReadRobloxThemeCache(
+    const std::filesystem::path& app_storage_file,
+    std::int64_t authenticated_user_id) {
+  RobloxThemeCacheResult result;
+  if (!app_storage_file.is_absolute() || authenticated_user_id < -1) {
+    result.error = "Roblox theme cache path or user ID is invalid";
+    return result;
+  }
+
+  const JsonReadResult storage = ReadJson(app_storage_file);
+  if (storage.status == ReadStatus::kInvalid) {
+    result.error = storage.error;
+    return result;
+  }
+  if (storage.status == ReadStatus::kMissing) {
+    return result;
+  }
+
+  const auto read_theme = [&result](const nlohmann::json& value,
+                                    std::string_view name) {
+    if (!value.is_string()) {
+      result.error = std::string(name) + " is not a string";
+      return;
+    }
+    const std::string& theme = value.get_ref<const std::string&>();
+    if (theme != "dark" && theme != "light") {
+      result.error = std::string(name) + " must be dark or light";
+      return;
+    }
+    result.dark_theme = theme == "dark";
+  };
+
+  if (authenticated_user_id >= 0) {
+    const auto encoded_device_themes = storage.value.find("DeviceLevelTheme");
+    if (encoded_device_themes != storage.value.end()) {
+      if (!encoded_device_themes->is_string()) {
+        result.error = "Roblox DeviceLevelTheme is not an encoded object";
+        return result;
+      }
+      const nlohmann::json device_themes = nlohmann::json::parse(
+          encoded_device_themes->get_ref<const std::string&>(), nullptr, false,
+          true);
+      if (device_themes.is_discarded() || !device_themes.is_object()) {
+        result.error = "Roblox DeviceLevelTheme encoding is invalid";
+        return result;
+      }
+      const auto account_theme =
+          device_themes.find(std::to_string(authenticated_user_id));
+      if (account_theme != device_themes.end()) {
+        read_theme(*account_theme, "Roblox account theme");
+        return result;
+      }
+    }
+  }
+
+  const auto authenticated_theme = storage.value.find("AuthenticatedTheme");
+  if (authenticated_theme != storage.value.end()) {
+    read_theme(*authenticated_theme, "Roblox authenticated theme");
+  }
+  return result;
+}
+
 bool ApplyRobloxThemeCacheOverride(
     const std::filesystem::path& app_storage_file,
     std::int64_t authenticated_user_id, bool dark_theme, std::string* error) {

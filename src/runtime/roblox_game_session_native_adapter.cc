@@ -405,7 +405,8 @@ Status RobloxGameSessionNativeAdapter::Start(
       surface.generation != binding_.surface.generation ||
       surface.native_window != binding_.surface.native_window ||
       surface.width != binding_.surface.width ||
-      surface.height != binding_.surface.height) {
+      surface.height != binding_.surface.height ||
+      surface.dpi_scale != binding_.surface.dpi_scale) {
     return FailedPrecondition(
         "coordinator start does not match retained StartGameParams");
   }
@@ -485,7 +486,7 @@ Status RobloxGameSessionNativeAdapter::RebindAndInvoke(
   }
 
   jobject candidate_params_local = nullptr;
-  status = CreatePlatformParamsLocked(env, &candidate_params_local);
+  status = CreatePlatformParamsLocked(env, surface, &candidate_params_local);
   if (!status.ok()) {
     if (replaces_surface) {
       ReleaseGlobalReferenceLocked(env, candidate_surface);
@@ -674,7 +675,7 @@ Status RobloxGameSessionNativeAdapter::CreateSurfaceObjectLocked(
 }
 
 Status RobloxGameSessionNativeAdapter::CreatePlatformParamsLocked(
-    JNIEnv* env, jobject* result) const {
+    JNIEnv* env, const GameSurface& surface, jobject* result) const {
   if (env == nullptr || result == nullptr) {
     return InvalidArgument("platform params JNI output is required");
   }
@@ -725,7 +726,9 @@ Status RobloxGameSessionNativeAdapter::CreatePlatformParamsLocked(
       set_int("viewportWidthMm", surface_config_.viewport_width_mm) &&
       set_int("viewportHeightMm", surface_config_.viewport_height_mm);
   if (populated) {
-    env->SetFloatField(object, dpi_scale, surface_config_.dpi_scale);
+    env->SetFloatField(object, dpi_scale,
+                       surface.dpi_scale > 0.0f ? surface.dpi_scale
+                                                : surface_config_.dpi_scale);
     env->SetObjectField(object, asset_folder, asset_path);
   }
   if (asset_path != nullptr) {

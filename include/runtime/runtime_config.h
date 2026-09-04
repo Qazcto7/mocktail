@@ -28,6 +28,10 @@ struct WindowConfig {
   int width = 1280;
   int height = 720;
   std::string title = "Roblox";
+  // GNOME desktop dimensions are logical units; keep the render surface at
+  // that size unless the user explicitly requests high-density rendering.
+  bool high_dpi = false;
+  bool high_dpi_valid = true;
 };
 
 struct InputCapabilityConfig {
@@ -83,8 +87,8 @@ class RuntimeConfig {
   const WindowConfig& window() const { return window_; }
   const std::string& theme_mode() const { return theme_mode_; }
   bool theme_mode_valid() const {
-    return theme_mode_ == "system" || theme_mode_ == "light" ||
-           theme_mode_ == "dark";
+    return theme_mode_ == "roblox" || theme_mode_ == "system" ||
+           theme_mode_ == "light" || theme_mode_ == "dark";
   }
   const InputCapabilityConfig& input_capabilities() const {
     return input_capabilities_;
@@ -135,7 +139,7 @@ class RuntimeConfig {
   GraphicsBackend graphics_backend_ = GraphicsBackend::kVulkan;
   std::string graphics_backend_name_ = "direct-vulkan";
   WindowConfig window_;
-  std::string theme_mode_ = "system";
+  std::string theme_mode_ = "roblox";
   InputCapabilityConfig input_capabilities_;
   DeviceProfile device_profile_ = *FindDeviceProfile(kDefaultDeviceProfileName);
   bool device_profile_valid_ = true;

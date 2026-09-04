@@ -1,6 +1,14 @@
 #include "window/video_driver_policy.h"
 
+#include <SDL3/SDL.h>
 #include <gtest/gtest.h>
+
+#include <cstdlib>
+#include <cstring>
+#include <string_view>
+#include <vector>
+
+#include "window/window.h"
 
 namespace mocktail {
 namespace window {
@@ -78,6 +86,47 @@ TEST(VideoDriverPolicyTest, NamesOnlySelectedDrivers) {
   EXPECT_STREQ(VideoDriverChoiceName(VideoDriverChoice::kNvidiaDirectVulkanX11),
                "x11");
   EXPECT_EQ(VideoDriverChoiceName(VideoDriverChoice::kSdlDefault), nullptr);
+}
+
+TEST(VideoDriverPolicyTest, AcceptsAnyCompiledDriverFromPriorityList) {
+  const std::vector<std::string_view> available = {"wayland", "x11", "dummy"};
+
+  EXPECT_TRUE(HasAvailableVideoDriverCandidate("x11", available));
+  EXPECT_TRUE(HasAvailableVideoDriverCandidate("unavailable,x11", available));
+  EXPECT_TRUE(
+      HasAvailableVideoDriverCandidate("wayland,unavailable", available));
+}
+
+TEST(VideoDriverPolicyTest, RejectsUnavailableOrEmptyDriverList) {
+  const std::vector<std::string_view> available = {"wayland", "x11"};
+
+  EXPECT_FALSE(HasAvailableVideoDriverCandidate("sdl3", available));
+  EXPECT_FALSE(HasAvailableVideoDriverCandidate("sdl3,missing", available));
+  EXPECT_FALSE(HasAvailableVideoDriverCandidate("", available));
+}
+
+TEST(VideoDriverPolicyIntegrationTest,
+     DropsUnavailableLegacyOverrideBeforeSdlInit) {
+  bool has_dummy_driver = false;
+  for (int index = 0; index < SDL_GetNumVideoDrivers(); ++index) {
+    const char* driver = SDL_GetVideoDriver(index);
+    has_dummy_driver = has_dummy_driver ||
+                       (driver != nullptr && std::strcmp(driver, "dummy") == 0);
+  }
+  if (!has_dummy_driver) {
+    GTEST_SKIP() << "linked SDL does not provide its non-display dummy driver";
+  }
+
+  ASSERT_EQ(setenv("SDL_VIDEODRIVER", "sdl3", 1), 0);
+  ASSERT_EQ(setenv("SDL_VIDEO_DRIVER", "dummy", 1), 0);
+  ASSERT_EQ(setenv("MOCKTAIL_DISABLE_AUTO_ANGLE_FALLBACK", "1", 1), 0);
+  ASSERT_EQ(setenv("MOCKTAIL_ENABLE_TEST_GRAPHICS_STUBS", "1", 1), 0);
+
+  ASSERT_TRUE(Init(320, 180, "SDL video-driver recovery test"));
+  EXPECT_EQ(std::getenv("SDL_VIDEODRIVER"), nullptr);
+  ASSERT_NE(SDL_GetCurrentVideoDriver(), nullptr);
+  EXPECT_STREQ(SDL_GetCurrentVideoDriver(), "dummy");
+  Shutdown();
 }
 
 }  // namespace

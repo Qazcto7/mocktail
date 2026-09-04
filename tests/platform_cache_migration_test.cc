@@ -301,6 +301,45 @@ TEST(PlatformCacheMigrationTest,
   EXPECT_EQ(storage["UnrelatedPreference"], "keep");
 }
 
+TEST(PlatformCacheMigrationTest,
+     ReadsAccountThemeWithoutChangingRobloxStorage) {
+  TemporaryDirectory temporary;
+  FixturePaths fixture = PathsFor(temporary);
+  const nlohmann::json device_themes = {
+      {"42", "light"},
+      {"99", "dark"},
+  };
+  ASSERT_TRUE(WriteJson(fixture.app_storage,
+                        {{"AuthenticatedTheme", "dark"},
+                         {"DeviceLevelTheme", device_themes.dump()},
+                         {"UnrelatedPreference", "keep"}}));
+  const std::string original = ReadFile(fixture.app_storage);
+
+  const RobloxThemeCacheResult account =
+      ReadRobloxThemeCache(fixture.app_storage, 42);
+  ASSERT_TRUE(account) << account.error;
+  ASSERT_TRUE(account.dark_theme.has_value());
+  EXPECT_FALSE(*account.dark_theme);
+
+  const RobloxThemeCacheResult fallback =
+      ReadRobloxThemeCache(fixture.app_storage, 7);
+  ASSERT_TRUE(fallback) << fallback.error;
+  ASSERT_TRUE(fallback.dark_theme.has_value());
+  EXPECT_TRUE(*fallback.dark_theme);
+  EXPECT_EQ(ReadFile(fixture.app_storage), original);
+}
+
+TEST(PlatformCacheMigrationTest, MissingRobloxThemeUsesCallerDefault) {
+  TemporaryDirectory temporary;
+  FixturePaths fixture = PathsFor(temporary);
+
+  const RobloxThemeCacheResult result =
+      ReadRobloxThemeCache(fixture.app_storage, -1);
+  ASSERT_TRUE(result) << result.error;
+  EXPECT_FALSE(result.dark_theme.has_value());
+  EXPECT_FALSE(std::filesystem::exists(fixture.app_storage));
+}
+
 }  // namespace
 }  // namespace runtime
 }  // namespace mocktail

@@ -678,6 +678,46 @@ TEST(RobloxTextInputJniBridgeTest,
 }
 
 TEST(RobloxTextInputJniBridgeTest,
+     FocusedTextBoxTracksGeometryChangesWithoutAPropertyCallback) {
+  jnivm::VM vm;
+  auto backend = std::make_shared<FakeBackend>();
+  std::unique_ptr<RobloxTextInputJniBridge> bridge;
+  ASSERT_TRUE(
+      RobloxTextInputJniBridge::CreateForTesting(&vm, backend, &bridge).ok());
+  jnivm::RobloxTextInputShowRequest request = ShowRequest(43, "moving");
+  request.info.x = 10.0F;
+  request.info.y = 20.0F;
+
+  ASSERT_TRUE(vm.DispatchRobloxTextInputShow(request));
+  ASSERT_TRUE(backend->Pump());
+  backend->calls.clear();
+  backend->query_result.available = true;
+  backend->query_result.info.x = 325.0F;
+  backend->query_result.info.y = 410.0F;
+  backend->query_result.info.width = 420.0F;
+  backend->query_result.info.height = 64.0F;
+  backend->query_result.info.text_input_type = 1;
+
+  for (int pump = 0; pump < 8; ++pump) {
+    ASSERT_TRUE(backend->Pump());
+  }
+
+  EXPECT_EQ(backend->calls,
+            (std::vector<std::string>{"query:1", "properties:1", "show:1"}));
+  EXPECT_EQ(backend->last_properties.area_x, 325);
+  EXPECT_EQ(backend->last_properties.area_y, 410);
+  EXPECT_EQ(backend->last_properties.area_width, 420);
+  EXPECT_EQ(backend->last_properties.area_height, 64);
+
+  backend->calls.clear();
+  for (int pump = 0; pump < 8; ++pump) {
+    ASSERT_TRUE(backend->Pump());
+  }
+  EXPECT_EQ(backend->calls, (std::vector<std::string>{"query:1"}));
+  EXPECT_TRUE(bridge->Shutdown().ok());
+}
+
+TEST(RobloxTextInputJniBridgeTest,
      ShutdownClosesAppliedSessionBeforeReleasingBackend) {
   jnivm::VM vm;
   auto backend = std::make_shared<FakeBackend>();

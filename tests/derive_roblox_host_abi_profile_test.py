@@ -38,6 +38,23 @@ PAYLOAD_ROOT = Path.home() / ".local" / "share" / "mocktail" / "payloads"
 REFERENCE_LIBRARY = PAYLOAD_ROOT / REFERENCE_PAYLOAD_ID / "libroblox.so"
 CANDIDATE_LIBRARY = PAYLOAD_ROOT / CANDIDATE_PAYLOAD_ID / "libroblox.so"
 CANDIDATE_METADATA = PAYLOAD_ROOT / CANDIDATE_PAYLOAD_ID / "roblox_payload.json"
+LATEST_REFERENCE_PAYLOAD_ID = "2908-63c5109637b7d7b2bdb8ed8f858023ff5ef49326"
+LATEST_CANDIDATE_PAYLOAD_ID = "2998-ade08266c67aee88ec9c1d00902150e1684dad3a"
+LATEST_REFERENCE_LIBRARY = PAYLOAD_ROOT / LATEST_REFERENCE_PAYLOAD_ID / "libroblox.so"
+LATEST_CANDIDATE_LIBRARY = PAYLOAD_ROOT / LATEST_CANDIDATE_PAYLOAD_ID / "libroblox.so"
+LATEST_CANDIDATE_METADATA = (
+    PAYLOAD_ROOT / LATEST_CANDIDATE_PAYLOAD_ID / "roblox_payload.json"
+)
+LATEST_REFERENCE_PROFILE = next(
+    iter(
+        sorted(
+            (PAYLOAD_ROOT.parent / "host_abi_profiles").glob(
+                f"{LATEST_REFERENCE_PAYLOAD_ID}-*.json"
+            )
+        )
+    ),
+    Path("/nonexistent"),
+)
 
 
 def load_analyzer():
@@ -258,6 +275,32 @@ class FailClosedUtilityTest(unittest.TestCase):
         self.assertEqual(sidecar["payload_path"], f"payloads/{sidecar['payload_id']}")
         self.assertNotIn("supported", profile["status"])
 
+    def test_probation_manifest_preserves_derived_runtime_anchors(self) -> None:
+        candidate = types.SimpleNamespace(build_id="a" * 40, sha256="b" * 64)
+        metadata = {"version_code": 3000, "version_name": "3.0.0"}
+        reference = {"elf_build_id": "c" * 40, "payload_sha256": "d" * 64}
+        runtime = {
+            "user_game_settings_fullscreen_setter_rva": "0x1234",
+            "fmod_output_device_bridge": {"vtable_rva": "0x5678"},
+        }
+
+        _sidecar, manifest = ANALYZER.output_documents(
+            candidate,
+            metadata,
+            reference,
+            {"elf_build_id": "a" * 40},
+            {"x": 1},
+            runtime,
+        )
+
+        profile = manifest["profiles"][0]
+        self.assertEqual(
+            profile["user_game_settings_fullscreen_setter_rva"], "0x1234"
+        )
+        self.assertEqual(
+            profile["fmod_output_device_bridge"], {"vtable_rva": "0x5678"}
+        )
+
 
 @unittest.skipIf(ANALYZER.capstone is None, "Python capstone is unavailable")
 class SignatureSemanticsTest(unittest.TestCase):
@@ -265,7 +308,11 @@ class SignatureSemanticsTest(unittest.TestCase):
         reference = decode_x86(bytes.fromhex("488d0534120000e878560000c3"))
         candidate = decode_x86(bytes.fromhex("488d0578560000e834120000c3"), 0x2000)
 
-        ANALYZER.validate_semantic_match(reference, candidate, False)
+        ANALYZER.validate_semantic_match(
+            reference,
+            candidate,
+            ANALYZER.SignatureSpec("test", 0x1000, len(reference)),
+        )
 
     def test_registry_object_size_must_change_consistently(self) -> None:
         reference = decode_x86(
@@ -287,9 +334,32 @@ class SignatureSemanticsTest(unittest.TestCase):
             + bytes.fromhex("beb8030000")
         )
 
-        ANALYZER.validate_semantic_match(reference, candidate, True)
+        spec = ANALYZER.SignatureSpec(
+            "registry", 0x1000, len(reference), True
+        )
+        ANALYZER.validate_semantic_match(reference, candidate, spec)
         with self.assertRaisesRegex(ANALYZER.AnalyzerError, "inconsistent"):
-            ANALYZER.validate_semantic_match(reference, inconsistent, True)
+            ANALYZER.validate_semantic_match(reference, inconsistent, spec)
+
+    def test_registry_body_can_use_shifted_size_indices(self) -> None:
+        reference = decode_x86(
+            bytes.fromhex(
+                "bf38030000 e800000000 4889c3 4531f6 ba38030000 "
+                "4889c7 31f6 e800000000 b80000803f 894320 488d4b28"
+            )
+        )
+        candidate = decode_x86(
+            bytes.fromhex(
+                "bfb0030000 e800000000 4889c3 4531f6 bab0030000 "
+                "4889c7 31f6 e800000000 b80000803f 894320 488d4b28"
+            ),
+            0x2000,
+        )
+        spec = ANALYZER.SignatureSpec(
+            "registry-body", 0x1000, len(reference), True, 6, (0, 4)
+        )
+
+        ANALYZER.validate_semantic_match(reference, candidate, spec)
 
     def test_short_anchor_is_opt_in(self) -> None:
         encoded = b"abc\0def"
@@ -428,6 +498,41 @@ class RealPayloadAcceptanceTest(unittest.TestCase):
                 },
             )
             self.assertEqual(manifest["profiles"][0]["status"], "experimental")
+
+
+@unittest.skipUnless(
+    ANALYZER.capstone is not None
+    and LATEST_REFERENCE_LIBRARY.is_file()
+    and LATEST_REFERENCE_PROFILE.is_file()
+    and LATEST_CANDIDATE_LIBRARY.is_file()
+    and LATEST_CANDIDATE_METADATA.is_file(),
+    "local exact 2908 and 2998 payloads are unavailable",
+)
+class RealRuntimeCompatibilityAcceptanceTest(unittest.TestCase):
+    def test_exact_2908_to_2998_runtime_bridge_derivation(self) -> None:
+        with ANALYZER.ElfImage(LATEST_REFERENCE_LIBRARY) as reference, ANALYZER.ElfImage(
+            LATEST_CANDIDATE_LIBRARY
+        ) as candidate:
+            derived = ANALYZER.derive_runtime_compatibility(
+                reference,
+                candidate,
+                (PROJECT_ROOT / "config" / "roblox_compatibility.json",),
+            )
+
+        self.assertEqual(
+            derived,
+            {
+                "user_game_settings_fullscreen_setter_rva": "0x45ad8aa",
+                "fmod_output_device_bridge": {
+                    "vtable_rva": "0x6c58040",
+                    "string_constructor_rva": "0x1d32df8",
+                    "count_method_rva": "0x32d0ee0",
+                    "info_method_rva": "0x32d0f80",
+                    "current_method_rva": "0x32d0f30",
+                    "select_method_rva": "0x32d0cb4",
+                },
+            },
+        )
 
 
 if __name__ == "__main__":

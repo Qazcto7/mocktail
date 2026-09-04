@@ -149,7 +149,8 @@ runtime::GameSessionUpdateResult WindowGameSurfaceBridge::Dispatch(
       return consumer_.changed(
           consumer_.context,
           {event.surface.generation, event.surface.native_window,
-           event.surface.width, event.surface.height});
+           event.surface.width, event.surface.height,
+           event.surface.dpi_scale});
     case WindowSurfaceEventType::kDestroyed:
       return consumer_.destroyed(consumer_.context, event.surface.generation);
   }

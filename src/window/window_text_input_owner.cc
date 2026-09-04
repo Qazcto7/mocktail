@@ -7,7 +7,10 @@
 #include <SDL3/SDL_video.h>
 
 #include <algorithm>
+#include <cmath>
 #include <utility>
+
+#include "mocktail/platform/platform_runtime.h"
 
 namespace mocktail {
 namespace window {
@@ -194,11 +197,39 @@ bool WindowTextInputOwner::StopAndClear() {
 }
 
 bool SdlTextInputBackend::SetArea(const TextInputArea& area) {
-  SDL_Rect rect = {area.x, area.y, area.width, area.height};
-  const int cursor = std::max(0, std::min(area.cursor, area.width));
-  return window_ != nullptr && SDL_SetTextInputArea(
-                                   static_cast<SDL_Window*>(window_), &rect,
-                                   cursor);
+  auto* window = static_cast<SDL_Window*>(window_);
+  if (window == nullptr) {
+    return false;
+  }
+  platform::SurfaceCoordinateTransform transform;
+  if (!SDL_GetWindowSize(window, &transform.logical_width,
+                         &transform.logical_height) ||
+      !SDL_GetWindowSizeInPixels(window, &transform.pixel_width,
+                                 &transform.pixel_height)) {
+    return false;
+  }
+  const float density_scale = SDL_GetWindowDisplayScale(window);
+  transform.density_scale = density_scale > 0.0F ? density_scale : 1.0F;
+  if (!transform.valid()) {
+    return false;
+  }
+
+  const int left =
+      static_cast<int>(std::lround(transform.GuestToHostLogicalX(area.x)));
+  const int top =
+      static_cast<int>(std::lround(transform.GuestToHostLogicalY(area.y)));
+  const int right = static_cast<int>(std::lround(
+      transform.GuestToHostLogicalX(static_cast<float>(area.x) + area.width)));
+  const int bottom = static_cast<int>(std::lround(
+      transform.GuestToHostLogicalY(static_cast<float>(area.y) + area.height)));
+  SDL_Rect rect = {left, top, std::max(1, right - left),
+                   std::max(1, bottom - top)};
+  const int native_cursor = std::max(0, std::min(area.cursor, area.width));
+  const int cursor_edge =
+      static_cast<int>(std::lround(transform.GuestToHostLogicalX(
+          static_cast<float>(area.x) + native_cursor)));
+  const int cursor = std::max(0, std::min(cursor_edge - left, rect.w));
+  return window_ != nullptr && SDL_SetTextInputArea(window, &rect, cursor);
 }
 
 bool SdlTextInputBackend::ClearArea() {

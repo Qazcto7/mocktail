@@ -192,7 +192,8 @@ class RobloxGameSessionNativeAdapter final {
   Status RebindAndInvoke(const GameSurface& surface, bool resume);
   Status CreateSurfaceObjectLocked(JNIEnv* env, const GameSurface& surface,
                                    jobject* result) const;
-  Status CreatePlatformParamsLocked(JNIEnv* env, jobject* result) const;
+  Status CreatePlatformParamsLocked(JNIEnv* env, const GameSurface& surface,
+                                    jobject* result) const;
   Status CheckJniException(JNIEnv* env, const char* operation) const;
   void ReleaseGlobalReferenceLocked(JNIEnv* env, jobject reference);
   void ReleaseGlobalReferencesLocked(JNIEnv* env);

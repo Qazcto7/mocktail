@@ -455,6 +455,7 @@ add_library(mocktail_window STATIC
   src/window/roblox_fullscreen_menu_request_gate.cc
   src/window/video_driver_policy.cc
   src/window/window.cc
+  src/window/window_creation_policy.cc
   src/window/window_fullscreen_request_gate.cc
   src/window/window_game_surface_bridge.cc
   src/window/window_pointer_capture_owner.cc
@@ -467,6 +468,7 @@ target_include_directories(mocktail_window PUBLIC src)
 mocktail_apply_compile_options(mocktail_window)
 target_link_libraries(mocktail_window PUBLIC
   Mocktail::PlatformSdl
+  Mocktail::SdlVulkanWsi
   SDL3::SDL3
   ${CMAKE_DL_LIBS}
   PRIVATE Mocktail::Runtime
@@ -595,45 +597,14 @@ endif()
 unset(_mocktail_execinfo_link_probe)
 
 add_library(mocktail_legacy_runtime STATIC
-  # ABI and platform foundations.
-  src/legacy/bionic_runtime_wrappers.cc
-  src/legacy/host_abi_runtime.cc
-  src/legacy/memory_inspection.cc
-  src/legacy/runtime_environment.cc
-  src/legacy/runtime_paths.cc
-  src/legacy/symbol_resolver.cc
-
-  # Headless recovery and diagnostics.
-  src/legacy/headless_patches.cc
-  src/legacy/headless_signal_handler.cc
-  src/legacy/headless_signal_support.cc
-  src/legacy/runtime_diagnostics.cc
-
-  # Runtime entry, orchestration, and adapters.
-  src/legacy/engine_startup.cc
-  src/legacy/legacy_runtime_entry.cc
-  src/legacy/legacy_runtime_runner.cc
-  src/legacy/main_thread_runtime.cc
-  src/legacy/rbxm_diagnostics.cc
-  src/legacy/runtime_adapters.cc
-
-  # Stage 6 compatibility and recovery.
-  src/legacy/stage6_binary_patches.cc
-  src/legacy/stage6_platform_patches.cc
-  src/legacy/stage6_rbxm_fallbacks.cc
-  src/legacy/stage6_start_lua_fallbacks.cc
-  src/legacy/stage6_start_lua_signal_recovery.cc
+  src/legacy/legacy_runtime.cc
   src/runtime/roblox_text_input_jni_bridge.cc
 )
 target_include_directories(mocktail_legacy_runtime PRIVATE include src)
 mocktail_apply_compile_options(mocktail_legacy_runtime)
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
   # Diagnostics from signal handlers cannot handle a failed write.
-  set_property(SOURCE
-    src/legacy/headless_signal_handler.cc
-    src/legacy/headless_signal_support.cc
-    src/legacy/stage6_start_lua_signal_recovery.cc
-    APPEND PROPERTY
+  set_property(SOURCE src/legacy/legacy_runtime.cc APPEND PROPERTY
     COMPILE_OPTIONS -Wno-unused-result
   )
 endif()

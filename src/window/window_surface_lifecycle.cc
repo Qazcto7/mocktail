@@ -16,24 +16,25 @@ Status FailedPrecondition(std::string message) {
 }
 
 bool ValidAvailableSurface(uintptr_t native_window, uint32_t width,
-                           uint32_t height) {
-  return native_window != 0 && width != 0 && height != 0;
+                           uint32_t height, float dpi_scale) {
+  return native_window != 0 && width != 0 && height != 0 && dpi_scale > 0.0f;
 }
 
 }  // namespace
 
 Status WindowSurfaceLifecycle::Activate(uintptr_t native_window, uint32_t width,
-                                        uint32_t height) {
+                                        uint32_t height, float dpi_scale) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (active_) {
     return FailedPrecondition("window surface lifecycle is already active");
   }
-  if (!ValidAvailableSurface(native_window, width, height)) {
+  if (!ValidAvailableSurface(native_window, width, height, dpi_scale)) {
     return InvalidArgument(
-        "initial window surface requires a native handle and dimensions");
+        "initial window surface requires a native handle, dimensions and "
+        "DPI scale");
   }
   events_.clear();
-  current_ = {1, native_window, width, height, true};
+  current_ = {1, native_window, width, height, true, dpi_scale};
   active_ = true;
   return Status::Ok();
 }
@@ -46,7 +47,7 @@ void WindowSurfaceLifecycle::Deactivate() {
 }
 
 Status WindowSurfaceLifecycle::Observe(uintptr_t native_window, uint32_t width,
-                                       uint32_t height) {
+                                       uint32_t height, float dpi_scale) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!active_) {
     return FailedPrecondition("window surface lifecycle is not active");
@@ -61,6 +62,10 @@ Status WindowSurfaceLifecycle::Observe(uintptr_t native_window, uint32_t width,
       current_.available = false;
     }
     return Status::Ok();
+  }
+
+  if (!(dpi_scale > 0.0f)) {
+    return InvalidArgument("observed window surface requires a DPI scale");
   }
 
   // A mapped handle with a temporarily zero pixel extent is not fabricated as
@@ -78,7 +83,7 @@ Status WindowSurfaceLifecycle::Observe(uintptr_t native_window, uint32_t width,
   }
 
   if (!current_.available) {
-    return RestoreLocked(native_window, width, height);
+    return RestoreLocked(native_window, width, height, dpi_scale);
   }
 
   if (native_window != current_.native_window) {
@@ -87,14 +92,16 @@ Status WindowSurfaceLifecycle::Observe(uintptr_t native_window, uint32_t width,
     QueueLocked(WindowSurfaceEventType::kDestroyed, destroyed);
     current_.native_window = 0;
     current_.available = false;
-    return RestoreLocked(native_window, width, height);
+    return RestoreLocked(native_window, width, height, dpi_scale);
   }
 
-  if (width == current_.width && height == current_.height) {
+  if (width == current_.width && height == current_.height &&
+      dpi_scale == current_.dpi_scale) {
     return Status::Ok();
   }
   current_.width = width;
   current_.height = height;
+  current_.dpi_scale = dpi_scale;
   QueueLocked(WindowSurfaceEventType::kChanged, current_);
   return Status::Ok();
 }
@@ -106,7 +113,7 @@ Status WindowSurfaceLifecycle::Refresh() {
   }
   if (!current_.available ||
       !ValidAvailableSurface(current_.native_window, current_.width,
-                             current_.height)) {
+                             current_.height, current_.dpi_scale)) {
     return FailedPrecondition("window surface is unavailable for refresh");
   }
   QueueLocked(WindowSurfaceEventType::kChanged, current_);
@@ -120,7 +127,7 @@ Status WindowSurfaceLifecycle::Recreate() {
   }
   if (!current_.available ||
       !ValidAvailableSurface(current_.native_window, current_.width,
-                             current_.height)) {
+                             current_.height, current_.dpi_scale)) {
     return FailedPrecondition("window surface is unavailable for recreation");
   }
   if (current_.generation == std::numeric_limits<uint64_t>::max()) {
@@ -171,7 +178,8 @@ void WindowSurfaceLifecycle::QueueLocked(WindowSurfaceEventType type,
 }
 
 Status WindowSurfaceLifecycle::RestoreLocked(uintptr_t native_window,
-                                             uint32_t width, uint32_t height) {
+                                             uint32_t width, uint32_t height,
+                                             float dpi_scale) {
   if (current_.generation == std::numeric_limits<uint64_t>::max()) {
     return FailedPrecondition("window surface generation overflowed");
   }
@@ -179,6 +187,7 @@ Status WindowSurfaceLifecycle::RestoreLocked(uintptr_t native_window,
   current_.native_window = native_window;
   current_.width = width;
   current_.height = height;
+  current_.dpi_scale = dpi_scale;
   current_.available = true;
   QueueLocked(WindowSurfaceEventType::kCreated, current_);
   QueueLocked(WindowSurfaceEventType::kChanged, current_);

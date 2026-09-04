@@ -1,6 +1,7 @@
 #ifndef MOCKTAIL_PLATFORM_PLATFORM_RUNTIME_H_
 #define MOCKTAIL_PLATFORM_PLATFORM_RUNTIME_H_
 
+#include <cmath>
 #include <cstdint>
 #include <string>
 #include <variant>
@@ -26,7 +27,7 @@ struct WindowOptions {
   int height = 720;
   std::string title = "Roblox";
   WindowSurfaceApi surface_api = WindowSurfaceApi::kAngleEgl;
-  bool high_pixel_density = true;
+  bool high_pixel_density = false;
   bool initially_hidden = true;
 
   // Production callers should keep this true. Tests using SDL's dummy driver
@@ -58,11 +59,69 @@ struct NativeWindowDescriptor {
 
 struct QuitEvent {};
 
+// Android exposes pointer and TextBox geometry in density-independent surface
+// coordinates. SDL exposes pointer positions in logical window coordinates,
+// while Vulkan presents to the pixel-sized drawable. Keep all three spaces in
+// one value so input, IME placement and same-surface overlays use exact inverse
+// transforms.
+struct SurfaceCoordinateTransform {
+  int32_t logical_width = 0;
+  int32_t logical_height = 0;
+  int32_t pixel_width = 0;
+  int32_t pixel_height = 0;
+  float density_scale = 1.0F;
+
+  bool valid() const {
+    return logical_width > 0 && logical_height > 0 && pixel_width > 0 &&
+           pixel_height > 0 && std::isfinite(density_scale) &&
+           density_scale > 0.0F;
+  }
+
+  float guest_width() const {
+    return valid() ? static_cast<float>(pixel_width) / density_scale : 0.0F;
+  }
+  float guest_height() const {
+    return valid() ? static_cast<float>(pixel_height) / density_scale : 0.0F;
+  }
+  int32_t rounded_guest_width() const {
+    return valid() ? static_cast<int32_t>(std::lround(guest_width())) : 0;
+  }
+  int32_t rounded_guest_height() const {
+    return valid() ? static_cast<int32_t>(std::lround(guest_height())) : 0;
+  }
+
+  float HostLogicalToGuestX(float coordinate) const {
+    return valid() ? coordinate * static_cast<float>(pixel_width) /
+                         static_cast<float>(logical_width) / density_scale
+                   : coordinate;
+  }
+  float HostLogicalToGuestY(float coordinate) const {
+    return valid() ? coordinate * static_cast<float>(pixel_height) /
+                         static_cast<float>(logical_height) / density_scale
+                   : coordinate;
+  }
+  float GuestToHostLogicalX(float coordinate) const {
+    return valid() ? coordinate * density_scale *
+                         static_cast<float>(logical_width) /
+                         static_cast<float>(pixel_width)
+                   : coordinate;
+  }
+  float GuestToHostLogicalY(float coordinate) const {
+    return valid() ? coordinate * density_scale *
+                         static_cast<float>(logical_height) /
+                         static_cast<float>(pixel_height)
+                   : coordinate;
+  }
+};
+
 struct WindowResizedEvent {
   int logical_width = 0;
   int logical_height = 0;
   int pixel_width = 0;
   int pixel_height = 0;
+  // Android DisplayMetrics.density equivalent. This is independent of the
+  // logical-to-pixel drawable ratio on X11/XWayland.
+  float density_scale = 1.0F;
 };
 
 struct WindowFocusEvent {

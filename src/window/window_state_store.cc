@@ -107,6 +107,14 @@ bool ReadBoolean(const nlohmann::json& object, const char* name, bool* value) {
 
 }  // namespace
 
+WindowStartupPresentationPlan PlanWindowStartupPresentation(
+    const PersistedWindowState& state) {
+  if (state.fullscreen) {
+    return {true, false};
+  }
+  return {false, state.maximized};
+}
+
 WindowStateLoadResult LoadWindowState(const std::filesystem::path& path) {
   WindowStateLoadResult result;
   if (!path.is_absolute()) {

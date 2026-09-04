@@ -1,6 +1,7 @@
 #ifndef MOCKTAIL_RUNTIME_ROBLOX_TEXT_DISPLAY_STATE_H_
 #define MOCKTAIL_RUNTIME_ROBLOX_TEXT_DISPLAY_STATE_H_
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -14,8 +15,14 @@ namespace runtime {
 struct RobloxTextOverlayViewport {
   int width = 0;
   int height = 0;
+  float density_scale = 1.0F;
 
-  bool valid() const { return width > 0 && height > 0; }
+  bool valid() const {
+    return width > 0 && height > 0 && std::isfinite(density_scale) &&
+           density_scale > 0.0F;
+  }
+  int coordinate_width() const;
+  int coordinate_height() const;
 };
 
 struct RobloxTextOverlayGeometry {

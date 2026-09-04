@@ -182,7 +182,11 @@ RuntimeConfig RuntimeConfig::FromEnvironment(const Environment& environment) {
                                           config.window_.height);
   config.window_.title =
       environment.GetOr("MOCKTAIL_WIN_TITLE", config.window_.title);
-  config.theme_mode_ = environment.GetOr("MOCKTAIL_THEME", "system");
+  config.window_.high_dpi = ReadBoolean(environment, "MOCKTAIL_WIN_HIGH_DPI",
+                                        config.window_.high_dpi,
+                                        &config.window_.high_dpi_valid);
+  config.theme_mode_ =
+      environment.GetOr("MOCKTAIL_THEME", config.theme_mode_);
   const std::optional<std::string> configured_device =
       environment.Get("MOCKTAIL_DEVICE_PROFILE");
   const bool has_explicit_device =
@@ -265,7 +269,7 @@ RuntimeConfig RuntimeConfig::FromEnvironment(const Environment& environment) {
         config.device_profile_.roblox_http_user_agent;
   }
   config.frame_rate_ = ParseFrameRatePolicy(
-      environment.GetOr("MOCKTAIL_FRAME_RATE_LIMIT", "display"));
+      environment.GetOr("MOCKTAIL_FRAME_RATE_LIMIT", "-1"));
   config.vsync_mode_ = environment.GetOr("MOCKTAIL_VSYNC", "auto");
   config.performance_ = ParsePerformancePolicy(
       environment.GetOr("MOCKTAIL_MULTITHREADED_RENDERING", "0"),

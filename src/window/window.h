@@ -31,7 +31,7 @@ bool PumpEvents();
 // missed the slot or SDL still has events).
 uint64_t PaceInputPump();
 
-// True when MOCKTAIL_VSYNC is off/0 or MOCKTAIL_FRAME_RATE_LIMIT is unlimited.
+// True when CachedPresentModePolicy() is unthrottled.
 bool UnthrottledPresentationRequested();
 
 // Queues supported GameActivity fullscreen flags for the SDL thread.
@@ -62,6 +62,7 @@ struct WindowViewportSnapshot {
   int logical_height = 0;
   int pixel_width = 0;
   int pixel_height = 0;
+  float dpi_scale = 1.0f;
 
   bool valid() const {
     return logical_width > 0 && logical_height > 0 && pixel_width > 0 &&

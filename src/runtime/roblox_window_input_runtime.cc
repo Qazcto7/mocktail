@@ -37,7 +37,8 @@ Status RobloxWindowInputRuntime::Initialize() {
                          "SDL input window is unavailable");
   }
   Status status = text_surface_overlay_.Initialize(
-      {window_viewport.pixel_width, window_viewport.pixel_height});
+      {window_viewport.pixel_width, window_viewport.pixel_height,
+       window_viewport.dpi_scale});
   if (!status.ok()) {
     return status;
   }
@@ -45,7 +46,8 @@ Status RobloxWindowInputRuntime::Initialize() {
       (SDL_GetWindowFlags(sdl_window) & SDL_WINDOW_INPUT_FOCUS) != 0;
   status = runtime_.Initialize(
       {window_viewport.logical_width, window_viewport.logical_height,
-       window_viewport.pixel_width, window_viewport.pixel_height},
+       window_viewport.pixel_width, window_viewport.pixel_height,
+       window_viewport.dpi_scale},
       initially_focused);
   if (!status.ok()) {
     (void)text_surface_overlay_.Shutdown();
@@ -82,7 +84,7 @@ void RobloxWindowInputRuntime::PlatformEventCallback(
   if (const auto* resized =
           std::get_if<platform::WindowResizedEvent>(&event.payload)) {
     (void)self->text_surface_overlay_.UpdateViewport(
-        {resized->pixel_width, resized->pixel_height});
+        {resized->pixel_width, resized->pixel_height, resized->density_scale});
   }
   (void)self->runtime_.HandleEvent(event);
 }

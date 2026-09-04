@@ -100,7 +100,8 @@ TEST(RuntimeConfigBootstrapTest, CreatesCompletePrivateFirstRunFile) {
   ASSERT_TRUE(loaded) << loaded.error;
   EXPECT_TRUE(loaded.file_loaded);
   EXPECT_EQ(loaded.config.graphics_backend(), GraphicsBackend::kVulkan);
-  EXPECT_EQ(loaded.config.frame_rate().mode, FrameRateLimitMode::kDisplay);
+  EXPECT_EQ(loaded.config.theme_mode(), "roblox");
+  EXPECT_EQ(loaded.config.frame_rate().mode, FrameRateLimitMode::kUnmanaged);
   EXPECT_EQ(loaded.config.vsync_mode(), "auto");
   EXPECT_FALSE(loaded.config.performance().multithreaded_rendering);
   EXPECT_EQ(loaded.config.performance().memory_limit_mb, 0U);
@@ -130,12 +131,15 @@ TEST(RuntimeConfigBootstrapTest,
            "profile.\ndevice: pc-windows-11",
            "# Boolean (default: false): start without a visible SDL "
            "window.\n  headless: false",
+           "# String (default: roblox): use Roblox's saved account theme. "
+           "Supported\n  # overrides: dark, light, or system (follow the "
+           "desktop color scheme).\n  theme: roblox",
            "# Recommended values: direct-vulkan, opengl, system, "
            "angle-vulkan.\n  backend: direct-vulkan",
-           "# selects Roblox's unmodified 240-FPS scheduler maximum.\n  "
-           "frame_rate_limit: display",
-           "# String (default: auto): presentation synchronization: auto, "
-           "on, or off.\n  vsync: auto",
+           "# DFIntTaskSchedulerTargetFps without a whitelist.\n  "
+           "# frame_rate_limit: -1",
+           "# Optional presentation synchronization override: auto, on, or "
+           "off.\n  # vsync: off",
            "# physical CPU core. A place's Lua/main thread can still remain "
            "serial.\n  multithreaded_rendering: false",
            "# sizes and coalesces midphase work. Supported: auto, latency, "
@@ -162,11 +166,16 @@ TEST(RuntimeConfigBootstrapTest,
            "# Boolean (default: true): never expose private or reserved "
            "joins.\n      public_servers_only: true",
            "#   playing: \"{place_name}\"\n    #   state: Playing Roblox",
-           "# Integer (default: 1280): initial window width in pixels.\n  "
-           "width: 1280",
-           "# Integer (default: 720): initial window height in pixels.\n  "
-           "height: 720",
-           "# String (default: Roblox): window title.\n  title: Roblox",
+            "# Integer (default: 1280): initial window width in logical desktop "
+            "units.\n  "
+            "width: 1280",
+            "# Integer (default: 720): initial window height in logical desktop "
+            "units.\n  "
+            "height: 720",
+            "# String (default: Roblox): window title.\n  title: Roblox",
+            "# Boolean (default: false): render at physical display-pixel density instead\n  "
+            "# of the logical desktop resolution. Enable only for sharper high-DPI output.\n  "
+            "high_dpi: false",
            "# HostAbi profile, run two isolated canaries with the selected "
            "graphics\n  "
            "# backend, and promote only on success. An existing current "
@@ -252,6 +261,7 @@ TEST(RuntimeConfigFileTest, UsesDefaultsWhenFileDoesNotExist) {
   ASSERT_TRUE(loaded) << loaded.error;
   EXPECT_FALSE(loaded.file_loaded);
   EXPECT_EQ(loaded.config.graphics_backend(), GraphicsBackend::kVulkan);
+  EXPECT_EQ(loaded.config.theme_mode(), "roblox");
   EXPECT_EQ(loaded.config.roblox_library_path(), "rbx_bin/libroblox.so");
 }
 
@@ -299,6 +309,7 @@ window:
   width: 1920
   height: 1080
   title: Mocktail Desktop
+  high_dpi: true
 input:
   touch_enabled: false
 network:
@@ -345,6 +356,7 @@ updates:
   EXPECT_EQ(loaded.config.window().width, 1920);
   EXPECT_EQ(loaded.config.window().height, 1080);
   EXPECT_EQ(loaded.config.window().title, "Mocktail Desktop");
+  EXPECT_TRUE(loaded.config.window().high_dpi);
   EXPECT_FALSE(loaded.config.input_capabilities().touch_enabled);
   EXPECT_TRUE(loaded.config.desktop_playability());
   ASSERT_TRUE(loaded.config.roblox_http_user_agent().has_value());
@@ -390,6 +402,8 @@ input:
   touch_enabled: true
 compatibility:
   desktop_playability: false
+window:
+  high_dpi: true
 network:
   proxy_host: yaml-proxy.example.test
   proxy_port: 8080
@@ -406,6 +420,7 @@ network:
       {"MOCKTAIL_AUDIO_INPUT_DEVICE", "Environment Microphone"},
       {"MOCKTAIL_TOUCH_MODE", "off"},
       {"MOCKTAIL_DESKTOP_PLAYABILITY", "1"},
+      {"MOCKTAIL_WIN_HIGH_DPI", "0"},
       {"MOCKTAIL_HTTP_PROXY_HOST", "env-proxy.example.test"},
       {"MOCKTAIL_HTTP_PROXY_PORT", "1080"},
   });
@@ -424,6 +439,7 @@ network:
   EXPECT_EQ(loaded.config.audio_output_device(), "Environment Headset");
   EXPECT_EQ(loaded.config.audio_input_device(), "Environment Microphone");
   EXPECT_FALSE(loaded.config.input_capabilities().touch_enabled);
+  EXPECT_FALSE(loaded.config.window().high_dpi);
   EXPECT_TRUE(loaded.config.desktop_playability());
   ASSERT_TRUE(loaded.config.roblox_http_user_agent().has_value());
   EXPECT_EQ(*loaded.config.roblox_http_user_agent(),
@@ -450,6 +466,21 @@ audio:
   std::string error;
   EXPECT_FALSE(ExportRuntimeConfigEnvironment(from_environment, &error));
   EXPECT_NE(error.find("invalid audio output device"), std::string::npos);
+}
+
+TEST(RuntimeConfigFileTest, RejectsInvalidHighDpiPolicy) {
+  TemporaryDirectory temporary;
+  const std::filesystem::path file = temporary.Write(R"yaml(
+version: 1
+window:
+  high_dpi: yes
+)yaml");
+
+  const RuntimeConfigLoadResult loaded =
+      LoadRuntimeConfig(MapEnvironment(), file);
+
+  EXPECT_FALSE(loaded);
+  EXPECT_NE(loaded.error.find("window.high_dpi"), std::string::npos);
 }
 
 TEST(RuntimeConfigFileTest, RejectsUnsafeAudioInputDevice) {
@@ -572,6 +603,22 @@ TEST(RuntimeConfigFileTest, ExportsMultithreadedRenderingPolicy) {
   ASSERT_TRUE(ExportRuntimeConfigEnvironment(disabled, &error)) << error;
   EXPECT_STREQ(getenv("MOCKTAIL_MULTITHREADED_RENDERING"), "0");
   unsetenv("MOCKTAIL_MULTITHREADED_RENDERING");
+}
+
+TEST(RuntimeConfigFileTest, ExportsHighDpiWindowPolicy) {
+  unsetenv("MOCKTAIL_WIN_HIGH_DPI");
+  std::string error;
+  const RuntimeConfig default_config =
+      RuntimeConfig::FromEnvironment(MapEnvironment());
+  ASSERT_TRUE(ExportRuntimeConfigEnvironment(default_config, &error)) << error;
+  ASSERT_NE(getenv("MOCKTAIL_WIN_HIGH_DPI"), nullptr);
+  EXPECT_STREQ(getenv("MOCKTAIL_WIN_HIGH_DPI"), "0");
+
+  const RuntimeConfig high_dpi = RuntimeConfig::FromEnvironment(
+      MapEnvironment({{"MOCKTAIL_WIN_HIGH_DPI", "1"}}));
+  ASSERT_TRUE(ExportRuntimeConfigEnvironment(high_dpi, &error)) << error;
+  EXPECT_STREQ(getenv("MOCKTAIL_WIN_HIGH_DPI"), "1");
+  unsetenv("MOCKTAIL_WIN_HIGH_DPI");
 }
 
 TEST(RuntimeConfigFileTest, ExportsPhysicsWorkerMode) {

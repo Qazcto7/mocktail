@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -37,6 +38,20 @@ struct PlatformCacheMigrationResult {
 PlatformCacheMigrationResult MigratePlatformProfileCaches(
     const Environment& environment, const RuntimePaths& paths,
     std::string_view desired_revision);
+
+struct RobloxThemeCacheResult {
+  std::optional<bool> dark_theme;
+  std::string error;
+
+  explicit operator bool() const { return error.empty(); }
+};
+
+// Reads the current account's Roblox theme without changing appStorage. A
+// missing value leaves dark_theme empty so the caller can use Roblox's own
+// startup default.
+RobloxThemeCacheResult ReadRobloxThemeCache(
+    const std::filesystem::path& app_storage_file,
+    std::int64_t authenticated_user_id);
 
 // Synchronizes only Roblox's local theme keys with the resolved host theme.
 bool ApplyRobloxThemeCacheOverride(

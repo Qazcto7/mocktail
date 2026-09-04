@@ -41,7 +41,8 @@ GameSurface SnapshotProductionSurface(void*) {
       window::GetWindowSurfaceSnapshot();
   return {snapshot.generation, snapshot.available ? snapshot.native_window : 0,
           snapshot.available ? snapshot.width : 0,
-          snapshot.available ? snapshot.height : 0};
+          snapshot.available ? snapshot.height : 0,
+          snapshot.available ? snapshot.dpi_scale : 0.0f};
 }
 
 Status SurfaceUpdateStatus(const GameSessionUpdateResult& result) {
@@ -54,7 +55,8 @@ Status SurfaceUpdateStatus(const GameSessionUpdateResult& result) {
 bool SameSurface(const GameSurface& left, const GameSurface& right) {
   return left.generation == right.generation &&
          left.native_window == right.native_window &&
-         left.width == right.width && left.height == right.height;
+         left.width == right.width && left.height == right.height &&
+         left.dpi_scale == right.dpi_scale;
 }
 
 int32_t JoinRequestTypeFor(const RobloxExperienceLaunchRequest& request) {
@@ -1072,7 +1074,8 @@ Status RobloxExperienceComposition::RefreshLateSurface() {
         case window::WindowSurfaceEventType::kChanged:
           status = SurfaceUpdateStatus(SurfaceChanged(
               {event.surface.generation, event.surface.native_window,
-               event.surface.width, event.surface.height}));
+               event.surface.width, event.surface.height,
+               event.surface.dpi_scale}));
           break;
         case window::WindowSurfaceEventType::kDestroyed:
           status =
@@ -1091,7 +1094,7 @@ Status RobloxExperienceComposition::RefreshLateSurface() {
               ? GameSurface{event.surface.generation, 0, 0, 0}
               : GameSurface{event.surface.generation,
                             event.surface.native_window, event.surface.width,
-                            event.surface.height};
+                            event.surface.height, event.surface.dpi_scale};
       std::lock_guard<std::mutex> lock(mutex_);
       late_surface_snapshot_ = committed;
     }
@@ -1753,7 +1756,8 @@ Status RobloxExperienceComposition::BuildLaunchObjects(
         SetField<jobject>(env, params_local, params_class, "assetFolderPath",
                           "Ljava/lang/String;", asset_path) &&
         SetField<jfloat>(env, params_local, params_class, "dpiScale", "F",
-                         surface_config_.dpi_scale) &&
+                         surface.dpi_scale > 0.0f ? surface.dpi_scale
+                                                  : surface_config_.dpi_scale) &&
         SetField<jint>(env, params_local, params_class, "viewportWidthMm", "I",
                        surface_config_.viewport_width_mm) &&
         SetField<jint>(env, params_local, params_class, "viewportHeightMm", "I",

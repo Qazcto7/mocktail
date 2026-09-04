@@ -32,16 +32,10 @@ RobloxInputDispatchResult Result(RobloxInputDispatchState state,
   return {state, kind, std::move(status)};
 }
 
-float ScaleToSurfacePixels(float coordinate, int32_t logical_extent,
-                           int32_t pixel_extent) {
-  if (__builtin_expect(logical_extent == pixel_extent, 1)) {
-    return coordinate;
-  }
-  if (__builtin_expect(logical_extent <= 0, 0)) {
-    return coordinate;
-  }
-  return coordinate * static_cast<float>(pixel_extent) /
-         static_cast<float>(logical_extent);
+platform::SurfaceCoordinateTransform CoordinateTransform(
+    const RobloxInputViewport& viewport) {
+  return {viewport.logical_width, viewport.logical_height, viewport.pixel_width,
+          viewport.pixel_height, viewport.density_scale};
 }
 
 }  // namespace
@@ -389,7 +383,7 @@ RobloxInputDispatchResult RobloxInputRouter::HandleEvent(
           std::get_if<platform::WindowResizedEvent>(&event.payload)) {
     RobloxInputViewport viewport = {
         resized->logical_width, resized->logical_height, resized->pixel_width,
-        resized->pixel_height};
+        resized->pixel_height, resized->density_scale};
     if (!viewport.valid()) {
       return Result(RobloxInputDispatchState::kRejectedInvalid,
                     RobloxInputEventKind::kViewport,
@@ -524,26 +518,21 @@ RobloxInputDispatchResult RobloxInputRouter::HandleMouseMotionLocked(
                   RobloxInputEventKind::kMouseMotion,
                   Unsupported("native mouse motion is unavailable"));
   }
-  const float delta_x = ScaleToSurfacePixels(
-      event.delta_x, snapshot_.viewport.logical_width,
-      snapshot_.viewport.pixel_width);
-  const float delta_y = ScaleToSurfacePixels(
-      event.delta_y, snapshot_.viewport.logical_height,
-      snapshot_.viewport.pixel_height);
+  const platform::SurfaceCoordinateTransform transform =
+      CoordinateTransform(snapshot_.viewport);
+  const float delta_x = transform.HostLogicalToGuestX(event.delta_x);
+  const float delta_y = transform.HostLogicalToGuestY(event.delta_y);
 
-  if (event.x == 0.0f && event.y == 0.0f && (delta_x != 0.0f || delta_y != 0.0f)) {
+  if (event.x == 0.0f && event.y == 0.0f &&
+      (delta_x != 0.0f || delta_y != 0.0f)) {
     mouse_x_ += delta_x;
     mouse_y_ += delta_y;
   } else {
-    mouse_x_ = ScaleToSurfacePixels(event.x, snapshot_.viewport.logical_width,
-                                    snapshot_.viewport.pixel_width);
-    mouse_y_ = ScaleToSurfacePixels(event.y, snapshot_.viewport.logical_height,
-                                    snapshot_.viewport.pixel_height);
+    mouse_x_ = transform.HostLogicalToGuestX(event.x);
+    mouse_y_ = transform.HostLogicalToGuestY(event.y);
   }
-  const float max_x = static_cast<float>(
-      snapshot_.viewport.pixel_width > 0 ? snapshot_.viewport.pixel_width - 1 : 0);
-  const float max_y = static_cast<float>(
-      snapshot_.viewport.pixel_height > 0 ? snapshot_.viewport.pixel_height - 1 : 0);
+  const float max_x = std::max(0.0F, transform.guest_width() - 1.0F);
+  const float max_y = std::max(0.0F, transform.guest_height() - 1.0F);
   const float clamped_x = std::clamp(mouse_x_, 0.0f, max_x);
   const float clamped_y = std::clamp(mouse_y_, 0.0f, max_y);
 
@@ -565,16 +554,17 @@ RobloxInputDispatchResult RobloxInputRouter::HandleMouseButtonLocked(
                   RobloxInputEventKind::kMouseButton,
                   Unsupported("SDL mouse button has no Android mapping"));
   }
-  if (event.x > 0.0f || event.y > 0.0f || (mouse_x_ == 0.0f && mouse_y_ == 0.0f)) {
-    mouse_x_ = ScaleToSurfacePixels(event.x, snapshot_.viewport.logical_width,
-                                    snapshot_.viewport.pixel_width);
-    mouse_y_ = ScaleToSurfacePixels(event.y, snapshot_.viewport.logical_height,
-                                    snapshot_.viewport.pixel_height);
+  if (event.x > 0.0f || event.y > 0.0f ||
+      (mouse_x_ == 0.0f && mouse_y_ == 0.0f)) {
+    const platform::SurfaceCoordinateTransform transform =
+        CoordinateTransform(snapshot_.viewport);
+    mouse_x_ = transform.HostLogicalToGuestX(event.x);
+    mouse_y_ = transform.HostLogicalToGuestY(event.y);
   }
-  const float max_x = static_cast<float>(
-      snapshot_.viewport.pixel_width > 0 ? snapshot_.viewport.pixel_width - 1 : 0);
-  const float max_y = static_cast<float>(
-      snapshot_.viewport.pixel_height > 0 ? snapshot_.viewport.pixel_height - 1 : 0);
+  const platform::SurfaceCoordinateTransform transform =
+      CoordinateTransform(snapshot_.viewport);
+  const float max_x = std::max(0.0F, transform.guest_width() - 1.0F);
+  const float max_y = std::max(0.0F, transform.guest_height() - 1.0F);
   const float clamped_x = std::clamp(mouse_x_, 0.0f, max_x);
   const float clamped_y = std::clamp(mouse_y_, 0.0f, max_y);
   if (event.pressed) {
@@ -607,12 +597,10 @@ RobloxInputDispatchResult RobloxInputRouter::HandleMouseWheelLocked(
                   RobloxInputEventKind::kMouseWheel,
                   Unsupported("vertical native mouse wheel is unavailable"));
   }
-  mouse_x_ = ScaleToSurfacePixels(
-      std::max(0.0f, event.mouse_x), snapshot_.viewport.logical_width,
-      snapshot_.viewport.pixel_width);
-  mouse_y_ = ScaleToSurfacePixels(
-      std::max(0.0f, event.mouse_y), snapshot_.viewport.logical_height,
-      snapshot_.viewport.pixel_height);
+  const platform::SurfaceCoordinateTransform transform =
+      CoordinateTransform(snapshot_.viewport);
+  mouse_x_ = transform.HostLogicalToGuestX(std::max(0.0f, event.mouse_x));
+  mouse_y_ = transform.HostLogicalToGuestY(std::max(0.0f, event.mouse_y));
   return NativeResultLocked(
       sink_.mouse_wheel(sink_.context, mouse_x_, mouse_y_, event.delta_y),
       RobloxInputEventKind::kMouseWheel);
@@ -625,10 +613,14 @@ RobloxInputDispatchResult RobloxInputRouter::HandleTouchLocked(
                   RobloxInputEventKind::kTouch,
                   Unsupported("native touch input is unavailable"));
   }
-  const float x = std::clamp(event.x, 0.0f, 1.0f) *
-                  static_cast<float>(snapshot_.viewport.logical_width);
-  const float y = std::clamp(event.y, 0.0f, 1.0f) *
-                  static_cast<float>(snapshot_.viewport.logical_height);
+  const platform::SurfaceCoordinateTransform transform =
+      CoordinateTransform(snapshot_.viewport);
+  const int32_t guest_width = transform.rounded_guest_width();
+  const int32_t guest_height = transform.rounded_guest_height();
+  const float x =
+      std::clamp(event.x, 0.0f, 1.0f) * static_cast<float>(guest_width);
+  const float y =
+      std::clamp(event.y, 0.0f, 1.0f) * static_cast<float>(guest_height);
   auto active = FindTouchIteratorLocked(event.touch_id, event.finger_id);
   int32_t action = kAndroidTouchMove;
   int32_t pointer_id = -1;
@@ -659,8 +651,7 @@ RobloxInputDispatchResult RobloxInputRouter::HandleTouchLocked(
   }
 
   Status status = sink_.touch(sink_.context, pointer_id, x, y, action,
-                              snapshot_.viewport.logical_width,
-                              snapshot_.viewport.logical_height);
+                              guest_width, guest_height);
   if (event.action == platform::TouchEvent::Action::kDown && status.ok()) {
     active_touches_.push_back(
         {event.touch_id, event.finger_id, pointer_id, x, y});
@@ -726,9 +717,11 @@ Status RobloxInputRouter::ReleasePressedInputsLocked() {
     if (sink_.touch == nullptr) {
       continue;
     }
+    const platform::SurfaceCoordinateTransform transform =
+        CoordinateTransform(snapshot_.viewport);
     Status status = sink_.touch(
         sink_.context, touch.pointer_id, touch.x, touch.y, kAndroidTouchUp,
-        snapshot_.viewport.logical_width, snapshot_.viewport.logical_height);
+        transform.rounded_guest_width(), transform.rounded_guest_height());
     if (status.ok()) {
       ++snapshot_.touch_events;
     } else if (first_error.ok()) {

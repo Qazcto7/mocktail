@@ -38,6 +38,20 @@ bool Query(void* context, bool* locked_center) {
   return true;
 }
 
+struct ReentrantQueryState {
+  WindowPointerCaptureOwner* owner = nullptr;
+};
+
+bool ClearQueryReentrantly(void* context, bool* locked_center) {
+  auto* state = static_cast<ReentrantQueryState*>(context);
+  if (state == nullptr || state->owner == nullptr || locked_center == nullptr) {
+    return false;
+  }
+  *locked_center = false;
+  state->owner->ClearQuery();
+  return true;
+}
+
 TEST(WindowPointerCaptureOwnerTest, FollowsNativeMouseLockState) {
   FakeBackend backend;
   QueryState query;
@@ -89,6 +103,19 @@ TEST(WindowPointerCaptureOwnerTest, QueryOrCaptureFailureStaysReleased) {
   query.succeeds = false;
   EXPECT_TRUE(owner.Pump(false));
   EXPECT_FALSE(owner.captured());
+}
+
+TEST(WindowPointerCaptureOwnerTest, QueryCanClearItselfWithoutDeadlock) {
+  FakeBackend backend;
+  WindowPointerCaptureOwner owner(&backend);
+  ReentrantQueryState query{&owner};
+  ASSERT_TRUE(owner.RegisterQuery(ClearQueryReentrantly, &query));
+
+  EXPECT_TRUE(owner.Pump(false));
+  EXPECT_FALSE(owner.captured());
+
+  QueryState replacement;
+  EXPECT_TRUE(owner.RegisterQuery(Query, &replacement));
 }
 
 TEST(WindowPointerCaptureOwnerTest, RightDragCapturesUntilButtonRelease) {

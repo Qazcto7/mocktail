@@ -10,6 +10,7 @@ namespace runtime {
 inline constexpr int kMaximumSupportedRobloxSchedulerFps = 240;
 
 enum class FrameRateLimitMode {
+  kUnmanaged,
   kDisplay,
   kFixed,
   kUnlimited,
@@ -17,7 +18,7 @@ enum class FrameRateLimitMode {
 };
 
 struct FrameRatePolicy {
-  FrameRateLimitMode mode = FrameRateLimitMode::kDisplay;
+  FrameRateLimitMode mode = FrameRateLimitMode::kUnmanaged;
   int fixed_fps = 0;
 
   bool valid() const { return mode != FrameRateLimitMode::kInvalid; }
@@ -25,7 +26,11 @@ struct FrameRatePolicy {
 
 FrameRatePolicy ParseFrameRatePolicy(std::string_view value);
 
-// Merges the scheduler policy into Roblox's supported client-settings ingress.
+// Enables Roblox's Basic Settings frame-rate control and, when explicitly
+// requested, merges a Mocktail scheduler policy into client settings.
+// Unmanaged (-1) does not add a scheduler target, so Roblox owns the cap.
+// Every positive fixed value is forwarded verbatim to
+// DFIntTaskSchedulerTargetFps; it is not restricted to common refresh rates.
 // Unlimited selects the unmodified payload's maximum scheduler target (240).
 // With VSync auto/off, graphics policy separately requests an unthrottled
 // Vulkan present mode when the host exposes one.

@@ -3,6 +3,7 @@
 #include <utf8proc.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -90,11 +91,24 @@ bool NativeGeometryIntersectsViewport(
                         static_cast<int64_t>(update.area_width);
   const int64_t bottom = static_cast<int64_t>(update.area_y) +
                          static_cast<int64_t>(update.area_height);
-  return right > 0 && bottom > 0 && update.area_x < viewport.width &&
-         update.area_y < viewport.height;
+  return right > 0 && bottom > 0 &&
+         update.area_x < viewport.coordinate_width() &&
+         update.area_y < viewport.coordinate_height();
 }
 
 }  // namespace
+
+int RobloxTextOverlayViewport::coordinate_width() const {
+  return valid() ? static_cast<int>(
+                       std::lround(static_cast<float>(width) / density_scale))
+                 : 0;
+}
+
+int RobloxTextOverlayViewport::coordinate_height() const {
+  return valid() ? static_cast<int>(
+                       std::lround(static_cast<float>(height) / density_scale))
+                 : 0;
+}
 
 RobloxTextOverlayPresentation::~RobloxTextOverlayPresentation() {
   ClearSensitive();

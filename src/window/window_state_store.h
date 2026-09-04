@@ -26,6 +26,19 @@ struct PersistedWindowState {
   bool maximized = false;
 };
 
+// Fullscreen can be part of native window creation, but maximization must be
+// requested only after startup size constraints and the windowed restore
+// position have been applied. On X11, changing the minimum size of a window
+// created with SDL_WINDOW_MAXIMIZED can synchronously wait on that initial
+// maximize transition and crash or hang before the first event pump.
+struct WindowStartupPresentationPlan {
+  bool fullscreen_at_creation = false;
+  bool maximize_after_constraints = false;
+};
+
+WindowStartupPresentationPlan PlanWindowStartupPresentation(
+    const PersistedWindowState& state);
+
 struct WindowStateLoadResult {
   bool found = false;
   PersistedWindowState state;

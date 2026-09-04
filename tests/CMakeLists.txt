@@ -55,6 +55,9 @@ target_link_libraries(native_update_test PRIVATE
   Mocktail::Update
   GTest::gtest_main
 )
+target_compile_definitions(native_update_test PRIVATE
+  MOCKTAIL_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+)
 
 add_executable(apk_provider_test apk_provider_test.cc)
 target_link_libraries(apk_provider_test PRIVATE
@@ -64,6 +67,12 @@ target_link_libraries(apk_provider_test PRIVATE
 
 add_executable(support_bundle_runtime_test support_bundle_runtime_test.cc)
 target_link_libraries(support_bundle_runtime_test PRIVATE
+  Mocktail::Runtime
+  GTest::gtest_main
+)
+
+add_executable(vulkan_icd_selection_test vulkan_icd_selection_test.cc)
+target_link_libraries(vulkan_icd_selection_test PRIVATE
   Mocktail::Runtime
   GTest::gtest_main
 )
@@ -442,6 +451,15 @@ target_link_libraries(window_surface_lifecycle_test PRIVATE
   GTest::gtest_main
 )
 mocktail_apply_compile_options(window_surface_lifecycle_test)
+
+add_executable(window_creation_policy_test
+  window_creation_policy_test.cc
+)
+target_link_libraries(window_creation_policy_test PRIVATE
+  mocktail_window
+  GTest::gtest_main
+)
+mocktail_apply_compile_options(window_creation_policy_test)
 
 add_executable(window_game_surface_bridge_test
   window_game_surface_bridge_test.cc
@@ -832,6 +850,7 @@ gtest_discover_tests(payload_update_preflight_test)
 gtest_discover_tests(apk_provider_test)
 gtest_discover_tests(native_update_test)
 gtest_discover_tests(support_bundle_runtime_test)
+gtest_discover_tests(vulkan_icd_selection_test)
 gtest_discover_tests(session_log_test)
 gtest_discover_tests(failure_dialog_test)
 gtest_discover_tests(frame_rate_policy_test)
@@ -878,6 +897,7 @@ gtest_discover_tests(vulkan_present_progress_gate_test)
 gtest_discover_tests(vulkan_text_overlay_compositor_test)
 gtest_discover_tests(video_driver_policy_test)
 gtest_discover_tests(window_surface_lifecycle_test)
+gtest_discover_tests(window_creation_policy_test)
 gtest_discover_tests(window_game_surface_bridge_test)
 gtest_discover_tests(window_resize_readiness_gate_test)
 gtest_discover_tests(window_fullscreen_request_gate_test)

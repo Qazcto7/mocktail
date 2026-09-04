@@ -35,6 +35,7 @@ struct Probe {
   int app_starts = 0;
   int app_pauses = 0;
   int app_surface_width = 0;
+  float app_dpi_scale = 0.0f;
   int app_start_surface_width = 0;
   int64_t app_user_id = 0;
   std::vector<std::string> app_surface_lifecycle;
@@ -320,12 +321,16 @@ jint Start(JNIEnv* env, jclass, jobject params) {
 }
 
 void Update(JNIEnv*, jclass, jobject, jobject, jobject) { ++g_probe->updates; }
-void UpdateApp(JNIEnv* env, jclass, jobject surface, jobject) {
+void UpdateApp(JNIEnv* env, jclass, jobject surface, jobject platform_params) {
   ++g_probe->app_updates;
   jclass surface_class = env->GetObjectClass(surface);
   g_probe->app_surface_width =
       env->GetIntField(surface, env->GetFieldID(surface_class, "width", "I"));
+  jclass params_class = env->GetObjectClass(platform_params);
+  g_probe->app_dpi_scale = env->GetFloatField(
+      platform_params, env->GetFieldID(params_class, "dpiScale", "F"));
   env->DeleteLocalRef(surface_class);
+  env->DeleteLocalRef(params_class);
 }
 void PauseGame(JNIEnv*, jclass) {}
 void CallMessagesFromMainThread(JNIEnv*, jclass) {}
@@ -875,9 +880,11 @@ TEST(RobloxExperienceCompositionTest,
   ASSERT_NE(probe.callback, nullptr);
 
   probe.observed_surface.width = 960;
+  probe.observed_surface.dpi_scale = 2.0f;
   ASSERT_TRUE(composition.DrainPlatformEvents().ok());
   EXPECT_EQ(probe.app_updates, 1);
   EXPECT_EQ(probe.app_surface_width, 960);
+  EXPECT_FLOAT_EQ(probe.app_dpi_scale, 2.0f);
 
   JNIEnv* env = vm.GetJNIEnv();
   jclass callback_class = env->GetObjectClass(probe.callback);

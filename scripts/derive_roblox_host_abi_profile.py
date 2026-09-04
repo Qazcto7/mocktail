@@ -67,6 +67,7 @@ ELF_VERSION_CURRENT = 1
 ELF_TYPE_SHARED_OBJECT = 3
 ELF_MACHINE_X86_64 = 62
 PT_LOAD = 1
+PT_GNU_RELRO = 0x6474E552
 PF_EXECUTE = 1
 PF_WRITE = 2
 PF_READ = 4
@@ -159,6 +160,7 @@ class SignatureSpec:
     instruction_count: int
     allow_registry_object_size_change: bool = False
     minimum_anchor_bytes: int = 6
+    registry_size_indices: tuple[int, int] = (8, 12)
 
 
 @dataclass(frozen=True)
@@ -217,6 +219,7 @@ class ElfImage:
         self.sections: dict[str, Section] = {}
         self.sections_by_index: tuple[Section, ...] = ()
         self.segments: tuple[Segment, ...] = ()
+        self.relro_ranges: tuple[tuple[int, int], ...] = ()
         self.build_id = ""
 
     def __enter__(self) -> "ElfImage":
@@ -300,10 +303,15 @@ class ElfImage:
         )
 
         segments = []
+        relro_ranges = []
         for index in range(program_count):
             values = PROGRAM_HEADER.unpack_from(
                 self.data, program_offset + index * program_entry_size
             )
+            if values[0] == PT_GNU_RELRO:
+                if values[6] <= 0:
+                    raise AnalyzerError("ELF PT_GNU_RELRO range is empty")
+                relro_ranges.append((values[3], values[6]))
             if values[0] != PT_LOAD:
                 continue
             segment = Segment(
@@ -320,6 +328,7 @@ class ElfImage:
         if not segments:
             raise AnalyzerError("ELF has no PT_LOAD segments")
         self.segments = tuple(segments)
+        self.relro_ranges = tuple(relro_ranges)
 
         raw_sections = [
             SECTION_HEADER.unpack_from(
@@ -454,6 +463,17 @@ class ElfImage:
             or segment.flags & PF_EXECUTE
         ):
             raise AnalyzerError(f"RVA 0x{rva:x} is not in a non-executable RW segment")
+
+    def require_relro_rva(self, rva: int, size: int = 1) -> None:
+        matches = [
+            (begin, length)
+            for begin, length in self.relro_ranges
+            if size >= 0 and begin <= rva and rva + size <= begin + length
+        ]
+        if len(matches) != 1:
+            raise AnalyzerError(
+                f"RVA 0x{rva:x} is not in a unique PT_GNU_RELRO range"
+            )
 
     def rva_to_offset(self, rva: int, size: int = 1) -> int:
         matches = [
@@ -1058,23 +1078,30 @@ def semantic_shape(
 def validate_semantic_match(
     reference: Sequence[Any],
     candidate: Sequence[Any],
-    allow_registry_object_size_change: bool,
+    spec: SignatureSpec,
 ) -> None:
     if len(reference) != len(candidate):
         raise AnalyzerError("normalized signature instruction count changed")
     for index, (reference_instruction, candidate_instruction) in enumerate(
         zip(reference, candidate)
     ):
-        wildcard_size = allow_registry_object_size_change and index in (8, 12)
+        wildcard_size = (
+            spec.allow_registry_object_size_change
+            and index in spec.registry_size_indices
+        )
         if semantic_shape(reference_instruction, wildcard_size) != semantic_shape(
             candidate_instruction, wildcard_size
         ):
             raise AnalyzerError(
                 f"normalized instruction semantics changed at signature index {index}"
             )
-    if allow_registry_object_size_change:
+    if spec.allow_registry_object_size_change:
         sizes = []
-        for index in (8, 12):
+        for index in spec.registry_size_indices:
+            if index >= len(candidate):
+                raise AnalyzerError(
+                    "registry initializer size index is outside its signature"
+                )
             operands = candidate[index].operands
             if len(operands) != 2 or operands[1].type != capstone_x86.X86_OP_IMM:
                 raise AnalyzerError("registry initializer size operands changed")
@@ -1154,7 +1181,7 @@ def find_signature_matches(
             validate_semantic_match(
                 reference_instructions,
                 candidate_instructions,
-                spec.allow_registry_object_size_change,
+                spec,
             )
         except AnalyzerError as error:
             semantic_errors.append(error)
@@ -1180,6 +1207,360 @@ def find_signature_match(
     return matches[0]
 
 
+def unique_semantic_signature_match(
+    reference: ElfImage, candidate: ElfImage, spec: SignatureSpec
+) -> SignatureMatch:
+    matches = find_signature_matches(
+        reference, candidate, spec, allow_multiple_candidates=True
+    )
+    if len(matches) != 1:
+        raise AnalyzerError(
+            f"signature {spec.name} matched {len(matches)} semantic candidate locations"
+        )
+    return matches[0]
+
+
+def relative_relocation_map(image: ElfImage) -> dict[int, int]:
+    result = {}
+    for relocation in decode_aps2_relocations(
+        image.section_bytes(image.sections[".rela.dyn"])
+    ):
+        if (
+            relocation.info & 0xFFFFFFFF != R_X86_64_RELATIVE
+            or relocation.info >> 32 != 0
+        ):
+            continue
+        if relocation.offset in result:
+            raise AnalyzerError("ELF contains duplicate relative relocations")
+        result[relocation.offset] = relocation.addend
+    return result
+
+
+def has_fullscreen_setter_contract(image: ElfImage, rva: int) -> bool:
+    size = 96
+    try:
+        image.require_code_rva(rva, size)
+        offset = image.rva_to_offset(rva, size)
+        code = image.bytes_at(offset, size, "fullscreen setter contract")
+    except AnalyzerError:
+        return False
+    fields = (b"\x59\x01\x00\x00", b"\x61\x01\x00\x00")
+    return (
+        code.startswith(b"\x55\x48\x89\xe5")
+        and b"\x89\xf3" in code[:24]
+        and any(
+            b"\x38\x98" + field in code and b"\x88\x98" + field in code
+            for field in fields
+        )
+    )
+
+
+def has_fmod_string_constructor_contract(image: ElfImage, rva: int) -> bool:
+    expected = bytes.fromhex(
+        "55 48 89 e5 41 57 41 56 41 54 53 48 89 d3 49 89 "
+        "f6 49 89 ff 48 83 fa 16"
+    )
+    try:
+        image.require_code_rva(rva, len(expected))
+        offset = image.rva_to_offset(rva, len(expected))
+        return (
+            image.bytes_at(offset, len(expected), "FMOD string contract")
+            == expected
+        )
+    except AnalyzerError:
+        return False
+
+
+def load_reference_runtime_profile(
+    paths: Sequence[Path], reference_build_id: str
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for path in paths:
+        document = read_json_object(path, "reference compatibility manifest")
+        profiles = document.get("profiles")
+        if document.get("schema_version") != 1 or not isinstance(profiles, list):
+            raise AnalyzerError(
+                "reference compatibility manifest schema is unsupported"
+            )
+        for profile in profiles:
+            if (
+                not isinstance(profile, dict)
+                or profile.get("elf_build_id") != reference_build_id
+            ):
+                continue
+            discovered: dict[str, Any] = {}
+            if "user_game_settings_fullscreen_setter_rva" in profile:
+                discovered["user_game_settings_fullscreen_setter_rva"] = parse_rva(
+                    profile["user_game_settings_fullscreen_setter_rva"],
+                    "reference fullscreen setter",
+                )
+            if "fmod_output_device_bridge" in profile:
+                bridge = profile["fmod_output_device_bridge"]
+                fields = {
+                    "vtable_rva",
+                    "string_constructor_rva",
+                    "count_method_rva",
+                    "info_method_rva",
+                    "current_method_rva",
+                    "select_method_rva",
+                }
+                if (
+                    not isinstance(bridge, dict)
+                    or set(bridge) != fields
+                    or profile.get("allow_host_abi_bridges") is not True
+                ):
+                    raise AnalyzerError(
+                        "reference FMOD output-device profile is incomplete"
+                    )
+                discovered["fmod_output_device_bridge"] = {
+                    field: parse_rva(value, f"reference FMOD {field}")
+                    for field, value in bridge.items()
+                }
+            for field, value in discovered.items():
+                if field in result and result[field] != value:
+                    raise AnalyzerError(
+                        f"reference compatibility manifests disagree on {field}"
+                    )
+                result[field] = value
+    return result
+
+
+def derive_fmod_output_device_bridge(
+    reference: ElfImage,
+    candidate: ElfImage,
+    source: dict[str, int],
+) -> dict[str, str]:
+    indexes = {
+        "count_method_rva": 5,
+        "info_method_rva": 6,
+        "current_method_rva": 7,
+        "select_method_rva": 17,
+    }
+    source_vtable = source["vtable_rva"]
+    reference.require_relro_rva(source_vtable, (max(indexes.values()) + 1) * 8)
+    reference_relocations = relative_relocation_map(reference)
+    for field, index in indexes.items():
+        if reference_relocations.get(source_vtable + index * 8) != source[field]:
+            raise AnalyzerError("reference FMOD vtable does not match its methods")
+        reference.require_code_rva(source[field])
+    if not has_fmod_string_constructor_contract(
+        reference, source["string_constructor_rva"]
+    ):
+        raise AnalyzerError("reference FMOD string constructor contract changed")
+
+    string_constructor = unique_semantic_signature_match(
+        reference,
+        candidate,
+        SignatureSpec(
+            "fmod-string-constructor",
+            source["string_constructor_rva"],
+            32,
+            minimum_anchor_bytes=3,
+        ),
+    ).rva
+    info_method = unique_semantic_signature_match(
+        reference,
+        candidate,
+        SignatureSpec(
+            "fmod-output-info",
+            source["info_method_rva"],
+            18,
+            minimum_anchor_bytes=3,
+        ),
+    ).rva
+    select_method = unique_semantic_signature_match(
+        reference,
+        candidate,
+        SignatureSpec(
+            "fmod-output-select",
+            source["select_method_rva"],
+            18,
+            minimum_anchor_bytes=3,
+        ),
+    ).rva
+    count_candidates = {
+        match.rva
+        for match in find_signature_matches(
+            reference,
+            candidate,
+            SignatureSpec(
+                "fmod-output-count",
+                source["count_method_rva"],
+                24,
+                minimum_anchor_bytes=3,
+            ),
+            allow_multiple_candidates=True,
+        )
+    }
+    current_candidates = {
+        match.rva
+        for match in find_signature_matches(
+            reference,
+            candidate,
+            SignatureSpec(
+                "fmod-output-current",
+                source["current_method_rva"],
+                24,
+                minimum_anchor_bytes=3,
+            ),
+            allow_multiple_candidates=True,
+        )
+    }
+    if not count_candidates or not current_candidates:
+        raise AnalyzerError("FMOD count/current method signatures have no candidates")
+
+    relocations = relative_relocation_map(candidate)
+    vtables = []
+    for offset, addend in relocations.items():
+        if addend != info_method or offset < indexes["info_method_rva"] * 8:
+            continue
+        vtable = offset - indexes["info_method_rva"] * 8
+        count_method = relocations.get(vtable + indexes["count_method_rva"] * 8)
+        current_method = relocations.get(
+            vtable + indexes["current_method_rva"] * 8
+        )
+        if (
+            vtable % 8 == 0
+            and count_method in count_candidates
+            and current_method in current_candidates
+            and count_method != current_method
+            and relocations.get(vtable + indexes["select_method_rva"] * 8)
+            == select_method
+        ):
+            try:
+                candidate.require_relro_rva(
+                    vtable, (max(indexes.values()) + 1) * 8
+                )
+            except AnalyzerError:
+                continue
+            vtables.append((vtable, count_method, current_method))
+    if len(vtables) != 1:
+        raise AnalyzerError(
+            f"FMOD output vtable matched {len(vtables)} candidate locations"
+        )
+    vtable, count_method, current_method = vtables[0]
+    if not has_fmod_string_constructor_contract(candidate, string_constructor):
+        raise AnalyzerError("candidate FMOD string constructor contract changed")
+    return {
+        "vtable_rva": format_rva(vtable),
+        "string_constructor_rva": format_rva(string_constructor),
+        "count_method_rva": format_rva(count_method),
+        "info_method_rva": format_rva(info_method),
+        "current_method_rva": format_rva(current_method),
+        "select_method_rva": format_rva(select_method),
+    }
+
+
+def derive_runtime_compatibility(
+    reference: ElfImage,
+    candidate: ElfImage,
+    manifests: Sequence[Path],
+) -> dict[str, Any]:
+    source = load_reference_runtime_profile(manifests, reference.build_id)
+    result: dict[str, Any] = {}
+    fullscreen = source.get("user_game_settings_fullscreen_setter_rva")
+    if fullscreen is not None:
+        if not has_fullscreen_setter_contract(reference, fullscreen):
+            raise AnalyzerError("reference fullscreen setter contract changed")
+        setter = unique_semantic_signature_match(
+            reference,
+            candidate,
+            SignatureSpec(
+                "fullscreen-setter", fullscreen, 32, minimum_anchor_bytes=3
+            ),
+        ).rva
+        if not has_fullscreen_setter_contract(candidate, setter):
+            raise AnalyzerError("candidate fullscreen setter contract changed")
+        result["user_game_settings_fullscreen_setter_rva"] = format_rva(setter)
+    fmod = source.get("fmod_output_device_bridge")
+    if fmod is not None:
+        result["fmod_output_device_bridge"] = derive_fmod_output_device_bridge(
+            reference, candidate, fmod
+        )
+    return result
+
+
+def find_registry_function_entry(
+    candidate: ElfImage,
+    body_rva: int,
+    reference_prologue: Sequence[Any],
+) -> int:
+    prologue_instruction_count = 8
+    maximum_prologue_bytes = 64
+    if (
+        len(reference_prologue) != prologue_instruction_count
+        or body_rva < maximum_prologue_bytes
+    ):
+        raise AnalyzerError("reference registry prologue shape is invalid")
+    entries = []
+    for rva in range(body_rva - maximum_prologue_bytes, body_rva):
+        try:
+            instructions = disassemble(candidate, rva, prologue_instruction_count)
+        except AnalyzerError:
+            continue
+        if instructions[-1].address + instructions[-1].size != body_rva:
+            continue
+        if any(
+            semantic_shape(reference_instruction, index == 7)
+            != semantic_shape(candidate_instruction, index == 7)
+            for index, (reference_instruction, candidate_instruction) in enumerate(
+                zip(reference_prologue, instructions)
+            )
+        ):
+            continue
+        frame = instructions[-1]
+        operands = frame.operands
+        if (
+            frame.mnemonic == "sub"
+            and len(operands) == 2
+            and operands[0].type == capstone_x86.X86_OP_REG
+            and operands[0].reg == capstone_x86.X86_REG_RSP
+            and operands[1].type == capstone_x86.X86_OP_IMM
+            and 0x20 <= operands[1].imm <= 0x400
+            and operands[1].imm % 8 == 0
+        ):
+            entries.append(rva)
+    if len(entries) != 1:
+        raise AnalyzerError(
+            "registry initializer body has no unique bounded prologue"
+        )
+    return entries[0]
+
+
+def find_registry_signature_match(
+    reference: ElfImage,
+    candidate: ElfImage,
+    spec: SignatureSpec,
+) -> SignatureMatch:
+    body_instruction_index = 8
+    body_instruction_count = 11
+    reference_full = disassemble(
+        reference, spec.reference_rva, spec.instruction_count
+    )
+    if len(reference_full) < body_instruction_index + body_instruction_count:
+        raise AnalyzerError("reference registry signature is incomplete")
+    body_spec = SignatureSpec(
+        "registry-initializer-body",
+        reference_full[body_instruction_index].address,
+        body_instruction_count,
+        True,
+        spec.minimum_anchor_bytes,
+        (0, 4),
+    )
+    body_match = find_signature_match(reference, candidate, body_spec)
+    candidate_entry = find_registry_function_entry(
+        candidate,
+        body_match.rva,
+        reference_full[:body_instruction_index],
+    )
+    candidate_full = disassemble(
+        candidate, candidate_entry, spec.instruction_count
+    )
+    if candidate_full[body_instruction_index].address != body_match.rva:
+        raise AnalyzerError("candidate registry signature is incomplete")
+    return SignatureMatch(candidate_entry, reference_full, candidate_full)
+
+
 def direct_call_target(instruction: Any, description: str) -> int:
     if (
         instruction.mnemonic != "call"
@@ -1188,6 +1569,51 @@ def direct_call_target(instruction: Any, description: str) -> int:
     ):
         raise AnalyzerError(f"{description} is not one direct call")
     return instruction.operands[0].imm
+
+
+def direct_jump_target(instruction: Any, description: str) -> int:
+    if (
+        instruction.mnemonic != "jmp"
+        or len(instruction.operands) != 1
+        or instruction.operands[0].type != capstone_x86.X86_OP_IMM
+    ):
+        raise AnalyzerError(f"{description} is not one direct jump")
+    return instruction.operands[0].imm
+
+
+def find_constructor_boundary_match(
+    reference: ElfImage,
+    candidate: ElfImage,
+    spec: SignatureSpec,
+    reference_entry: int,
+    candidate_entry: int,
+) -> SignatureMatch:
+    if reference_entry != spec.reference_rva:
+        raise AnalyzerError(
+            "reference constructor boundary moved outside init-array index 4"
+        )
+    reference_wrapper = disassemble(reference, reference_entry, 1)
+    reference_target = direct_jump_target(
+        reference_wrapper[0], "reference constructor boundary"
+    )
+    target_match = find_signature_match(
+        reference,
+        candidate,
+        SignatureSpec(
+            "constructor-4-target",
+            reference_target,
+            spec.instruction_count,
+        ),
+    )
+    candidate_wrapper = disassemble(candidate, candidate_entry, 1)
+    candidate_target = direct_jump_target(
+        candidate_wrapper[0], "candidate constructor boundary"
+    )
+    if candidate_target != target_match.rva:
+        raise AnalyzerError(
+            "constructor index 4 no longer targets its verified boundary"
+        )
+    return SignatureMatch(candidate_entry, reference_wrapper, candidate_wrapper)
 
 
 def rip_targets(instruction: Any) -> tuple[int, ...]:
@@ -1417,12 +1843,32 @@ def derive_profile(
 
     reference_profile = reference_sidecar["profile"]
     anchors = reference_sidecar["derivation_anchors"]
+    reference_init = reference.init_array_relocations()
+    candidate_init = candidate.init_array_relocations()
+    if len(reference_init) != reference_profile["init_array_count"]:
+        raise AnalyzerError(
+            "reference sidecar init-array count differs from ELF metadata"
+        )
+    if len(candidate_init) < 8:
+        raise AnalyzerError("candidate init-array is unexpectedly short")
     matches = {}
     allocate_matches = ()
     for spec in create_signature_specs(reference_profile, anchors):
         if spec.name == "allocate":
             allocate_matches = find_signature_matches(
                 reference, candidate, spec, allow_multiple_candidates=True
+            )
+        elif spec.name == "registry-initializer":
+            matches[spec.name] = find_registry_signature_match(
+                reference, candidate, spec
+            )
+        elif spec.name == "constructor-4":
+            matches[spec.name] = find_constructor_boundary_match(
+                reference,
+                candidate,
+                spec,
+                reference_init[4],
+                candidate_init[4],
             )
         else:
             matches[spec.name] = find_signature_match(reference, candidate, spec)
@@ -1458,14 +1904,6 @@ def derive_profile(
             "registry allocator call"
         )
     matches["allocate"] = selected_allocate[0]
-    reference_init = reference.init_array_relocations()
-    candidate_init = candidate.init_array_relocations()
-    if len(reference_init) != reference_profile["init_array_count"]:
-        raise AnalyzerError(
-            "reference sidecar init-array count differs from ELF metadata"
-        )
-    if len(candidate_init) < 8:
-        raise AnalyzerError("candidate init-array is unexpectedly short")
     for index in (2, 3, 4):
         match = matches[f"constructor-{index}"]
         if (
@@ -1635,6 +2073,7 @@ def output_documents(
     reference_sidecar: dict[str, Any],
     profile: dict[str, Any],
     anchors: dict[str, Any],
+    runtime_compatibility: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     version_code = metadata["version_code"]
     payload_id = f"{version_code}-{candidate.build_id}"
@@ -1651,25 +2090,26 @@ def output_documents(
         "profile": profile,
         "derivation_anchors": anchors,
     }
+    compatibility_profile = {
+        "version_name": metadata["version_name"],
+        "version_code": version_code,
+        "elf_build_id": candidate.build_id,
+        "status": "experimental",
+        "default_allowed": True,
+        "allow_legacy_binary_patches": False,
+        "allow_host_abi_bridges": True,
+        "allow_host_constructor_replay": True,
+        "reason": (
+            "Machine-derived exact-Build-ID profile for isolated "
+            "probation only; normal activation requires two "
+            "successful no-recovery Tier C canaries."
+        ),
+    }
+    if runtime_compatibility:
+        compatibility_profile.update(runtime_compatibility)
     manifest = {
         "schema_version": 1,
-        "profiles": [
-            {
-                "version_name": metadata["version_name"],
-                "version_code": version_code,
-                "elf_build_id": candidate.build_id,
-                "status": "experimental",
-                "default_allowed": True,
-                "allow_legacy_binary_patches": False,
-                "allow_host_abi_bridges": True,
-                "allow_host_constructor_replay": True,
-                "reason": (
-                    "Machine-derived exact-Build-ID profile for isolated "
-                    "probation only; it is not supported until the updater "
-                    "records a successful no-recovery Tier C canary."
-                ),
-            }
-        ],
+        "profiles": [compatibility_profile],
     }
     return sidecar, manifest
 
@@ -1720,8 +2160,18 @@ def analyze(arguments: argparse.Namespace) -> tuple[dict[str, Any], dict[str, An
     with ElfImage(reference_path) as reference, ElfImage(candidate_path) as candidate:
         metadata = validated_payload_metadata(metadata_path, candidate_path, candidate)
         profile, anchors = derive_profile(reference, candidate, reference_sidecar)
+        runtime_compatibility = derive_runtime_compatibility(
+            reference,
+            candidate,
+            tuple(Path(path) for path in arguments.reference_compatibility),
+        )
         return output_documents(
-            candidate, metadata, reference_sidecar, profile, anchors
+            candidate,
+            metadata,
+            reference_sidecar,
+            profile,
+            anchors,
+            runtime_compatibility,
         )
 
 
@@ -1731,6 +2181,13 @@ def parse_arguments(argv: Sequence[str]) -> argparse.Namespace:
     )
     parser.add_argument("--reference-lib", required=True, metavar="REF")
     parser.add_argument("--reference-profile", required=True, metavar="REFJSON")
+    parser.add_argument(
+        "--reference-compatibility",
+        action="append",
+        default=[],
+        metavar="MANIFEST",
+        help="compatibility manifest containing exact reference runtime anchors",
+    )
     parser.add_argument("--candidate-lib", required=True, metavar="LIB")
     parser.add_argument("--payload-metadata", required=True, metavar="META")
     parser.add_argument("--output", required=True, metavar="PROFILE")
