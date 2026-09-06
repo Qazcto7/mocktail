@@ -16,6 +16,7 @@
 
 #include "runtime/crash_report_policy.h"
 #include "runtime/http_client_policy.h"
+#include "runtime/texture_memory_policy.h"
 
 namespace mocktail {
 namespace runtime {
@@ -249,7 +250,9 @@ bool MergePerformanceClientSettingsOverrides(const PerformancePolicy& policy,
     const bool manual_quality =
         quality_str == "auto" || quality_str == "0" || quality_str == "manual";
 
-    const std::array<ClientSetting, 70> rendering_settings = {{
+    // ForceCacheSize settings are byte counts. Let Roblox size its mesh and
+    // SLIM content caches; values like 256/128 would cap them to a few bytes.
+    const std::array<ClientSetting, 68> rendering_settings = {{
         {"FIntSmoothClusterTaskQueueMaxParallelTasks", workers},
         {"FIntOcclusionWorkerThreadCount", occlusion_workers},
         {"FFlagMovePrerenderV2", "True"},
@@ -298,8 +301,6 @@ bool MergePerformanceClientSettingsOverrides(const PerformancePolicy& policy,
         {"FFlagContentProviderMmapAssets", "True"},
         {"FIntAssetProviderAssetCacheReadThreadCount", "1"},
         {"FIntAssetProviderAssetCacheWriteThreadCount", "1"},
-        {"FIntMeshContentProviderForceCacheSize", "256"},
-        {"FIntSlimContentProviderForceCacheSize", "128"},
         {"FIntInitialAudioAssetCacheSize", "32"},
         {"FIntAvatarTextureMemoryMax", "33554432"},
         {"FFlagEnableSLIMAvatars", "True"},
@@ -356,7 +357,13 @@ bool MergeRuntimeClientSettingsOverrides(const FrameRatePolicy& frame_rate,
                                         &http_client_overrides, error)) {
     return false;
   }
-  return MergeCrashReportClientSettingsOverrides(http_client_overrides,
+  std::string texture_memory_overrides;
+  if (!MergeTextureMemoryClientSettingsOverrides(
+          CalculateTextureMemoryBudgetBytes(DetectHostMemoryBytes()),
+          http_client_overrides, &texture_memory_overrides, error)) {
+    return false;
+  }
+  return MergeCrashReportClientSettingsOverrides(texture_memory_overrides,
                                                  merged_json, error);
 }
 
@@ -378,8 +385,10 @@ bool MergeAudioCaptureClientSettingsOverrides(bool microphone_enabled,
     }
     return false;
   }
-  overrides["DFFlagVoiceChatSkipPermissionCheckForTests"] =
-      microphone_enabled ? "True" : "False";
+  // PermissionsProtocol now owns authorization. Keep the test bypass off even
+  // when a caller supplied it, so disabled host capture remains denied.
+  (void)microphone_enabled;
+  overrides["DFFlagVoiceChatSkipPermissionCheckForTests"] = "False";
   *merged_json = overrides.dump();
   return true;
 }

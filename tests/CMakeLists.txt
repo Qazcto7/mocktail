@@ -101,6 +101,12 @@ target_link_libraries(performance_policy_test PRIVATE
   GTest::gtest_main
 )
 
+add_executable(texture_memory_policy_test texture_memory_policy_test.cc)
+target_link_libraries(texture_memory_policy_test PRIVATE
+  Mocktail::Runtime
+  GTest::gtest_main
+)
+
 add_executable(http_client_policy_test http_client_policy_test.cc)
 target_link_libraries(http_client_policy_test PRIVATE
   Mocktail::Runtime
@@ -316,6 +322,15 @@ target_link_libraries(roblox_web_view_bridge_test PRIVATE
 )
 mocktail_apply_compile_options(roblox_web_view_bridge_test)
 
+add_executable(roblox_permissions_bridge_test roblox_permissions_bridge_test.cc)
+target_link_libraries(roblox_permissions_bridge_test PRIVATE
+  Mocktail::LegacyJni
+  Mocktail::Runtime
+  GTest::gtest_main
+  Threads::Threads
+)
+mocktail_apply_compile_options(roblox_permissions_bridge_test)
+
 add_executable(roblox_browser_service_bridge_test
   roblox_browser_service_bridge_test.cc
 )
@@ -378,6 +393,15 @@ target_link_libraries(jnivm_native_text_box_info_test PRIVATE
   Threads::Threads
 )
 mocktail_apply_compile_options(jnivm_native_text_box_info_test)
+
+add_executable(jnivm_webrtc_audio_manager_test
+  jnivm_webrtc_audio_manager_test.cc
+)
+target_link_libraries(jnivm_webrtc_audio_manager_test PRIVATE
+  Mocktail::LegacyJni
+  GTest::gtest_main
+)
+mocktail_apply_compile_options(jnivm_webrtc_audio_manager_test)
 
 add_executable(vulkan_present_observer_test
   vulkan_present_observer_test.cc
@@ -855,6 +879,7 @@ gtest_discover_tests(session_log_test)
 gtest_discover_tests(failure_dialog_test)
 gtest_discover_tests(frame_rate_policy_test)
 gtest_discover_tests(performance_policy_test)
+gtest_discover_tests(texture_memory_policy_test)
 gtest_discover_tests(http_client_policy_test)
 gtest_discover_tests(http_client_spin_guard_test)
 gtest_discover_tests(crash_report_policy_test)
@@ -884,12 +909,14 @@ gtest_discover_tests(roblox_app_lifecycle_test)
 gtest_discover_tests(roblox_game_session_native_adapter_test)
 gtest_discover_tests(roblox_experience_launch_bridge_test)
 gtest_discover_tests(roblox_web_view_bridge_test)
+gtest_discover_tests(roblox_permissions_bridge_test)
 gtest_discover_tests(roblox_browser_service_bridge_test)
 gtest_discover_tests(roblox_fresh_game_launch_controller_test)
 gtest_discover_tests(roblox_experience_composition_test)
 gtest_discover_tests(jnivm_message_bus_test)
 gtest_discover_tests(jnivm_experience_lifecycle_test)
 gtest_discover_tests(jnivm_native_text_box_info_test)
+gtest_discover_tests(jnivm_webrtc_audio_manager_test)
 gtest_discover_tests(vulkan_present_observer_test)
 gtest_discover_tests(input_pump_pacer_test)
 gtest_discover_tests(vulkan_surface_recovery_gate_test)
@@ -953,6 +980,12 @@ add_test(
   NAME AppImageAppRunTest.ResolvesCanonicalBundleRoot
   COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/appimage_apprun_test.sh
           ${CMAKE_SOURCE_DIR}/packaging/AppRun
+)
+
+add_test(
+  NAME AnyLinuxPackagingTest.RelocatedRuntimePaths
+  COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/anylinux_packaging_test.sh
+          ${CMAKE_SOURCE_DIR} ${CMAKE_CXX_COMPILER}
 )
 
 add_test(

@@ -82,6 +82,32 @@ struct FmodAudioDeviceCallbacks {
   void (*shutdown)(void *context) = nullptr;
 };
 
+// Parameters passed by WebRtcAudioManager's constructor to the guest's
+// nativeCacheAudioParameters(IIIZZZZZZZIIJ)V. Buffer sizes are PCM frames,
+// not bytes. Querying them must not open a microphone.
+struct WebRtcAudioManagerParameters {
+  int sample_rate_hz = 0;
+  int output_channels = 0;
+  int input_channels = 0;
+  bool hardware_aec = false;
+  bool hardware_agc = false;
+  bool hardware_ns = false;
+  bool low_latency_output = false;
+  bool low_latency_input = false;
+  bool pro_audio = false;
+  bool aaudio = false;
+  int output_buffer_size_frames = 0;
+  int input_buffer_size_frames = 0;
+};
+
+struct WebRtcAudioManagerCallbacks {
+  bool (*get_parameters)(void* context,
+                         WebRtcAudioManagerParameters* parameters) = nullptr;
+  bool (*init)(void* context, const void* identity) = nullptr;
+  void (*dispose)(void* context, const void* identity) = nullptr;
+  void (*set_microphone_mute)(void* context, bool muted) = nullptr;
+};
+
 using WebRtcAudioRecordDataCallback = void (*)(void *context,
                                                const void *identity,
                                                std::size_t size_bytes);
@@ -167,6 +193,11 @@ struct MessageBusRequestHandlerCallbacks {
   std::string (*run)(void *context, JNIEnv *env, jstring message) = nullptr;
 };
 
+struct MessageBusAsyncRequestHandlerCallbacks {
+  void (*run)(void* context, JNIEnv* env, jstring message,
+              jstring response_id) = nullptr;
+};
+
 // Dispatch accepts Callback.onItemSet(String) only on a receiver created by
 // this VM. The context stays alive while the callback runs.
 struct MemStorageCallbackCallbacks {
@@ -231,10 +262,12 @@ public:
 
   JavaVM *GetJavaVM() { return java_vm_; }
 
-  // Resolves the process pseudo-VM that owns an exact JavaVM pointer. Returns
+  // Resolves the live pseudo-VM that owns an exact JavaVM pointer. Returns
   // null for foreign VMs and after the owner is destroyed.
   static VM *FromJavaVM(JavaVM *java_vm);
 
+  // Binds this thread's JNI environment to this VM. Switching owners must
+  // not reuse the previous VM's native function table.
   JNIEnv *GetJNIEnv();
 
   std::size_t GetClassCount() const { return class_registry_.size(); }
@@ -289,6 +322,18 @@ public:
   bool DispatchFmodAudioDeviceWrite(const void *identity,
                                     const std::uint8_t *data, std::size_t size);
   bool DispatchFmodAudioDeviceClose(const void *identity);
+
+  void SetWebRtcAudioManagerCallbacks(
+      std::shared_ptr<void> context,
+      const WebRtcAudioManagerCallbacks& callbacks);
+  void ClearWebRtcAudioManagerCallbacks();
+  void RegisterWebRtcAudioManagerNative(const char* name, const char* signature,
+                                        void* function);
+  bool DispatchWebRtcAudioManagerConstruct(jobject manager,
+                                           jlong native_audio_manager);
+  bool DispatchWebRtcAudioManagerInit(jobject manager);
+  void DispatchWebRtcAudioManagerDispose(jobject manager);
+  void DispatchWebRtcAudioManagerMicrophoneMute(jobject manager, bool muted);
 
   void
   SetWebRtcAudioRecordCallbacks(std::shared_ptr<void> context,
@@ -354,6 +399,16 @@ public:
   void ClearMessageBusRequestHandler(jobject handler);
   jstring DispatchMessageBusRequestHandler(jobject handler, JNIEnv *env,
                                            jstring message);
+
+  // Exact RequestHandlerAsyncRaw.run(String, String) receiver. Clearing stops
+  // new calls; an in-flight call retains the host context until it returns.
+  jobject CreateMessageBusAsyncRequestHandler(
+      std::shared_ptr<void> context,
+      const MessageBusAsyncRequestHandlerCallbacks& callbacks);
+  void ClearMessageBusAsyncRequestHandler(jobject handler);
+  bool DispatchMessageBusAsyncRequestHandler(jobject handler, JNIEnv* env,
+                                             jstring message,
+                                             jstring response_id);
 
   // Creates the exact com.roblox.engine.jni.memstorage.Callback receiver used
   // by MemStorage.bind. Clear prevents future dispatch while an in-flight call
@@ -432,6 +487,14 @@ private:
   mutable std::mutex fmod_audio_device_mutex_;
   FmodAudioDeviceBinding fmod_audio_device_binding_;
 
+  struct WebRtcAudioManagerBinding {
+    std::shared_ptr<void> context;
+    WebRtcAudioManagerCallbacks callbacks;
+  };
+  mutable std::mutex webrtc_audio_manager_mutex_;
+  WebRtcAudioManagerBinding webrtc_audio_manager_binding_;
+  void* webrtc_cache_audio_parameters_native_ = nullptr;
+
   struct WebRtcAudioRecordBinding {
     std::shared_ptr<void> context;
     WebRtcAudioRecordCallbacks callbacks;
@@ -480,6 +543,15 @@ private:
   mutable std::mutex message_bus_request_handler_mutex_;
   std::unordered_map<jobject, std::shared_ptr<MessageBusRequestHandlerBinding>>
       message_bus_request_handler_bindings_;
+
+  struct MessageBusAsyncRequestHandlerBinding {
+    std::shared_ptr<void> context;
+    MessageBusAsyncRequestHandlerCallbacks callbacks;
+  };
+  mutable std::mutex message_bus_async_request_handler_mutex_;
+  std::unordered_map<jobject,
+                     std::shared_ptr<MessageBusAsyncRequestHandlerBinding>>
+      message_bus_async_request_handler_bindings_;
 
   struct MemStorageCallbackBinding {
     std::shared_ptr<void> context;

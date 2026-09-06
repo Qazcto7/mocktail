@@ -291,6 +291,7 @@ add_library(mocktail_runtime STATIC
   src/runtime/roblox_launch_uri.cc
   src/runtime/roblox_game_session_native_adapter.cc
   src/runtime/roblox_web_view_bridge.cc
+  src/runtime/roblox_permissions_bridge.cc
   src/runtime/payload_update_preflight.cc
   src/runtime/runtime_config.cc
   src/runtime/runtime_config_bootstrap.cc
@@ -302,6 +303,7 @@ add_library(mocktail_runtime STATIC
   src/runtime/supported_launch_policy.cc
   src/runtime/support_bundle.cc
   src/runtime/system_proxy.cc
+  src/runtime/texture_memory_policy.cc
 )
 add_library(Mocktail::Runtime ALIAS mocktail_runtime)
 target_include_directories(mocktail_runtime PUBLIC include)
