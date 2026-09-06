@@ -38,6 +38,7 @@
 #include "runtime/roblox_desktop_app_policy.h"
 #include "runtime/roblox_experience_launch_bridge.h"
 #include "runtime/roblox_fullscreen_runtime_bridge.h"
+#include "runtime/roblox_web_view_bridge.h"
 #include "runtime/runtime_config_bootstrap.h"
 #include "runtime/runtime_config_file.h"
 #include "runtime/runtime_paths.h"
