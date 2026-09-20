@@ -8,7 +8,7 @@
 
 cmake_minimum_required(VERSION 3.20)
 project(Mocktail
-  VERSION 1.0.3
+  VERSION 1.0.4
   DESCRIPTION "Android x86-64 Roblox compatibility runtime for Linux"
   LANGUAGES CXX
 )
@@ -138,12 +138,7 @@ if(BUILD_TESTING)
   FetchContent_MakeAvailable(googletest)
 endif()
 
-add_library(mocktail_crypto_foundation STATIC
-  src/foundation/sha256.cc
-)
-add_library(Mocktail::CryptoFoundation ALIAS mocktail_crypto_foundation)
-target_include_directories(mocktail_crypto_foundation PUBLIC include)
-mocktail_apply_compile_options(mocktail_crypto_foundation)
+find_package(OpenSSL REQUIRED)
 
 include(${CMAKE_SOURCE_DIR}/cmake/MocktailPlatformGraphics.cmake)
 foreach(foundation_target IN ITEMS
@@ -201,7 +196,6 @@ target_include_directories(mocktail_bionic_stdio_runtime PUBLIC include)
 mocktail_apply_compile_options(mocktail_bionic_stdio_runtime)
 
 find_package(CURL REQUIRED)
-find_package(OpenSSL REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBYAML REQUIRED IMPORTED_TARGET yaml-0.1)
@@ -234,7 +228,6 @@ add_library(Mocktail::Update ALIAS mocktail_update)
 target_include_directories(mocktail_update PUBLIC include)
 target_link_libraries(mocktail_update PUBLIC
   Mocktail::Compat
-  Mocktail::CryptoFoundation
   CURL::libcurl
   OpenSSL::Crypto
   PkgConfig::LIBYAML
@@ -271,10 +264,12 @@ add_library(mocktail_runtime STATIC
   src/runtime/command_line.cc
   src/runtime/crash_report_policy.cc
   src/runtime/discord_rpc.cc
+  src/runtime/device_memory_profile.cc
   src/runtime/device_profile.cc
   src/runtime/environment.cc
   src/runtime/external_launch_broker.cc
   src/runtime/frame_rate_policy.cc
+  src/runtime/fleasion.cc
   src/runtime/game_mode.cc
   src/runtime/game_session_coordinator.cc
   src/runtime/graphics_launch_policy.cc
@@ -293,6 +288,8 @@ add_library(mocktail_runtime STATIC
   src/runtime/roblox_web_view_bridge.cc
   src/runtime/roblox_permissions_bridge.cc
   src/runtime/payload_update_preflight.cc
+  src/runtime/process_launch_policy.cc
+  src/runtime/process_diagnostics.cc
   src/runtime/runtime_config.cc
   src/runtime/runtime_config_bootstrap.cc
   src/runtime/runtime_config_file.cc
@@ -334,7 +331,7 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
 endif()
 target_link_libraries(mocktail_runtime PUBLIC Threads::Threads)
 target_link_libraries(mocktail_runtime PRIVATE
-  Mocktail::CryptoFoundation
+  OpenSSL::Crypto
   CURL::libcurl
   nlohmann_json::nlohmann_json
   PkgConfig::GIO
@@ -473,7 +470,7 @@ target_link_libraries(mocktail_window PUBLIC
   Mocktail::SdlVulkanWsi
   SDL3::SDL3
   ${CMAKE_DL_LIBS}
-  PRIVATE Mocktail::Runtime
+  PRIVATE Mocktail::Runtime Mocktail::GlesTextOverlay
 )
 
 add_library(mocktail_roblox_output_device_runtime STATIC

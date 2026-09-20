@@ -18,6 +18,7 @@
 #include <utility>
 #include <vector>
 
+#include "mocktail/graphics/gles_text_overlay_compositor.h"
 #include "mocktail/graphics/present_mode_policy.h"
 #include "mocktail/platform/display_refresh_capabilities.h"
 #include "mocktail/platform/sdl_application_metadata.h"
@@ -151,6 +152,7 @@ static std::unique_ptr<SdlTextInputBackend> g_text_input_backend;
 static std::unique_ptr<WindowTextInputOwner> g_text_input_owner;
 static std::unique_ptr<SdlPointerCaptureBackend> g_pointer_capture_backend;
 static std::unique_ptr<WindowPointerCaptureOwner> g_pointer_capture_owner;
+static std::unique_ptr<graphics::GlesTextOverlayCompositor> g_gles_text_overlay;
 static char g_preferred_egl_library[4096];
 static char g_preferred_gles_library[4096];
 static bool g_auto_angle_retry_attempted = false;
@@ -1550,9 +1552,15 @@ extern "C" bool mocktail_window_has_presented_frame() {
   return HasPresentedFrame();
 }
 
-extern "C" int mocktail_window_width() { return GetWidth(); }
+extern "C" int mocktail_window_width() {
+  const auto surface = g_window_surface_lifecycle.Snapshot();
+  return surface.generation != 0 ? static_cast<int>(surface.width) : GetWidth();
+}
 
-extern "C" int mocktail_window_height() { return GetHeight(); }
+extern "C" int mocktail_window_height() {
+  const auto surface = g_window_surface_lifecycle.Snapshot();
+  return surface.generation != 0 ? static_cast<int>(surface.height) : GetHeight();
+}
 
 extern "C" void* mocktail_gl_proc_address(const char* name) {
   return GetGLProcAddress(name);
@@ -1580,6 +1588,19 @@ bool SwapBuffers() {
     }
     return false;
   }
+
+  if (g_gles_text_overlay == nullptr) {
+    graphics::GlesTextOverlaySource source;
+    source.may_present = reinterpret_cast<decltype(source.may_present)>(
+        dlsym(RTLD_DEFAULT, "mocktail_text_overlay_may_present"));
+    source.query = reinterpret_cast<decltype(source.query)>(
+        dlsym(RTLD_DEFAULT, "mocktail_text_overlay_query"));
+    source.copy = reinterpret_cast<decltype(source.copy)>(
+        dlsym(RTLD_DEFAULT, "mocktail_text_overlay_copy"));
+    g_gles_text_overlay =
+        std::make_unique<graphics::GlesTextOverlayCompositor>(source);
+  }
+  (void)g_gles_text_overlay->Draw(g_state.sdl_window);
 
   if (!SDL_GL_SwapWindow(g_state.sdl_window)) {
     fprintf(stderr, "  [window] SDL_GL_SwapWindow failed: %s\n",
@@ -2207,9 +2228,11 @@ bool PumpEvents() {
           }
         }
         g_state.native_window = observed_native_window;
-        if (pixel_width > 0 && pixel_height > 0) {
-          g_state.width = pixel_width;
-          g_state.height = pixel_height;
+        const WindowSurfaceSnapshot surface =
+            g_window_surface_lifecycle.Snapshot();
+        if (surface.available) {
+          g_state.width = static_cast<int>(surface.width);
+          g_state.height = static_cast<int>(surface.height);
         }
         if ((event.type == SDL_EVENT_WINDOW_RESIZED ||
              event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED ||
@@ -2354,6 +2377,10 @@ void Shutdown() {
   g_pointer_capture_backend.reset();
   g_text_input_owner.reset();
   g_text_input_backend.reset();
+  // PresentLifecycleGate has drained every compositor call. If the render
+  // context is on another thread, destroying that context releases its GL
+  // resources below.
+  g_gles_text_overlay.reset();
   if (!g_state.direct_vulkan && g_state.egl_context != nullptr) {
     SDL_GL_MakeCurrent(g_state.sdl_window, nullptr);
   }

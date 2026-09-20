@@ -182,16 +182,16 @@ int RunGraphicsPolicyProbe(const char* backend) {
                  std::string(anv_memory_limit) == expected_anv_limit &&
                  std::string(submit_thread) == "1" &&
                  std::string(overrides).find(
-                     "\"FStringGraphicsTextureManager2DenyPattern2\":\".*\"") !=
+                     "FStringGraphicsTextureManager2DenyPattern2") ==
                      std::string::npos &&
                  std::string(overrides).find(
                      "FStringGraphicsVulkanShaderMTDenyPattern") !=
                      std::string::npos &&
                  std::string(overrides).find(
-                     "\"FFlagTextureTranscodeNewRollout\":\"True\"") !=
+                     "\"FFlagTextureTranscodeNewRollout\"") ==
                      std::string::npos &&
                  std::string(overrides).find(
-                     "\"FStringTextureTranscodeRollout\":\"\"") !=
+                     "\"FStringTextureTranscodeRollout\"") ==
                      std::string::npos
              ? 0
              : 25;

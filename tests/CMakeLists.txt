@@ -16,6 +16,18 @@ target_link_libraries(runtime_config_test PRIVATE
   GTest::gtest_main
 )
 
+add_executable(fleasion_probe fleasion_probe.cc)
+target_link_libraries(fleasion_probe PRIVATE Mocktail::Services libc_shim)
+mocktail_apply_compile_options(fleasion_probe)
+find_program(MOCKTAIL_TEST_PYTHON python3)
+find_program(MOCKTAIL_TEST_OPENSSL openssl)
+if(MOCKTAIL_TEST_PYTHON AND MOCKTAIL_TEST_OPENSSL)
+  add_test(NAME FleasionIntegrationTest.ProxyAndTrust
+    COMMAND ${MOCKTAIL_TEST_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/fleasion_integration_test.py
+            $<TARGET_FILE:fleasion_probe> ${MOCKTAIL_TEST_OPENSSL})
+  set_tests_properties(FleasionIntegrationTest.ProxyAndTrust PROPERTIES TIMEOUT 45)
+endif()
+
 add_executable(runtime_config_file_test runtime_config_file_test.cc)
 target_link_libraries(runtime_config_file_test PRIVATE
   Mocktail::Runtime
@@ -188,6 +200,13 @@ target_link_libraries(supported_launch_policy_test PRIVATE
   Mocktail::Runtime
   GTest::gtest_main
 )
+
+add_executable(process_launch_policy_test process_launch_policy_test.cc)
+target_link_libraries(process_launch_policy_test PRIVATE
+  Mocktail::Runtime
+  GTest::gtest_main
+)
+mocktail_apply_compile_options(process_launch_policy_test)
 
 add_executable(platform_cache_migration_test
   platform_cache_migration_test.cc
@@ -595,13 +614,6 @@ target_link_libraries(auth_service_test PRIVATE
   GTest::gtest_main
 )
 
-add_executable(sha256_test sha256_test.cc)
-target_link_libraries(sha256_test PRIVATE
-  Mocktail::CryptoFoundation
-  GTest::gtest_main
-)
-mocktail_apply_compile_options(sha256_test)
-
 add_executable(auth_runtime_composition_test
   auth_runtime_composition_test.cc
 )
@@ -730,6 +742,8 @@ target_link_libraries(bionic_pthread_create_runtime_test PRIVATE
 )
 target_link_options(bionic_pthread_create_runtime_test PRIVATE
   "-Wl,--wrap=pthread_create"
+  "-Wl,--wrap=pthread_setschedparam"
+  "-Wl,--wrap=sched_setscheduler"
 )
 
 add_executable(bionic_sysconf_test bionic_sysconf_test.cc)
@@ -892,6 +906,7 @@ gtest_discover_tests(memory_limit_test)
 gtest_discover_tests(runtime_paths_test)
 gtest_discover_tests(single_instance_lock_test)
 gtest_discover_tests(supported_launch_policy_test)
+gtest_discover_tests(process_launch_policy_test)
 gtest_discover_tests(platform_cache_migration_test)
 gtest_discover_tests(roblox_desktop_app_policy_test)
 gtest_discover_tests(browser_tracker_service_test)
@@ -937,7 +952,6 @@ gtest_discover_tests(window_pointer_capture_owner_test)
 gtest_discover_tests(roblox_text_input_jni_bridge_test)
 gtest_discover_tests(auth_service_test)
 gtest_discover_tests(auth_runtime_composition_test)
-gtest_discover_tests(sha256_test)
 gtest_discover_tests(client_settings_service_test)
 gtest_discover_tests(elf_build_id_test)
 gtest_discover_tests(build_profile_test)
@@ -980,6 +994,12 @@ add_test(
   NAME AppImageAppRunTest.ResolvesCanonicalBundleRoot
   COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/appimage_apprun_test.sh
           ${CMAKE_SOURCE_DIR}/packaging/AppRun
+)
+
+add_test(
+  NAME AnyLinuxDependenciesTest.RollingAssetsAreVerified
+  COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/anylinux_dependencies_test.sh
+          ${CMAKE_SOURCE_DIR}
 )
 
 add_test(
