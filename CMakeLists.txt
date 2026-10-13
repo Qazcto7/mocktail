@@ -9,7 +9,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(Mocktail
   VERSION 1.0.4
-  DESCRIPTION "Android x86-64 Roblox compatibility runtime for Linux"
+  DESCRIPTION "Android Roblox compatibility runtime for Linux"
   LANGUAGES CXX
 )
 
@@ -248,6 +248,9 @@ mocktail_apply_compile_options(mocktail_updater)
 
 add_library(mocktail_legacy_jnivm STATIC
   src/jnivm/jnivm.cc
+  src/jnivm/jni_references.cc
+  src/jnivm/jni_fields.cc
+  src/jnivm/jni_strings.cc
 )
 add_library(Mocktail::LegacyJni ALIAS mocktail_legacy_jnivm)
 target_include_directories(mocktail_legacy_jnivm PUBLIC include)
@@ -284,9 +287,12 @@ add_library(mocktail_runtime STATIC
   src/runtime/roblox_capability_resolver.cc
   src/runtime/roblox_experience_launch_bridge.cc
   src/runtime/roblox_launch_uri.cc
+  src/runtime/roblox_presence_resolver.cc
   src/runtime/roblox_game_session_native_adapter.cc
   src/runtime/roblox_web_view_bridge.cc
   src/runtime/roblox_permissions_bridge.cc
+  src/runtime/roblox_message_bus_request_bridge.cc
+  src/runtime/roblox_call_protocol_bridge.cc
   src/runtime/payload_update_preflight.cc
   src/runtime/process_launch_policy.cc
   src/runtime/process_diagnostics.cc
@@ -470,7 +476,7 @@ target_link_libraries(mocktail_window PUBLIC
   Mocktail::SdlVulkanWsi
   SDL3::SDL3
   ${CMAKE_DL_LIBS}
-  PRIVATE Mocktail::Runtime Mocktail::GlesTextOverlay
+  PRIVATE Mocktail::Runtime Mocktail::GlesTextOverlay Mocktail::GraphicsFoundation
 )
 
 add_library(mocktail_roblox_output_device_runtime STATIC
@@ -551,50 +557,6 @@ target_link_libraries(mocktail_bionic_abi_exports PRIVATE
   Threads::Threads
 )
 
-include(CheckCXXSourceCompiles)
-include(CheckIncludeFileCXX)
-include(CMakePushCheckState)
-
-check_include_file_cxx(execinfo.h MOCKTAIL_HAVE_EXECINFO_H)
-if(NOT MOCKTAIL_HAVE_EXECINFO_H)
-  message(FATAL_ERROR
-    "execinfo.h is required for crash diagnostics; on musl install "
-    "libexecinfo-devel"
-  )
-endif()
-
-set(MOCKTAIL_EXECINFO_LINK_LIBRARY "")
-set(_mocktail_execinfo_link_probe [=[
-  #include <execinfo.h>
-  int main() {
-    void* frames[1] = {};
-    const int count = backtrace(frames, 1);
-    return backtrace_symbols(frames, count) == nullptr;
-  }
-]=])
-check_cxx_source_compiles(
-  "${_mocktail_execinfo_link_probe}"
-  MOCKTAIL_EXECINFO_IN_HOST_LIBC
-)
-if(NOT MOCKTAIL_EXECINFO_IN_HOST_LIBC)
-  find_library(MOCKTAIL_EXECINFO_LIBRARY NAMES execinfo REQUIRED)
-  cmake_push_check_state(RESET)
-  set(CMAKE_REQUIRED_LIBRARIES "${MOCKTAIL_EXECINFO_LIBRARY}")
-  check_cxx_source_compiles(
-    "${_mocktail_execinfo_link_probe}"
-    MOCKTAIL_EXECINFO_IN_EXTERNAL_LIBRARY
-  )
-  cmake_pop_check_state()
-  if(NOT MOCKTAIL_EXECINFO_IN_EXTERNAL_LIBRARY)
-    message(FATAL_ERROR
-      "execinfo.h is available, but backtrace and backtrace_symbols cannot "
-      "be linked"
-    )
-  endif()
-  set(MOCKTAIL_EXECINFO_LINK_LIBRARY "${MOCKTAIL_EXECINFO_LIBRARY}")
-endif()
-unset(_mocktail_execinfo_link_probe)
-
 add_library(mocktail_legacy_runtime STATIC
   src/legacy/legacy_runtime.cc
   src/runtime/roblox_text_input_jni_bridge.cc
@@ -619,7 +581,6 @@ target_link_libraries(mocktail_legacy_runtime PRIVATE
   libc_shim
   mocktail_window
   mocktail_graphics_foundation
-  ${MOCKTAIL_EXECINFO_LINK_LIBRARY}
 )
 target_compile_definitions(mocktail_legacy_runtime PRIVATE
   "MOCKTAIL_DEFAULT_COMPATIBILITY_MANIFEST=\"${MOCKTAIL_DEFAULT_COMPATIBILITY_MANIFEST}\""
@@ -648,6 +609,11 @@ target_link_options(mocktail PRIVATE
 )
 
 # Native FreeBSD helper for Linuxulator's unsupported DF socket option.
+# The helper is x86-64 assembly; other host architectures have nothing to
+# assemble.
+if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
+  set(MOCKTAIL_BUILD_FREEBSD_SOCKET_HELPER OFF)
+endif()
 option(MOCKTAIL_BUILD_FREEBSD_SOCKET_HELPER
   "Build the native FreeBSD Linuxulator socket helper" ON)
 if(MOCKTAIL_BUILD_FREEBSD_SOCKET_HELPER)
@@ -792,7 +758,7 @@ set(CPACK_PACKAGE_CONTACT "komaruworld <rtysus228@gmail.com>")
 set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/komaruworld/mocktail")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "${PROJECT_DESCRIPTION}")
 set(CPACK_PACKAGE_DESCRIPTION
-  "Runs the Android x86-64 Roblox client on Linux."
+  "Runs the Android Roblox client on Linux."
 )
 set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_SOURCE_DIR}/LICENSE")
 set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")

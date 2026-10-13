@@ -30,13 +30,14 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <time.h>
-#include <execinfo.h>
 #include <ucontext.h>
 #include <elf.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/prctl.h>
+#if defined(__x86_64__)
 #include <asm/prctl.h>
+#endif
 #include <sys/syscall.h>
 #include <vector>
 
@@ -49,6 +50,7 @@
 #include "compat/bionic_socket_runtime.h"
 #include "compat/build_profile.h"
 #include "compat/elf_build_id.h"
+#include "compat/guest_abi.h"
 #include "compat/host_abi_experiment.h"
 #include "compat/host_abi_profile.h"
 #include "compat/host_allocator_bridge.h"
@@ -1006,7 +1008,7 @@ struct BionicAddrInfo {
 };
 
 static_assert(sizeof(BionicAddrInfo) == 48,
-              "unexpected x86_64 bionic addrinfo size");
+              "unexpected bionic addrinfo size");
 
 bool DnsTraceEnabled() {
   return IsEnabled("MOCKTAIL_DNS_TRACE");
@@ -1371,15 +1373,31 @@ bool IsUnsafeSoftTimeoutModule(void* rip) {
 void JniOnLoadTimeoutAlarm(int, siginfo_t* info, void* context) {
   static_cast<void>(info);
   auto* uc = static_cast<ucontext_t*>(context);
+#if defined(__x86_64__)
   auto rip = uc ? static_cast<uintptr_t>(uc->uc_mcontext.gregs[REG_RIP]) : 0;
   auto rsp = uc ? static_cast<uintptr_t>(uc->uc_mcontext.gregs[REG_RSP]) : 0;
   auto rbp = uc ? static_cast<uintptr_t>(uc->uc_mcontext.gregs[REG_RBP]) : 0;
   auto rax = uc ? static_cast<uintptr_t>(uc->uc_mcontext.gregs[REG_RAX]) : 0;
+  const char* regs_format =
+      "  [timeout] RIP=0x%016llx RSP=0x%016llx RBP=0x%016llx "
+      "RAX=0x%016llx\n";
+#elif defined(__aarch64__)
+  auto rip = uc ? static_cast<uintptr_t>(uc->uc_mcontext.pc) : 0;
+  auto rsp = uc ? static_cast<uintptr_t>(uc->uc_mcontext.sp) : 0;
+  auto rbp = uc ? static_cast<uintptr_t>(uc->uc_mcontext.regs[29]) : 0;
+  auto rax = uc ? static_cast<uintptr_t>(uc->uc_mcontext.regs[0]) : 0;
+  const char* regs_format =
+      "  [timeout] PC=0x%016llx SP=0x%016llx FP=0x%016llx "
+      "X0=0x%016llx\n";
+#else
+  uintptr_t rip = 0, rsp = 0, rbp = 0, rax = 0;
+  const char* regs_format =
+      "  [timeout] PC=0x%016llx SP=0x%016llx FP=0x%016llx "
+      "X0=0x%016llx\n";
+#endif
   char regs_msg[192];
   int len = std::snprintf(
-      regs_msg, sizeof(regs_msg),
-      "  [timeout] RIP=0x%016llx RSP=0x%016llx RBP=0x%016llx "
-      "RAX=0x%016llx\n",
+      regs_msg, sizeof(regs_msg), regs_format,
       static_cast<unsigned long long>(rip), static_cast<unsigned long long>(rsp),
       static_cast<unsigned long long>(rbp), static_cast<unsigned long long>(rax));
   write(2, regs_msg, static_cast<size_t>(len));
@@ -2422,10 +2440,12 @@ jobject BuildDeviceParams(JNIEnv* env) {
       GetEnvString("MOCKTAIL_DEVICE_NAME", "Mocktail Linux");
   const std::string manufacturer =
       GetEnvString("MOCKTAIL_DEVICE_MANUFACTURER", "Mocktail");
-  const std::string device_sku =
-      GetEnvString("MOCKTAIL_DEVICE_SKU", "mocktail-x86_64");
+  const std::string device_sku = GetEnvString(
+      "MOCKTAIL_DEVICE_SKU",
+      ("mocktail-" + std::string(mocktail::compat::kGuestCpuName)).c_str());
   const std::string soc_model =
-      GetEnvString("MOCKTAIL_DEVICE_SOC_MODEL", "x86_64");
+      GetEnvString("MOCKTAIL_DEVICE_SOC_MODEL",
+                   std::string(mocktail::compat::kGuestCpuName).c_str());
   SetStringField(env, params, "osVersion", "33");
   SetStringField(env, params, "deviceName", device_name.c_str());
   const std::string app_version =
@@ -4621,12 +4641,14 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
 
   // Roblox internal threads trigger SI_KERNEL traps from CET shadow-stack
   // return mismatches. Unsupported kernels ignore this request.
+#if defined(__x86_64__)
   {
     long r = syscall(SYS_arch_prctl, ARCH_SHSTK_DISABLE, ARCH_SHSTK_SHSTK);
     if (r == 0) {
       std::cout << "  [cet] shadow-stack (SHSTK) disabled\n";
     }
   }
+#endif
 
   if (build_profile.allow_legacy_binary_patches) {
     std::cerr
@@ -4818,9 +4840,8 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
         mocktail::runtime::ReadRobloxThemeCache(
             app_storage_file, dependencies.account_identity().user_id);
     if (!saved_theme) {
-      std::cerr << "[FATAL] Cannot read Roblox theme cache: "
+      std::cerr << "  [theme] Cannot read Roblox theme cache; using default: "
                 << saved_theme.error << '\n';
-      return EXIT_FAILURE;
     }
     if (saved_theme.dark_theme.has_value()) {
       dark_theme = *saved_theme.dark_theme;
@@ -4831,7 +4852,7 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
   if (runtime_config.theme_mode() == "roblox") {
     std::cout << "  [theme] "
               << (roblox_theme_found ? "Roblox saved theme="
-                                     : "Roblox theme missing; default=")
+                                     : "Roblox theme unavailable; default=")
               << (dark_theme ? "dark" : "light") << '\n'
               << std::flush;
   } else if (app_storage_file != nullptr) {
@@ -4839,9 +4860,8 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
     if (!mocktail::runtime::ApplyRobloxThemeCacheOverride(
             app_storage_file, dependencies.account_identity().user_id,
             dark_theme, &theme_error)) {
-      std::cerr << "[FATAL] Roblox theme cache override failed: " << theme_error
-                << '\n';
-      return EXIT_FAILURE;
+      std::cerr << "  [theme] Cannot persist Roblox theme override: "
+                << theme_error << '\n';
     }
     std::cout << "  [theme] Roblox local theme="
               << (dark_theme ? "dark" : "light") << '\n'
@@ -5545,6 +5565,27 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
                          reinterpret_cast<void*>(mocktail_pthread_spin_trylock));
   linker::RegisterSymbol("pthread_spin_unlock",
                          reinterpret_cast<void*>(mocktail_pthread_spin_unlock));
+  linker::RegisterSymbol(
+      "pthread_attr_init",
+      reinterpret_cast<void*>(mocktail_pthread_attr_init));
+  linker::RegisterSymbol(
+      "pthread_attr_destroy",
+      reinterpret_cast<void*>(mocktail_pthread_attr_destroy));
+  linker::RegisterSymbol(
+      "pthread_attr_setstacksize",
+      reinterpret_cast<void*>(mocktail_pthread_attr_setstacksize));
+  linker::RegisterSymbol(
+      "pthread_attr_setdetachstate",
+      reinterpret_cast<void*>(mocktail_pthread_attr_setdetachstate));
+  linker::RegisterSymbol(
+      "pthread_attr_setschedparam",
+      reinterpret_cast<void*>(mocktail_pthread_attr_setschedparam));
+  linker::RegisterSymbol(
+      "pthread_getattr_np",
+      reinterpret_cast<void*>(mocktail_pthread_getattr_np));
+  linker::RegisterSymbol(
+      "pthread_attr_getstack",
+      reinterpret_cast<void*>(mocktail_pthread_attr_getstack));
   linker::RegisterSymbol("pthread_barrier_init",
                          reinterpret_cast<void*>(mocktail_pthread_barrier_init));
   linker::RegisterSymbol(
@@ -5664,7 +5705,8 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
 
   if (roblox_handle == nullptr) {
     std::cerr << "\n[FATAL] Could not load '" << library_path << "'.\n"
-              << "  Extract lib/x86_64/libroblox.so from a Roblox APK and\n"
+              << "  Extract lib/" << compat::kGuestAbi
+              << "/libroblox.so from a Roblox APK and\n"
               << "  place it at the path above (or set ROBLOX_LIB_PATH).\n";
     return EXIT_FAILURE;
   }
@@ -5851,6 +5893,10 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
       experience_game_symbols;
   std::shared_ptr<mocktail::runtime::RobloxExperienceComposition>
       experience_composition;
+  std::unique_ptr<mocktail::runtime::RobloxPermissionsBridge>
+      eager_permissions_bridge;
+  std::unique_ptr<mocktail::runtime::RobloxCallProtocolBridge>
+      eager_call_protocol_bridge;
   std::shared_ptr<ExperienceLifecycleTarget> experience_lifecycle_target;
   std::shared_ptr<mocktail::runtime::RobloxWindowInputRuntime>
       window_input_runtime;
@@ -6510,6 +6556,75 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
               << " run_start_app_with_params="
               << (run_start_app_with_params ? 1 : 0) << '\n' << std::flush;
 
+    // The direct GAME path still runs CoreScripts that query app protocols.
+    // Install these independently of ExperienceProtocol's dynamic launch path.
+    if (game_session_runtime != nullptr) {
+      mocktail::runtime::JniEnvironmentProvider environment{
+          raw_vm, jni_vm.get(), &RestoreGameSessionJniEnvironment};
+      JNIEnv* env = nullptr;
+      auto status = environment.Acquire(&env);
+      if (!status.ok()) {
+        std::cerr << "[FATAL] GAME protocol JNI environment unavailable\n";
+        return EXIT_FAILURE;
+      }
+      const auto symbols = mocktail::runtime::ResolveRobloxPlatformWebSymbols(
+          roblox_handle,
+          reinterpret_cast<mocktail::runtime::SubscribeExperienceLaunchRawFn>(
+              linker::ResolveSymbol(roblox_handle,
+                                    "Java_com_roblox_universalapp_messagebus_"
+                                    "MessageBus_doSubscribeRaw")),
+          reinterpret_cast<mocktail::runtime::DeleteMessageBusConnectionFn>(
+              linker::ResolveSymbol(roblox_handle,
+                                    "Java_com_roblox_universalapp_messagebus_"
+                                    "Connection_deleteSharedPtr")));
+      jclass bus_class =
+          env->FindClass("com/roblox/universalapp/messagebus/MessageBus");
+      jmethodID singleton =
+          bus_class ? env->GetStaticMethodID(
+                          bus_class, "f",
+                          "()Lcom/roblox/universalapp/messagebus/MessageBus;")
+                    : nullptr;
+      jobject bus = singleton
+                        ? env->CallStaticObjectMethod(bus_class, singleton)
+                        : nullptr;
+      if (bus_class)
+        env->DeleteLocalRef(bus_class);
+      if (!bus || env->ExceptionCheck()) {
+        if (env->ExceptionCheck())
+          env->ExceptionClear();
+        if (bus)
+          env->DeleteLocalRef(bus);
+        std::cerr << "[FATAL] GAME platform MessageBus is unavailable\n";
+        return EXIT_FAILURE;
+      }
+      const mocktail::runtime::RobloxMessageBusObjects objects{
+          bus,
+          jni_vm.get(),
+          &CreateExperienceRawCallback,
+          &ClearExperienceRawCallback,
+          &CreateAsyncMessageBusRequestHandler,
+          &ClearAsyncMessageBusRequestHandler};
+      eager_permissions_bridge =
+          std::make_unique<mocktail::runtime::RobloxPermissionsBridge>(
+              environment, symbols.permissions, objects,
+              runtime_config.microphone_enabled());
+      eager_call_protocol_bridge =
+          std::make_unique<mocktail::runtime::RobloxCallProtocolBridge>(
+              environment, symbols.permissions, objects);
+      status = eager_permissions_bridge->Initialize();
+      if (status.ok())
+        status = eager_call_protocol_bridge->Initialize();
+      env->DeleteLocalRef(bus);
+      if (!status.ok()) {
+        std::cerr << "[FATAL] GAME platform protocols did not initialize: "
+                  << status.message() << '\n';
+        return EXIT_FAILURE;
+      }
+      std::cout << "  [platform] direct GAME PermissionsProtocol and "
+                   "CallProtocol ready\n"
+                << std::flush;
+    }
+
     if (experience_game_symbols != nullptr) {
       mocktail::runtime::RobloxExperienceMessageBusSymbols message_bus_symbols;
       message_bus_symbols.get_launch_id =
@@ -6987,6 +7102,14 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
     if (window_input_runtime != nullptr) {
       input_shutdown_completed = window_input_runtime->Shutdown().ok() &&
                                  input_shutdown_completed;
+    }
+    if (eager_call_protocol_bridge != nullptr) {
+      (void)eager_call_protocol_bridge->Shutdown();
+      eager_call_protocol_bridge.reset();
+    }
+    if (eager_permissions_bridge != nullptr) {
+      (void)eager_permissions_bridge->Shutdown();
+      eager_permissions_bridge.reset();
     }
     bool experience_destroyed_app = false;
     if (experience_composition != nullptr) {

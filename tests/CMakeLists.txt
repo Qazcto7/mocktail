@@ -10,6 +10,13 @@ target_link_libraries(jnivm_test PRIVATE
   GTest::gtest_main
 )
 
+add_executable(jnivm_fields_test jnivm_fields_test.cc)
+target_link_libraries(jnivm_fields_test PRIVATE
+  Mocktail::LegacyJni
+  GTest::gtest_main
+  Threads::Threads
+)
+
 add_executable(runtime_config_test runtime_config_test.cc)
 target_link_libraries(runtime_config_test PRIVATE
   Mocktail::Runtime
@@ -71,6 +78,12 @@ target_compile_definitions(native_update_test PRIVATE
   MOCKTAIL_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
 )
 
+add_executable(compatibility_catalog_test compatibility_catalog_test.cc)
+target_link_libraries(compatibility_catalog_test PRIVATE
+  Mocktail::Update
+  GTest::gtest_main
+)
+
 add_executable(apk_provider_test apk_provider_test.cc)
 target_link_libraries(apk_provider_test PRIVATE
   Mocktail::Update
@@ -118,6 +131,38 @@ target_link_libraries(texture_memory_policy_test PRIVATE
   Mocktail::Runtime
   GTest::gtest_main
 )
+
+find_package(PNG REQUIRED)
+add_executable(texture_resample_test
+  texture_resample_test.cc
+  ${CMAKE_SOURCE_DIR}/src/graphics/texture_override.cc
+)
+target_include_directories(texture_resample_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/include
+)
+target_link_libraries(texture_resample_test PRIVATE PNG::PNG GTest::gtest_main)
+mocktail_apply_compile_options(texture_resample_test)
+
+add_executable(etc2_decoder_test
+  etc2_decoder_test.cc
+  ${CMAKE_SOURCE_DIR}/src/graphics/etc2_decoder.cc
+)
+target_include_directories(etc2_decoder_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(etc2_decoder_test PRIVATE GTest::gtest_main Threads::Threads)
+target_link_options(etc2_decoder_test PRIVATE -Wl,--wrap=pthread_create)
+mocktail_apply_compile_options(etc2_decoder_test)
+
+add_executable(vulkan_etc2_emulation_test
+  vulkan_etc2_emulation_test.cc
+  ${CMAKE_SOURCE_DIR}/src/graphics/vulkan_etc2_emulation.cc
+  ${CMAKE_SOURCE_DIR}/src/graphics/etc2_decoder.cc
+  ${CMAKE_SOURCE_DIR}/src/graphics/texture_override.cc
+)
+target_include_directories(vulkan_etc2_emulation_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(vulkan_etc2_emulation_test PRIVATE
+  Vulkan::Headers PNG::PNG GTest::gtest_main Threads::Threads
+)
+mocktail_apply_compile_options(vulkan_etc2_emulation_test)
 
 add_executable(http_client_policy_test http_client_policy_test.cc)
 target_link_libraries(http_client_policy_test PRIVATE
@@ -882,11 +927,13 @@ target_link_libraries(headless_graphics_test PRIVATE
 
 include(GoogleTest)
 gtest_discover_tests(jnivm_test)
+gtest_discover_tests(jnivm_fields_test)
 gtest_discover_tests(runtime_config_test)
 gtest_discover_tests(runtime_config_file_test)
 gtest_discover_tests(payload_update_preflight_test)
 gtest_discover_tests(apk_provider_test)
 gtest_discover_tests(native_update_test)
+gtest_discover_tests(compatibility_catalog_test)
 gtest_discover_tests(support_bundle_runtime_test)
 gtest_discover_tests(vulkan_icd_selection_test)
 gtest_discover_tests(session_log_test)
@@ -894,6 +941,9 @@ gtest_discover_tests(failure_dialog_test)
 gtest_discover_tests(frame_rate_policy_test)
 gtest_discover_tests(performance_policy_test)
 gtest_discover_tests(texture_memory_policy_test)
+gtest_discover_tests(texture_resample_test)
+gtest_discover_tests(etc2_decoder_test)
+gtest_discover_tests(vulkan_etc2_emulation_test)
 gtest_discover_tests(http_client_policy_test)
 gtest_discover_tests(http_client_spin_guard_test)
 gtest_discover_tests(crash_report_policy_test)
@@ -1030,6 +1080,11 @@ add_test(
 )
 
 find_program(MOCKTAIL_PATCHELF_EXECUTABLE patchelf)
+add_test(
+  NAME StandaloneWebkitCacheTest.RelocatesAllLoaderNames
+  COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/standalone_webkit_cache_test.sh
+          ${CMAKE_SOURCE_DIR}
+)
 if(MOCKTAIL_BUILD_FREEBSD_SOCKET_HELPER AND MOCKTAIL_PATCHELF_EXECUTABLE)
   add_test(
     NAME PortablePackagingTest.RelocatableReadOnlyBundle
@@ -1037,6 +1092,9 @@ if(MOCKTAIL_BUILD_FREEBSD_SOCKET_HELPER AND MOCKTAIL_PATCHELF_EXECUTABLE)
             MOCKTAIL_PORTABLE_TEST_BUILD_DIR=${CMAKE_BINARY_DIR}
             bash ${CMAKE_CURRENT_SOURCE_DIR}/portable_packaging_test.sh
   )
+  # Copies and verifies a full JVM/WebKit bundle, unlike the unit tests.
+  set_tests_properties(PortablePackagingTest.RelocatableReadOnlyBundle
+    PROPERTIES TIMEOUT 600)
 endif()
 
 add_test(
