@@ -1,5 +1,7 @@
 #include "runtime/payload_update_preflight.h"
 
+#include "runtime/helper_environment.h"
+
 #include <fcntl.h>
 #include <spawn.h>
 #include <sys/socket.h>
@@ -17,6 +19,10 @@
 #include <vector>
 
 extern char** environ;
+
+#ifndef MOCKTAIL_INSTALL_LIBDIR
+#define MOCKTAIL_INSTALL_LIBDIR "lib"
+#endif
 
 namespace mocktail {
 namespace runtime {
@@ -79,7 +85,8 @@ std::filesystem::path UpdateHelper(const Environment& environment) {
       executable_dir / "mocktail_updater",
       executable_dir.parent_path() / "libexec" / "mocktail" /
           "mocktail_updater",
-      executable_dir.parent_path() / "lib" / "mocktail" / "mocktail_updater",
+      executable_dir.parent_path() / MOCKTAIL_INSTALL_LIBDIR / "mocktail" /
+          "mocktail_updater",
   };
   for (const std::filesystem::path& candidate : candidates) {
     if (IsExecutableRegularFile(candidate)) {
@@ -169,8 +176,9 @@ class UpdateProgressMonitor final {
     pid_t child = -1;
     int spawn_status = action_status;
     if (spawn_status == 0) {
+      const auto child_environment = BuildHelperEnvironment(environ);
       spawn_status = posix_spawn(&child, helper.c_str(), &actions, nullptr,
-                                 arguments, environ);
+                                 arguments, child_environment.data());
     }
     posix_spawn_file_actions_destroy(&actions);
     close(sockets[1]);
@@ -377,7 +385,8 @@ PayloadUpdatePreflightResult RunPayloadUpdatePreflight(
 
   const std::filesystem::path helper = UpdateHelper(environment);
   if (helper.empty()) {
-    if (force_run_latest) {
+    if (force_run_latest ||
+        environment.HasNonEmpty("MOCKTAIL_RUNTIME_LIBRARY_DIR")) {
       result.error = "cannot locate the Mocktail update helper";
     }
     return result;
