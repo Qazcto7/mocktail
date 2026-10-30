@@ -148,7 +148,7 @@ add_executable(etc2_decoder_test
   ${CMAKE_SOURCE_DIR}/src/graphics/etc2_decoder.cc
 )
 target_include_directories(etc2_decoder_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(etc2_decoder_test PRIVATE GTest::gtest_main Threads::Threads)
+target_link_libraries(etc2_decoder_test PRIVATE mocktail_core_rust GTest::gtest_main Threads::Threads)
 target_link_options(etc2_decoder_test PRIVATE -Wl,--wrap=pthread_create)
 mocktail_apply_compile_options(etc2_decoder_test)
 
@@ -160,7 +160,7 @@ add_executable(vulkan_etc2_emulation_test
 )
 target_include_directories(vulkan_etc2_emulation_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(vulkan_etc2_emulation_test PRIVATE
-  Vulkan::Headers PNG::PNG GTest::gtest_main Threads::Threads
+  mocktail_core_rust Vulkan::Headers PNG::PNG GTest::gtest_main Threads::Threads
 )
 mocktail_apply_compile_options(vulkan_etc2_emulation_test)
 

@@ -17,6 +17,9 @@ add_library(mocktail_audio_core STATIC
 target_include_directories(mocktail_audio_core PUBLIC
   ${MOCKTAIL_AUDIO_ROOT}/include
 )
+target_link_libraries(mocktail_audio_core PUBLIC
+  mocktail_core_rust
+)
 target_compile_features(mocktail_audio_core PUBLIC cxx_std_17)
 set_target_properties(mocktail_audio_core PROPERTIES
   POSITION_INDEPENDENT_CODE ON

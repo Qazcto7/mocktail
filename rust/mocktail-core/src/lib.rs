@@ -5791,6 +5791,799 @@ pub extern "C" fn mocktail_rust_sanitize_log(
 }
 
 // ============================================================================
+// 33. Client Settings & Atomic File Store (Group A)
+// ============================================================================
+
+pub const MOCKTAIL_SAFE_DEFAULTS_JSON: &str = r#"{
+    "applicationSettings": {
+      "BeginScheduledFlagFetch3": "False",
+      "BeginScheduledFlagFetch5": "false",
+      "RetryFlagPrefetchOnBackgroundFailure": "false",
+      "FFlagEnableVersionCheckFromClientSettingsCDN": "False",
+      "FIntScheduledFlagFetchPeriodMinutes": "1000000",
+      "FIntScheduledFlagFetchPeriodFlexMinutes": "0",
+      "DFFlagFetchAndWriteFlagsAfterSuccessfulCachedFlagsLoad": "False",
+      "DFFlagWriteFlagCacheAfterDynamicFetch": "False",
+      "DFFlagWriteFlagCacheAfterFlagFetch": "False",
+      "DFFlagWriteFlagCacheAfterFlagFetch2": "False",
+      "DFFlagEnableAppPlatformQoSEmergencyOnStartup3": "False",
+      "DFFlagEnableAppPlatformQoSEmergencyOnFlagReload3": "False",
+      "DFFlagEnableAppPlatformQoSEmergencyOnFlagReload4": "False",
+      "FFlagAndroidEnableQoS": "False",
+      "FFlagEnableNetworkStatusObserving": "False",
+      "DFFlagDontReportAccumulatedStatsInHttpClientDestroy2": "True",
+      "FFlagEnableJNIAppbridgeStartMilestone": "False"
+    }
+  }"#;
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_client_settings_safe_defaults(
+    out_buf: *mut c_char,
+    buf_cap: usize,
+) -> c_int {
+    if out_buf.is_null() || buf_cap <= MOCKTAIL_SAFE_DEFAULTS_JSON.len() {
+        return -1;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            MOCKTAIL_SAFE_DEFAULTS_JSON.as_ptr() as *const c_char,
+            out_buf,
+            MOCKTAIL_SAFE_DEFAULTS_JSON.len(),
+        );
+        *out_buf.add(MOCKTAIL_SAFE_DEFAULTS_JSON.len()) = 0;
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_client_settings_default_url(
+    app_name: *const c_char,
+    out_buf: *mut c_char,
+    buf_cap: usize,
+) -> c_int {
+    if app_name.is_null() || out_buf.is_null() || buf_cap == 0 {
+        return -1;
+    }
+    let app = match unsafe { CStr::from_ptr(app_name) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return -2,
+    };
+    let url = format!(
+        "https://clientsettingscdn.roblox.com/v2/settings/application/{}",
+        app
+    );
+    if url.len() >= buf_cap {
+        return -3;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(url.as_ptr() as *const c_char, out_buf, url.len());
+        *out_buf.add(url.len()) = 0;
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_client_settings_is_valid_json(
+    json_str: *const c_char,
+) -> c_int {
+    if json_str.is_null() {
+        return 0;
+    }
+    let s = match unsafe { CStr::from_ptr(json_str) }.to_str() {
+        Ok(s) => s.trim(),
+        Err(_) => return 0,
+    };
+    if s.is_empty() {
+        return 0;
+    }
+    match serde_json::from_str::<serde_json::Value>(s) {
+        Ok(v) => if v.is_object() { 1 } else { 0 },
+        Err(_) => 0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_atomic_write_file(
+    file_path: *const c_char,
+    content: *const c_char,
+    content_len: usize,
+    out_err: *mut c_char,
+    err_cap: usize,
+) -> c_int {
+    let set_err = |msg: &str| {
+        if !out_err.is_null() && err_cap > 0 {
+            let len = std::cmp::min(msg.len(), err_cap - 1);
+            unsafe {
+                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_err, len);
+                *out_err.add(len) = 0;
+            }
+        }
+    };
+    if file_path.is_null() {
+        set_err("path is null");
+        return -1;
+    }
+    let path_str = match unsafe { CStr::from_ptr(file_path) }.to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_err("invalid path encoding");
+            return -2;
+        }
+    };
+    let path = Path::new(path_str);
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    if let Err(e) = std::fs::create_dir_all(parent) {
+        set_err(&format!("could not create directory: {}", e));
+        return -3;
+    }
+
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp_path = parent.join(format!(
+        ".tmp_{}_{}",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+
+    let bytes = if content_len > 0 && !content.is_null() {
+        unsafe { std::slice::from_raw_parts(content as *const u8, content_len) }
+    } else {
+        &[]
+    };
+
+    let mut file = match std::fs::File::create(&tmp_path) {
+        Ok(f) => f,
+        Err(e) => {
+            set_err(&format!("cannot create temporary file: {}", e));
+            return -4;
+        }
+    };
+    use std::io::Write;
+    if let Err(e) = file.write_all(bytes) {
+        let _ = std::fs::remove_file(&tmp_path);
+        set_err(&format!("cannot write temporary file: {}", e));
+        return -5;
+    }
+    if let Err(e) = file.sync_all() {
+        let _ = std::fs::remove_file(&tmp_path);
+        set_err(&format!("cannot sync temporary file: {}", e));
+        return -6;
+    }
+    drop(file);
+
+    if let Err(e) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        set_err(&format!("cannot rename temporary file: {}", e));
+        return -7;
+    }
+    0
+}
+
+// ============================================================================
+// 34. Window State & Video Driver Policy (Group B)
+// ============================================================================
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MocktailRustWindowState {
+    pub x: c_int,
+    pub y: c_int,
+    pub width: c_int,
+    pub height: c_int,
+    pub has_position: c_int,
+    pub fullscreen: c_int,
+    pub maximized: c_int,
+    pub configured_width: c_int,
+    pub configured_height: c_int,
+    pub has_configured_size: c_int,
+}
+
+const MIN_WINDOW_WIDTH: i32 = 160;
+const MIN_WINDOW_HEIGHT: i32 = 120;
+const MAX_EXTENT: i32 = 16384;
+const MAX_COORDINATE_MAGNITUDE: i32 = 131072;
+const MAX_STATE_BYTES: u64 = 32 * 1024;
+
+fn is_valid_window_state(state: &MocktailRustWindowState) -> bool {
+    state.width >= MIN_WINDOW_WIDTH
+        && state.width <= MAX_EXTENT
+        && state.height >= MIN_WINDOW_HEIGHT
+        && state.height <= MAX_EXTENT
+        && (state.has_configured_size == 0
+            || (state.configured_width > 0 && state.configured_height > 0))
+        && (state.has_position == 0
+            || (state.x >= -MAX_COORDINATE_MAGNITUDE
+                && state.x <= MAX_COORDINATE_MAGNITUDE
+                && state.y >= -MAX_COORDINATE_MAGNITUDE
+                && state.y <= MAX_COORDINATE_MAGNITUDE))
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_window_state_load(
+    path_ptr: *const c_char,
+    out_state: *mut MocktailRustWindowState,
+    out_found: *mut c_int,
+    out_err: *mut c_char,
+    err_cap: usize,
+) -> c_int {
+    let set_err = |msg: &str| {
+        if !out_err.is_null() && err_cap > 0 {
+            let len = std::cmp::min(msg.len(), err_cap - 1);
+            unsafe {
+                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_err, len);
+                *out_err.add(len) = 0;
+            }
+        }
+    };
+    if path_ptr.is_null() || out_state.is_null() || out_found.is_null() {
+        set_err("invalid arguments");
+        return -1;
+    }
+    unsafe {
+        *out_found = 0;
+    }
+    let p_str = match unsafe { CStr::from_ptr(path_ptr) }.to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_err("invalid path encoding");
+            return -2;
+        }
+    };
+    let path = Path::new(p_str);
+    if !path.is_absolute() {
+        set_err("window state path must be absolute");
+        return -3;
+    }
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                return 0;
+            }
+            set_err("cannot safely open window state");
+            return -4;
+        }
+    };
+    if meta.file_type().is_symlink() || !meta.is_file() || meta.len() > MAX_STATE_BYTES {
+        set_err("window state is not a bounded regular file");
+        return -5;
+    }
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => {
+            set_err("cannot read window state");
+            return -6;
+        }
+    };
+    let doc: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => {
+            set_err("window state is not a JSON object");
+            return -7;
+        }
+    };
+    if !doc.is_object() {
+        set_err("window state is not a JSON object");
+        return -7;
+    }
+    let schema_version = doc.get("schema_version").and_then(|v| v.as_i64()).unwrap_or(0);
+    if schema_version != 1 {
+        set_err("window state has an unsupported schema");
+        return -8;
+    }
+    let windowed = match doc.get("windowed").and_then(|v| v.as_object()) {
+        Some(w) => w,
+        None => {
+            set_err("window state has an unsupported schema");
+            return -8;
+        }
+    };
+    let width = match windowed.get("width").and_then(|v| v.as_i64()) {
+        Some(w) => w as i32,
+        None => {
+            set_err("window state has an unsupported schema");
+            return -8;
+        }
+    };
+    let height = match windowed.get("height").and_then(|v| v.as_i64()) {
+        Some(h) => h as i32,
+        None => {
+            set_err("window state has an unsupported schema");
+            return -8;
+        }
+    };
+    let has_position = match windowed.get("has_position").and_then(|v| v.as_bool()) {
+        Some(hp) => hp,
+        None => {
+            set_err("window state has an unsupported schema");
+            return -8;
+        }
+    };
+    let fullscreen = match doc.get("fullscreen").and_then(|v| v.as_bool()) {
+        Some(f) => f,
+        None => {
+            set_err("window state has an unsupported schema");
+            return -8;
+        }
+    };
+    let maximized = match doc.get("maximized").and_then(|v| v.as_bool()) {
+        Some(m) => m,
+        None => {
+            set_err("window state has an unsupported schema");
+            return -8;
+        }
+    };
+
+    let mut x = 0;
+    let mut y = 0;
+    if has_position {
+        x = match windowed.get("x").and_then(|v| v.as_i64()) {
+            Some(xv) => xv as i32,
+            None => {
+                set_err("window state position is incomplete");
+                return -9;
+            }
+        };
+        y = match windowed.get("y").and_then(|v| v.as_i64()) {
+            Some(yv) => yv as i32,
+            None => {
+                set_err("window state position is incomplete");
+                return -9;
+            }
+        };
+    }
+
+    let mut configured_width = 0;
+    let mut configured_height = 0;
+    let mut has_configured_size = false;
+    if let Some(configured) = doc.get("configured").and_then(|v| v.as_object()) {
+        let cw = match configured.get("width").and_then(|v| v.as_i64()) {
+            Some(w) => w as i32,
+            None => {
+                set_err("window state configured size is malformed");
+                return -10;
+            }
+        };
+        let ch = match configured.get("height").and_then(|v| v.as_i64()) {
+            Some(h) => h as i32,
+            None => {
+                set_err("window state configured size is malformed");
+                return -10;
+            }
+        };
+        configured_width = cw;
+        configured_height = ch;
+        has_configured_size = true;
+    }
+
+    let state = MocktailRustWindowState {
+        x,
+        y,
+        width,
+        height,
+        has_position: if has_position { 1 } else { 0 },
+        fullscreen: if fullscreen { 1 } else { 0 },
+        maximized: if maximized { 1 } else { 0 },
+        configured_width,
+        configured_height,
+        has_configured_size: if has_configured_size { 1 } else { 0 },
+    };
+
+    if !is_valid_window_state(&state) {
+        set_err("window state geometry is out of range");
+        return -11;
+    }
+
+    unsafe {
+        *out_state = state;
+        *out_found = 1;
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_window_state_store(
+    path_ptr: *const c_char,
+    state_ptr: *const MocktailRustWindowState,
+    out_err: *mut c_char,
+    err_cap: usize,
+) -> c_int {
+    let set_err = |msg: &str| {
+        if !out_err.is_null() && err_cap > 0 {
+            let len = std::cmp::min(msg.len(), err_cap - 1);
+            unsafe {
+                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_err, len);
+                *out_err.add(len) = 0;
+            }
+        }
+    };
+    if path_ptr.is_null() || state_ptr.is_null() {
+        set_err("invalid arguments");
+        return -1;
+    }
+    let state = unsafe { *state_ptr };
+    let p_str = match unsafe { CStr::from_ptr(path_ptr) }.to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_err("invalid path encoding");
+            return -2;
+        }
+    };
+    let path = Path::new(p_str);
+    if !path.is_absolute() {
+        set_err("window state path must be absolute");
+        return -3;
+    }
+    if !is_valid_window_state(&state) {
+        set_err("window state geometry is out of range");
+        return -4;
+    }
+
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    if let Err(e) = std::fs::create_dir_all(parent) {
+        set_err(&format!("cannot create window state directory: {}", e));
+        return -5;
+    }
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            set_err("window state target is a symlink");
+            return -6;
+        }
+    }
+
+    let mut windowed = serde_json::json!({
+        "has_position": state.has_position != 0,
+        "width": state.width,
+        "height": state.height,
+    });
+    if state.has_position != 0 {
+        windowed["x"] = serde_json::json!(state.x);
+        windowed["y"] = serde_json::json!(state.y);
+    }
+    let mut doc = serde_json::json!({
+        "schema_version": 1,
+        "fullscreen": state.fullscreen != 0,
+        "maximized": state.maximized != 0,
+        "windowed": windowed,
+    });
+    if state.has_configured_size != 0 {
+        doc["configured"] = serde_json::json!({
+            "width": state.configured_width,
+            "height": state.configured_height,
+        });
+    }
+
+    let serialized = doc.to_string();
+
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp_path = parent.join(format!(
+        ".mocktail-window-state.tmp.{}.{}",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+
+    use std::io::Write;
+    let mut file = match std::fs::File::create(&tmp_path) {
+        Ok(f) => f,
+        Err(e) => {
+            set_err(&format!("cannot create temporary window state: {}", e));
+            return -7;
+        }
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+    }
+    if let Err(e) = file.write_all(serialized.as_bytes()) {
+        let _ = std::fs::remove_file(&tmp_path);
+        set_err(&format!("cannot write window state: {}", e));
+        return -8;
+    }
+    if let Err(e) = file.sync_all() {
+        let _ = std::fs::remove_file(&tmp_path);
+        set_err(&format!("cannot sync window state: {}", e));
+        return -9;
+    }
+    drop(file);
+
+    if let Err(e) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        set_err(&format!("cannot atomically store window state: {}", e));
+        return -10;
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_window_plan_presentation(
+    fullscreen: c_int,
+    maximized: c_int,
+    out_fullscreen_at_creation: *mut c_int,
+    out_maximize_after_constraints: *mut c_int,
+) {
+    if !out_fullscreen_at_creation.is_null() {
+        unsafe {
+            *out_fullscreen_at_creation = if fullscreen != 0 { 1 } else { 0 };
+        }
+    }
+    if !out_maximize_after_constraints.is_null() {
+        unsafe {
+            *out_maximize_after_constraints = if fullscreen != 0 { 0 } else if maximized != 0 { 1 } else { 0 };
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_video_driver_resolve(
+    has_explicit_sdl_driver: c_int,
+    force_wayland: c_int,
+    force_x11: c_int,
+    has_x11_display: c_int,
+    uses_direct_vulkan: c_int,
+    has_nvidia_kernel_driver: c_int,
+    has_wayland_session: c_int,
+    prefer_wayland: c_int,
+) -> c_int {
+    // 0 = SdlDefault, 1 = Wayland, 2 = X11, 3 = NvidiaDirectVulkanX11
+    if has_explicit_sdl_driver != 0 {
+        return 0;
+    }
+    if force_wayland != 0 {
+        return 1;
+    }
+    if force_x11 != 0 && has_x11_display != 0 {
+        return 2;
+    }
+    if uses_direct_vulkan != 0
+        && has_nvidia_kernel_driver != 0
+        && has_wayland_session != 0
+        && has_x11_display != 0
+    {
+        return 3;
+    }
+    if prefer_wayland != 0 && has_wayland_session != 0 {
+        return 1;
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_video_driver_has_candidate(
+    requested: *const c_char,
+    candidates_csv: *const c_char,
+) -> c_int {
+    if requested.is_null() || candidates_csv.is_null() {
+        return 0;
+    }
+    let req = match unsafe { CStr::from_ptr(requested) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    let cand_str = match unsafe { CStr::from_ptr(candidates_csv) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    let candidates: Vec<&str> = cand_str.split(',').map(|s| s.trim()).collect();
+    for part in req.split(',') {
+        let p = part.trim();
+        if !p.is_empty() && candidates.contains(&p) {
+            return 1;
+        }
+    }
+    0
+}
+
+// ============================================================================
+// 35. Runtime Paths & XDG Layout (Group C)
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_runtime_paths_is_lower_hex_build_id(
+    build_id: *const c_char,
+) -> c_int {
+    if build_id.is_null() {
+        return 0;
+    }
+    let s = match unsafe { CStr::from_ptr(build_id) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    if s.len() == 40 && s.chars().all(|c| c.is_ascii_digit() || (c >= 'a' && c <= 'f')) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_runtime_paths_resolve_adjacent_assets(
+    roblox_lib_path: *const c_char,
+    working_dir: *const c_char,
+    out_path: *mut c_char,
+    out_cap: usize,
+) -> c_int {
+    if roblox_lib_path.is_null() || out_path.is_null() || out_cap == 0 {
+        return -1;
+    }
+    let lib_str = match unsafe { CStr::from_ptr(roblox_lib_path) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return -2,
+    };
+    let mut p = PathBuf::from(lib_str);
+    if !p.is_absolute() && !working_dir.is_null() {
+        if let Ok(wd) = unsafe { CStr::from_ptr(working_dir) }.to_str() {
+            p = Path::new(wd).join(p);
+        }
+    }
+    let candidate = if let Some(parent) = p.parent() {
+        parent.join("assets")
+    } else {
+        PathBuf::from("assets")
+    };
+    let res = if candidate.is_dir() {
+        candidate.to_string_lossy().to_string()
+    } else {
+        String::new()
+    };
+    if res.len() >= out_cap {
+        return -3;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(res.as_ptr() as *const c_char, out_path, res.len());
+        *out_path.add(res.len()) = 0;
+    }
+    0
+}
+
+// ============================================================================
+// 36. Host ABI Profile Loader & Payload Compatibility (Group D)
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_compute_file_sha256(
+    file_path: *const c_char,
+    out_hex: *mut c_char,
+    hex_cap: usize,
+    out_err: *mut c_char,
+    err_cap: usize,
+) -> c_int {
+    let set_err = |msg: &str| {
+        if !out_err.is_null() && err_cap > 0 {
+            let len = std::cmp::min(msg.len(), err_cap - 1);
+            unsafe {
+                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_err, len);
+                *out_err.add(len) = 0;
+            }
+        }
+    };
+    if file_path.is_null() || out_hex.is_null() || hex_cap < 65 {
+        set_err("invalid arguments");
+        return -1;
+    }
+    let p_str = match unsafe { CStr::from_ptr(file_path) }.to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_err("invalid file path encoding");
+            return -2;
+        }
+    };
+    let mut hex_buf = [0 as c_char; 65];
+    let rc = mocktail_rust_sha256_file(file_path, hex_buf.as_mut_ptr(), 65);
+    if rc != 0 {
+        set_err(&format!("cannot hash file: {}", p_str));
+        return -3;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(hex_buf.as_ptr(), out_hex, 65);
+    }
+    0
+}
+
+// ============================================================================
+// 37. Audio Sink & PCM Validation (Group E)
+// ============================================================================
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MocktailRustPcmFormat {
+    Unsigned8 = 0,
+    Signed16LittleEndian = 1,
+    Signed32LittleEndian = 2,
+    Float32LittleEndian = 3,
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_audio_bytes_per_sample(
+    format: MocktailRustPcmFormat,
+) -> usize {
+    match format {
+        MocktailRustPcmFormat::Unsigned8 => 1,
+        MocktailRustPcmFormat::Signed16LittleEndian => 2,
+        MocktailRustPcmFormat::Signed32LittleEndian
+        | MocktailRustPcmFormat::Float32LittleEndian => 4,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_audio_validate_pcm(
+    sample_rate_hz: c_int,
+    channels: u8,
+    format: MocktailRustPcmFormat,
+    out_bytes_per_frame: *mut usize,
+    out_err: *mut c_char,
+    err_cap: usize,
+) -> c_int {
+    let set_err = |msg: &str| {
+        if !out_err.is_null() && err_cap > 0 {
+            let len = std::cmp::min(msg.len(), err_cap - 1);
+            unsafe {
+                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_err, len);
+                *out_err.add(len) = 0;
+            }
+        }
+    };
+    if sample_rate_hz < 8000 || sample_rate_hz > 384000 {
+        set_err("PCM sample rate must be between 8000 and 384000 Hz");
+        return -1;
+    }
+    if channels == 0 || channels > 8 {
+        set_err("PCM channel count must be between 1 and 8");
+        return -2;
+    }
+    let bps = mocktail_rust_audio_bytes_per_sample(format);
+    if bps == 0 {
+        set_err("PCM sample format is unsupported");
+        return -3;
+    }
+    let bpf = bps * (channels as usize);
+    if !out_bytes_per_frame.is_null() {
+        unsafe {
+            *out_bytes_per_frame = bpf;
+        }
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_audio_apply_gain_f32(
+    samples: *mut f32,
+    count: usize,
+    gain: f32,
+) {
+    if samples.is_null() || count == 0 {
+        return;
+    }
+    let safe_gain = if gain.is_nan() || gain.is_infinite() || gain < 0.0 {
+        0.0
+    } else {
+        gain
+    };
+    let slice = unsafe { std::slice::from_raw_parts_mut(samples, count) };
+    for sample in slice.iter_mut() {
+        let val = *sample * safe_gain;
+        *sample = val.clamp(-1.0, 1.0);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_audio_convert_f32_to_i16(
+    src: *const f32,
+    dst: *mut i16,
+    count: usize,
+) {
+    if src.is_null() || dst.is_null() || count == 0 {
+        return;
+    }
+    let in_slice = unsafe { std::slice::from_raw_parts(src, count) };
+    let out_slice = unsafe { std::slice::from_raw_parts_mut(dst, count) };
+    for (s_in, s_out) in in_slice.iter().zip(out_slice.iter_mut()) {
+        let clamped = s_in.clamp(-1.0, 1.0);
+        let scaled = (clamped * 32767.0).round();
+        *s_out = scaled as i16;
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -6680,5 +7473,142 @@ integrations:
         assert!(sanitized.contains("[compat] Loading libc.so"));
         assert!(!sanitized.contains(".ROBLOSECURITY"));
         assert!(!sanitized.contains("https://evil.com"));
+    }
+
+    #[test]
+    fn test_client_settings_and_atomic_write() {
+        let mut def_buf = [0 as c_char; 2048];
+        let rc = mocktail_rust_client_settings_safe_defaults(def_buf.as_mut_ptr(), def_buf.len());
+        assert_eq!(rc, 0);
+        let s = unsafe { CStr::from_ptr(def_buf.as_ptr()) }.to_str().unwrap();
+        assert!(s.contains("applicationSettings"));
+
+        let app = CString::new("TestApp").unwrap();
+        let mut url_buf = [0 as c_char; 256];
+        let rc_url = mocktail_rust_client_settings_default_url(app.as_ptr(), url_buf.as_mut_ptr(), url_buf.len());
+        assert_eq!(rc_url, 0);
+        let url_s = unsafe { CStr::from_ptr(url_buf.as_ptr()) }.to_str().unwrap();
+        assert_eq!(url_s, "https://clientsettingscdn.roblox.com/v2/settings/application/TestApp");
+
+        let valid_json = CString::new("{\"key\":\"value\"}").unwrap();
+        assert_eq!(mocktail_rust_client_settings_is_valid_json(valid_json.as_ptr()), 1);
+
+        let invalid_json = CString::new("not_json").unwrap();
+        assert_eq!(mocktail_rust_client_settings_is_valid_json(invalid_json.as_ptr()), 0);
+
+        let tmp_dir = std::env::temp_dir().join(format!("mocktail_test_{}", std::process::id()));
+        let tmp_file = tmp_dir.join("test_write.txt");
+        let p_c = CString::new(tmp_file.to_str().unwrap()).unwrap();
+        let content = b"hello mocktail rust atomic write";
+        let mut err_buf = [0 as c_char; 256];
+        let rc_write = mocktail_rust_atomic_write_file(
+            p_c.as_ptr(),
+            content.as_ptr() as *const c_char,
+            content.len(),
+            err_buf.as_mut_ptr(),
+            err_buf.len(),
+        );
+        assert_eq!(rc_write, 0);
+        assert_eq!(std::fs::read(&tmp_file).unwrap(), content);
+        let _ = std::fs::remove_dir_all(tmp_dir);
+    }
+
+    #[test]
+    fn test_window_state_and_video_driver() {
+        let mut fs_creation = 0;
+        let mut max_constr = 0;
+        mocktail_rust_window_plan_presentation(1, 0, &mut fs_creation, &mut max_constr);
+        assert_eq!(fs_creation, 1);
+        assert_eq!(max_constr, 0);
+
+        mocktail_rust_window_plan_presentation(0, 1, &mut fs_creation, &mut max_constr);
+        assert_eq!(fs_creation, 0);
+        assert_eq!(max_constr, 1);
+
+        // Video driver resolve
+        let choice = mocktail_rust_video_driver_resolve(0, 1, 0, 0, 0, 0, 0, 0);
+        assert_eq!(choice, 1); // Wayland
+
+        let choice_nv = mocktail_rust_video_driver_resolve(0, 0, 0, 1, 1, 1, 1, 0);
+        assert_eq!(choice_nv, 3); // NvidiaDirectVulkanX11
+
+        let req = CString::new("wayland,x11").unwrap();
+        let cand = CString::new("x11,kmsdrm").unwrap();
+        assert_eq!(mocktail_rust_video_driver_has_candidate(req.as_ptr(), cand.as_ptr()), 1);
+
+        // Window state storage & load
+        let tmp_dir = std::env::temp_dir().join(format!("mocktail_ws_test_{}", std::process::id()));
+        let ws_file = tmp_dir.join("window_state.json");
+        let p_c = CString::new(ws_file.to_str().unwrap()).unwrap();
+        let state = MocktailRustWindowState {
+            x: 100,
+            y: 200,
+            width: 1280,
+            height: 720,
+            has_position: 1,
+            fullscreen: 0,
+            maximized: 1,
+            configured_width: 1920,
+            configured_height: 1080,
+            has_configured_size: 1,
+        };
+        let mut err_buf = [0 as c_char; 256];
+        let rc_store = mocktail_rust_window_state_store(p_c.as_ptr(), &state, err_buf.as_mut_ptr(), err_buf.len());
+        assert_eq!(rc_store, 0);
+
+        let mut loaded = MocktailRustWindowState::default();
+        let mut found = 0;
+        let rc_load = mocktail_rust_window_state_load(p_c.as_ptr(), &mut loaded, &mut found, err_buf.as_mut_ptr(), err_buf.len());
+        assert_eq!(rc_load, 0);
+        assert_eq!(found, 1);
+        assert_eq!(loaded.width, 1280);
+        assert_eq!(loaded.height, 720);
+        assert_eq!(loaded.x, 100);
+        assert_eq!(loaded.y, 200);
+        assert_eq!(loaded.maximized, 1);
+        assert_eq!(loaded.configured_width, 1920);
+
+        let _ = std::fs::remove_dir_all(tmp_dir);
+    }
+
+    #[test]
+    fn test_runtime_paths_rust() {
+        let valid_bid = CString::new("1686400865ae0e408cd7bd67de7a439625c6fd13").unwrap();
+        assert_eq!(mocktail_rust_runtime_paths_is_lower_hex_build_id(valid_bid.as_ptr()), 1);
+
+        let invalid_bid = CString::new("1686400865ae0e408cd7bd67de7a439625c6fd1G").unwrap();
+        assert_eq!(mocktail_rust_runtime_paths_is_lower_hex_build_id(invalid_bid.as_ptr()), 0);
+
+        let short_bid = CString::new("16864008").unwrap();
+        assert_eq!(mocktail_rust_runtime_paths_is_lower_hex_build_id(short_bid.as_ptr()), 0);
+    }
+
+    #[test]
+    fn test_audio_pcm_and_gain() {
+        assert_eq!(mocktail_rust_audio_bytes_per_sample(MocktailRustPcmFormat::Unsigned8), 1);
+        assert_eq!(mocktail_rust_audio_bytes_per_sample(MocktailRustPcmFormat::Signed16LittleEndian), 2);
+        assert_eq!(mocktail_rust_audio_bytes_per_sample(MocktailRustPcmFormat::Float32LittleEndian), 4);
+
+        let mut bpf = 0;
+        let mut err_buf = [0 as c_char; 128];
+        let rc = mocktail_rust_audio_validate_pcm(48000, 2, MocktailRustPcmFormat::Signed16LittleEndian, &mut bpf, err_buf.as_mut_ptr(), err_buf.len());
+        assert_eq!(rc, 0);
+        assert_eq!(bpf, 4);
+
+        let rc_bad = mocktail_rust_audio_validate_pcm(1000, 2, MocktailRustPcmFormat::Signed16LittleEndian, &mut bpf, err_buf.as_mut_ptr(), err_buf.len());
+        assert_eq!(rc_bad, -1);
+
+        let mut samples = [0.5f32, -0.5f32, 1.0f32];
+        mocktail_rust_audio_apply_gain_f32(samples.as_mut_ptr(), samples.len(), 2.0);
+        assert_eq!(samples[0], 1.0);
+        assert_eq!(samples[1], -1.0);
+        assert_eq!(samples[2], 1.0);
+
+        let f32_samples = [0.0f32, 1.0f32, -1.0f32];
+        let mut i16_samples = [0i16; 3];
+        mocktail_rust_audio_convert_f32_to_i16(f32_samples.as_ptr(), i16_samples.as_mut_ptr(), 3);
+        assert_eq!(i16_samples[0], 0);
+        assert_eq!(i16_samples[1], 32767);
+        assert_eq!(i16_samples[2], -32767);
     }
 }

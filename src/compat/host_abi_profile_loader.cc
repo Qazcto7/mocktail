@@ -1,4 +1,5 @@
 #include "compat/host_abi_profile_loader.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <elf.h>
 #include <fcntl.h>
@@ -1109,35 +1110,14 @@ ExternalHostAbiProfileResult RegisterProfile(
 }  // namespace
 
 FileSha256Result ComputeFileSha256(const std::string& path) {
-  std::ifstream input(path, std::ios::binary);
-  if (!input) {
-    return {{}, "cannot open file for SHA-256: " + path};
+  char hex_buf[65] = {};
+  char err_buf[512] = {};
+  int rc = mocktail_rust_compute_file_sha256(
+      path.c_str(), hex_buf, sizeof(hex_buf), err_buf, sizeof(err_buf));
+  if (rc != 0) {
+    return {{}, err_buf[0] != '\0' ? err_buf : "cannot hash file: " + path};
   }
-  std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> ctx(
-      EVP_MD_CTX_new(), &EVP_MD_CTX_free);
-  if (!ctx || EVP_DigestInit_ex(ctx.get(), EVP_sha256(), nullptr) != 1) {
-    return {{}, "cannot initialize SHA-256 digest context for: " + path};
-  }
-  std::array<unsigned char, 128 * 1024> buffer{};
-  while (input) {
-    input.read(reinterpret_cast<char*>(buffer.data()), buffer.size());
-    const std::streamsize read = input.gcount();
-    if (read > 0) {
-      if (EVP_DigestUpdate(ctx.get(), buffer.data(),
-                           static_cast<std::size_t>(read)) != 1) {
-        return {{}, "cannot update SHA-256 digest for: " + path};
-      }
-    }
-  }
-  if (!input.eof()) {
-    return {{}, "cannot read file for SHA-256: " + path};
-  }
-  unsigned char digest[EVP_MAX_MD_SIZE];
-  unsigned int len = 0;
-  if (EVP_DigestFinal_ex(ctx.get(), digest, &len) != 1) {
-    return {{}, "cannot finalize SHA-256 digest for: " + path};
-  }
-  return {FormatHex(digest, len), {}};
+  return {std::string(hex_buf), {}};
 }
 
 const HostAbiProfile* FindLoadedExternalHostAbiProfile(

@@ -45,60 +45,16 @@ bool AtomicWriteFile(const std::filesystem::path& path,
     }
     return false;
   }
-  std::error_code directory_error;
-  const std::filesystem::path parent = path.parent_path().empty()
-                                           ? std::filesystem::path(".")
-                                           : path.parent_path();
-  if (!mocktail::runtime::RuntimePaths::EnsureDirectory(parent,
-                                                        &directory_error)) {
+  char err_buf[512] = {};
+  const int rc = mocktail_rust_atomic_write_file(
+      path.c_str(), content.data(), content.size(), err_buf, sizeof(err_buf));
+  if (rc != 0) {
     if (error_message != nullptr) {
-      *error_message = "could not create client settings cache directory: " +
-                       directory_error.message();
+      *error_message = err_buf[0] != '\0' ? err_buf : "could not commit client settings cache";
     }
     return false;
   }
-
-  const std::filesystem::path temporary =
-      path.string() + ".tmp." + std::to_string(getpid());
-  const int fd = open(temporary.c_str(), O_CREAT | O_TRUNC | O_WRONLY, 0644);
-  if (fd < 0) {
-    if (error_message != nullptr) {
-      *error_message = "could not create client settings temporary file";
-    }
-    return false;
-  }
-
-  bool ok = true;
-  const char* cursor = content.data();
-  size_t remaining = content.size();
-  while (remaining != 0) {
-    const ssize_t written = write(fd, cursor, remaining);
-    if (written < 0 && errno == EINTR) {
-      continue;
-    }
-    if (written <= 0) {
-      ok = false;
-      break;
-    }
-    cursor += written;
-    remaining -= static_cast<size_t>(written);
-  }
-  if (ok && fsync(fd) != 0) {
-    ok = false;
-  }
-  if (close(fd) != 0) {
-    ok = false;
-  }
-  if (ok && rename(temporary.c_str(), path.c_str()) != 0) {
-    ok = false;
-  }
-  if (!ok) {
-    unlink(temporary.c_str());
-    if (error_message != nullptr) {
-      *error_message = "could not commit client settings cache";
-    }
-  }
-  return ok;
+  return true;
 }
 
 ClientSettingsResult FileResult(const std::filesystem::path& path,
@@ -217,41 +173,23 @@ ClientSettingsResult ClientSettingsService::Resolve(
 }
 
 std::string ClientSettingsService::SafeDefaultsJson() {
-  return R"json({
-    "applicationSettings": {
-      "BeginScheduledFlagFetch3": "False",
-      "BeginScheduledFlagFetch5": "false",
-      "RetryFlagPrefetchOnBackgroundFailure": "false",
-      "FFlagEnableVersionCheckFromClientSettingsCDN": "False",
-      "FIntScheduledFlagFetchPeriodMinutes": "1000000",
-      "FIntScheduledFlagFetchPeriodFlexMinutes": "0",
-      "DFFlagFetchAndWriteFlagsAfterSuccessfulCachedFlagsLoad": "False",
-      "DFFlagWriteFlagCacheAfterDynamicFetch": "False",
-      "DFFlagWriteFlagCacheAfterFlagFetch": "False",
-      "DFFlagWriteFlagCacheAfterFlagFetch2": "False",
-      "DFFlagEnableAppPlatformQoSEmergencyOnStartup3": "False",
-      "DFFlagEnableAppPlatformQoSEmergencyOnFlagReload3": "False",
-      "DFFlagEnableAppPlatformQoSEmergencyOnFlagReload4": "False",
-      "FFlagAndroidEnableQoS": "False",
-      "FFlagEnableNetworkStatusObserving": "False",
-      "DFFlagDontReportAccumulatedStatsInHttpClientDestroy2": "True",
-      "FFlagEnableJNIAppbridgeStartMilestone": "False"
-    }
-  })json";
+  char buf[4096] = {};
+  if (mocktail_rust_client_settings_safe_defaults(buf, sizeof(buf)) == 0) {
+    return std::string(buf);
+  }
+  return R"json({"applicationSettings":{}})json";
 }
 
 std::string ClientSettingsService::DefaultUrl(const std::string& application) {
-  return "https://clientsettingscdn.roblox.com/v2/settings/application/" +
-         application;
+  char buf[512] = {};
+  if (mocktail_rust_client_settings_default_url(application.c_str(), buf, sizeof(buf)) == 0) {
+    return std::string(buf);
+  }
+  return "https://clientsettingscdn.roblox.com/v2/settings/application/" + application;
 }
 
 bool ClientSettingsService::IsValidJson(const std::string& content) {
-  if (content.empty()) {
-    return false;
-  }
-  const nlohmann::json value =
-      nlohmann::json::parse(content, nullptr, false, true);
-  return !value.is_discarded() && value.is_object();
+  return mocktail_rust_client_settings_is_valid_json(content.c_str()) == 1;
 }
 
 const char* ClientSettingsSourceName(ClientSettingsSource source) {

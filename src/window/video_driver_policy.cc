@@ -1,4 +1,5 @@
 #include "window/video_driver_policy.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <algorithm>
 #include <system_error>
@@ -9,23 +10,25 @@ namespace window {
 
 VideoDriverChoice ResolveVideoDriverChoice(
     const VideoDriverPolicyInput& input) {
-  if (input.has_explicit_sdl_driver) {
-    return VideoDriverChoice::kSdlDefault;
+  const int choice = mocktail_rust_video_driver_resolve(
+      input.has_explicit_sdl_driver ? 1 : 0,
+      input.force_wayland ? 1 : 0,
+      input.force_x11 ? 1 : 0,
+      input.has_x11_display ? 1 : 0,
+      input.uses_direct_vulkan ? 1 : 0,
+      input.has_nvidia_kernel_driver ? 1 : 0,
+      input.has_wayland_session ? 1 : 0,
+      input.prefer_wayland ? 1 : 0);
+  switch (choice) {
+    case 1:
+      return VideoDriverChoice::kWayland;
+    case 2:
+      return VideoDriverChoice::kX11;
+    case 3:
+      return VideoDriverChoice::kNvidiaDirectVulkanX11;
+    default:
+      return VideoDriverChoice::kSdlDefault;
   }
-  if (input.force_wayland) {
-    return VideoDriverChoice::kWayland;
-  }
-  if (input.force_x11 && input.has_x11_display) {
-    return VideoDriverChoice::kX11;
-  }
-  if (input.uses_direct_vulkan && input.has_nvidia_kernel_driver &&
-      input.has_wayland_session && input.has_x11_display) {
-    return VideoDriverChoice::kNvidiaDirectVulkanX11;
-  }
-  if (input.prefer_wayland && input.has_wayland_session) {
-    return VideoDriverChoice::kWayland;
-  }
-  return VideoDriverChoice::kSdlDefault;
 }
 
 const char* VideoDriverChoiceName(VideoDriverChoice choice) {
@@ -54,22 +57,13 @@ bool HasNvidiaKernelDriver(const std::filesystem::path& proc_version,
 bool HasAvailableVideoDriverCandidate(
     std::string_view requested,
     const std::vector<std::string_view>& available_drivers) {
-  std::size_t begin = 0;
-  while (begin <= requested.size()) {
-    const std::size_t end = requested.find(',', begin);
-    const std::string_view candidate = requested.substr(
-        begin, end == requested.npos ? requested.npos : end - begin);
-    if (!candidate.empty() &&
-        std::find(available_drivers.begin(), available_drivers.end(),
-                  candidate) != available_drivers.end()) {
-      return true;
-    }
-    if (end == requested.npos) {
-      break;
-    }
-    begin = end + 1;
+  std::string joined;
+  for (std::size_t i = 0; i < available_drivers.size(); ++i) {
+    if (i > 0) joined.push_back(',');
+    joined.append(available_drivers[i]);
   }
-  return false;
+  std::string req(requested);
+  return mocktail_rust_video_driver_has_candidate(req.c_str(), joined.c_str()) == 1;
 }
 
 }  // namespace window

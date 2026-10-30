@@ -666,6 +666,135 @@ int mocktail_rust_sanitize_log(
     size_t buf_cap,
     size_t* out_len);
 
+// ============================================================================
+// 33. Client Settings & Atomic File Store (Group A)
+// ============================================================================
+
+int mocktail_rust_client_settings_safe_defaults(
+    char* out_buf,
+    size_t buf_cap);
+
+int mocktail_rust_client_settings_default_url(
+    const char* app_name,
+    char* out_buf,
+    size_t buf_cap);
+
+int mocktail_rust_client_settings_is_valid_json(
+    const char* json_str);
+
+int mocktail_rust_atomic_write_file(
+    const char* file_path,
+    const char* content,
+    size_t content_len,
+    char* out_err,
+    size_t err_cap);
+
+// ============================================================================
+// 34. Window State & Video Driver Policy (Group B)
+// ============================================================================
+
+typedef struct MocktailRustWindowState {
+    int x;
+    int y;
+    int width;
+    int height;
+    int has_position;
+    int fullscreen;
+    int maximized;
+    int configured_width;
+    int configured_height;
+    int has_configured_size;
+} MocktailRustWindowState;
+
+int mocktail_rust_window_state_load(
+    const char* path_ptr,
+    MocktailRustWindowState* out_state,
+    int* out_found,
+    char* out_err,
+    size_t err_cap);
+
+int mocktail_rust_window_state_store(
+    const char* path_ptr,
+    const MocktailRustWindowState* state_ptr,
+    char* out_err,
+    size_t err_cap);
+
+void mocktail_rust_window_plan_presentation(
+    int fullscreen,
+    int maximized,
+    int* out_fullscreen_at_creation,
+    int* out_maximize_after_constraints);
+
+int mocktail_rust_video_driver_resolve(
+    int has_explicit_sdl_driver,
+    int force_wayland,
+    int force_x11,
+    int has_x11_display,
+    int uses_direct_vulkan,
+    int has_nvidia_kernel_driver,
+    int has_wayland_session,
+    int prefer_wayland);
+
+int mocktail_rust_video_driver_has_candidate(
+    const char* requested,
+    const char* candidates_csv);
+
+// ============================================================================
+// 35. Runtime Paths & XDG Layout (Group C)
+// ============================================================================
+
+int mocktail_rust_runtime_paths_is_lower_hex_build_id(
+    const char* build_id);
+
+int mocktail_rust_runtime_paths_resolve_adjacent_assets(
+    const char* roblox_lib_path,
+    const char* working_dir,
+    char* out_path,
+    size_t out_cap);
+
+// ============================================================================
+// 36. Host ABI Profile Loader & Payload Compatibility (Group D)
+// ============================================================================
+
+int mocktail_rust_compute_file_sha256(
+    const char* file_path,
+    char* out_hex,
+    size_t hex_cap,
+    char* out_err,
+    size_t err_cap);
+
+// ============================================================================
+// 37. Audio Sink & PCM Validation (Group E)
+// ============================================================================
+
+typedef enum MocktailRustPcmFormat {
+    kMocktailRustPcmUnsigned8 = 0,
+    kMocktailRustPcmSigned16LittleEndian = 1,
+    kMocktailRustPcmSigned32LittleEndian = 2,
+    kMocktailRustPcmFloat32LittleEndian = 3,
+} MocktailRustPcmFormat;
+
+size_t mocktail_rust_audio_bytes_per_sample(
+    MocktailRustPcmFormat format);
+
+int mocktail_rust_audio_validate_pcm(
+    int sample_rate_hz,
+    uint8_t channels,
+    MocktailRustPcmFormat format,
+    size_t* out_bytes_per_frame,
+    char* out_err,
+    size_t err_cap);
+
+void mocktail_rust_audio_apply_gain_f32(
+    float* samples,
+    size_t count,
+    float gain);
+
+void mocktail_rust_audio_convert_f32_to_i16(
+    const float* src,
+    int16_t* dst,
+    size_t count);
+
 #ifdef __cplusplus
 }
 #endif

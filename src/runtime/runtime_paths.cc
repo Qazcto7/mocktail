@@ -1,5 +1,6 @@
 // Includes changes by vii from CoderDayton/nightcap.
 #include "runtime/runtime_paths.h"
+#include "mocktail/mocktail_rust.h"
 
 #define JSON_NOEXCEPTION 1
 #include <array>
@@ -33,15 +34,8 @@ std::filesystem::path XdgHome(const Environment& environment,
 }
 
 bool IsLowerHexBuildId(std::string_view value) {
-  if (value.size() != 40) {
-    return false;
-  }
-  for (const unsigned char character : value) {
-    if (!std::isdigit(character) && !(character >= 'a' && character <= 'f')) {
-      return false;
-    }
-  }
-  return true;
+  std::string null_term(value);
+  return mocktail_rust_runtime_paths_is_lower_hex_build_id(null_term.c_str()) == 1;
 }
 
 std::optional<std::string> ApprovalGeneration(

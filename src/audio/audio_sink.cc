@@ -1,44 +1,43 @@
 #include "mocktail/audio/audio_sink.h"
-
-#include <limits>
+#include "mocktail/mocktail_rust.h"
 
 namespace mocktail::audio {
 
-std::size_t BytesPerSample(PcmSampleFormat format) {
+namespace {
+
+MocktailRustPcmFormat ToRustPcmFormat(PcmSampleFormat format) {
   switch (format) {
     case PcmSampleFormat::kUnsigned8:
-      return 1;
+      return kMocktailRustPcmUnsigned8;
     case PcmSampleFormat::kSigned16LittleEndian:
-      return 2;
+      return kMocktailRustPcmSigned16LittleEndian;
     case PcmSampleFormat::kSigned32LittleEndian:
+      return kMocktailRustPcmSigned32LittleEndian;
     case PcmSampleFormat::kFloat32LittleEndian:
-      return 4;
+      return kMocktailRustPcmFloat32LittleEndian;
   }
-  return 0;
+  return kMocktailRustPcmUnsigned8;
+}
+
+}  // namespace
+
+std::size_t BytesPerSample(PcmSampleFormat format) {
+  return mocktail_rust_audio_bytes_per_sample(ToRustPcmFormat(format));
 }
 
 std::size_t BytesPerFrame(const PcmSpec& spec) {
-  const std::size_t bytes_per_sample = BytesPerSample(spec.format);
-  if (bytes_per_sample == 0 || spec.channels == 0 ||
-      bytes_per_sample >
-          std::numeric_limits<std::size_t>::max() / spec.channels) {
-    return 0;
-  }
-  return bytes_per_sample * spec.channels;
+  return BytesPerSample(spec.format) * spec.channels;
 }
 
 Status ValidatePcmSpec(const PcmSpec& spec) {
-  if (spec.sample_rate_hz < 8000 || spec.sample_rate_hz > 384000) {
+  size_t bpf = 0;
+  char err_buf[256] = {};
+  const int rc = mocktail_rust_audio_validate_pcm(
+      spec.sample_rate_hz, spec.channels, ToRustPcmFormat(spec.format),
+      &bpf, err_buf, sizeof(err_buf));
+  if (rc != 0) {
     return Status::Error(StatusCode::kInvalidArgument,
-                         "PCM sample rate must be between 8000 and 384000 Hz");
-  }
-  if (spec.channels == 0 || spec.channels > 8) {
-    return Status::Error(StatusCode::kInvalidArgument,
-                         "PCM channel count must be between 1 and 8");
-  }
-  if (BytesPerFrame(spec) == 0) {
-    return Status::Error(StatusCode::kInvalidArgument,
-                         "PCM sample format is unsupported");
+                         err_buf[0] != '\0' ? err_buf : "invalid PCM spec");
   }
   return Status::Ok();
 }
