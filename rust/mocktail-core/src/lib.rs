@@ -4957,10 +4957,17 @@ fn internal_inspect_payload(dir: &Path) -> Result<MocktailRustPayloadInfo, Strin
         return Err("payload root is not a real directory".to_string());
     }
 
+    let split_apk_rel = if dir.join("sober_apk/split_config.arm64_v8a.apk").exists() {
+        "sober_apk/split_config.arm64_v8a.apk"
+    } else if cfg!(target_arch = "aarch64") {
+        "sober_apk/split_config.arm64_v8a.apk"
+    } else {
+        "sober_apk/split_config.x86_64.apk"
+    };
     let required_files = [
         "libroblox.so",
         "sober_apk/base.apk",
-        "sober_apk/split_config.x86_64.apk",
+        split_apk_rel,
         "roblox_payload.json",
     ];
     for f in required_files {
@@ -5013,8 +5020,16 @@ fn internal_inspect_payload(dir: &Path) -> Result<MocktailRustPayloadInfo, Strin
     };
     let library_sha256 = sha_obj.get("libroblox").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let base_apk_sha256 = sha_obj.get("base_apk").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let split_hash_key = if cfg!(target_arch = "aarch64") {
+        "arm64_v8a_split_apk"
+    } else {
+        "x86_64_split_apk"
+    };
     let split_apk_sha256 = sha_obj
-        .get("split_config_x86_64")
+        .get(split_hash_key)
+        .or_else(|| sha_obj.get("x86_64_split_apk"))
+        .or_else(|| sha_obj.get("arm64_v8a_split_apk"))
+        .or_else(|| sha_obj.get("split_config_x86_64"))
         .or_else(|| sha_obj.get("split_apk"))
         .and_then(|v| v.as_str())
         .unwrap_or("")
@@ -5179,7 +5194,14 @@ pub extern "C" fn mocktail_rust_payload_verify(
         set_err(&e);
         return -5;
     }
-    if let Err(e) = check_file_sha("sober_apk/split_config.x86_64.apk", &info.split_apk_sha256) {
+    let split_file = if dir.join("sober_apk/split_config.arm64_v8a.apk").exists() {
+        "sober_apk/split_config.arm64_v8a.apk"
+    } else if cfg!(target_arch = "aarch64") {
+        "sober_apk/split_config.arm64_v8a.apk"
+    } else {
+        "sober_apk/split_config.x86_64.apk"
+    };
+    if let Err(e) = check_file_sha(split_file, &info.split_apk_sha256) {
         set_err(&e);
         return -6;
     }
