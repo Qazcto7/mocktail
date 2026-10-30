@@ -539,6 +539,133 @@ int mocktail_rust_decode_etc_image_block_rows(
     uint8_t* destination,
     size_t destination_bytes);
 
+// ============================================================================
+// 27. ZIP Archive Manager
+// ============================================================================
+
+int mocktail_rust_zip_list_entries(
+    const char* archive_path,
+    size_t max_entries,
+    char* out_json,
+    size_t json_cap,
+    char* out_err,
+    size_t err_cap);
+
+int mocktail_rust_zip_read_entry(
+    const char* archive_path,
+    const char* entry_name,
+    size_t max_bytes,
+    uint8_t* out_buffer,
+    size_t buf_cap,
+    size_t* out_read_len,
+    char* out_err,
+    size_t err_cap);
+
+int mocktail_rust_zip_extract_entry(
+    const char* archive_path,
+    const char* entry_name,
+    const char* destination_path,
+    size_t max_bytes,
+    char* out_err,
+    size_t err_cap);
+
+int mocktail_rust_zip_extract_prefix(
+    const char* archive_path,
+    const char* prefix,
+    const char* destination_dir,
+    size_t max_total_bytes,
+    size_t* out_extracted_count,
+    char* out_err,
+    size_t err_cap);
+
+// ============================================================================
+// 28. Payload Integrity & Asset Tree Verifier
+// ============================================================================
+
+int mocktail_rust_payload_hash_asset_tree(
+    const char* root_dir,
+    char* out_sha256_hex,
+    size_t hex_cap,
+    size_t* out_file_count,
+    char* out_err,
+    size_t err_cap);
+
+int mocktail_rust_payload_inspect(
+    const char* payload_dir,
+    char* out_json,
+    size_t json_cap,
+    char* out_err,
+    size_t err_cap);
+
+int mocktail_rust_payload_verify(
+    const char* payload_dir,
+    char* out_json,
+    size_t json_cap,
+    char* out_err,
+    size_t err_cap);
+
+// ============================================================================
+// 29. ClientAppSettings / FFlags Merger
+// ============================================================================
+
+int mocktail_rust_fflags_load_and_merge(
+    const char* file_path,
+    const char* base_json,
+    char* out_json,
+    size_t json_cap,
+    size_t* out_applied_count,
+    int* out_file_loaded,
+    char* out_err,
+    size_t err_cap);
+
+// ============================================================================
+// 30. APKPure Update Provider
+// ============================================================================
+
+int mocktail_rust_apkpure_parse_latest(
+    const uint8_t* metadata,
+    size_t meta_len,
+    char* out_version_name,
+    size_t ver_cap,
+    uint64_t* out_version_code,
+    char* out_err,
+    size_t err_cap);
+
+int mocktail_rust_apkpure_parse_exact_urls(
+    const uint8_t* metadata,
+    size_t meta_len,
+    const char* version,
+    char* out_urls_json,
+    size_t json_cap,
+    char* out_err,
+    size_t err_cap);
+
+// ============================================================================
+// 31. BrowserTracker Service
+// ============================================================================
+
+int mocktail_rust_browser_tracker_generate_id(
+    char* out_buf,
+    size_t buf_cap);
+
+int mocktail_rust_browser_tracker_extract_id(
+    const char* cookie_str,
+    char* out_buf,
+    size_t buf_cap);
+
+// ============================================================================
+// 32. Support Bundle & Log Redactor
+// ============================================================================
+
+int mocktail_rust_is_diagnostic_token(const char* token);
+
+int mocktail_rust_sanitize_log(
+    const uint8_t* log_bytes,
+    size_t log_len,
+    char* out_buf,
+    size_t buf_cap,
+    size_t* out_len);
+
 #ifdef __cplusplus
 }
 #endif

@@ -2,7 +2,8 @@ use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
 use std::os::raw::{c_char, c_int};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use serde::{Deserialize, Serialize};
 use std::slice;
 
 use sha2::{Digest, Sha256};
@@ -4118,6 +4119,1442 @@ pub extern "C" fn mocktail_rust_decode_etc_image_block_rows(
     1
 }
 
+
+// ============================================================================
+// 27. ZIP Archive Manager
+// ============================================================================
+
+fn is_safe_archive_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    if bytes.is_empty() || bytes[0] == b'/' {
+        return false;
+    }
+    for &b in bytes {
+        if b < 0x20 || b == 0x7f || b == b'\\' {
+            return false;
+        }
+    }
+    let mut parts = bytes.split(|&b| b == b'/');
+    let mut is_first = true;
+    while let Some(part) = parts.next() {
+        if part.is_empty() {
+            if parts.clone().next().is_none() && !is_first {
+                return true;
+            }
+            return false;
+        }
+        if part == b"." || part == b".." {
+            return false;
+        }
+        is_first = false;
+    }
+    true
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct MocktailRustZipEntryInfo {
+    pub name: String,
+    pub uncompressed_size: u64,
+    pub directory: bool,
+    pub symbolic_link: bool,
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_zip_list_entries(
+    archive_path: *const c_char,
+    max_entries: usize,
+    out_json: *mut c_char,
+    json_cap: usize,
+    out_err: *mut c_char,
+    err_cap: usize,
+) -> c_int {
+    let set_err = |msg: &str| {
+        if !out_err.is_null() && err_cap > 0 {
+            let len = std::cmp::min(msg.len(), err_cap - 1);
+            unsafe {
+                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_err, len);
+                *out_err.add(len) = 0;
+            }
+        }
+    };
+    if archive_path.is_null() || out_json.is_null() || json_cap == 0 {
+        set_err("invalid arguments");
+        return -1;
+    }
+    let path = match unsafe { CStr::from_ptr(archive_path) }.to_str() {
+        Ok(p) => p,
+        Err(_) => {
+            set_err("invalid archive path encoding");
+            return -2;
+        }
+    };
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            set_err(&format!("cannot open ZIP archive: {}: {}", path, e));
+            return -3;
+        }
+    };
+    let mut zip = match zip::ZipArchive::new(file) {
+        Ok(z) => z,
+        Err(e) => {
+            set_err(&format!("cannot parse ZIP archive: {}", e));
+            return -4;
+        }
+    };
+    if zip.len() > max_entries {
+        set_err("ZIP archive has an invalid or excessive entry count");
+        return -5;
+    }
+    let mut entries = Vec::new();
+    for i in 0..zip.len() {
+        let entry = match zip.by_index(i) {
+            Ok(e) => e,
+            Err(e) => {
+                set_err(&format!("cannot read ZIP entry metadata: {}", e));
+                return -6;
+            }
+        };
+        let name = entry.name().to_string();
+        if !is_safe_archive_path(&name) {
+            set_err("ZIP entry path is unsafe");
+            return -7;
+        }
+        let uncompressed_size = entry.size();
+        let directory = entry.is_dir() || name.ends_with('/');
+        let mode = entry.unix_mode().unwrap_or(0);
+        let symbolic_link = (mode & 0o170000) == 0o120000;
+        entries.push(MocktailRustZipEntryInfo {
+            name,
+            uncompressed_size,
+            directory,
+            symbolic_link,
+        });
+    }
+    let serialized = match serde_json::to_string(&entries) {
+        Ok(s) => s,
+        Err(e) => {
+            set_err(&format!("JSON serialization error: {}", e));
+            return -8;
+        }
+    };
+    if serialized.len() >= json_cap {
+        set_err("JSON output buffer too small");
+        return -9;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(serialized.as_ptr() as *const c_char, out_json, serialized.len());
+        *out_json.add(serialized.len()) = 0;
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_zip_read_entry(
+    archive_path: *const c_char,
+    entry_name: *const c_char,
+    max_bytes: usize,
+    out_buf: *mut u8,
+    buf_cap: usize,
+    out_read_len: *mut usize,
+    out_err: *mut c_char,
+    err_cap: usize,
+) -> c_int {
+    let set_err = |msg: &str| {
+        if !out_err.is_null() && err_cap > 0 {
+            let len = std::cmp::min(msg.len(), err_cap - 1);
+            unsafe {
+                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_err, len);
+                *out_err.add(len) = 0;
+            }
+        }
+    };
+    if archive_path.is_null() || entry_name.is_null() || out_buf.is_null() || out_read_len.is_null() {
+        set_err("invalid arguments");
+        return -1;
+    }
+    let path = match unsafe { CStr::from_ptr(archive_path) }.to_str() {
+        Ok(p) => p,
+        Err(_) => {
+            set_err("invalid archive path encoding");
+            return -2;
+        }
+    };
+    let target_name = match unsafe { CStr::from_ptr(entry_name) }.to_str() {
+        Ok(p) => p,
+        Err(_) => {
+            set_err("invalid entry name encoding");
+            return -3;
+        }
+    };
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            set_err(&format!("cannot open ZIP archive: {}: {}", path, e));
+            return -4;
+        }
+    };
+    let mut zip = match zip::ZipArchive::new(file) {
+        Ok(z) => z,
+        Err(e) => {
+            set_err(&format!("cannot parse ZIP archive: {}", e));
+            return -5;
+        }
+    };
+    let mut entry = match zip.by_name(target_name) {
+        Ok(e) => e,
+        Err(_) => {
+            set_err(&format!("ZIP entry is missing: {}", target_name));
+            return -6;
+        }
+    };
+    if entry.size() > max_bytes as u64 || entry.size() > buf_cap as u64 {
+        set_err("decompressed ZIP data exceeds its size limit");
+        return -7;
+    }
+    use std::io::Read;
+    let mut total_read = 0;
+    let slice = unsafe { std::slice::from_raw_parts_mut(out_buf, buf_cap) };
+    while total_read < slice.len() {
+        match entry.read(&mut slice[total_read..]) {
+            Ok(0) => break,
+            Ok(n) => {
+                total_read += n;
+                if total_read > max_bytes {
+                    set_err("decompressed ZIP data exceeds its size limit");
+                    return -8;
+                }
+            }
+            Err(e) => {
+                set_err(&format!("cannot decompress ZIP entry: {}", e));
+                return -9;
+            }
+        }
+    }
+    unsafe {
+        *out_read_len = total_read;
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_zip_extract_entry(
+    archive_path: *const c_char,
+    entry_name: *const c_char,
+    dest_path: *const c_char,
+    max_bytes: usize,
+    out_err: *mut c_char,
+    err_cap: usize,
+) -> c_int {
+    let set_err = |msg: &str| {
+        if !out_err.is_null() && err_cap > 0 {
+            let len = std::cmp::min(msg.len(), err_cap - 1);
+            unsafe {
+                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_err, len);
+                *out_err.add(len) = 0;
+            }
+        }
+    };
+    if archive_path.is_null() || entry_name.is_null() || dest_path.is_null() {
+        set_err("invalid arguments");
+        return -1;
+    }
+    let path = match unsafe { CStr::from_ptr(archive_path) }.to_str() {
+        Ok(p) => p,
+        Err(_) => {
+            set_err("invalid archive path encoding");
+            return -2;
+        }
+    };
+    let target_name = match unsafe { CStr::from_ptr(entry_name) }.to_str() {
+        Ok(p) => p,
+        Err(_) => {
+            set_err("invalid entry name encoding");
+            return -3;
+        }
+    };
+    let dest = match unsafe { CStr::from_ptr(dest_path) }.to_str() {
+        Ok(p) => Path::new(p),
+        Err(_) => {
+            set_err("invalid dest path encoding");
+            return -4;
+        }
+    };
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            set_err(&format!("cannot open ZIP archive: {}: {}", path, e));
+            return -5;
+        }
+    };
+    let mut zip = match zip::ZipArchive::new(file) {
+        Ok(z) => z,
+        Err(e) => {
+            set_err(&format!("cannot parse ZIP archive: {}", e));
+            return -6;
+        }
+    };
+    let mut entry = match zip.by_name(target_name) {
+        Ok(e) => e,
+        Err(_) => {
+            set_err(&format!("ZIP entry is missing: {}", target_name));
+            return -7;
+        }
+    };
+    if entry.size() > max_bytes as u64 {
+        set_err("decompressed ZIP data exceeds its size limit");
+        return -8;
+    }
+    let parent = dest.parent().unwrap_or_else(|| Path::new("."));
+    if let Err(e) = std::fs::create_dir_all(parent) {
+        set_err(&format!("cannot create directory: {}", e));
+        return -9;
+    }
+    let tmp_path = parent.join(format!(".tmp_extract_{}_{}", std::process::id(), target_name.replace('/', "_")));
+    let mut out_file = match std::fs::File::create(&tmp_path) {
+        Ok(f) => f,
+        Err(e) => {
+            set_err(&format!("cannot create temporary file: {}", e));
+            return -10;
+        }
+    };
+    use std::io::{Read, Write};
+    let mut total_written = 0;
+    let mut buffer = [0u8; 16384];
+    loop {
+        match entry.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(n) => {
+                total_written += n;
+                if total_written > max_bytes {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    set_err("decompressed ZIP data exceeds its size limit");
+                    return -11;
+                }
+                if let Err(e) = out_file.write_all(&buffer[..n]) {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    set_err(&format!("cannot write temporary file: {}", e));
+                    return -12;
+                }
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp_path);
+                set_err(&format!("cannot decompress ZIP entry: {}", e));
+                return -13;
+            }
+        }
+    }
+    if let Err(e) = out_file.sync_all() {
+        let _ = std::fs::remove_file(&tmp_path);
+        set_err(&format!("cannot sync file: {}", e));
+        return -14;
+    }
+    drop(out_file);
+    if let Err(e) = std::fs::rename(&tmp_path, dest) {
+        let _ = std::fs::remove_file(&tmp_path);
+        set_err(&format!("cannot rename to destination: {}", e));
+        return -15;
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_zip_extract_prefix(
+    archive_path: *const c_char,
+    prefix: *const c_char,
+    dest_dir: *const c_char,
+    max_total_bytes: usize,
+    out_extracted_count: *mut usize,
+    out_err: *mut c_char,
+    err_cap: usize,
+) -> c_int {
+    let set_err = |msg: &str| {
+        if !out_err.is_null() && err_cap > 0 {
+            let len = std::cmp::min(msg.len(), err_cap - 1);
+            unsafe {
+                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_err, len);
+                *out_err.add(len) = 0;
+            }
+        }
+    };
+    if archive_path.is_null() || prefix.is_null() || dest_dir.is_null() || out_extracted_count.is_null() {
+        set_err("invalid arguments");
+        return -1;
+    }
+    let arc_p = match unsafe { CStr::from_ptr(archive_path) }.to_str() {
+        Ok(p) => p,
+        Err(_) => {
+            set_err("invalid archive path encoding");
+            return -2;
+        }
+    };
+    let pref = match unsafe { CStr::from_ptr(prefix) }.to_str() {
+        Ok(p) => p,
+        Err(_) => {
+            set_err("invalid prefix encoding");
+            return -3;
+        }
+    };
+    let dest_base = match unsafe { CStr::from_ptr(dest_dir) }.to_str() {
+        Ok(p) => Path::new(p),
+        Err(_) => {
+            set_err("invalid dest directory encoding");
+            return -4;
+        }
+    };
+    let file = match std::fs::File::open(arc_p) {
+        Ok(f) => f,
+        Err(e) => {
+            set_err(&format!("cannot open ZIP archive: {}: {}", arc_p, e));
+            return -5;
+        }
+    };
+    let mut zip = match zip::ZipArchive::new(file) {
+        Ok(z) => z,
+        Err(e) => {
+            set_err(&format!("cannot parse ZIP archive: {}", e));
+            return -6;
+        }
+    };
+    use std::io::{Read, Write};
+    let mut total_bytes = 0;
+    let mut count = 0;
+    for i in 0..zip.len() {
+        let mut entry = match zip.by_index(i) {
+            Ok(e) => e,
+            Err(e) => {
+                set_err(&format!("cannot read ZIP entry: {}", e));
+                return -7;
+            }
+        };
+        let name = entry.name().to_string();
+        if !name.starts_with(pref) {
+            continue;
+        }
+        let rel_name = &name[pref.len()..];
+        if rel_name.is_empty() {
+            continue;
+        }
+        if !is_safe_archive_path(rel_name) {
+            set_err(&format!("unsafe entry path in prefix extract: {}", rel_name));
+            return -8;
+        }
+        let target_path = dest_base.join(rel_name);
+        if entry.is_dir() || rel_name.ends_with('/') {
+            if let Err(e) = std::fs::create_dir_all(&target_path) {
+                set_err(&format!("cannot create directory {}: {}", target_path.display(), e));
+                return -9;
+            }
+            continue;
+        }
+        if let Some(p) = target_path.parent() {
+            if let Err(e) = std::fs::create_dir_all(p) {
+                set_err(&format!("cannot create parent directory {}: {}", p.display(), e));
+                return -10;
+            }
+        }
+        let mut out = match std::fs::File::create(&target_path) {
+            Ok(f) => f,
+            Err(e) => {
+                set_err(&format!("cannot create file {}: {}", target_path.display(), e));
+                return -11;
+            }
+        };
+        let mut buf = [0u8; 16384];
+        loop {
+            match entry.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    total_bytes += n;
+                    if total_bytes > max_total_bytes {
+                        set_err("total extracted size exceeded limit");
+                        return -12;
+                    }
+                    if let Err(e) = out.write_all(&buf[..n]) {
+                        set_err(&format!("cannot write file {}: {}", target_path.display(), e));
+                        return -13;
+                    }
+                }
+                Err(e) => {
+                    set_err(&format!("cannot read entry {}: {}", name, e));
+                    return -14;
+                }
+            }
+        }
+        count += 1;
+    }
+    unsafe {
+        *out_extracted_count = count;
+    }
+    0
+}
+
+// ============================================================================
+// 28. Payload Integrity & Asset Tree
+// ============================================================================
+
+fn walk_asset_tree(
+    root: &Path,
+    current: &Path,
+    files: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    let entries = match std::fs::read_dir(current) {
+        Ok(e) => e,
+        Err(err) => return Err(format!("cannot read directory {}: {}", current.display(), err)),
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(err) => return Err(format!("error reading directory entry: {}", err)),
+        };
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(err) => return Err(format!("error inspecting file type: {}", err)),
+        };
+        if file_type.is_symlink() {
+            return Err("asset tree contains a symbolic link".to_string());
+        }
+        if file_type.is_dir() {
+            walk_asset_tree(root, &entry.path(), files)?;
+        } else if file_type.is_file() {
+            if let Ok(rel) = entry.path().strip_prefix(root) {
+                files.push(rel.to_path_buf());
+            }
+        } else {
+            return Err("asset tree contains a non-regular entry".to_string());
+        }
+    }
+    Ok(())
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_payload_hash_asset_tree(
+    root_dir: *const c_char,
+    out_hex: *mut c_char,
+    hex_cap: usize,
+    out_file_count: *mut usize,
+    out_err: *mut c_char,
+    err_cap: usize,
+) -> c_int {
+    let set_err = |msg: &str| {
+        if !out_err.is_null() && err_cap > 0 {
+            let len = std::cmp::min(msg.len(), err_cap - 1);
+            unsafe {
+                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_err, len);
+                *out_err.add(len) = 0;
+            }
+        }
+    };
+    if root_dir.is_null() || out_hex.is_null() || hex_cap < 65 {
+        set_err("invalid arguments");
+        return -1;
+    }
+    let root_str = match unsafe { CStr::from_ptr(root_dir) }.to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_err("invalid root directory encoding");
+            return -2;
+        }
+    };
+    let root_path = Path::new(root_str);
+    let sym_meta = match std::fs::symlink_metadata(root_path) {
+        Ok(m) => m,
+        Err(_) => {
+            set_err("asset root is not a real directory");
+            return -3;
+        }
+    };
+    if sym_meta.file_type().is_symlink() || !sym_meta.is_dir() {
+        set_err("asset root is not a real directory");
+        return -4;
+    }
+
+    let mut files = Vec::new();
+    if let Err(e) = walk_asset_tree(root_path, root_path, &mut files) {
+        set_err(&e);
+        return -5;
+    }
+
+    files.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
+
+    use sha2::{Digest, Sha256};
+    let mut tree_hasher = Sha256::new();
+
+    for rel_path in &files {
+        let full_path = root_path.join(rel_path);
+        let mut file = match std::fs::File::open(&full_path) {
+            Ok(f) => f,
+            Err(_) => {
+                set_err(&format!("cannot open file {}", full_path.display()));
+                return -6;
+            }
+        };
+        let mut file_hasher = Sha256::new();
+        let mut buf = [0u8; 16384];
+        use std::io::Read;
+        loop {
+            match file.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => file_hasher.update(&buf[..n]),
+                Err(_) => {
+                    set_err(&format!("cannot read file {}", full_path.display()));
+                    return -7;
+                }
+            }
+        }
+        let file_sha = hex::encode(file_hasher.finalize());
+        let rel_unix_str = rel_path.to_string_lossy().replace('\\', "/");
+        tree_hasher.update(file_sha.as_bytes());
+        tree_hasher.update(b"  ");
+        tree_hasher.update(rel_unix_str.as_bytes());
+        tree_hasher.update(&[0u8]);
+    }
+
+    let final_hex = hex::encode(tree_hasher.finalize());
+    unsafe {
+        std::ptr::copy_nonoverlapping(final_hex.as_ptr() as *const c_char, out_hex, final_hex.len());
+        *out_hex.add(final_hex.len()) = 0;
+        if !out_file_count.is_null() {
+            *out_file_count = files.len();
+        }
+    }
+    0
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct MocktailRustPayloadInfo {
+    pub package_name: String,
+    pub version_name: String,
+    pub version_code: u64,
+    pub build_id: String,
+    pub library_sha256: String,
+    pub base_apk_sha256: String,
+    pub split_apk_sha256: String,
+    pub asset_file_count: usize,
+    pub asset_tree_sha256: String,
+    pub payload_id: String,
+}
+
+fn internal_inspect_payload(dir: &Path) -> Result<MocktailRustPayloadInfo, String> {
+    let sym = match std::fs::symlink_metadata(dir) {
+        Ok(m) => m,
+        Err(_) => return Err("payload root is not a real directory".to_string()),
+    };
+    if sym.file_type().is_symlink() || !sym.is_dir() {
+        return Err("payload root is not a real directory".to_string());
+    }
+
+    let required_files = [
+        "libroblox.so",
+        "sober_apk/base.apk",
+        "sober_apk/split_config.x86_64.apk",
+        "roblox_payload.json",
+    ];
+    for f in required_files {
+        let p = dir.join(f);
+        let m = match std::fs::symlink_metadata(&p) {
+            Ok(m) => m,
+            Err(_) => return Err(format!("payload is missing regular file: {}", f)),
+        };
+        if m.file_type().is_symlink() || !m.is_file() {
+            return Err(format!("payload is missing regular file: {}", f));
+        }
+    }
+
+    let required_dirs = ["assets", "assets/content"];
+    for d in required_dirs {
+        let p = dir.join(d);
+        let m = match std::fs::symlink_metadata(&p) {
+            Ok(m) => m,
+            Err(_) => return Err(format!("payload is missing real directory: {}", d)),
+        };
+        if m.file_type().is_symlink() || !m.is_dir() {
+            return Err(format!("payload is missing real directory: {}", d));
+        }
+    }
+
+    let manifest_path = dir.join("roblox_payload.json");
+    let content = match std::fs::read_to_string(&manifest_path) {
+        Ok(c) => c,
+        Err(_) => return Err("cannot read payload metadata".to_string()),
+    };
+    let doc: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return Err("payload metadata schema is invalid".to_string()),
+    };
+    if !doc.is_object() || doc.get("schema_version").and_then(|v| v.as_i64()) != Some(1) {
+        return Err("payload metadata schema is invalid".to_string());
+    }
+
+    let package = doc.get("package").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let version_name = doc.get("version_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let version_code = match doc.get("version_code").and_then(|v| v.as_u64()) {
+        Some(c) => c,
+        None => return Err("payload metadata schema is invalid".to_string()),
+    };
+    let build_id = doc.get("elf_build_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    let sha_obj = match doc.get("sha256").and_then(|v| v.as_object()) {
+        Some(o) => o,
+        None => return Err("payload metadata schema is invalid".to_string()),
+    };
+    let library_sha256 = sha_obj.get("libroblox").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let base_apk_sha256 = sha_obj.get("base_apk").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let split_apk_sha256 = sha_obj
+        .get("split_config_x86_64")
+        .or_else(|| sha_obj.get("split_apk"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let assets_obj = match doc.get("assets").and_then(|v| v.as_object()) {
+        Some(o) => o,
+        None => return Err("payload metadata schema is invalid".to_string()),
+    };
+    let asset_file_count = match assets_obj.get("file_count").and_then(|v| v.as_u64()) {
+        Some(c) => c as usize,
+        None => return Err("payload metadata asset count is invalid".to_string()),
+    };
+    let asset_tree_sha256 = assets_obj.get("sha256_tree").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    let is_lower_hex = |s: &str, expected_len: usize| {
+        s.len() == expected_len && s.chars().all(|c| c.is_ascii_digit() || (c >= 'a' && c <= 'f'))
+    };
+
+    if package != "com.roblox.client"
+        || version_name.is_empty()
+        || version_code == 0
+        || !is_lower_hex(&build_id, 40)
+        || !is_lower_hex(&library_sha256, 64)
+        || !is_lower_hex(&base_apk_sha256, 64)
+        || !is_lower_hex(&split_apk_sha256, 64)
+        || !is_lower_hex(&asset_tree_sha256, 64)
+    {
+        return Err("payload metadata identity or hashes are invalid".to_string());
+    }
+
+    let payload_id = format!("{}-{}", version_code, build_id);
+
+    Ok(MocktailRustPayloadInfo {
+        package_name: package,
+        version_name,
+        version_code,
+        build_id,
+        library_sha256,
+        base_apk_sha256,
+        split_apk_sha256,
+        asset_file_count,
+        asset_tree_sha256,
+        payload_id,
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_payload_inspect(
+    dir_path: *const c_char,
+    out_json: *mut c_char,
+    json_cap: usize,
+    out_err: *mut c_char,
+    err_cap: usize,
+) -> c_int {
+    let set_err = |msg: &str| {
+        if !out_err.is_null() && err_cap > 0 {
+            let len = std::cmp::min(msg.len(), err_cap - 1);
+            unsafe {
+                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_err, len);
+                *out_err.add(len) = 0;
+            }
+        }
+    };
+    if dir_path.is_null() || out_json.is_null() || json_cap == 0 {
+        set_err("invalid arguments");
+        return -1;
+    }
+    let p_str = match unsafe { CStr::from_ptr(dir_path) }.to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_err("invalid directory path encoding");
+            return -2;
+        }
+    };
+    match internal_inspect_payload(Path::new(p_str)) {
+        Ok(info) => {
+            let json = serde_json::to_string(&info).unwrap_or_default();
+            if json.len() >= json_cap {
+                set_err("JSON output buffer too small");
+                return -3;
+            }
+            unsafe {
+                std::ptr::copy_nonoverlapping(json.as_ptr() as *const c_char, out_json, json.len());
+                *out_json.add(json.len()) = 0;
+            }
+            0
+        }
+        Err(e) => {
+            set_err(&e);
+            -4
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_payload_verify(
+    dir_path: *const c_char,
+    out_json: *mut c_char,
+    json_cap: usize,
+    out_err: *mut c_char,
+    err_cap: usize,
+) -> c_int {
+    let set_err = |msg: &str| {
+        if !out_err.is_null() && err_cap > 0 {
+            let len = std::cmp::min(msg.len(), err_cap - 1);
+            unsafe {
+                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_err, len);
+                *out_err.add(len) = 0;
+            }
+        }
+    };
+    if dir_path.is_null() || out_json.is_null() || json_cap == 0 {
+        set_err("invalid arguments");
+        return -1;
+    }
+    let p_str = match unsafe { CStr::from_ptr(dir_path) }.to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_err("invalid directory path encoding");
+            return -2;
+        }
+    };
+    let dir = Path::new(p_str);
+    let info = match internal_inspect_payload(dir) {
+        Ok(i) => i,
+        Err(e) => {
+            set_err(&e);
+            return -3;
+        }
+    };
+
+    use sha2::{Digest, Sha256};
+    let check_file_sha = |rel: &str, expected: &str| -> Result<(), String> {
+        let f_path = dir.join(rel);
+        let mut file = match std::fs::File::open(&f_path) {
+            Ok(f) => f,
+            Err(_) => return Err(format!("cannot open regular file: {}", rel)),
+        };
+        let mut hasher = Sha256::new();
+        let mut buf = [0u8; 16384];
+        use std::io::Read;
+        loop {
+            match file.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => hasher.update(&buf[..n]),
+                Err(_) => return Err(format!("cannot read regular file: {}", rel)),
+            }
+        }
+        let actual = hex::encode(hasher.finalize());
+        if actual != expected {
+            return Err(format!("payload hash mismatch: {}", rel));
+        }
+        Ok(())
+    };
+
+    if let Err(e) = check_file_sha("libroblox.so", &info.library_sha256) {
+        set_err(&e);
+        return -4;
+    }
+    if let Err(e) = check_file_sha("sober_apk/base.apk", &info.base_apk_sha256) {
+        set_err(&e);
+        return -5;
+    }
+    if let Err(e) = check_file_sha("sober_apk/split_config.x86_64.apk", &info.split_apk_sha256) {
+        set_err(&e);
+        return -6;
+    }
+
+    let mut actual_count = 0;
+    let mut tree_hex = [0 as c_char; 65];
+    let mut tree_err = [0 as c_char; 256];
+    let assets_cstr = match CString::new(dir.join("assets").to_string_lossy().as_bytes()) {
+        Ok(c) => c,
+        Err(_) => {
+            set_err("invalid assets path");
+            return -7;
+        }
+    };
+    let rc = mocktail_rust_payload_hash_asset_tree(
+        assets_cstr.as_ptr(),
+        tree_hex.as_mut_ptr(),
+        65,
+        &mut actual_count,
+        tree_err.as_mut_ptr(),
+        256,
+    );
+    if rc != 0 {
+        let err_msg = unsafe { CStr::from_ptr(tree_err.as_ptr()) }.to_str().unwrap_or("asset tree error");
+        set_err(err_msg);
+        return -8;
+    }
+    let actual_tree_hex = unsafe { CStr::from_ptr(tree_hex.as_ptr()) }.to_str().unwrap_or("");
+    if actual_count != info.asset_file_count || actual_tree_hex != info.asset_tree_sha256 {
+        set_err("payload asset tree does not match metadata");
+        return -9;
+    }
+
+    let json = serde_json::to_string(&info).unwrap_or_default();
+    if json.len() >= json_cap {
+        set_err("JSON output buffer too small");
+        return -10;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(json.as_ptr() as *const c_char, out_json, json.len());
+        *out_json.add(json.len()) = 0;
+    }
+    0
+}
+
+// ============================================================================
+// 29. FFlag & ClientAppSettings Merger
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_fflags_load_and_merge(
+    file_path: *const c_char,
+    base_json: *const c_char,
+    out_json: *mut c_char,
+    json_cap: usize,
+    out_count: *mut usize,
+    out_loaded: *mut c_int,
+    out_err: *mut c_char,
+    err_cap: usize,
+) -> c_int {
+    let set_err = |msg: &str| {
+        if !out_err.is_null() && err_cap > 0 {
+            let len = std::cmp::min(msg.len(), err_cap - 1);
+            unsafe {
+                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_err, len);
+                *out_err.add(len) = 0;
+            }
+        }
+    };
+    if out_json.is_null() || json_cap == 0 {
+        set_err("invalid arguments");
+        return -1;
+    }
+
+    let mut merged: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+
+    if !base_json.is_null() {
+        let b_str = match unsafe { CStr::from_ptr(base_json) }.to_str() {
+            Ok(s) => s.trim(),
+            Err(_) => {
+                set_err("invalid base json encoding");
+                return -2;
+            }
+        };
+        if !b_str.is_empty() {
+            match serde_json::from_str::<serde_json::Value>(b_str) {
+                Ok(serde_json::Value::Object(m)) => {
+                    merged = m;
+                }
+                _ => {
+                    set_err("base client-settings overrides must be a JSON object");
+                    return -3;
+                }
+            }
+        }
+    }
+
+    let mut loaded = 0;
+    let mut added_count = 0;
+
+    if !file_path.is_null() {
+        let p_str = match unsafe { CStr::from_ptr(file_path) }.to_str() {
+            Ok(s) => s.trim(),
+            Err(_) => {
+                set_err("invalid file path encoding");
+                return -4;
+            }
+        };
+        if !p_str.is_empty() {
+            let path = Path::new(p_str);
+            match std::fs::symlink_metadata(path) {
+                Ok(meta) => {
+                    if meta.file_type().is_symlink() || !meta.is_file() {
+                        set_err("fflags file is not a regular file");
+                        return -5;
+                    }
+                    if meta.len() > 1024 * 1024 {
+                        set_err("fflags file exceeds 1 MiB limit");
+                        return -6;
+                    }
+                    let content = match std::fs::read_to_string(path) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            set_err(&format!("cannot read fflags file: {}", e));
+                            return -7;
+                        }
+                    };
+                    let file_obj = match serde_json::from_str::<serde_json::Value>(&content) {
+                        Ok(serde_json::Value::Object(o)) => o,
+                        _ => {
+                            set_err("fflags file must contain a JSON object");
+                            return -8;
+                        }
+                    };
+
+                    for (k, v) in &file_obj {
+                        if k.is_empty() {
+                            set_err("fflags file contains an invalid key");
+                            return -9;
+                        }
+                        if !v.is_string() && !v.is_boolean() && !v.is_number() {
+                            set_err("fflags file values must be strings, booleans, or integers");
+                            return -10;
+                        }
+                    }
+
+                    for (k, v) in file_obj {
+                        if !merged.contains_key(&k) {
+                            let norm_val = match v {
+                                serde_json::Value::Bool(b) => serde_json::Value::String(if b { "True".to_string() } else { "False".to_string() }),
+                                serde_json::Value::Number(n) => serde_json::Value::String(n.to_string()),
+                                serde_json::Value::String(s) => serde_json::Value::String(s),
+                                _ => serde_json::Value::String(String::new()),
+                            };
+                            merged.insert(k, norm_val);
+                            added_count += 1;
+                        }
+                    }
+                    loaded = 1;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    // File does not exist: valid, loaded = 0
+                }
+                Err(_) => {
+                    set_err("cannot safely open fflags file");
+                    return -11;
+                }
+            }
+        }
+    }
+
+    let out_serialized = serde_json::to_string(&serde_json::Value::Object(merged)).unwrap_or_else(|_| "{}".to_string());
+    if out_serialized.len() >= json_cap {
+        set_err("JSON output buffer too small");
+        return -12;
+    }
+
+    unsafe {
+        std::ptr::copy_nonoverlapping(out_serialized.as_ptr() as *const c_char, out_json, out_serialized.len());
+        *out_json.add(out_serialized.len()) = 0;
+        if !out_count.is_null() {
+            *out_count = added_count;
+        }
+        if !out_loaded.is_null() {
+            *out_loaded = loaded;
+        }
+    }
+    0
+}
+
+// ============================================================================
+// 30. APKPure Provider Parser
+// ============================================================================
+
+struct ApkPureVersionMarker {
+    begin: usize,
+    colon: usize,
+    value: String,
+}
+
+fn apkpure_version_character(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'.' || c == b'+' || c == b'_' || c == b'-'
+}
+
+fn apkpure_version_markers(metadata: &[u8]) -> Vec<ApkPureVersionMarker> {
+    let mut markers = Vec::new();
+    let mut index = 0;
+    while index < metadata.len() {
+        if !metadata[index].is_ascii_digit() || (index > 0 && apkpure_version_character(metadata[index - 1])) {
+            index += 1;
+            continue;
+        }
+        let mut end = index;
+        let mut dot = false;
+        while end < metadata.len() && apkpure_version_character(metadata[end]) {
+            if metadata[end] == b'.' {
+                dot = true;
+            }
+            end += 1;
+        }
+        if dot && end < metadata.len() && metadata[end] == b':' {
+            if let Ok(val) = std::str::from_utf8(&metadata[index..end]) {
+                markers.push(ApkPureVersionMarker {
+                    begin: index,
+                    colon: end,
+                    value: val.to_string(),
+                });
+            }
+            index = end;
+        }
+        index += 1;
+    }
+    markers
+}
+
+fn is_apkpure_url_char(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || b"-@:%._+~#=?&/()".contains(&c)
+}
+
+fn apkpure_downloads_in_record(record: &[u8]) -> Vec<String> {
+    let allowed_hosts = ["pureapk.com", "apkpure.com", "winudf.com"];
+    let mut downloads = Vec::new();
+    let mut index = 0;
+    while index < record.len() {
+        let mut url_begin = None;
+        if record[index..].starts_with(b"XAPKJ") && index + 7 < record.len() {
+            url_begin = Some(index + 7);
+        } else if record[index..].starts_with(b"APKJ") && index + 6 < record.len() {
+            url_begin = Some(index + 6);
+        }
+        if let Some(begin) = url_begin {
+            if record[begin..].starts_with(b"https://") {
+                let mut url_end = begin;
+                while url_end < record.len() && is_apkpure_url_char(record[url_end]) {
+                    url_end += 1;
+                }
+                if let Ok(url_str) = std::str::from_utf8(&record[begin..url_end]) {
+                    if let Ok(parsed) = url::Url::parse(url_str) {
+                        if let Some(host) = parsed.host_str() {
+                            let trusted = allowed_hosts.iter().any(|&h| host == h || host.ends_with(&format!(".{}", h)));
+                            if trusted {
+                                downloads.push(url_str.to_string());
+                            }
+                        }
+                    }
+                }
+                index = url_end;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    downloads
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_apkpure_parse_latest(
+    metadata: *const u8,
+    meta_len: usize,
+    out_version_name: *mut c_char,
+    ver_cap: usize,
+    out_version_code: *mut u64,
+    out_err: *mut c_char,
+    err_cap: usize,
+) -> c_int {
+    let set_err = |msg: &str| {
+        if !out_err.is_null() && err_cap > 0 {
+            let len = std::cmp::min(msg.len(), err_cap - 1);
+            unsafe {
+                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_err, len);
+                *out_err.add(len) = 0;
+            }
+        }
+    };
+    if metadata.is_null() || meta_len == 0 || out_version_name.is_null() || out_version_code.is_null() {
+        set_err("invalid arguments");
+        return -1;
+    }
+    let data = unsafe { std::slice::from_raw_parts(metadata, meta_len) };
+    let markers = apkpure_version_markers(data);
+    if markers.is_empty() {
+        set_err("APKPure metadata contains no version identity");
+        return -2;
+    }
+    let marker = &markers[0];
+    let prefix_begin = if marker.begin > 128 { marker.begin - 128 } else { 0 };
+
+    let mut position = marker.begin;
+    while position > prefix_begin {
+        position -= 1;
+        if data[position] != 0x2a || position + 3 >= marker.begin {
+            continue;
+        }
+        let code_len = data[position + 1] as usize;
+        let code_begin = position + 2;
+        let name_tag = code_begin + code_len;
+        if code_len == 0 || code_len > 20 || name_tag + 2 != marker.begin {
+            continue;
+        }
+        if data[name_tag] != 0x32 || data[name_tag + 1] as usize != marker.value.len() {
+            continue;
+        }
+        let mut code: u64 = 0;
+        let mut valid = true;
+        for i in code_begin..name_tag {
+            let c = data[i];
+            if !c.is_ascii_digit() || code > 999999999999999999 {
+                valid = false;
+                break;
+            }
+            code = code * 10 + (c - b'0') as u64;
+        }
+        if valid && code > 0 {
+            if marker.value.len() >= ver_cap {
+                set_err("version name buffer too small");
+                return -3;
+            }
+            unsafe {
+                std::ptr::copy_nonoverlapping(marker.value.as_ptr() as *const c_char, out_version_name, marker.value.len());
+                *out_version_name.add(marker.value.len()) = 0;
+                *out_version_code = code;
+            }
+            return 0;
+        }
+    }
+    set_err("APKPure metadata contains no version code");
+    -4
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_apkpure_parse_exact_urls(
+    metadata: *const u8,
+    meta_len: usize,
+    version: *const c_char,
+    out_urls_json: *mut c_char,
+    json_cap: usize,
+    out_err: *mut c_char,
+    err_cap: usize,
+) -> c_int {
+    let set_err = |msg: &str| {
+        if !out_err.is_null() && err_cap > 0 {
+            let len = std::cmp::min(msg.len(), err_cap - 1);
+            unsafe {
+                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_err, len);
+                *out_err.add(len) = 0;
+            }
+        }
+    };
+    if metadata.is_null() || meta_len == 0 || version.is_null() || out_urls_json.is_null() {
+        set_err("invalid arguments");
+        return -1;
+    }
+    let ver_target = match unsafe { CStr::from_ptr(version) }.to_str() {
+        Ok(v) => v,
+        Err(_) => {
+            set_err("invalid version encoding");
+            return -2;
+        }
+    };
+    let data = unsafe { std::slice::from_raw_parts(metadata, meta_len) };
+    let markers = apkpure_version_markers(data);
+    let mut results = Vec::new();
+    for i in 0..markers.len() {
+        if markers[i].value != ver_target {
+            continue;
+        }
+        let record_end = if i + 1 < markers.len() { markers[i + 1].begin } else { data.len() };
+        let record_slice = &data[markers[i].colon + 1..record_end];
+        let downloads = apkpure_downloads_in_record(record_slice);
+        for d in downloads {
+            if !results.contains(&d) {
+                results.push(d);
+            }
+        }
+    }
+    if results.is_empty() {
+        set_err("APKPure does not offer the requested exact version");
+        return -3;
+    }
+    if results.len() > 4 {
+        set_err("APKPure returned too many candidates");
+        return -4;
+    }
+    let json = match serde_json::to_string(&results) {
+        Ok(j) => j,
+        Err(_) => {
+            set_err("JSON serialization failed");
+            return -5;
+        }
+    };
+    if json.len() >= json_cap {
+        set_err("JSON output buffer too small");
+        return -6;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(json.as_ptr() as *const c_char, out_urls_json, json.len());
+        *out_urls_json.add(json.len()) = 0;
+    }
+    0
+}
+
+// ============================================================================
+// 31. BrowserTracker & RBXEventTracker
+// ============================================================================
+
+fn is_valid_browser_id(val: &str) -> bool {
+    !val.is_empty() && val.len() <= 20 && !val.starts_with('0') && val.chars().all(|c| c.is_ascii_digit())
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_browser_tracker_generate_id(
+    out_id: *mut c_char,
+    id_cap: usize,
+) -> c_int {
+    if out_id.is_null() || id_cap < 21 {
+        return -1;
+    }
+    // Read from /dev/urandom for crypto-secure random 64-bit uint > 0
+    let mut rand_val: u64 = 0;
+    let mut got_random = false;
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        use std::io::Read;
+        let mut buf = [0u8; 8];
+        if f.read_exact(&mut buf).is_ok() {
+            rand_val = u64::from_ne_bytes(buf);
+            got_random = true;
+        }
+    }
+    if !got_random || rand_val == 0 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+        rand_val = (now as u64) ^ 0x5bf03635467c4187;
+        if rand_val == 0 {
+            rand_val = 13374210987654321;
+        }
+    }
+    let id_str = rand_val.to_string();
+    unsafe {
+        std::ptr::copy_nonoverlapping(id_str.as_ptr() as *const c_char, out_id, id_str.len());
+        *out_id.add(id_str.len()) = 0;
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_browser_tracker_extract_id(
+    tracker_cookie: *const c_char,
+    out_id: *mut c_char,
+    id_cap: usize,
+) -> c_int {
+    if tracker_cookie.is_null() || out_id.is_null() || id_cap == 0 {
+        return -1;
+    }
+    let cookie_str = match unsafe { CStr::from_ptr(tracker_cookie) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return -2,
+    };
+    for field in cookie_str.split('&') {
+        let field = field.trim();
+        if let Some((k, v)) = field.split_once('=') {
+            if k.trim() == "browserid" {
+                let id = v.trim();
+                if is_valid_browser_id(id) {
+                    if id.len() >= id_cap {
+                        return -3;
+                    }
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(id.as_ptr() as *const c_char, out_id, id.len());
+                        *out_id.add(id.len()) = 0;
+                    }
+                    return 0;
+                }
+            }
+        }
+    }
+    -4
+}
+
+// ============================================================================
+// 32. Support Bundle & Log Redactor
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_is_diagnostic_token(token: *const c_char) -> c_int {
+    if token.is_null() {
+        return 0;
+    }
+    let s = match unsafe { CStr::from_ptr(token) }.to_str() {
+        Ok(v) => v,
+        Err(_) => return 0,
+    };
+    if s.is_empty() || s.len() > 64 {
+        return 0;
+    }
+    if !s.chars().next().map_or(false, |c| c.is_ascii_alphanumeric()) {
+        return 0;
+    }
+    if s.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == ':' || c == '+' || c == '-') {
+        1
+    } else {
+        0
+    }
+}
+
+fn safe_log_line(line: &str) -> bool {
+    let allowlisted_markers = [
+        "[FATAL]",
+        "[compat]",
+        "[window] first Roblox Vulkan frame presented",
+        "[vulkan]",
+        "[mocktail][audio]",
+        "[input]",
+        "[lifecycle]",
+        "[main] Roblox lifecycle shutdown: Stopped",
+        "setStage:",
+        "JNI_OnLoad",
+        "RenderView created",
+        "RenderView destroyed",
+        "[native-updater]",
+        "Segmentation fault",
+        "core dumped",
+    ];
+    if line.contains(".ROBLOSECURITY")
+        || line.contains("Authorization:")
+        || line.contains("authenticationTicket")
+        || line.contains("http://")
+        || line.contains("https://")
+    {
+        return false;
+    }
+    allowlisted_markers.iter().any(|&m| line.contains(m))
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_sanitize_log(
+    raw_log: *const u8,
+    raw_len: usize,
+    out_sanitized: *mut c_char,
+    out_cap: usize,
+    out_len: *mut usize,
+) -> c_int {
+    if raw_log.is_null() || out_sanitized.is_null() || out_cap == 0 {
+        return -1;
+    }
+    let data = unsafe { std::slice::from_raw_parts(raw_log, raw_len) };
+    let text = String::from_utf8_lossy(data);
+    let mut sanitized = String::new();
+
+    for line in text.lines() {
+        if safe_log_line(line) {
+            let bounded = if line.len() > 1024 { &line[..1024] } else { line };
+            sanitized.push_str(bounded);
+            sanitized.push('\n');
+        }
+    }
+
+    let bytes = sanitized.as_bytes();
+    let copy_len = std::cmp::min(bytes.len(), out_cap - 1);
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr() as *const c_char, out_sanitized, copy_len);
+        *out_sanitized.add(copy_len) = 0;
+        if !out_len.is_null() {
+            *out_len = copy_len;
+        }
+    }
+    0
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -4816,5 +6253,184 @@ runtime:
         // Alpha channel should be 255 for opaque RGB8
         assert_eq!(dst[3], 255);
         assert_eq!(dst[7], 255);
+    }
+
+    #[test]
+    fn test_zip_archive() {
+        let temp_dir = std::env::temp_dir().join(format!("mocktail_zip_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let zip_path = temp_dir.join("test.zip");
+
+        // Create zip archive with zip writer
+        {
+            let file = std::fs::File::create(&zip_path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+
+            zip.start_file("assets/test.txt", options).unwrap();
+            use std::io::Write;
+            zip.write_all(b"Hello Zip World!").unwrap();
+
+            zip.add_directory("assets/sub/", options).unwrap();
+            zip.start_file("assets/sub/nested.txt", options).unwrap();
+            zip.write_all(b"Nested content").unwrap();
+
+            zip.finish().unwrap();
+        }
+
+        // 1. List entries
+        let zip_cstr = CString::new(zip_path.to_str().unwrap()).unwrap();
+        let mut list_json = [0 as c_char; 2048];
+        let mut err_buf = [0 as c_char; 256];
+        let rc_list = mocktail_rust_zip_list_entries(
+            zip_cstr.as_ptr(),
+            100,
+            list_json.as_mut_ptr(),
+            2048,
+            err_buf.as_mut_ptr(),
+            256,
+        );
+        assert_eq!(rc_list, 0);
+        let list_str = unsafe { CStr::from_ptr(list_json.as_ptr()) }.to_str().unwrap();
+        assert!(list_str.contains("assets/test.txt"));
+        assert!(list_str.contains("assets/sub/nested.txt"));
+
+        // 2. Read entry
+        let entry_cstr = CString::new("assets/test.txt").unwrap();
+        let mut read_buf = [0u8; 128];
+        let mut read_len = 0;
+        let rc_read = mocktail_rust_zip_read_entry(
+            zip_cstr.as_ptr(),
+            entry_cstr.as_ptr(),
+            128,
+            read_buf.as_mut_ptr(),
+            128,
+            &mut read_len,
+            err_buf.as_mut_ptr(),
+            256,
+        );
+        assert_eq!(rc_read, 0);
+        assert_eq!(&read_buf[..read_len], b"Hello Zip World!");
+
+        // 3. Extract entry
+        let dest_single = temp_dir.join("extracted_single.txt");
+        let dest_single_cstr = CString::new(dest_single.to_str().unwrap()).unwrap();
+        let rc_extract = mocktail_rust_zip_extract_entry(
+            zip_cstr.as_ptr(),
+            entry_cstr.as_ptr(),
+            dest_single_cstr.as_ptr(),
+            1024,
+            err_buf.as_mut_ptr(),
+            256,
+        );
+        assert_eq!(rc_extract, 0);
+        assert_eq!(std::fs::read(&dest_single).unwrap(), b"Hello Zip World!");
+
+        // 4. Extract prefix
+        let dest_prefix_dir = temp_dir.join("prefix_out");
+        let dest_prefix_cstr = CString::new(dest_prefix_dir.to_str().unwrap()).unwrap();
+        let prefix_cstr = CString::new("assets/").unwrap();
+        let mut extracted_count = 0;
+        let rc_prefix = mocktail_rust_zip_extract_prefix(
+            zip_cstr.as_ptr(),
+            prefix_cstr.as_ptr(),
+            dest_prefix_cstr.as_ptr(),
+            10240,
+            &mut extracted_count,
+            err_buf.as_mut_ptr(),
+            256,
+        );
+        assert_eq!(rc_prefix, 0);
+        assert!(extracted_count >= 2);
+        assert_eq!(std::fs::read(dest_prefix_dir.join("test.txt")).unwrap(), b"Hello Zip World!");
+        assert_eq!(std::fs::read(dest_prefix_dir.join("sub/nested.txt")).unwrap(), b"Nested content");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_fflags_merger() {
+        let temp_dir = std::env::temp_dir().join(format!("mocktail_fflags_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let fflags_file = temp_dir.join("ClientAppSettings.json");
+
+        let file_json = r#"{"FFlagTarget": true, "DFFlagCount": 120, "SFlagName": "Custom"}"#;
+        std::fs::write(&fflags_file, file_json).unwrap();
+
+        let base_json = r#"{"FFlagTarget": "False", "BasePreserved": "1"}"#;
+        let file_cstr = CString::new(fflags_file.to_str().unwrap()).unwrap();
+        let base_cstr = CString::new(base_json).unwrap();
+
+        let mut out_json = [0 as c_char; 2048];
+        let mut out_count = 0;
+        let mut out_loaded = 0;
+        let mut err_buf = [0 as c_char; 256];
+
+        let rc = mocktail_rust_fflags_load_and_merge(
+            file_cstr.as_ptr(),
+            base_cstr.as_ptr(),
+            out_json.as_mut_ptr(),
+            2048,
+            &mut out_count,
+            &mut out_loaded,
+            err_buf.as_mut_ptr(),
+            256,
+        );
+        assert_eq!(rc, 0);
+        assert_eq!(out_loaded, 1);
+        assert_eq!(out_count, 2); // DFFlagCount and SFlagName added; FFlagTarget kept base value "False"
+
+        let merged_str = unsafe { CStr::from_ptr(out_json.as_ptr()) }.to_str().unwrap();
+        assert!(merged_str.contains("\"FFlagTarget\":\"False\""));
+        assert!(merged_str.contains("\"BasePreserved\":\"1\""));
+        assert!(merged_str.contains("\"DFFlagCount\":\"120\""));
+        assert!(merged_str.contains("\"SFlagName\":\"Custom\""));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_browser_tracker() {
+        let mut id_buf = [0 as c_char; 32];
+        let rc_gen = mocktail_rust_browser_tracker_generate_id(id_buf.as_mut_ptr(), 32);
+        assert_eq!(rc_gen, 0);
+        let id_str = unsafe { CStr::from_ptr(id_buf.as_ptr()) }.to_str().unwrap();
+        assert!(!id_str.is_empty());
+        assert!(!id_str.starts_with('0'));
+        assert!(id_str.parse::<u64>().is_ok());
+
+        let cookie = CString::new("path=/&browserid=1234567890123&domain=roblox.com").unwrap();
+        let mut extract_buf = [0 as c_char; 32];
+        let rc_ext = mocktail_rust_browser_tracker_extract_id(cookie.as_ptr(), extract_buf.as_mut_ptr(), 32);
+        assert_eq!(rc_ext, 0);
+        let ext_str = unsafe { CStr::from_ptr(extract_buf.as_ptr()) }.to_str().unwrap();
+        assert_eq!(ext_str, "1234567890123");
+    }
+
+    #[test]
+    fn test_support_bundle() {
+        let valid_tok = CString::new("roblox_crash_dump.1").unwrap();
+        assert_eq!(mocktail_rust_is_diagnostic_token(valid_tok.as_ptr()), 1);
+
+        let invalid_tok = CString::new("/bin/sh").unwrap();
+        assert_eq!(mocktail_rust_is_diagnostic_token(invalid_tok.as_ptr()), 0);
+
+        let raw_log = b"Starting engine...\n[FATAL] Segmentation fault in libroblox\nSecret: .ROBLOSECURITY=_|WARNING\n[compat] Loading libc.so\nhttps://evil.com/leak\n";
+        let mut out_sanitized = [0 as c_char; 1024];
+        let mut out_len = 0;
+        let rc = mocktail_rust_sanitize_log(
+            raw_log.as_ptr(),
+            raw_log.len(),
+            out_sanitized.as_mut_ptr(),
+            1024,
+            &mut out_len,
+        );
+        assert_eq!(rc, 0);
+        let sanitized = unsafe { CStr::from_ptr(out_sanitized.as_ptr()) }.to_str().unwrap();
+        assert!(sanitized.contains("[FATAL] Segmentation fault"));
+        assert!(sanitized.contains("[compat] Loading libc.so"));
+        assert!(!sanitized.contains(".ROBLOSECURITY"));
+        assert!(!sanitized.contains("https://evil.com"));
     }
 }

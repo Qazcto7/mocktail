@@ -1,4 +1,5 @@
 #include "services/browser_tracker_service.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <fcntl.h>
 #include <sys/file.h>
@@ -35,11 +36,11 @@ bool IsValidId(const std::string& value) {
 }
 
 std::string SuggestedId() {
-  std::random_device entropy;
-  std::mt19937_64 random(entropy());
-  std::uniform_int_distribution<std::uint64_t> distribution(
-      1, std::numeric_limits<std::uint64_t>::max());
-  return std::to_string(distribution(random));
+  char buf[32] = {};
+  if (mocktail_rust_browser_tracker_generate_id(buf, sizeof(buf)) == 0) {
+    return std::string(buf);
+  }
+  return {};
 }
 
 bool ReadStorage(const std::filesystem::path& path, nlohmann::json* storage,
@@ -144,18 +145,11 @@ bool HasCookie(std::string_view cookies, std::string_view name) {
 }
 
 std::string BrowserIdFromTracker(std::string_view tracker) {
-  size_t begin = 0;
-  while (begin < tracker.size()) {
-    size_t end = tracker.find('&', begin);
-    if (end == std::string_view::npos) end = tracker.size();
-    const std::string_view field = tracker.substr(begin, end - begin);
-    const size_t equals = field.find('=');
-    if (equals != std::string_view::npos &&
-        field.substr(0, equals) == "browserid") {
-      const std::string id(field.substr(equals + 1));
-      return IsValidId(id) ? id : std::string();
-    }
-    begin = end + (end < tracker.size());
+  if (tracker.empty()) return {};
+  std::string tracker_str(tracker);
+  char buf[32] = {};
+  if (mocktail_rust_browser_tracker_extract_id(tracker_str.c_str(), buf, sizeof(buf)) == 0) {
+    return std::string(buf);
   }
   return {};
 }

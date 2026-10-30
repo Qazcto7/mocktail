@@ -1,5 +1,8 @@
 #include "update/apkpure_provider.h"
+#include "mocktail/mocktail_rust.h"
 
+#define JSON_NOEXCEPTION 1
+#include <nlohmann/json.hpp>
 #include <sys/statvfs.h>
 
 #include <algorithm>
@@ -61,41 +64,7 @@ std::vector<VersionMarker> VersionMarkers(std::string_view metadata) {
   return markers;
 }
 
-bool UrlCharacter(unsigned char character) {
-  return std::isalnum(character) ||
-         std::string_view("-@:%._+~#=?&/()")
-                 .find(static_cast<char>(character)) != std::string_view::npos;
-}
 
-std::vector<std::pair<std::string, bool>> DownloadsInRecord(
-    std::string_view record) {
-  std::vector<std::pair<std::string, bool>> downloads;
-  for (std::size_t index = 0; index < record.size(); ++index) {
-    bool xapk = false;
-    std::size_t url_begin = std::string_view::npos;
-    if (record.substr(index, 5) == "XAPKJ" && index + 7 < record.size()) {
-      xapk = true;
-      url_begin = index + 7;
-    } else if (record.substr(index, 4) == "APKJ" && index + 6 < record.size()) {
-      url_begin = index + 6;
-    }
-    if (url_begin == std::string_view::npos ||
-        record.substr(url_begin, 8) != "https://") {
-      continue;
-    }
-    std::size_t url_end = url_begin;
-    while (url_end < record.size() &&
-           UrlCharacter(static_cast<unsigned char>(record[url_end]))) {
-      ++url_end;
-    }
-    const std::string url(record.substr(url_begin, url_end - url_begin));
-    if (IsTrustedHttpsUrl(url, kDownloadHosts)) {
-      downloads.emplace_back(url, xapk);
-    }
-    index = url_end;
-  }
-  return downloads;
-}
 
 HttpBytesResult FetchMetadata(std::string_view architecture) {
   HttpTransferRequest request;
@@ -132,69 +101,43 @@ bool ZipMagic(const std::filesystem::path& path) {
 
 ProviderVersion ParseApkPureLatestMetadata(std::string_view metadata) {
   ProviderVersion result;
-  const auto markers = VersionMarkers(metadata);
-  if (markers.empty()) {
-    result.error = "APKPure metadata contains no version identity";
+  char ver_name[128] = {};
+  uint64_t ver_code = 0;
+  char err_buf[256] = {};
+  int rc = mocktail_rust_apkpure_parse_latest(
+      reinterpret_cast<const uint8_t*>(metadata.data()), metadata.size(),
+      ver_name, sizeof(ver_name), &ver_code, err_buf, sizeof(err_buf));
+  if (rc != 0) {
+    result.error = err_buf[0] != '\0' ? err_buf : "failed to parse APKPure latest metadata";
     return result;
   }
-  const VersionMarker& marker = markers.front();
-  const std::size_t prefix_begin = marker.begin > 128 ? marker.begin - 128 : 0;
-  for (std::size_t position = marker.begin; position-- > prefix_begin;) {
-    if (static_cast<unsigned char>(metadata[position]) != 0x2a ||
-        position + 3 >= marker.begin) {
-      continue;
-    }
-    const std::size_t code_length =
-        static_cast<unsigned char>(metadata[position + 1]);
-    const std::size_t code_begin = position + 2;
-    const std::size_t name_tag = code_begin + code_length;
-    if (code_length == 0 || code_length > 20 || name_tag + 2 != marker.begin ||
-        static_cast<unsigned char>(metadata[name_tag]) != 0x32 ||
-        static_cast<unsigned char>(metadata[name_tag + 1]) !=
-            marker.value.size()) {
-      continue;
-    }
-    std::uint64_t code = 0;
-    bool valid = true;
-    for (std::size_t index = code_begin; index < name_tag; ++index) {
-      const unsigned char character = metadata[index];
-      if (!std::isdigit(character) || code > 999999999999999999ULL) {
-        valid = false;
-        break;
-      }
-      code = code * 10U + static_cast<std::uint64_t>(character - '0');
-    }
-    if (valid && code > 0) {
-      result.version_name = marker.value;
-      result.version_code = code;
-      return result;
-    }
-  }
-  result.error = "APKPure metadata contains no version code";
+  result.version_name = ver_name;
+  result.version_code = ver_code;
   return result;
 }
 
 std::vector<std::string> ParseApkPureExactDownloadUrls(
     std::string_view metadata, std::string_view version, std::string* error) {
   std::vector<std::string> result;
-  const auto markers = VersionMarkers(metadata);
-  for (std::size_t index = 0; index < markers.size(); ++index) {
-    if (markers[index].value != version) continue;
-    const std::size_t record_end =
-        index + 1 < markers.size() ? markers[index + 1].begin : metadata.size();
-    const auto downloads = DownloadsInRecord(metadata.substr(
-        markers[index].colon + 1, record_end - markers[index].colon - 1));
-    if (!downloads.empty() &&
-        std::find(result.begin(), result.end(), downloads.front().first) ==
-            result.end()) {
-      result.push_back(downloads.front().first);
+  std::string ver_str(version);
+  std::vector<char> json_buf(8192);
+  char err_buf[256] = {};
+  int rc = mocktail_rust_apkpure_parse_exact_urls(
+      reinterpret_cast<const uint8_t*>(metadata.data()), metadata.size(),
+      ver_str.c_str(), json_buf.data(), json_buf.size(), err_buf, sizeof(err_buf));
+  if (rc != 0) {
+    if (error != nullptr) {
+      *error = err_buf[0] != '\0' ? err_buf : "failed to parse APKPure exact download URLs";
     }
+    return result;
   }
-  if (result.empty() && error != nullptr) {
-    *error = "APKPure does not offer the requested exact version";
-  } else if (result.size() > kMaximumExactCandidates) {
-    result.clear();
-    if (error != nullptr) *error = "APKPure returned too many candidates";
+  const auto parsed = nlohmann::json::parse(json_buf.data(), nullptr, false, true);
+  if (!parsed.is_discarded() && parsed.is_array()) {
+    for (const auto& item : parsed) {
+      if (item.is_string()) {
+        result.push_back(item.get<std::string>());
+      }
+    }
   }
   return result;
 }

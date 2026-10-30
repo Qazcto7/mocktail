@@ -1,4 +1,5 @@
 #include "runtime/support_bundle.h"
+#include "mocktail/mocktail_rust.h"
 
 #define JSON_NOEXCEPTION 1
 #include <fcntl.h>
@@ -29,13 +30,11 @@ bool Enabled(const Environment& environment, std::string_view name) {
 }
 
 bool IsDiagnosticToken(std::string_view value) {
-  if (value.empty() || value.size() > 64 || !std::isalnum(value.front())) {
+  if (value.empty() || value.size() > 64) {
     return false;
   }
-  return std::all_of(value.begin(), value.end(), [](unsigned char character) {
-    return std::isalnum(character) || character == '.' || character == '_' ||
-           character == ':' || character == '+' || character == '-';
-  });
+  std::string token_str(value);
+  return mocktail_rust_is_diagnostic_token(token_str.c_str()) == 1;
 }
 
 bool WritePrivate(const std::filesystem::path& path, std::string_view contents,
@@ -99,50 +98,16 @@ std::string ReadTail(const std::filesystem::path& path, std::size_t maximum) {
   return contents;
 }
 
-bool SafeLogLine(std::string_view line) {
-  constexpr std::array<std::string_view, 15> kAllowlistedMarkers = {
-      "[FATAL]",
-      "[compat]",
-      "[window] first Roblox Vulkan frame presented",
-      "[vulkan]",
-      "[mocktail][audio]",
-      "[input]",
-      "[lifecycle]",
-      "[main] Roblox lifecycle shutdown: Stopped",
-      "setStage:",
-      "JNI_OnLoad",
-      "RenderView created",
-      "RenderView destroyed",
-      "[native-updater]",
-      "Segmentation fault",
-      "core dumped",
-  };
-  if (line.find(".ROBLOSECURITY") != line.npos ||
-      line.find("Authorization:") != line.npos ||
-      line.find("authenticationTicket") != line.npos ||
-      line.find("http://") != line.npos || line.find("https://") != line.npos) {
-    return false;
-  }
-  return std::any_of(
-      kAllowlistedMarkers.begin(), kAllowlistedMarkers.end(),
-      [&](std::string_view marker) { return line.find(marker) != line.npos; });
-}
-
 std::string SanitizeLog(std::string_view raw) {
-  std::string output;
-  for (std::size_t begin = 0; begin < raw.size();) {
-    std::size_t end = raw.find('\n', begin);
-    if (end == raw.npos) end = raw.size();
-    std::string_view line = raw.substr(begin, end - begin);
-    if (SafeLogLine(line)) {
-      // Bound individual lines so future guest text cannot inflate a bundle.
-      if (line.size() > 1024) line = line.substr(0, 1024);
-      output.append(line);
-      output.push_back('\n');
-    }
-    begin = end + (end < raw.size() ? 1U : 0U);
+  if (raw.empty()) return {};
+  std::vector<char> out_buf(raw.size() + 2);
+  size_t out_len = 0;
+  if (mocktail_rust_sanitize_log(
+          reinterpret_cast<const uint8_t*>(raw.data()), raw.size(),
+          out_buf.data(), out_buf.size(), &out_len) == 0) {
+    return std::string(out_buf.data(), out_len);
   }
-  return output;
+  return {};
 }
 
 std::string PayloadSummary(const RuntimePaths& paths) {
