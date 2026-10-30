@@ -1,4 +1,5 @@
 #include "runtime/session_log.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <fcntl.h>
 #include <poll.h>
@@ -325,56 +326,40 @@ std::optional<std::string> ReadKey(const std::filesystem::path& path,
 
 std::string CpuModel() {
   std::ifstream input("/proc/cpuinfo");
-  std::string fallback;
-  std::string line;
-  while (std::getline(input, line)) {
-    const std::size_t separator = line.find(':');
-    if (separator == std::string::npos) continue;
-    const std::string key = Trim(line.substr(0, separator));
-    std::string value = Trim(line.substr(separator + 1));
-    if (value.empty()) continue;
-    if (key == "model name") return value;
-    if (fallback.empty() && (key == "Hardware" || key == "Processor")) {
-      fallback = std::move(value);
+  if (input) {
+    std::string contents((std::istreambuf_iterator<char>(input)),
+                         std::istreambuf_iterator<char>());
+    std::array<char, 256> buf{};
+    if (mocktail_rust_parse_cpuinfo_model(contents.c_str(), buf.data(),
+                                          buf.size()) == 0) {
+      if (std::strcmp(buf.data(), "unknown") != 0) {
+        return std::string(buf.data());
+      }
     }
   }
-  if (!fallback.empty()) return fallback;
   return ReadFirstLine("/sys/devices/soc0/machine").value_or("unknown");
 }
 
 std::string TotalMemory() {
   std::ifstream input("/proc/meminfo");
-  std::string key;
-  std::uint64_t kibibytes = 0;
-  while (input >> key) {
-    if (key == "MemTotal:") {
-      if (input >> kibibytes) {
-        return std::to_string((kibibytes + 512U) / 1024U) + "MiB";
-      }
-      break;
-    }
-    input.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+  if (!input) return "unknown";
+  std::string contents((std::istreambuf_iterator<char>(input)),
+                       std::istreambuf_iterator<char>());
+  std::array<char, 64> buf{};
+  if (mocktail_rust_parse_meminfo_total(contents.c_str(), buf.data(),
+                                        buf.size()) == 0) {
+    return std::string(buf.data());
   }
   return "unknown";
 }
 
 std::string HexId(std::optional<std::string> value) {
   if (!value.has_value()) return {};
-  std::string result = Trim(std::move(*value));
-  if (result.size() > 2 && result[0] == '0' &&
-      (result[1] == 'x' || result[1] == 'X')) {
-    result.erase(0, 2);
+  std::array<char, 16> buf{};
+  if (mocktail_rust_hex_id(value->c_str(), buf.data(), buf.size()) == 0) {
+    return std::string(buf.data());
   }
-  std::transform(result.begin(), result.end(), result.begin(), [](char c) {
-    return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-  });
-  if (result.size() != 4 ||
-      !std::all_of(result.begin(), result.end(), [](char c) {
-        return std::isxdigit(static_cast<unsigned char>(c)) != 0;
-      })) {
-    return {};
-  }
-  return result;
+  return {};
 }
 
 struct PciName {
@@ -417,15 +402,12 @@ PciName FindPciName(std::string_view vendor_id, std::string_view device_id) {
 }
 
 std::string PciVendorFallback(std::string_view vendor_id) {
-  if (vendor_id == "1002") return "AMD";
-  if (vendor_id == "10de") return "NVIDIA";
-  if (vendor_id == "8086") return "Intel";
-  if (vendor_id == "13b5") return "Arm";
-  if (vendor_id == "5143") return "Qualcomm";
-  if (vendor_id == "14e4") return "Broadcom";
-  if (vendor_id == "1af4") return "Virtio";
-  if (vendor_id == "15ad") return "VMware";
-  return "PCI " + std::string(vendor_id);
+  const std::string vid(vendor_id);
+  std::array<char, 64> buf{};
+  if (mocktail_rust_pci_vendor_fallback(vid.c_str(), buf.data(), buf.size()) == 0) {
+    return std::string(buf.data());
+  }
+  return "PCI " + vid;
 }
 
 bool DeviceNodeName(std::string_view name, std::string_view prefix) {

@@ -129,6 +129,7 @@ target_include_directories(mocktail_sdl_vulkan_wsi PUBLIC
 )
 target_link_libraries(mocktail_sdl_vulkan_wsi PUBLIC SDL3::SDL3)
 target_link_libraries(mocktail_sdl_vulkan_wsi PUBLIC Vulkan::Headers)
+target_link_libraries(mocktail_sdl_vulkan_wsi PUBLIC mocktail_core_rust)
 target_compile_features(mocktail_sdl_vulkan_wsi PUBLIC cxx_std_17)
 add_library(Mocktail::SdlVulkanWsi ALIAS mocktail_sdl_vulkan_wsi)
 

@@ -1,4 +1,5 @@
 #include <SDL3/SDL_gamepad.h>
+#include "mocktail/mocktail_rust.h"
 
 #include <algorithm>
 #include <cmath>
@@ -45,78 +46,40 @@ void KeepFirstError(Status status, Status* first_error) {
   }
 }
 
-float SignedAxis(int16_t value) {
-  return static_cast<float>(value) / (value < 0 ? 32768.0F : 32767.0F);
-}
-
 std::array<float, 2> Stick(int16_t raw_x, int16_t raw_y) {
-  constexpr float kDeadzone = 0.20F;
-  const float x = SignedAxis(raw_x);
-  const float y = -SignedAxis(raw_y);
-  const float length = std::sqrt(x * x + y * y);
-  if (length <= kDeadzone) {
-    return {};
-  }
-  const float scale =
-      (std::min(length, 1.0F) - kDeadzone) / ((1.0F - kDeadzone) * length);
-  return {x * scale, y * scale};
+  float ox = 0.0F;
+  float oy = 0.0F;
+  mocktail_rust_gamepad_stick(raw_x, raw_y, &ox, &oy);
+  return {ox, oy};
 }
 
 float Trigger(int16_t raw) {
-  constexpr float kDeadzone = 0.02F;
-  const float value = std::max(0.0F, static_cast<float>(raw) / 32767.0F);
-  return value <= kDeadzone ? 0.0F : (value - kDeadzone) / (1.0F - kDeadzone);
+  return mocktail_rust_gamepad_trigger(raw);
 }
 
 }  // namespace
 
 int32_t MapSdlGamepadButtonToAndroid(uint8_t button) {
-  switch (button) {
-    case SDL_GAMEPAD_BUTTON_SOUTH:
-      return 96;
-    case SDL_GAMEPAD_BUTTON_EAST:
-      return 97;
-    case SDL_GAMEPAD_BUTTON_WEST:
-      return 99;
-    case SDL_GAMEPAD_BUTTON_NORTH:
-      return 100;
-    case SDL_GAMEPAD_BUTTON_DPAD_UP:
-      return 19;
-    case SDL_GAMEPAD_BUTTON_DPAD_DOWN:
-      return 20;
-    case SDL_GAMEPAD_BUTTON_DPAD_LEFT:
-      return 21;
-    case SDL_GAMEPAD_BUTTON_DPAD_RIGHT:
-      return 22;
-    case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER:
-      return 102;
-    case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER:
-      return 103;
-    case SDL_GAMEPAD_BUTTON_LEFT_STICK:
-      return 106;
-    case SDL_GAMEPAD_BUTTON_RIGHT_STICK:
-      return 107;
-    case SDL_GAMEPAD_BUTTON_START:
-      return 108;
-    case SDL_GAMEPAD_BUTTON_BACK:
-      return 109;
-    default:
-      return -1;
-  }
+  return mocktail_rust_gamepad_button_to_android(button);
 }
 
 int32_t RobloxGamepadType(platform::GamepadFamily family) {
-  // NativeInputInterface's Android gamepad types are not SDL_GamepadType.
+  int fam = 0;
   switch (family) {
     case platform::GamepadFamily::kPlayStation4:
-      return 1;
+      fam = 2;
+      break;
     case platform::GamepadFamily::kPlayStation5:
-      return 2;
+      fam = 3;
+      break;
     case platform::GamepadFamily::kXbox:
-      return 3;
+      fam = 1;
+      break;
     default:
-      return 0;
+      fam = 0;
+      break;
   }
+  return mocktail_rust_roblox_gamepad_type(fam);
 }
 
 std::vector<RobloxInputRouter::ActiveGamepad>::iterator

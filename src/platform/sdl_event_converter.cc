@@ -1,4 +1,5 @@
 #include "mocktail/platform/sdl_event_converter.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <cstdint>
 
@@ -82,11 +83,12 @@ bool ConvertSdlEvent(SDL_Window* window, const SDL_Event& source,
     case SDL_EVENT_FINGER_UP:
     case SDL_EVENT_FINGER_CANCELED: {
       TouchEvent::Action action = TouchEvent::Action::kMove;
-      if (source.type == SDL_EVENT_FINGER_DOWN) {
+      const int rust_act = mocktail_rust_sdl_finger_action(source.type);
+      if (rust_act == 0) {
         action = TouchEvent::Action::kDown;
-      } else if (source.type == SDL_EVENT_FINGER_UP) {
+      } else if (rust_act == 1) {
         action = TouchEvent::Action::kUp;
-      } else if (source.type == SDL_EVENT_FINGER_CANCELED) {
+      } else if (rust_act == 3) {
         action = TouchEvent::Action::kCancelled;
       }
       destination->payload =

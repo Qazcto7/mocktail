@@ -1,7 +1,9 @@
 #include "mocktail/graphics/present_mode_policy.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <algorithm>
 #include <cstdlib>
+#include <string>
 
 namespace mocktail {
 namespace graphics {
@@ -15,28 +17,41 @@ std::string_view EnvironmentOr(const char *name, const char *fallback) {
   return value;
 }
 
+PresentModePolicy FromRustPolicy(int policy) {
+  switch (policy) {
+    case 0: return PresentModePolicy::kHostDefault;
+    case 1: return PresentModePolicy::kVsync;
+    case 2: return PresentModePolicy::kUnthrottled;
+    case 3: return PresentModePolicy::kFifo;
+    case 4: return PresentModePolicy::kMailbox;
+    case 5: return PresentModePolicy::kImmediate;
+    default: return PresentModePolicy::kHostDefault;
+  }
+}
+
+int ToRustPolicy(PresentModePolicy policy) {
+  switch (policy) {
+    case PresentModePolicy::kHostDefault: return 0;
+    case PresentModePolicy::kVsync: return 1;
+    case PresentModePolicy::kUnthrottled: return 2;
+    case PresentModePolicy::kFifo: return 3;
+    case PresentModePolicy::kMailbox: return 4;
+    case PresentModePolicy::kImmediate: return 5;
+  }
+  return 0;
+}
+
 } // namespace
 
 PresentModePolicy ResolvePresentModePolicy(std::string_view vsync_value,
                                            std::string_view frame_rate_value,
                                            std::string_view present_mode) {
-  if (present_mode == "fifo") return PresentModePolicy::kFifo;
-  if (present_mode == "mailbox") return PresentModePolicy::kMailbox;
-  if (present_mode == "immediate") return PresentModePolicy::kImmediate;
-  if (vsync_value == "on" || vsync_value == "1") {
-    return PresentModePolicy::kVsync;
-  }
-  if (vsync_value == "off" || vsync_value == "0") {
-    return PresentModePolicy::kUnthrottled;
-  }
-  if (frame_rate_value == "unlimited") {
-    return PresentModePolicy::kUnthrottled;
-  }
-  if (frame_rate_value.empty() || frame_rate_value == "-1") {
-    return PresentModePolicy::kHostDefault;
-  }
-  // Display or any fixed scheduler target keeps synchronized presentation.
-  return PresentModePolicy::kVsync;
+  const std::string vsync_str(vsync_value);
+  const std::string frame_rate_str(frame_rate_value);
+  const std::string present_mode_str(present_mode);
+  const int policy = mocktail_rust_present_mode_resolve(
+      vsync_str.c_str(), frame_rate_str.c_str(), present_mode_str.c_str());
+  return FromRustPolicy(policy);
 }
 
 PresentModePolicy CachedPresentModePolicy() {
@@ -52,58 +67,38 @@ PresentModePolicy CachedPresentModePolicy() {
 std::vector<VkPresentModeKHR>
 FilterPresentModes(PresentModePolicy policy,
                    const std::vector<VkPresentModeKHR> &host_modes) {
-  if (policy == PresentModePolicy::kHostDefault || host_modes.empty()) {
-    return host_modes;
-  }
-  if (const auto explicit_mode = ExplicitPresentMode(policy)) {
-    const auto supported = [&](VkPresentModeKHR mode) {
-      return std::find(host_modes.begin(), host_modes.end(), mode) !=
-             host_modes.end();
-    };
-    if (supported(*explicit_mode)) return {*explicit_mode};
-    if (supported(VK_PRESENT_MODE_FIFO_KHR)) return {VK_PRESENT_MODE_FIFO_KHR};
+  if (host_modes.empty()) {
     return {};
   }
-  // Late frames: FIFO waits for the next vblank. FIFO_LATEST_READY and
-  // MAILBOX present the newest image instead. FIFO_RELAXED only tears if
-  // the deadline was already missed.
-  const VkPresentModeKHR vsync_modes[] = {
-      VK_PRESENT_MODE_FIFO_LATEST_READY_KHR, VK_PRESENT_MODE_MAILBOX_KHR,
-      VK_PRESENT_MODE_FIFO_RELAXED_KHR, VK_PRESENT_MODE_FIFO_KHR};
-  const VkPresentModeKHR unthrottled_modes[] = {
-      VK_PRESENT_MODE_IMMEDIATE_KHR, VK_PRESENT_MODE_MAILBOX_KHR,
-      VK_PRESENT_MODE_FIFO_RELAXED_KHR, VK_PRESENT_MODE_FIFO_KHR};
-  const VkPresentModeKHR *preferred =
-      policy == PresentModePolicy::kVsync ? vsync_modes : unthrottled_modes;
-  const std::size_t preferred_count =
-      policy == PresentModePolicy::kVsync
-          ? sizeof(vsync_modes) / sizeof(vsync_modes[0])
-          : sizeof(unthrottled_modes) / sizeof(unthrottled_modes[0]);
-  for (std::size_t i = 0; i < preferred_count; ++i) {
-    if (std::find(host_modes.begin(), host_modes.end(), preferred[i]) !=
-        host_modes.end()) {
-      return {preferred[i]};
-    }
+  std::vector<uint32_t> in_modes(host_modes.size());
+  for (std::size_t i = 0; i < host_modes.size(); ++i) {
+    in_modes[i] = static_cast<uint32_t>(host_modes[i]);
   }
-  return host_modes;
+  std::vector<uint32_t> out_modes(host_modes.size());
+  size_t out_count = 0;
+  const int rc = mocktail_rust_present_mode_filter(
+      ToRustPolicy(policy), in_modes.data(), in_modes.size(),
+      out_modes.data(), out_modes.size(), &out_count);
+  if (rc != 0 || out_count == 0) {
+    return {};
+  }
+  std::vector<VkPresentModeKHR> result(out_count);
+  for (std::size_t i = 0; i < out_count; ++i) {
+    result[i] = static_cast<VkPresentModeKHR>(out_modes[i]);
+  }
+  return result;
 }
 
 std::optional<VkPresentModeKHR> ExplicitPresentMode(PresentModePolicy policy) {
-  switch (policy) {
-  case PresentModePolicy::kFifo: return VK_PRESENT_MODE_FIFO_KHR;
-  case PresentModePolicy::kMailbox: return VK_PRESENT_MODE_MAILBOX_KHR;
-  case PresentModePolicy::kImmediate: return VK_PRESENT_MODE_IMMEDIATE_KHR;
-  default: return std::nullopt;
+  uint32_t mode = 0;
+  if (mocktail_rust_present_mode_explicit(ToRustPolicy(policy), &mode) != 0) {
+    return static_cast<VkPresentModeKHR>(mode);
   }
+  return std::nullopt;
 }
 
 int ResolveSwapInterval(PresentModePolicy policy, int requested) {
-  switch (policy) {
-  case PresentModePolicy::kHostDefault: return requested;
-  case PresentModePolicy::kUnthrottled:
-  case PresentModePolicy::kImmediate: return 0;
-  default: return 1;
-  }
+  return mocktail_rust_present_mode_swap_interval(ToRustPolicy(policy), requested);
 }
 
 const char *PresentModeKhrName(VkPresentModeKHR mode) {
@@ -145,26 +140,8 @@ std::uint32_t PreferSwapchainMinImageCount(PresentModePolicy policy,
                                            std::uint32_t requested,
                                            std::uint32_t min_images,
                                            std::uint32_t max_images) {
-  std::uint32_t count = std::max(requested, min_images);
-  if (policy == PresentModePolicy::kUnthrottled) {
-    constexpr std::uint32_t kUnthrottledImages = 5;
-    count = std::max(count, kUnthrottledImages);
-    if (min_images != 0) {
-      count = std::max(count, min_images + 2);
-    }
-  } else if (policy == PresentModePolicy::kVsync) {
-    constexpr std::uint32_t kVsyncImages = 4;
-    count = std::max(count, kVsyncImages);
-    if (min_images != 0) {
-      count = std::max(count, min_images + 2);
-    }
-  } else if (policy == PresentModePolicy::kMailbox) {
-    count = std::max(count, 3U);
-  }
-  if (max_images != 0) {
-    count = std::min(count, max_images);
-  }
-  return count;
+  return mocktail_rust_present_mode_prefer_min_image_count(
+      ToRustPolicy(policy), requested, min_images, max_images);
 }
 
 } // namespace graphics

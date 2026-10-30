@@ -1,4 +1,5 @@
 #include "update/candidate_approval.h"
+#include "mocktail/mocktail_rust.h"
 
 #define JSON_NOEXCEPTION 1
 #include <fcntl.h>
@@ -30,11 +31,8 @@ using Json = nlohmann::json;
 constexpr std::size_t kMaximumApprovalBytes = 1024U * 1024U;
 
 bool IsLowerHex(std::string_view value, std::size_t size) {
-  return value.size() == size &&
-         std::all_of(value.begin(), value.end(), [](unsigned char character) {
-           return std::isdigit(character) ||
-                  (character >= 'a' && character <= 'f');
-         });
+  const std::string s(value);
+  return mocktail_rust_is_lower_hex(s.c_str(), size) == 1;
 }
 
 std::string ReadRegular(const std::filesystem::path& path,

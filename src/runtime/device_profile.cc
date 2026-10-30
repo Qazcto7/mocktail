@@ -113,13 +113,21 @@ std::string BuildCustomDeviceProfileCacheKey(const DeviceProfile& profile) {
 }
 
 std::string_view DeviceClassName(DeviceClass device_class) {
+  int dc = 0;
   switch (device_class) {
     case DeviceClass::kPc:
-      return "pc";
+      dc = 0;
+      break;
     case DeviceClass::kMobile:
-      return "mobile";
+      dc = 1;
+      break;
     case DeviceClass::kConsole:
-      return "console";
+      dc = 2;
+      break;
+  }
+  static const char* const kNames[] = {"pc", "mobile", "console"};
+  if (dc >= 0 && dc <= 2) {
+    return kNames[dc];
   }
   return "unknown";
 }

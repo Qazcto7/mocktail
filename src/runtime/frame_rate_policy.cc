@@ -1,51 +1,43 @@
 #include "runtime/frame_rate_policy.h"
+#include "mocktail/mocktail_rust.h"
 
-#define JSON_NOEXCEPTION 1
-#include <nlohmann/json.hpp>
-
-#include <charconv>
+#include <array>
+#include <cstring>
 #include <string>
 
 namespace mocktail {
 namespace runtime {
 namespace {
 
-bool SetCompatibleValue(nlohmann::json *object, const char *key,
-                        const std::string &value, std::string *error) {
-  const auto existing = object->find(key);
-  if (existing != object->end()) {
-    if (!existing->is_string() || existing->get<std::string>() != value) {
-      if (error != nullptr) {
-        *error = std::string("frame-rate policy conflicts with ") + key;
-      }
-      return false;
-    }
-    return true;
+FrameRateLimitMode FromRustMode(int mode) {
+  switch (mode) {
+    case 0: return FrameRateLimitMode::kUnmanaged;
+    case 1: return FrameRateLimitMode::kDisplay;
+    case 2: return FrameRateLimitMode::kFixed;
+    case 3: return FrameRateLimitMode::kUnlimited;
+    default: return FrameRateLimitMode::kInvalid;
   }
-  (*object)[key] = value;
-  return true;
+}
+
+int ToRustMode(FrameRateLimitMode mode) {
+  switch (mode) {
+    case FrameRateLimitMode::kUnmanaged: return 0;
+    case FrameRateLimitMode::kDisplay: return 1;
+    case FrameRateLimitMode::kFixed: return 2;
+    case FrameRateLimitMode::kUnlimited: return 3;
+    case FrameRateLimitMode::kInvalid: return 4;
+  }
+  return 4;
 }
 
 } // namespace
 
 FrameRatePolicy ParseFrameRatePolicy(std::string_view value) {
-  if (value.empty() || value == "-1") {
-    return {};
-  }
-  if (value == "display") {
-    return {FrameRateLimitMode::kDisplay, 0};
-  }
-  if (value == "unlimited") {
-    return {FrameRateLimitMode::kUnlimited, 0};
-  }
+  const std::string s(value);
+  int mode = 0;
   int fps = 0;
-  const auto parsed =
-      std::from_chars(value.data(), value.data() + value.size(), fps);
-  if (parsed.ec == std::errc() &&
-      parsed.ptr == value.data() + value.size() && fps > 0) {
-    return {FrameRateLimitMode::kFixed, fps};
-  }
-  return {FrameRateLimitMode::kInvalid, 0};
+  mocktail_rust_frame_rate_parse(s.c_str(), &mode, &fps);
+  return {FromRustMode(mode), fps};
 }
 
 bool MergeFrameRateClientSettingsOverrides(const FrameRatePolicy &policy,
@@ -58,33 +50,26 @@ bool MergeFrameRateClientSettingsOverrides(const FrameRatePolicy &policy,
     }
     return false;
   }
-  nlohmann::json overrides = nlohmann::json::parse(
-      base_json.empty() ? "{}" : base_json, nullptr, false, true);
-  if (overrides.is_discarded() || !overrides.is_object()) {
+  const std::string base_str(base_json);
+  std::string out_buf(base_str.size() + 2048, '\0');
+  std::array<char, 256> err_buf{};
+  int rc = mocktail_rust_frame_rate_merge_client_settings(
+      ToRustMode(policy.mode), policy.fixed_fps, base_str.c_str(),
+      out_buf.data(), out_buf.size(), err_buf.data(), err_buf.size());
+  if (rc == -5) {
+    out_buf.resize(out_buf.size() * 2);
+    rc = mocktail_rust_frame_rate_merge_client_settings(
+        ToRustMode(policy.mode), policy.fixed_fps, base_str.c_str(),
+        out_buf.data(), out_buf.size(), err_buf.data(), err_buf.size());
+  }
+  if (rc != 0) {
     if (error != nullptr) {
-      *error = "client-settings overrides must be a JSON object";
+      *error = err_buf[0] != '\0' ? err_buf.data() : "cannot merge frame rate overrides";
     }
     return false;
   }
-  if (!SetCompatibleValue(&overrides,
-                          "FFlagGameBasicSettingsFramerateCap5", "True",
-                          error)) {
-    return false;
-  }
-  if (policy.mode == FrameRateLimitMode::kUnmanaged ||
-      policy.mode == FrameRateLimitMode::kDisplay) {
-    *merged_json = overrides.dump();
-    return true;
-  }
-  const std::string target =
-      policy.mode == FrameRateLimitMode::kUnlimited
-          ? std::to_string(kMaximumSupportedRobloxSchedulerFps)
-          : std::to_string(policy.fixed_fps);
-  if (!SetCompatibleValue(&overrides, "DFIntTaskSchedulerTargetFps", target,
-                          error)) {
-    return false;
-  }
-  *merged_json = overrides.dump();
+  out_buf.resize(std::strlen(out_buf.data()));
+  *merged_json = std::move(out_buf);
   return true;
 }
 

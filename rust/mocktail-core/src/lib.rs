@@ -6584,6 +6584,731 @@ pub extern "C" fn mocktail_rust_audio_convert_f32_to_i16(
 }
 
 // ============================================================================
+// 38. Present Mode Policy & Swapchain (Group 1)
+// ============================================================================
+
+fn copy_to_c_buffer(src: &str, dst: *mut c_char, cap: usize) -> c_int {
+    if dst.is_null() || cap == 0 {
+        return -1;
+    }
+    let src_bytes = src.as_bytes();
+    if src_bytes.len() + 1 > cap {
+        return -2;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(src_bytes.as_ptr() as *const c_char, dst, src_bytes.len());
+        *dst.add(src_bytes.len()) = 0;
+    }
+    0
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MocktailRustPresentModePolicy {
+    HostDefault = 0,
+    Vsync = 1,
+    Unthrottled = 2,
+    Fifo = 3,
+    Mailbox = 4,
+    Immediate = 5,
+}
+
+pub const VK_PRESENT_MODE_IMMEDIATE_KHR: u32 = 0;
+pub const VK_PRESENT_MODE_MAILBOX_KHR: u32 = 1;
+pub const VK_PRESENT_MODE_FIFO_KHR: u32 = 2;
+pub const VK_PRESENT_MODE_FIFO_RELAXED_KHR: u32 = 3;
+pub const VK_PRESENT_MODE_FIFO_LATEST_READY_KHR: u32 = 1000361000;
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_present_mode_resolve(
+    vsync_ptr: *const c_char,
+    fps_ptr: *const c_char,
+    pm_ptr: *const c_char,
+) -> c_int {
+    let vsync = if vsync_ptr.is_null() { "" } else { unsafe { CStr::from_ptr(vsync_ptr).to_str().unwrap_or("") } };
+    let fps = if fps_ptr.is_null() { "" } else { unsafe { CStr::from_ptr(fps_ptr).to_str().unwrap_or("") } };
+    let pm = if pm_ptr.is_null() { "" } else { unsafe { CStr::from_ptr(pm_ptr).to_str().unwrap_or("") } };
+
+    if pm == "fifo" {
+        return MocktailRustPresentModePolicy::Fifo as c_int;
+    }
+    if pm == "mailbox" {
+        return MocktailRustPresentModePolicy::Mailbox as c_int;
+    }
+    if pm == "immediate" {
+        return MocktailRustPresentModePolicy::Immediate as c_int;
+    }
+    if vsync == "on" || vsync == "1" {
+        return MocktailRustPresentModePolicy::Vsync as c_int;
+    }
+    if vsync == "off" || vsync == "0" {
+        return MocktailRustPresentModePolicy::Unthrottled as c_int;
+    }
+    if fps == "unlimited" {
+        return MocktailRustPresentModePolicy::Unthrottled as c_int;
+    }
+    if fps.is_empty() || fps == "-1" {
+        return MocktailRustPresentModePolicy::HostDefault as c_int;
+    }
+    MocktailRustPresentModePolicy::Vsync as c_int
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_present_mode_explicit(
+    policy: c_int,
+    out_mode: *mut u32,
+) -> c_int {
+    if out_mode.is_null() {
+        return 0;
+    }
+    match policy {
+        3 /* Fifo */ => {
+            unsafe { *out_mode = VK_PRESENT_MODE_FIFO_KHR; }
+            1
+        }
+        4 /* Mailbox */ => {
+            unsafe { *out_mode = VK_PRESENT_MODE_MAILBOX_KHR; }
+            1
+        }
+        5 /* Immediate */ => {
+            unsafe { *out_mode = VK_PRESENT_MODE_IMMEDIATE_KHR; }
+            1
+        }
+        _ => 0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_present_mode_swap_interval(
+    policy: c_int,
+    requested: c_int,
+) -> c_int {
+    match policy {
+        0 /* HostDefault */ => requested,
+        2 /* Unthrottled */ | 5 /* Immediate */ => 0,
+        _ => 1,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_present_mode_prefer_min_image_count(
+    policy: c_int,
+    requested: u32,
+    min_images: u32,
+    max_images: u32,
+) -> u32 {
+    let mut count = requested.max(min_images);
+    if policy == MocktailRustPresentModePolicy::Unthrottled as c_int {
+        const UNTHROTTLED_IMAGES: u32 = 5;
+        count = count.max(UNTHROTTLED_IMAGES);
+        if min_images != 0 {
+            count = count.max(min_images + 2);
+        }
+    } else if policy == MocktailRustPresentModePolicy::Vsync as c_int {
+        const VSYNC_IMAGES: u32 = 4;
+        count = count.max(VSYNC_IMAGES);
+        if min_images != 0 {
+            count = count.max(min_images + 2);
+        }
+    } else if policy == MocktailRustPresentModePolicy::Mailbox as c_int {
+        count = count.max(3);
+    }
+    if max_images != 0 {
+        count = count.min(max_images);
+    }
+    count
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_present_mode_filter(
+    policy: c_int,
+    host_modes_ptr: *const u32,
+    host_count: usize,
+    out_modes_ptr: *mut u32,
+    out_cap: usize,
+    out_count: *mut usize,
+) -> c_int {
+    if host_modes_ptr.is_null() || out_modes_ptr.is_null() || out_count.is_null() {
+        return -1;
+    }
+    let host_modes = unsafe { std::slice::from_raw_parts(host_modes_ptr, host_count) };
+
+    if policy == MocktailRustPresentModePolicy::HostDefault as c_int || host_count == 0 {
+        let copy_len = host_count.min(out_cap);
+        unsafe {
+            std::ptr::copy_nonoverlapping(host_modes_ptr, out_modes_ptr, copy_len);
+            *out_count = copy_len;
+        }
+        return 0;
+    }
+
+    let mut explicit_mode = 0u32;
+    if mocktail_rust_present_mode_explicit(policy, &mut explicit_mode) != 0 {
+        if host_modes.contains(&explicit_mode) {
+            if out_cap >= 1 {
+                unsafe {
+                    *out_modes_ptr = explicit_mode;
+                    *out_count = 1;
+                }
+                return 0;
+            }
+        } else if host_modes.contains(&VK_PRESENT_MODE_FIFO_KHR) {
+            if out_cap >= 1 {
+                unsafe {
+                    *out_modes_ptr = VK_PRESENT_MODE_FIFO_KHR;
+                    *out_count = 1;
+                }
+                return 0;
+            }
+        }
+        unsafe { *out_count = 0; }
+        return 0;
+    }
+
+    let vsync_modes = [
+        VK_PRESENT_MODE_FIFO_LATEST_READY_KHR,
+        VK_PRESENT_MODE_MAILBOX_KHR,
+        VK_PRESENT_MODE_FIFO_RELAXED_KHR,
+        VK_PRESENT_MODE_FIFO_KHR,
+    ];
+    let unthrottled_modes = [
+        VK_PRESENT_MODE_IMMEDIATE_KHR,
+        VK_PRESENT_MODE_MAILBOX_KHR,
+        VK_PRESENT_MODE_FIFO_RELAXED_KHR,
+        VK_PRESENT_MODE_FIFO_KHR,
+    ];
+
+    let preferred = if policy == MocktailRustPresentModePolicy::Vsync as c_int {
+        &vsync_modes[..]
+    } else {
+        &unthrottled_modes[..]
+    };
+
+    for &mode in preferred {
+        if host_modes.contains(&mode) {
+            if out_cap >= 1 {
+                unsafe {
+                    *out_modes_ptr = mode;
+                    *out_count = 1;
+                }
+                return 0;
+            }
+        }
+    }
+
+    let copy_len = host_count.min(out_cap);
+    unsafe {
+        std::ptr::copy_nonoverlapping(host_modes_ptr, out_modes_ptr, copy_len);
+        *out_count = copy_len;
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_present_mode_khr_name(
+    mode: u32,
+    out_buf: *mut c_char,
+    cap: usize,
+) -> c_int {
+    let name = match mode {
+        VK_PRESENT_MODE_IMMEDIATE_KHR => "immediate",
+        VK_PRESENT_MODE_MAILBOX_KHR => "mailbox",
+        VK_PRESENT_MODE_FIFO_KHR => "fifo",
+        VK_PRESENT_MODE_FIFO_RELAXED_KHR => "fifo-relaxed",
+        VK_PRESENT_MODE_FIFO_LATEST_READY_KHR => "fifo-latest-ready",
+        _ => "other",
+    };
+    copy_to_c_buffer(name, out_buf, cap)
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_present_mode_policy_name(
+    policy: c_int,
+    out_buf: *mut c_char,
+    cap: usize,
+) -> c_int {
+    let name = match policy {
+        0 => "host-default",
+        1 => "vsync",
+        2 => "unthrottled",
+        3 => "fifo",
+        4 => "mailbox",
+        5 => "immediate",
+        _ => "unknown",
+    };
+    copy_to_c_buffer(name, out_buf, cap)
+}
+
+// ============================================================================
+// 39. Frame Rate Policy (Group 1)
+// ============================================================================
+
+pub const MOCKTAIL_MAXIMUM_SUPPORTED_ROBLOX_SCHEDULER_FPS: i32 = 240;
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_frame_rate_parse(
+    val_ptr: *const c_char,
+    out_mode: *mut c_int,
+    out_fps: *mut c_int,
+) -> c_int {
+    if out_mode.is_null() || out_fps.is_null() {
+        return -1;
+    }
+    let val = if val_ptr.is_null() { "" } else { unsafe { CStr::from_ptr(val_ptr).to_str().unwrap_or("") } };
+    if val.is_empty() || val == "-1" {
+        unsafe {
+            *out_mode = 0; // kUnmanaged
+            *out_fps = 0;
+        }
+        return 0;
+    }
+    if val == "display" {
+        unsafe {
+            *out_mode = 1; // kDisplay
+            *out_fps = 0;
+        }
+        return 0;
+    }
+    if val == "unlimited" {
+        unsafe {
+            *out_mode = 3; // kUnlimited
+            *out_fps = 0;
+        }
+        return 0;
+    }
+    if let Ok(fps) = val.parse::<i32>() {
+        if fps > 0 && !val.starts_with('+') {
+            unsafe {
+                *out_mode = 2; // kFixed
+                *out_fps = fps;
+            }
+            return 0;
+        }
+    }
+    unsafe {
+        *out_mode = 4; // kInvalid
+        *out_fps = 0;
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_frame_rate_merge_client_settings(
+    mode: c_int,
+    fps: c_int,
+    base_json_ptr: *const c_char,
+    out_buf: *mut c_char,
+    out_cap: usize,
+    out_err: *mut c_char,
+    err_cap: usize,
+) -> c_int {
+    let set_err = |msg: &str| {
+        copy_to_c_buffer(msg, out_err, err_cap);
+    };
+
+    if mode == 4 /* kInvalid */ {
+        set_err("invalid frame-rate policy");
+        return -1;
+    }
+
+    let base_json_str = if base_json_ptr.is_null() {
+        "{}"
+    } else {
+        unsafe {
+            CStr::from_ptr(base_json_ptr).to_str().unwrap_or("{}")
+        }
+    };
+    let input_str = if base_json_str.is_empty() { "{}" } else { base_json_str };
+
+    let mut parsed: serde_json::Value = match serde_json::from_str(input_str) {
+        Ok(serde_json::Value::Object(map)) => serde_json::Value::Object(map),
+        _ => {
+            set_err("client-settings overrides must be a JSON object");
+            return -2;
+        }
+    };
+
+    let obj = parsed.as_object_mut().unwrap();
+
+    const CAP5_KEY: &str = "FFlagGameBasicSettingsFramerateCap5";
+    if let Some(existing) = obj.get(CAP5_KEY) {
+        if existing.as_str() != Some("True") {
+            set_err(&format!("frame-rate policy conflicts with {}", CAP5_KEY));
+            return -3;
+        }
+    } else {
+        obj.insert(CAP5_KEY.to_string(), serde_json::Value::String("True".to_string()));
+    }
+
+    if mode == 0 /* kUnmanaged */ || mode == 1 /* kDisplay */ {
+        let serialized = serde_json::to_string(&parsed).unwrap_or_else(|_| "{}".to_string());
+        if copy_to_c_buffer(&serialized, out_buf, out_cap) != 0 {
+            set_err("output buffer too small");
+            return -5;
+        }
+        return 0;
+    }
+
+    let target_fps = if mode == 3 /* kUnlimited */ {
+        MOCKTAIL_MAXIMUM_SUPPORTED_ROBLOX_SCHEDULER_FPS
+    } else {
+        fps
+    };
+    let target_str = target_fps.to_string();
+
+    const TARGET_KEY: &str = "DFIntTaskSchedulerTargetFps";
+    if let Some(existing) = obj.get(TARGET_KEY) {
+        if existing.as_str() != Some(&target_str) {
+            set_err(&format!("frame-rate policy conflicts with {}", TARGET_KEY));
+            return -4;
+        }
+    } else {
+        obj.insert(TARGET_KEY.to_string(), serde_json::Value::String(target_str));
+    }
+
+    let serialized = serde_json::to_string(&parsed).unwrap_or_else(|_| "{}".to_string());
+    if copy_to_c_buffer(&serialized, out_buf, out_cap) != 0 {
+        set_err("output buffer too small");
+        return -5;
+    }
+    0
+}
+
+// ============================================================================
+// 40. Gamepad & Input Mapping (Group 2)
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_gamepad_valid_id(id: i64) -> c_int {
+    if id > 0 && id <= (u32::MAX as i64) { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_gamepad_family(sdl_type: c_int) -> c_int {
+    match sdl_type {
+        1 | 2 => 1, // kXbox
+        3 | 4 => 2, // kPlayStation4
+        5 => 3,     // kPlayStation5
+        _ => 0,     // kUnknown
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_gamepad_button_to_android(button: u8) -> i32 {
+    match button {
+        0 /* SOUTH */ => 96,
+        1 /* EAST */ => 97,
+        2 /* WEST */ => 99,
+        3 /* NORTH */ => 100,
+        11 /* DPAD_UP */ => 19,
+        12 /* DPAD_DOWN */ => 20,
+        13 /* DPAD_LEFT */ => 21,
+        14 /* DPAD_RIGHT */ => 22,
+        9 /* LEFT_SHOULDER */ => 102,
+        10 /* RIGHT_SHOULDER */ => 103,
+        7 /* LEFT_STICK */ => 106,
+        8 /* RIGHT_STICK */ => 107,
+        6 /* START */ => 108,
+        4 /* BACK */ => 109,
+        _ => -1,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_roblox_gamepad_type(family: c_int) -> i32 {
+    match family {
+        2 /* kPlayStation4 */ => 1,
+        3 /* kPlayStation5 */ => 2,
+        1 /* kXbox */ => 3,
+        _ => 0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_gamepad_signed_axis(val: i16) -> f32 {
+    (val as f32) / (if val < 0 { 32768.0 } else { 32767.0 })
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_gamepad_stick(
+    raw_x: i16,
+    raw_y: i16,
+    out_x: *mut f32,
+    out_y: *mut f32,
+) {
+    if out_x.is_null() || out_y.is_null() {
+        return;
+    }
+    const DEADZONE: f32 = 0.20;
+    let x = mocktail_rust_gamepad_signed_axis(raw_x);
+    let y = -mocktail_rust_gamepad_signed_axis(raw_y);
+    let length = (x * x + y * y).sqrt();
+    if length <= DEADZONE {
+        unsafe {
+            *out_x = 0.0;
+            *out_y = 0.0;
+        }
+        return;
+    }
+    let scale = (length.min(1.0) - DEADZONE) / ((1.0 - DEADZONE) * length);
+    unsafe {
+        *out_x = x * scale;
+        *out_y = y * scale;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_gamepad_trigger(raw: i16) -> f32 {
+    const DEADZONE: f32 = 0.02;
+    let val = 0.0f32.max((raw as f32) / 32767.0);
+    if val <= DEADZONE {
+        0.0
+    } else {
+        (val - DEADZONE) / (1.0 - DEADZONE)
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_sdl_finger_action(sdl_type: u32) -> c_int {
+    match sdl_type {
+        0x700 => 0, // Down
+        0x701 => 1, // Up
+        0x702 => 2, // Move
+        0x703 => 3, // Cancelled
+        _ => -1,
+    }
+}
+
+// ============================================================================
+// 41. Device Memory Profile & Class Name (Group 3)
+// ============================================================================
+
+#[repr(C)]
+pub struct MocktailRustDeviceMemoryProfile {
+    pub total_memory_mb: i32,
+    pub memory_class_mb: i32,
+    pub large_memory_class_mb: i32,
+    pub low_memory_killer_background_threshold: i32,
+    pub low_memory_killer_foreground_threshold: i32,
+    pub low_ram_device: c_int,
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_build_device_memory_profile(
+    host_memory_bytes: u64,
+    out_profile: *mut MocktailRustDeviceMemoryProfile,
+) {
+    if out_profile.is_null() {
+        return;
+    }
+    const MEBIBYTE: u64 = 1024 * 1024;
+    const MINIMUM_NORMAL_RAM_BYTES: u64 = 4096 * MEBIBYTE;
+
+    if host_memory_bytes < MINIMUM_NORMAL_RAM_BYTES {
+        unsafe {
+            (*out_profile).total_memory_mb = 2048;
+            (*out_profile).memory_class_mb = 256;
+            (*out_profile).large_memory_class_mb = 512;
+            (*out_profile).low_memory_killer_background_threshold = 256;
+            (*out_profile).low_memory_killer_foreground_threshold = 512;
+            (*out_profile).low_ram_device = 1;
+        }
+        return;
+    }
+
+    let mb = (host_memory_bytes / MEBIBYTE).min(i32::MAX as u64) as i32;
+    unsafe {
+        (*out_profile).total_memory_mb = mb;
+        (*out_profile).memory_class_mb = 512;
+        (*out_profile).large_memory_class_mb = 1024;
+        (*out_profile).low_memory_killer_background_threshold = 0;
+        (*out_profile).low_memory_killer_foreground_threshold = 0;
+        (*out_profile).low_ram_device = 0;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_device_class_name(
+    device_class: c_int,
+    out_buf: *mut c_char,
+    cap: usize,
+) -> c_int {
+    let name = match device_class {
+        0 => "pc",
+        1 => "mobile",
+        2 => "console",
+        _ => "unknown",
+    };
+    copy_to_c_buffer(name, out_buf, cap)
+}
+
+// ============================================================================
+// 42. Payload Integrity & Candidate Approval (Group 4)
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_hash_text(
+    text_ptr: *const c_char,
+    text_len: usize,
+    max_hex_chars: usize,
+    out_hex: *mut c_char,
+    hex_cap: usize,
+    out_err: *mut c_char,
+    err_cap: usize,
+) -> c_int {
+    if text_ptr.is_null() || out_hex.is_null() {
+        if !out_err.is_null() && err_cap > 0 {
+            copy_to_c_buffer("invalid null argument", out_err, err_cap);
+        }
+        return -1;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(text_ptr as *const u8, text_len) };
+    let hash = Sha256::digest(bytes);
+    let mut full_hex = String::with_capacity(64);
+    for byte in hash.iter() {
+        use std::fmt::Write;
+        let _ = write!(&mut full_hex, "{:02x}", byte);
+    }
+    let result_str = if max_hex_chars > 0 && max_hex_chars < full_hex.len() {
+        &full_hex[..max_hex_chars]
+    } else {
+        &full_hex[..]
+    };
+    copy_to_c_buffer(result_str, out_hex, hex_cap)
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_is_lower_hex(
+    val_ptr: *const c_char,
+    expected_len: usize,
+) -> c_int {
+    if val_ptr.is_null() {
+        return 0;
+    }
+    let s = unsafe { CStr::from_ptr(val_ptr).to_str().unwrap_or("") };
+    if s.len() != expected_len {
+        return 0;
+    }
+    for b in s.bytes() {
+        if !b.is_ascii_digit() && !(b >= b'a' && b <= b'f') {
+            return 0;
+        }
+    }
+    1
+}
+
+// ============================================================================
+// 43. Session Log & Hardware Detection Helpers (Group 5)
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_pci_vendor_fallback(
+    vendor_id_ptr: *const c_char,
+    out_buf: *mut c_char,
+    cap: usize,
+) -> c_int {
+    if vendor_id_ptr.is_null() || out_buf.is_null() {
+        return -1;
+    }
+    let vid = unsafe { CStr::from_ptr(vendor_id_ptr).to_str().unwrap_or("") };
+    let name = match vid {
+        "1002" => "AMD".to_string(),
+        "10de" => "NVIDIA".to_string(),
+        "8086" => "Intel".to_string(),
+        "13b5" => "Arm".to_string(),
+        "5143" => "Qualcomm".to_string(),
+        "14e4" => "Broadcom".to_string(),
+        "1af4" => "Virtio".to_string(),
+        "15ad" => "VMware".to_string(),
+        _ => format!("PCI {}", vid),
+    };
+    copy_to_c_buffer(&name, out_buf, cap)
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_hex_id(
+    input_ptr: *const c_char,
+    out_buf: *mut c_char,
+    cap: usize,
+) -> c_int {
+    if input_ptr.is_null() || out_buf.is_null() {
+        return -1;
+    }
+    let mut s = unsafe { CStr::from_ptr(input_ptr).to_str().unwrap_or("").trim() };
+    if s.starts_with("0x") || s.starts_with("0X") {
+        s = &s[2..];
+    }
+    let lower = s.to_ascii_lowercase();
+    if lower.len() == 4 && lower.chars().all(|c| c.is_ascii_hexdigit()) {
+        copy_to_c_buffer(&lower, out_buf, cap)
+    } else {
+        unsafe {
+            if cap > 0 { *out_buf = 0; }
+        }
+        -1
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_parse_meminfo_total(
+    contents_ptr: *const c_char,
+    out_buf: *mut c_char,
+    cap: usize,
+) -> c_int {
+    if contents_ptr.is_null() || out_buf.is_null() {
+        return -1;
+    }
+    let text = unsafe { CStr::from_ptr(contents_ptr).to_str().unwrap_or("") };
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("MemTotal:") {
+            let rest = trimmed["MemTotal:".len()..].trim();
+            let mut parts = rest.split_whitespace();
+            if let Some(num_str) = parts.next() {
+                if let Ok(kib) = num_str.parse::<u64>() {
+                    let mib = (kib + 512) / 1024;
+                    let formatted = format!("{}MiB", mib);
+                    return copy_to_c_buffer(&formatted, out_buf, cap);
+                }
+            }
+        }
+    }
+    copy_to_c_buffer("unknown", out_buf, cap)
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_parse_cpuinfo_model(
+    contents_ptr: *const c_char,
+    out_buf: *mut c_char,
+    cap: usize,
+) -> c_int {
+    if contents_ptr.is_null() || out_buf.is_null() {
+        return -1;
+    }
+    let text = unsafe { CStr::from_ptr(contents_ptr).to_str().unwrap_or("") };
+    let mut fallback = String::new();
+    for line in text.lines() {
+        if let Some(sep) = line.find(':') {
+            let key = line[..sep].trim();
+            let val = line[sep + 1..].trim();
+            if val.is_empty() {
+                continue;
+            }
+            if key == "model name" {
+                return copy_to_c_buffer(val, out_buf, cap);
+            }
+            if fallback.is_empty() && (key == "Hardware" || key == "Processor") {
+                fallback = val.to_string();
+            }
+        }
+    }
+    if !fallback.is_empty() {
+        return copy_to_c_buffer(&fallback, out_buf, cap);
+    }
+    copy_to_c_buffer("unknown", out_buf, cap)
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -7610,5 +8335,183 @@ integrations:
         assert_eq!(i16_samples[0], 0);
         assert_eq!(i16_samples[1], 32767);
         assert_eq!(i16_samples[2], -32767);
+    }
+
+    #[test]
+    fn test_present_mode_and_swapchain() {
+        let vsync_auto = CString::new("auto").unwrap();
+        let fps_neg1 = CString::new("-1").unwrap();
+        let fps_display = CString::new("display").unwrap();
+        let fps_unlimited = CString::new("unlimited").unwrap();
+        let pm_fifo = CString::new("fifo").unwrap();
+        let pm_mailbox = CString::new("mailbox").unwrap();
+        let pm_immediate = CString::new("immediate").unwrap();
+        let pm_auto = CString::new("auto").unwrap();
+
+        assert_eq!(mocktail_rust_present_mode_resolve(vsync_auto.as_ptr(), fps_neg1.as_ptr(), pm_auto.as_ptr()), 0); // HostDefault
+        assert_eq!(mocktail_rust_present_mode_resolve(vsync_auto.as_ptr(), fps_display.as_ptr(), pm_auto.as_ptr()), 1); // Vsync
+        assert_eq!(mocktail_rust_present_mode_resolve(vsync_auto.as_ptr(), fps_unlimited.as_ptr(), pm_auto.as_ptr()), 2); // Unthrottled
+        assert_eq!(mocktail_rust_present_mode_resolve(vsync_auto.as_ptr(), fps_display.as_ptr(), pm_fifo.as_ptr()), 3); // Fifo
+        assert_eq!(mocktail_rust_present_mode_resolve(vsync_auto.as_ptr(), fps_display.as_ptr(), pm_mailbox.as_ptr()), 4); // Mailbox
+        assert_eq!(mocktail_rust_present_mode_resolve(vsync_auto.as_ptr(), fps_display.as_ptr(), pm_immediate.as_ptr()), 5); // Immediate
+
+        let mut explicit = 0u32;
+        assert_eq!(mocktail_rust_present_mode_explicit(3, &mut explicit), 1);
+        assert_eq!(explicit, VK_PRESENT_MODE_FIFO_KHR);
+        assert_eq!(mocktail_rust_present_mode_explicit(0, &mut explicit), 0);
+
+        assert_eq!(mocktail_rust_present_mode_swap_interval(0, 2), 2);
+        assert_eq!(mocktail_rust_present_mode_swap_interval(2, 1), 0);
+        assert_eq!(mocktail_rust_present_mode_swap_interval(1, 0), 1);
+        assert_eq!(mocktail_rust_present_mode_swap_interval(5, 1), 0);
+
+        assert_eq!(mocktail_rust_present_mode_prefer_min_image_count(4 /* Mailbox */, 2, 2, 8), 3);
+        assert_eq!(mocktail_rust_present_mode_prefer_min_image_count(3 /* Fifo */, 2, 2, 8), 2);
+        assert_eq!(mocktail_rust_present_mode_prefer_min_image_count(1 /* Vsync */, 2, 2, 8), 4);
+        assert_eq!(mocktail_rust_present_mode_prefer_min_image_count(2 /* Unthrottled */, 2, 2, 8), 5);
+
+        let host_modes = [VK_PRESENT_MODE_IMMEDIATE_KHR, VK_PRESENT_MODE_FIFO_KHR];
+        let mut out_modes = [0u32; 8];
+        let mut out_count = 0usize;
+        let rc = mocktail_rust_present_mode_filter(1 /* Vsync */, host_modes.as_ptr(), host_modes.len(), out_modes.as_mut_ptr(), out_modes.len(), &mut out_count);
+        assert_eq!(rc, 0);
+        assert_eq!(out_count, 1);
+        assert_eq!(out_modes[0], VK_PRESENT_MODE_FIFO_KHR);
+    }
+
+    #[test]
+    fn test_frame_rate_policy() {
+        let mut mode = 0;
+        let mut fps = 0;
+
+        let empty = CString::new("").unwrap();
+        mocktail_rust_frame_rate_parse(empty.as_ptr(), &mut mode, &mut fps);
+        assert_eq!(mode, 0); // Unmanaged
+
+        let display = CString::new("display").unwrap();
+        mocktail_rust_frame_rate_parse(display.as_ptr(), &mut mode, &mut fps);
+        assert_eq!(mode, 1); // Display
+
+        let fps144 = CString::new("144").unwrap();
+        mocktail_rust_frame_rate_parse(fps144.as_ptr(), &mut mode, &mut fps);
+        assert_eq!(mode, 2); // Fixed
+        assert_eq!(fps, 144);
+
+        let unlimited = CString::new("unlimited").unwrap();
+        mocktail_rust_frame_rate_parse(unlimited.as_ptr(), &mut mode, &mut fps);
+        assert_eq!(mode, 3); // Unlimited
+
+        let invalid = CString::new("bad_fps").unwrap();
+        mocktail_rust_frame_rate_parse(invalid.as_ptr(), &mut mode, &mut fps);
+        assert_eq!(mode, 4); // Invalid
+
+        // Merge settings
+        let base_json = CString::new("{}").unwrap();
+        let mut out_buf = [0 as c_char; 1024];
+        let mut out_err = [0 as c_char; 256];
+        let rc = mocktail_rust_frame_rate_merge_client_settings(
+            2, 144, base_json.as_ptr(), out_buf.as_mut_ptr(), out_buf.len(), out_err.as_mut_ptr(), out_err.len()
+        );
+        assert_eq!(rc, 0);
+        let out_str = unsafe { CStr::from_ptr(out_buf.as_ptr()).to_str().unwrap() };
+        assert!(out_str.contains("\"DFIntTaskSchedulerTargetFps\":\"144\""));
+        assert!(out_str.contains("\"FFlagGameBasicSettingsFramerateCap5\":\"True\""));
+    }
+
+    #[test]
+    fn test_gamepad_and_input() {
+        assert_eq!(mocktail_rust_gamepad_valid_id(1), 1);
+        assert_eq!(mocktail_rust_gamepad_valid_id(0), 0);
+        assert_eq!(mocktail_rust_gamepad_valid_id(-1), 0);
+
+        assert_eq!(mocktail_rust_gamepad_family(1), 1); // Xbox
+        assert_eq!(mocktail_rust_gamepad_family(4), 2); // PS4
+        assert_eq!(mocktail_rust_gamepad_family(5), 3); // PS5
+
+        assert_eq!(mocktail_rust_gamepad_button_to_android(0), 96);
+        assert_eq!(mocktail_rust_gamepad_button_to_android(1), 97);
+        assert_eq!(mocktail_rust_gamepad_button_to_android(255), -1);
+
+        assert_eq!(mocktail_rust_roblox_gamepad_type(1), 3); // Xbox
+        assert_eq!(mocktail_rust_roblox_gamepad_type(2), 1); // PS4
+        assert_eq!(mocktail_rust_roblox_gamepad_type(3), 2); // PS5
+
+        assert_eq!(mocktail_rust_gamepad_signed_axis(0), 0.0);
+        assert_eq!(mocktail_rust_gamepad_signed_axis(32767), 1.0);
+        assert_eq!(mocktail_rust_gamepad_signed_axis(-32768), -1.0);
+
+        let mut ox = 0.0f32;
+        let mut oy = 0.0f32;
+        mocktail_rust_gamepad_stick(0, 0, &mut ox, &mut oy);
+        assert_eq!(ox, 0.0);
+        assert_eq!(oy, 0.0);
+
+        assert_eq!(mocktail_rust_gamepad_trigger(0), 0.0);
+        assert_eq!(mocktail_rust_gamepad_trigger(32767), 1.0);
+
+        assert_eq!(mocktail_rust_sdl_finger_action(0x700), 0);
+        assert_eq!(mocktail_rust_sdl_finger_action(0x701), 1);
+        assert_eq!(mocktail_rust_sdl_finger_action(0x702), 2);
+        assert_eq!(mocktail_rust_sdl_finger_action(0x703), 3);
+        assert_eq!(mocktail_rust_sdl_finger_action(0x999), -1);
+    }
+
+    #[test]
+    fn test_device_memory_and_class() {
+        let mut profile = MocktailRustDeviceMemoryProfile {
+            total_memory_mb: 0,
+            memory_class_mb: 0,
+            large_memory_class_mb: 0,
+            low_memory_killer_background_threshold: 0,
+            low_memory_killer_foreground_threshold: 0,
+            low_ram_device: 0,
+        };
+        mocktail_rust_build_device_memory_profile(2 * 1024 * 1024 * 1024, &mut profile);
+        assert_eq!(profile.low_ram_device, 1);
+        assert_eq!(profile.total_memory_mb, 2048);
+
+        mocktail_rust_build_device_memory_profile(8 * 1024 * 1024 * 1024, &mut profile);
+        assert_eq!(profile.low_ram_device, 0);
+        assert_eq!(profile.total_memory_mb, 8192);
+
+        let mut class_buf = [0 as c_char; 32];
+        mocktail_rust_device_class_name(0, class_buf.as_mut_ptr(), class_buf.len());
+        assert_eq!(unsafe { CStr::from_ptr(class_buf.as_ptr()).to_str().unwrap() }, "pc");
+    }
+
+    #[test]
+    fn test_payload_integrity_and_session_log_helpers() {
+        let text = CString::new("hello world").unwrap();
+        let mut hex_buf = [0 as c_char; 65];
+        let mut err_buf = [0 as c_char; 128];
+        let rc = mocktail_rust_hash_text(text.as_ptr(), 11, 0, hex_buf.as_mut_ptr(), hex_buf.len(), err_buf.as_mut_ptr(), err_buf.len());
+        assert_eq!(rc, 0);
+        let hex_str = unsafe { CStr::from_ptr(hex_buf.as_ptr()).to_str().unwrap() };
+        assert_eq!(hex_str, "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9");
+
+        let hex_valid = CString::new("0123456789abcdef").unwrap();
+        assert_eq!(mocktail_rust_is_lower_hex(hex_valid.as_ptr(), 16), 1);
+        let hex_invalid = CString::new("0123456789ABCDEF").unwrap();
+        assert_eq!(mocktail_rust_is_lower_hex(hex_invalid.as_ptr(), 16), 0);
+
+        let mut vendor_buf = [0 as c_char; 64];
+        let vid_nvidia = CString::new("10de").unwrap();
+        mocktail_rust_pci_vendor_fallback(vid_nvidia.as_ptr(), vendor_buf.as_mut_ptr(), vendor_buf.len());
+        assert_eq!(unsafe { CStr::from_ptr(vendor_buf.as_ptr()).to_str().unwrap() }, "NVIDIA");
+
+        let mut hex_id_buf = [0 as c_char; 16];
+        let hid = CString::new("0x10DE").unwrap();
+        mocktail_rust_hex_id(hid.as_ptr(), hex_id_buf.as_mut_ptr(), hex_id_buf.len());
+        assert_eq!(unsafe { CStr::from_ptr(hex_id_buf.as_ptr()).to_str().unwrap() }, "10de");
+
+        let meminfo = CString::new("MemTotal:        8163532 kB\nMemFree:         123456 kB\n").unwrap();
+        let mut total_buf = [0 as c_char; 32];
+        mocktail_rust_parse_meminfo_total(meminfo.as_ptr(), total_buf.as_mut_ptr(), total_buf.len());
+        assert_eq!(unsafe { CStr::from_ptr(total_buf.as_ptr()).to_str().unwrap() }, "7972MiB");
+
+        let cpuinfo = CString::new("processor: 0\nmodel name: Intel Core i7-4500U CPU @ 1.80GHz\n").unwrap();
+        let mut model_buf = [0 as c_char; 128];
+        mocktail_rust_parse_cpuinfo_model(cpuinfo.as_ptr(), model_buf.as_mut_ptr(), model_buf.len());
+        assert_eq!(unsafe { CStr::from_ptr(model_buf.as_ptr()).to_str().unwrap() }, "Intel Core i7-4500U CPU @ 1.80GHz");
     }
 }

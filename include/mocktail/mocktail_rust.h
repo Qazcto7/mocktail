@@ -795,6 +795,152 @@ void mocktail_rust_audio_convert_f32_to_i16(
     int16_t* dst,
     size_t count);
 
+// ============================================================================
+// 38. Present Mode Policy & Swapchain (Group 1)
+// ============================================================================
+
+int mocktail_rust_present_mode_resolve(
+    const char* vsync_str,
+    const char* fps_str,
+    const char* present_mode_str);
+
+int mocktail_rust_present_mode_explicit(
+    int policy,
+    uint32_t* out_mode);
+
+int mocktail_rust_present_mode_swap_interval(
+    int policy,
+    int requested);
+
+uint32_t mocktail_rust_present_mode_prefer_min_image_count(
+    int policy,
+    uint32_t requested,
+    uint32_t min_images,
+    uint32_t max_images);
+
+int mocktail_rust_present_mode_filter(
+    int policy,
+    const uint32_t* host_modes,
+    size_t host_count,
+    uint32_t* out_modes,
+    size_t out_cap,
+    size_t* out_count);
+
+int mocktail_rust_present_mode_khr_name(
+    uint32_t mode,
+    char* out_buf,
+    size_t cap);
+
+int mocktail_rust_present_mode_policy_name(
+    int policy,
+    char* out_buf,
+    size_t cap);
+
+// ============================================================================
+// 39. Frame Rate Policy (Group 1)
+// ============================================================================
+
+int mocktail_rust_frame_rate_parse(
+    const char* val_str,
+    int* out_mode,
+    int* out_fps);
+
+int mocktail_rust_frame_rate_merge_client_settings(
+    int mode,
+    int fps,
+    const char* base_json,
+    char* out_buf,
+    size_t out_cap,
+    char* out_err,
+    size_t err_cap);
+
+// ============================================================================
+// 40. Gamepad & Input Mapping (Group 2)
+// ============================================================================
+
+int mocktail_rust_gamepad_valid_id(int64_t id);
+
+int mocktail_rust_gamepad_family(int sdl_type);
+
+int32_t mocktail_rust_gamepad_button_to_android(uint8_t button);
+
+int32_t mocktail_rust_roblox_gamepad_type(int family);
+
+float mocktail_rust_gamepad_signed_axis(int16_t val);
+
+void mocktail_rust_gamepad_stick(
+    int16_t raw_x,
+    int16_t raw_y,
+    float* out_x,
+    float* out_y);
+
+float mocktail_rust_gamepad_trigger(int16_t raw);
+
+int mocktail_rust_sdl_finger_action(uint32_t sdl_type);
+
+// ============================================================================
+// 41. Device Memory Profile & Class Name (Group 3)
+// ============================================================================
+
+typedef struct MocktailRustDeviceMemoryProfile {
+    int32_t total_memory_mb;
+    int32_t memory_class_mb;
+    int32_t large_memory_class_mb;
+    int32_t low_memory_killer_background_threshold;
+    int32_t low_memory_killer_foreground_threshold;
+    int low_ram_device;
+} MocktailRustDeviceMemoryProfile;
+
+void mocktail_rust_build_device_memory_profile(
+    uint64_t host_memory_bytes,
+    MocktailRustDeviceMemoryProfile* out_profile);
+
+int mocktail_rust_device_class_name(
+    int device_class,
+    char* out_buf,
+    size_t cap);
+
+// ============================================================================
+// 42. Payload Integrity & Candidate Approval (Group 4)
+// ============================================================================
+
+int mocktail_rust_hash_text(
+    const char* text,
+    size_t text_len,
+    size_t max_hex_chars,
+    char* out_hex,
+    size_t hex_cap,
+    char* out_err,
+    size_t err_cap);
+
+int mocktail_rust_is_lower_hex(
+    const char* val_str,
+    size_t expected_len);
+
+// ============================================================================
+// 43. Session Log & Hardware Detection Helpers (Group 5)
+// ============================================================================
+
+int mocktail_rust_pci_vendor_fallback(
+    const char* vendor_id,
+    char* out_buf,
+    size_t cap);
+
+int mocktail_rust_hex_id(
+    const char* input,
+    char* out_buf,
+    size_t cap);
+
+int mocktail_rust_parse_meminfo_total(
+    const char* contents,
+    char* out_buf,
+    size_t cap);
+
+int mocktail_rust_parse_cpuinfo_model(
+    const char* contents,
+    char* out_buf,
+    size_t cap);
+
 #ifdef __cplusplus
 }
 #endif

@@ -1,4 +1,5 @@
 #include "mocktail/platform/sdl_gamepad_manager.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <SDL3/SDL_init.h>
 #include <SDL3/SDL_timer.h>
@@ -15,14 +16,14 @@ static_assert(SDL_GAMEPAD_BUTTON_COUNT <= 32);
 static_assert(SDL_GAMEPAD_AXIS_COUNT <= 32);
 
 GamepadFamily Family(SDL_Gamepad* gamepad) {
-  switch (SDL_GetGamepadType(gamepad)) {
-    case SDL_GAMEPAD_TYPE_XBOX360:
-    case SDL_GAMEPAD_TYPE_XBOXONE:
+  const int rust_fam = mocktail_rust_gamepad_family(
+      static_cast<int>(SDL_GetGamepadType(gamepad)));
+  switch (rust_fam) {
+    case 1:
       return GamepadFamily::kXbox;
-    case SDL_GAMEPAD_TYPE_PS3:
-    case SDL_GAMEPAD_TYPE_PS4:
+    case 2:
       return GamepadFamily::kPlayStation4;
-    case SDL_GAMEPAD_TYPE_PS5:
+    case 3:
       return GamepadFamily::kPlayStation5;
     default:
       return GamepadFamily::kUnknown;
@@ -30,7 +31,7 @@ GamepadFamily Family(SDL_Gamepad* gamepad) {
 }
 
 bool ValidId(std::int64_t id) {
-  return id > 0 && id <= std::numeric_limits<SDL_JoystickID>::max();
+  return mocktail_rust_gamepad_valid_id(id) == 1;
 }
 
 }  // namespace
