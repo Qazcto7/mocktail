@@ -71,7 +71,11 @@ int main(int argc, char**) {
   Clear(request);
   std::putchar(status);
   if (status == 'F' && password != nullptr) std::fputs(password, stdout);
-  if (password != nullptr) secret_password_free(password);
+  if (password != nullptr) {
+    volatile char* p = password;
+    for (size_t i = 0; p[i] != '\0'; ++i) p[i] = '\0';
+    secret_password_free(password);
+  }
   return std::fflush(stdout) == 0 ? 0 : 1;
 }
 

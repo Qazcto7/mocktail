@@ -195,10 +195,13 @@ std::string_view StringViewFromJString(jstring str) {
   if (__builtin_expect(!str, 0)) {
     return {};
   }
-  auto* string_object = static_cast<PseudoStringObject*>(
-      PseudoObjectFromRef(reinterpret_cast<jobject>(str)));
-  if (string_object) {
-    return string_object->value;
+  std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
+  if (g_known_strings.find(str) != g_known_strings.end()) {
+    auto* string_object = dynamic_cast<PseudoStringObject*>(
+        PseudoObjectFromRef(reinterpret_cast<jobject>(str)));
+    if (string_object != nullptr) {
+      return string_object->value;
+    }
   }
   if (!IsRawStringPointer(str)) {
     return {};

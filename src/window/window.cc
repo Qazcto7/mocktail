@@ -14,6 +14,7 @@
 #include <cstring>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -1771,7 +1772,8 @@ bool SwapBuffers() {
     return false;
   }
 
-  if (g_gles_text_overlay == nullptr) {
+  static std::once_flag text_overlay_init_flag;
+  std::call_once(text_overlay_init_flag, [] {
     graphics::GlesTextOverlaySource source;
     source.may_present = reinterpret_cast<decltype(source.may_present)>(
         dlsym(RTLD_DEFAULT, "mocktail_text_overlay_may_present"));
@@ -1781,8 +1783,10 @@ bool SwapBuffers() {
         dlsym(RTLD_DEFAULT, "mocktail_text_overlay_copy"));
     g_gles_text_overlay =
         std::make_unique<graphics::GlesTextOverlayCompositor>(source);
+  });
+  if (g_gles_text_overlay != nullptr) {
+    (void)g_gles_text_overlay->Draw(g_state.sdl_window);
   }
-  (void)g_gles_text_overlay->Draw(g_state.sdl_window);
 
   if (!SDL_GL_SwapWindow(g_state.sdl_window)) {
     fprintf(stderr, "  [window] SDL_GL_SwapWindow failed: %s\n",

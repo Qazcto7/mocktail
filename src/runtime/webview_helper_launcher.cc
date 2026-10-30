@@ -60,7 +60,10 @@ class SensitiveStringGuard final {
   explicit SensitiveStringGuard(std::string* value) : value_(value) {}
   ~SensitiveStringGuard() {
     if (value_ != nullptr) {
-      std::fill(value_->begin(), value_->end(), '\0');
+      volatile char* bytes = value_->empty() ? nullptr : value_->data();
+      for (std::size_t i = 0; bytes != nullptr && i < value_->size(); ++i) {
+        bytes[i] = '\0';
+      }
       value_->clear();
     }
   }

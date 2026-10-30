@@ -150,13 +150,23 @@ bool WriteAll(int descriptor, const void* bytes, std::size_t size) {
 bool ReadAll(int descriptor, void* bytes, std::size_t size) {
   auto* next = static_cast<unsigned char*>(bytes);
   while (size != 0) {
-    const ssize_t received = recv(descriptor, next, size, 0);
+    pollfd event{descriptor, POLLIN, 0};
+    const int ready = poll(&event, 1, 3000);
+    if (ready <= 0) {
+      if (ready < 0 && errno == EINTR) {
+        continue;
+      }
+      return false;
+    }
+    const ssize_t received =
+        recv(descriptor, next, size, MSG_NOSIGNAL | MSG_DONTWAIT);
     if (received > 0) {
       next += received;
       size -= static_cast<std::size_t>(received);
       continue;
     }
-    if (received < 0 && errno == EINTR) {
+    if (received < 0 &&
+        (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) {
       continue;
     }
     return false;
