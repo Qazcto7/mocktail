@@ -895,6 +895,629 @@ pub extern "C" fn mocktail_rust_is_safe_url(url: *const c_char) -> c_int {
 }
 
 // ============================================================================
+// 10. JNI Modified UTF-8 (MUTF-8) Engine
+// ============================================================================
+
+/// Converts MUTF-8 to UTF-16 code units.
+/// In MUTF-8, 0x00 is encoded as 0xC0 0x80. Standard surrogate pairs are preserved.
+#[no_mangle]
+pub extern "C" fn mocktail_rust_mutf8_to_utf16(
+    mutf8_ptr: *const u8,
+    mutf8_len: usize,
+    out_utf16: *mut u16,
+    out_cap: usize,
+    out_len: *mut usize,
+) -> c_int {
+    if (mutf8_ptr.is_null() && mutf8_len > 0) || out_utf16.is_null() || out_len.is_null() {
+        return -1;
+    }
+    let bytes = if mutf8_len == 0 { &[] } else { unsafe { slice::from_raw_parts(mutf8_ptr, mutf8_len) } };
+    let mut code_units: Vec<u16> = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let b1 = bytes[index];
+        if b1 != 0 && b1 <= 0x7F {
+            code_units.push(b1 as u16);
+            index += 1;
+        } else if (b1 & 0xE0) == 0xC0 && index + 1 < bytes.len() && (bytes[index + 1] & 0xC0) == 0x80 {
+            let b2 = bytes[index + 1];
+            let cp = (((b1 & 0x1F) as u32) << 6) | ((b2 & 0x3F) as u32);
+            code_units.push(cp as u16);
+            index += 2;
+        } else if (b1 & 0xF0) == 0xE0 && index + 2 < bytes.len()
+            && (bytes[index + 1] & 0xC0) == 0x80 && (bytes[index + 2] & 0xC0) == 0x80 {
+            let b2 = bytes[index + 1];
+            let b3 = bytes[index + 2];
+            let cp = (((b1 & 0x0F) as u32) << 12) | (((b2 & 0x3F) as u32) << 6) | ((b3 & 0x3F) as u32);
+            code_units.push(cp as u16);
+            index += 3;
+        } else if (b1 & 0xF8) == 0xF0 && index + 3 < bytes.len()
+            && (bytes[index + 1] & 0xC0) == 0x80 && (bytes[index + 2] & 0xC0) == 0x80 && (bytes[index + 3] & 0xC0) == 0x80 {
+            // Standard UTF-8 4-byte sequence -> convert to surrogate pair for Java UTF-16
+            let b2 = bytes[index + 1];
+            let b3 = bytes[index + 2];
+            let b4 = bytes[index + 3];
+            let cp = (((b1 & 0x07) as u32) << 18) | (((b2 & 0x3F) as u32) << 12)
+                | (((b3 & 0x3F) as u32) << 6) | ((b4 & 0x3F) as u32);
+            if cp >= 0x10000 && cp <= 0x10FFFF {
+                let sub = cp - 0x10000;
+                let high = (0xD800 + (sub >> 10)) as u16;
+                let low = (0xDC00 + (sub & 0x3FF)) as u16;
+                code_units.push(high);
+                code_units.push(low);
+            } else {
+                code_units.push(0xFFFD);
+            }
+            index += 4;
+        } else {
+            code_units.push(0xFFFD);
+            index += 1;
+        }
+    }
+    if code_units.len() > out_cap {
+        return -2;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(code_units.as_ptr(), out_utf16, code_units.len());
+        *out_len = code_units.len();
+    }
+    0
+}
+
+/// Converts UTF-16 code units to MUTF-8.
+#[no_mangle]
+pub extern "C" fn mocktail_rust_utf16_to_mutf8(
+    utf16_ptr: *const u16,
+    utf16_len: usize,
+    out_mutf8: *mut u8,
+    out_cap: usize,
+    out_len: *mut usize,
+) -> c_int {
+    if (utf16_ptr.is_null() && utf16_len > 0) || out_mutf8.is_null() || out_len.is_null() {
+        return -1;
+    }
+    let units = if utf16_len == 0 { &[] } else { unsafe { slice::from_raw_parts(utf16_ptr, utf16_len) } };
+    let mut mutf8: Vec<u8> = Vec::with_capacity(units.len() * 3);
+    for &u in units {
+        if u == 0 {
+            mutf8.push(0xC0);
+            mutf8.push(0x80);
+        } else if u <= 0x7F {
+            mutf8.push(u as u8);
+        } else if u <= 0x7FF {
+            mutf8.push(0xC0 | ((u >> 6) as u8));
+            mutf8.push(0x80 | ((u & 0x3F) as u8));
+        } else {
+            mutf8.push(0xE0 | ((u >> 12) as u8));
+            mutf8.push(0x80 | (((u >> 6) & 0x3F) as u8));
+            mutf8.push(0x80 | ((u & 0x3F) as u8));
+        }
+    }
+    if mutf8.len() > out_cap {
+        return -2;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(mutf8.as_ptr(), out_mutf8, mutf8.len());
+        *out_len = mutf8.len();
+    }
+    0
+}
+
+/// Converts MUTF-8 bytes to standard UTF-8 string bytes.
+#[no_mangle]
+pub extern "C" fn mocktail_rust_mutf8_to_utf8(
+    mutf8_ptr: *const u8,
+    mutf8_len: usize,
+    out_utf8: *mut u8,
+    out_cap: usize,
+    out_len: *mut usize,
+) -> c_int {
+    if (mutf8_ptr.is_null() && mutf8_len > 0) || out_utf8.is_null() || out_len.is_null() {
+        return -1;
+    }
+    let bytes = if mutf8_len == 0 { &[] } else { unsafe { slice::from_raw_parts(mutf8_ptr, mutf8_len) } };
+    let mut utf16 = Vec::new();
+    let mut idx = 0;
+    while idx < bytes.len() {
+        let b1 = bytes[idx];
+        if b1 != 0 && b1 <= 0x7F {
+            utf16.push(b1 as u16);
+            idx += 1;
+        } else if (b1 & 0xE0) == 0xC0 && idx + 1 < bytes.len() && (bytes[idx + 1] & 0xC0) == 0x80 {
+            let b2 = bytes[idx + 1];
+            let cp = (((b1 & 0x1F) as u16) << 6) | ((b2 & 0x3F) as u16);
+            utf16.push(cp);
+            idx += 2;
+        } else if (b1 & 0xF0) == 0xE0 && idx + 2 < bytes.len()
+            && (bytes[idx + 1] & 0xC0) == 0x80 && (bytes[idx + 2] & 0xC0) == 0x80 {
+            let b2 = bytes[idx + 1];
+            let b3 = bytes[idx + 2];
+            let cp = (((b1 & 0x0F) as u16) << 12) | (((b2 & 0x3F) as u16) << 6) | ((b3 & 0x3F) as u16);
+            utf16.push(cp);
+            idx += 3;
+        } else {
+            utf16.push(0xFFFD);
+            idx += 1;
+        }
+    }
+    let string = String::from_utf16_lossy(&utf16);
+    let str_bytes = string.as_bytes();
+    if str_bytes.len() > out_cap {
+        return -2;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(str_bytes.as_ptr(), out_utf8, str_bytes.len());
+        *out_len = str_bytes.len();
+    }
+    0
+}
+
+// ============================================================================
+// 11. Roblox Cookie & Token Parser
+// ============================================================================
+
+#[inline]
+fn is_valid_cookie_octet(b: u8) -> bool {
+    b == 0x21 || (b >= 0x23 && b <= 0x2B) || (b >= 0x2D && b <= 0x3A)
+        || (b >= 0x3C && b <= 0x5B) || (b >= 0x5D && b <= 0x7E)
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_is_valid_cookie_octet(byte: u8) -> c_int {
+    if is_valid_cookie_octet(byte) { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_parse_roblox_cookie(
+    raw_input: *const c_char,
+    out_buf: *mut c_char,
+    out_cap: usize,
+    out_len: *mut usize,
+) -> c_int {
+    if raw_input.is_null() || out_buf.is_null() || out_len.is_null() {
+        return -1;
+    }
+    let c_str = unsafe { CStr::from_ptr(raw_input) };
+    let mut bytes = c_str.to_bytes();
+    if bytes.is_empty() || bytes.len() > 1024 * 1024 {
+        return -2;
+    }
+    // If it contains ".ROBLOSECURITY=", slice after it
+    static PREFIX: &[u8] = b".ROBLOSECURITY=";
+    if let Some(pos) = bytes.windows(PREFIX.len()).position(|w| w == PREFIX) {
+        bytes = &bytes[pos + PREFIX.len()..];
+    }
+    // Slice until semicolon if present
+    if let Some(semi) = bytes.iter().position(|&b| b == b';') {
+        bytes = &bytes[..semi];
+    }
+    // Trim whitespace
+    let mut start = 0;
+    while start < bytes.len() && (bytes[start] == b' ' || bytes[start] == b'\t' || bytes[start] == b'\r' || bytes[start] == b'\n') {
+        start += 1;
+    }
+    let mut end = bytes.len();
+    while end > start && (bytes[end - 1] == b' ' || bytes[end - 1] == b'\t' || bytes[end - 1] == b'\r' || bytes[end - 1] == b'\n') {
+        end -= 1;
+    }
+    bytes = &bytes[start..end];
+
+    // Trim quotes if wrapped
+    if bytes.len() >= 2 && bytes.first() == Some(&b'"') && bytes.last() == Some(&b'"') {
+        bytes = &bytes[1..bytes.len() - 1];
+    }
+
+    if bytes.is_empty() || bytes.len() > 4096 {
+        return -3;
+    }
+    if !bytes.iter().all(|&b| is_valid_cookie_octet(b)) {
+        return -4;
+    }
+    if bytes.len() + 1 > out_cap {
+        return -5;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr() as *const c_char, out_buf, bytes.len());
+        *out_buf.add(bytes.len()) = 0;
+        *out_len = bytes.len();
+    }
+    0
+}
+
+// ============================================================================
+// 12. Roblox MessageBus JSON & Permissions Bridge
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_validate_json_depth(json_str: *const c_char, max_depth: usize) -> c_int {
+    if json_str.is_null() {
+        return 0;
+    }
+    let c_str = unsafe { CStr::from_ptr(json_str) };
+    let bytes = c_str.to_bytes();
+    let mut depth = 0usize;
+    let mut quoted = false;
+    let mut escaped = false;
+    for &b in bytes {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                quoted = false;
+            }
+        } else if b == b'"' {
+            quoted = true;
+        } else if b == b'{' || b == b'[' {
+            depth += 1;
+            if depth > max_depth {
+                return 0;
+            }
+        } else if b == b'}' || b == b']' {
+            if depth > 0 {
+                depth -= 1;
+            }
+        }
+    }
+    if quoted || depth != 0 {
+        return 0;
+    }
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_check_permission_request(
+    json_str: *const c_char,
+    microphone_enabled: c_int,
+    out_has_missing: *mut c_int,
+    out_missing_json: *mut c_char,
+    out_cap: usize,
+) -> c_int {
+    if json_str.is_null() || out_has_missing.is_null() || out_missing_json.is_null() {
+        return -1;
+    }
+    let c_str = unsafe { CStr::from_ptr(json_str) };
+    let bytes = c_str.to_bytes();
+    if bytes.is_empty() || bytes.len() > 64 * 1024 {
+        return -2;
+    }
+    if mocktail_rust_validate_json_depth(json_str, 8) == 0 {
+        return -3;
+    }
+    let val: serde_json::Value = match serde_json::from_slice(bytes) {
+        Ok(v) => v,
+        Err(_) => return -4,
+    };
+    let obj = match val.as_object() {
+        Some(o) => o,
+        None => return -5,
+    };
+    let perms_arr = match obj.get("permissions").and_then(|p| p.as_array()) {
+        Some(a) => a,
+        None => return -6,
+    };
+    if perms_arr.len() > 64 {
+        return -7;
+    }
+    let mut missing = Vec::new();
+    for item in perms_arr {
+        let s = match item.as_str() {
+            Some(s) => s,
+            None => return -8,
+        };
+        if s.is_empty() || s.len() > 128 || s.bytes().any(|b| b == b'\r' || b == b'\n' || b == b'\t' || b == 0) {
+            return -9;
+        }
+        if s != "LOCAL_NETWORK" && (s != "MICROPHONE_ACCESS" || microphone_enabled == 0) {
+            missing.push(serde_json::Value::String(s.to_string()));
+        }
+    }
+    let missing_json = match serde_json::to_string(&missing) {
+        Ok(j) => j,
+        Err(_) => return -10,
+    };
+    if missing_json.len() + 1 > out_cap {
+        return -11;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(missing_json.as_ptr() as *const c_char, out_missing_json, missing_json.len());
+        *out_missing_json.add(missing_json.len()) = 0;
+        *out_has_missing = if missing.is_empty() { 0 } else { 1 };
+    }
+    0
+}
+
+// ============================================================================
+// 13. ELF Header & GNU Build-ID Safe Parser
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_verify_elf_architecture(
+    elf_bytes: *const u8,
+    elf_len: usize,
+    expected_machine: u16,
+) -> c_int {
+    if elf_bytes.is_null() || elf_len < 64 {
+        return 0;
+    }
+    let bytes = unsafe { slice::from_raw_parts(elf_bytes, elf_len) };
+    if &bytes[0..4] != b"\x7fELF" {
+        return 0;
+    }
+    if bytes[4] != 2 || bytes[5] != 1 {
+        // Must be 64-bit (2) and Little-Endian (1)
+        return 0;
+    }
+    let e_machine = u16::from_le_bytes([bytes[18], bytes[19]]);
+    if expected_machine != 0 && e_machine != expected_machine {
+        return 0;
+    }
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_parse_elf_build_id(
+    elf_bytes: *const u8,
+    elf_len: usize,
+    out_hex: *mut c_char,
+    out_cap: usize,
+) -> c_int {
+    if elf_bytes.is_null() || elf_len < 64 || out_hex.is_null() {
+        return -1;
+    }
+    let bytes = unsafe { slice::from_raw_parts(elf_bytes, elf_len) };
+    if &bytes[0..4] != b"\x7fELF" || bytes[4] != 2 || bytes[5] != 1 {
+        return -2;
+    }
+
+    let e_phoff = u64::from_le_bytes(bytes[32..40].try_into().unwrap()) as usize;
+    let e_phentsize = u16::from_le_bytes(bytes[54..56].try_into().unwrap()) as usize;
+    let e_phnum = u16::from_le_bytes(bytes[56..58].try_into().unwrap()) as usize;
+
+    let e_shoff = u64::from_le_bytes(bytes[40..48].try_into().unwrap()) as usize;
+    let e_shentsize = u16::from_le_bytes(bytes[58..60].try_into().unwrap()) as usize;
+    let e_shnum = u16::from_le_bytes(bytes[60..62].try_into().unwrap()) as usize;
+
+    let parse_notes = |note_data: &[u8]| -> Option<String> {
+        let mut offset = 0;
+        while offset + 12 <= note_data.len() {
+            let namesz = u32::from_le_bytes(note_data[offset..offset + 4].try_into().unwrap()) as usize;
+            let descsz = u32::from_le_bytes(note_data[offset + 4..offset + 8].try_into().unwrap()) as usize;
+            let n_type = u32::from_le_bytes(note_data[offset + 8..offset + 12].try_into().unwrap());
+            offset += 12;
+
+            let namesz_padded = (namesz + 3) & !3;
+            let descsz_padded = (descsz + 3) & !3;
+
+            if offset + namesz_padded + descsz > note_data.len() {
+                break;
+            }
+
+            let name = &note_data[offset..offset + namesz];
+            let desc = &note_data[offset + namesz_padded..offset + namesz_padded + descsz];
+            offset += namesz_padded + descsz_padded;
+
+            if n_type == 3 && namesz >= 3 && name.starts_with(b"GNU") && descsz > 0 && descsz <= 64 {
+                return Some(hex::encode(desc));
+            }
+        }
+        None
+    };
+
+    if e_phentsize >= 56 && e_phnum > 0 && e_phoff + e_phnum * e_phentsize <= elf_len {
+        for i in 0..e_phnum {
+            let ph_offset = e_phoff + i * e_phentsize;
+            let p_type = u32::from_le_bytes(bytes[ph_offset..ph_offset + 4].try_into().unwrap());
+            if p_type == 4 { // PT_NOTE
+                let p_offset = u64::from_le_bytes(bytes[ph_offset + 8..ph_offset + 16].try_into().unwrap()) as usize;
+                let p_filesz = u64::from_le_bytes(bytes[ph_offset + 32..ph_offset + 40].try_into().unwrap()) as usize;
+                if p_offset + p_filesz <= elf_len {
+                    if let Some(id) = parse_notes(&bytes[p_offset..p_offset + p_filesz]) {
+                        if id.len() + 1 > out_cap {
+                            return -3;
+                        }
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(id.as_ptr() as *const c_char, out_hex, id.len());
+                            *out_hex.add(id.len()) = 0;
+                        }
+                        return 0;
+                    }
+                }
+            }
+        }
+    }
+
+    if e_shentsize >= 64 && e_shnum > 0 && e_shoff + e_shnum * e_shentsize <= elf_len {
+        for i in 0..e_shnum {
+            let sh_offset = e_shoff + i * e_shentsize;
+            let sh_type = u32::from_le_bytes(bytes[sh_offset + 4..sh_offset + 8].try_into().unwrap());
+            if sh_type == 7 { // SHT_NOTE
+                let s_offset = u64::from_le_bytes(bytes[sh_offset + 24..sh_offset + 32].try_into().unwrap()) as usize;
+                let s_size = u64::from_le_bytes(bytes[sh_offset + 32..sh_offset + 40].try_into().unwrap()) as usize;
+                if s_offset + s_size <= elf_len {
+                    if let Some(id) = parse_notes(&bytes[s_offset..s_offset + s_size]) {
+                        if id.len() + 1 > out_cap {
+                            return -3;
+                        }
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(id.as_ptr() as *const c_char, out_hex, id.len());
+                            *out_hex.add(id.len()) = 0;
+                        }
+                        return 0;
+                    }
+                }
+            }
+        }
+    }
+
+    -4
+}
+
+// ============================================================================
+// 14. Linux ⇄ Android Keycode & Input Translation Engine
+// ============================================================================
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MocktailRustKeyMapping {
+    pub scan_code: i32,
+    pub key_code: i32,
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_map_sdl_key_to_android(
+    sdl_scancode: u32,
+    sdl_key: u32,
+    out_mapping: *mut MocktailRustKeyMapping,
+) -> c_int {
+    if out_mapping.is_null() {
+        return 0;
+    }
+    let mapping = match sdl_scancode {
+        4 => (30, 29),    // A
+        5 => (48, 30),    // B
+        6 => (46, 31),    // C
+        7 => (32, 32),    // D
+        8 => (18, 33),    // E
+        9 => (33, 34),    // F
+        10 => (34, 35),   // G
+        11 => (35, 36),   // H
+        12 => (23, 37),   // I
+        13 => (36, 38),   // J
+        14 => (37, 39),   // K
+        15 => (38, 40),   // L
+        16 => (50, 41),   // M
+        17 => (49, 42),   // N
+        18 => (24, 43),   // O
+        19 => (25, 44),   // P
+        20 => (16, 45),   // Q
+        21 => (19, 46),   // R
+        22 => (31, 47),   // S
+        23 => (20, 48),   // T
+        24 => (22, 49),   // U
+        25 => (47, 50),   // V
+        26 => (17, 51),   // W
+        27 => (45, 52),   // X
+        28 => (21, 53),   // Y
+        29 => (44, 54),   // Z
+        30 => (2, 8),     // 1
+        31 => (3, 9),     // 2
+        32 => (4, 10),    // 3
+        33 => (5, 11),    // 4
+        34 => (6, 12),    // 5
+        35 => (7, 13),    // 6
+        36 => (8, 14),    // 7
+        37 => (9, 15),    // 8
+        38 => (10, 16),   // 9
+        39 => (11, 7),    // 0
+        40 => (28, 66),   // RETURN
+        41 => (1, 111),   // ESCAPE
+        42 => (14, 67),   // BACKSPACE
+        43 => (15, 61),   // TAB
+        44 => (57, 62),   // SPACE
+        45 => (12, 69),   // MINUS
+        46 => (13, 70),   // EQUALS
+        47 => (26, 71),   // LEFTBRACKET
+        48 => (27, 72),   // RIGHTBRACKET
+        49 => (43, 73),   // BACKSLASH
+        51 => (39, 74),   // SEMICOLON
+        52 => (40, 75),   // APOSTROPHE
+        53 => (41, 68),   // GRAVE
+        54 => (51, 55),   // COMMA
+        55 => (52, 56),   // PERIOD
+        56 => (53, 76),   // SLASH
+        57 => (58, 115),  // CAPSLOCK
+        58 => (59, 131),  // F1
+        59 => (60, 132),  // F2
+        60 => (61, 133),  // F3
+        61 => (62, 134),  // F4
+        62 => (63, 135),  // F5
+        63 => (64, 136),  // F6
+        64 => (65, 137),  // F7
+        65 => (66, 138),  // F8
+        66 => (67, 139),  // F9
+        67 => (68, 140),  // F10
+        68 => (87, 141),  // F11
+        69 => (88, 142),  // F12
+        70 => (99, 120),  // PRINTSCREEN
+        71 => (70, 116),  // SCROLLLOCK
+        72 => (119, 121), // PAUSE
+        73 => (110, 124), // INSERT
+        74 => (102, 122), // HOME
+        75 => (104, 92),  // PAGEUP
+        76 => (111, 112), // DELETE
+        77 => (107, 123), // END
+        78 => (109, 93),  // PAGEDOWN
+        79 => (106, 22),  // RIGHT
+        80 => (105, 21),  // LEFT
+        81 => (108, 20),  // DOWN
+        82 => (103, 19),  // UP
+        83 => (69, 143),  // NUMLOCKCLEAR
+        84 => (98, 154),  // KP_DIVIDE
+        85 => (55, 155),  // KP_MULTIPLY
+        86 => (74, 156),  // KP_MINUS
+        87 => (78, 157),  // KP_PLUS
+        88 => (96, 160),  // KP_ENTER
+        89 => (79, 145),  // KP_1
+        90 => (80, 146),  // KP_2
+        91 => (81, 147),  // KP_3
+        92 => (75, 148),  // KP_4
+        93 => (76, 149),  // KP_5
+        94 => (77, 150),  // KP_6
+        95 => (71, 151),  // KP_7
+        96 => (72, 152),  // KP_8
+        97 => (73, 153),  // KP_9
+        98 => (82, 144),  // KP_0
+        99 => (83, 158),  // KP_PERIOD
+        224 => (29, 113), // LCTRL
+        225 => (42, 59),  // LSHIFT
+        226 => (56, 57),  // LALT
+        227 => (125, 117),// LGUI
+        228 => (97, 114), // RCTRL
+        229 => (54, 60),  // RSHIFT
+        230 => (100, 58), // RALT
+        231 => (126, 118),// RGUI
+        232 => (127, 82), // APPLICATION
+        _ => {
+            let mut fallback_keycode = 0i32;
+            if (b'0'..=b'9').contains(&(sdl_key as u8)) {
+                fallback_keycode = 7 + (sdl_key as i32 - b'0' as i32);
+            } else if (b'a'..=b'z').contains(&(sdl_key as u8)) {
+                fallback_keycode = 29 + (sdl_key as i32 - b'a' as i32);
+            } else if (b'A'..=b'Z').contains(&(sdl_key as u8)) {
+                fallback_keycode = 29 + (sdl_key as i32 - b'A' as i32);
+            }
+            if fallback_keycode > 0 {
+                let scan = if sdl_scancode > 0 { sdl_scancode as i32 } else { fallback_keycode };
+                (scan, fallback_keycode)
+            } else if sdl_scancode > 0 {
+                (sdl_scancode as i32, sdl_scancode as i32)
+            } else {
+                (0, 0)
+            }
+        }
+    };
+    unsafe {
+        (*out_mapping).scan_code = mapping.0;
+        (*out_mapping).key_code = mapping.1;
+    }
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_map_sdl_mouse_button(sdl_button: u8) -> i32 {
+    match sdl_button {
+        1 => 0,  // SDL_BUTTON_LEFT -> Roblox Left (0)
+        3 => 1,  // SDL_BUTTON_RIGHT -> Roblox Right (1)
+        2 => 2,  // SDL_BUTTON_MIDDLE -> Roblox Middle (2)
+        4 => 7,  // SDL_BUTTON_X1 -> Roblox Button 4 / X1 (7)
+        5 => 15, // SDL_BUTTON_X2 -> Roblox Button 5 / X2 (15)
+        _ => -1,
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -1048,5 +1671,126 @@ mod tests {
     fn test_apk_signing_magic() {
         assert_eq!(mocktail_rust_verify_apk_signing_magic(b"APK Sig Block 42".as_ptr(), 16), 1);
         assert_eq!(mocktail_rust_verify_apk_signing_magic(b"WrongMagicBlock!".as_ptr(), 16), 0);
+    }
+
+    #[test]
+    fn test_mutf8() {
+        // Test null byte encoding: \0 -> 0xC0 0x80
+        let null_u16 = [0u16];
+        let mut mutf8_buf = [0u8; 8];
+        let mut len = 0usize;
+        assert_eq!(mocktail_rust_utf16_to_mutf8(null_u16.as_ptr(), 1, mutf8_buf.as_mut_ptr(), 8, &mut len), 0);
+        assert_eq!(len, 2);
+        assert_eq!(&mutf8_buf[0..2], &[0xC0, 0x80]);
+
+        // Test decode 0xC0 0x80 back to 0u16
+        let mut u16_buf = [0u16; 8];
+        let mut u16_len = 0usize;
+        assert_eq!(mocktail_rust_mutf8_to_utf16(mutf8_buf.as_ptr(), 2, u16_buf.as_mut_ptr(), 8, &mut u16_len), 0);
+        assert_eq!(u16_len, 1);
+        assert_eq!(u16_buf[0], 0);
+
+        // Test normal string "Hello"
+        let hello = b"Hello\0";
+        assert_eq!(mocktail_rust_mutf8_to_utf16(hello.as_ptr(), 5, u16_buf.as_mut_ptr(), 8, &mut u16_len), 0);
+        assert_eq!(u16_len, 5);
+        assert_eq!(&u16_buf[0..5], &[b'H' as u16, b'e' as u16, b'l' as u16, b'l' as u16, b'o' as u16]);
+
+        let mut utf8_buf = [0u8; 16];
+        let mut utf8_len = 0usize;
+        assert_eq!(mocktail_rust_mutf8_to_utf8(hello.as_ptr(), 5, utf8_buf.as_mut_ptr(), 16, &mut utf8_len), 0);
+        assert_eq!(utf8_len, 5);
+        assert_eq!(&utf8_buf[0..5], b"Hello");
+    }
+
+    #[test]
+    fn test_cookie_parser() {
+        let cookie = CString::new(".ROBLOSECURITY=\"_|WARNING:-DO-NOT-SHARE-THIS.--Sharing-this-will-allow-someone-to-log-in-as-you-and-to-steal-your-ROBUX-and-items.|_ABC1234567890XYZ\"; path=/; domain=.roblox.com").unwrap();
+        let mut out = [0 as c_char; 256];
+        let mut out_len = 0usize;
+        let rc = mocktail_rust_parse_roblox_cookie(cookie.as_ptr(), out.as_mut_ptr(), out.len(), &mut out_len);
+        assert_eq!(rc, 0);
+        let s = unsafe { CStr::from_ptr(out.as_ptr()) }.to_str().unwrap();
+        assert!(s.starts_with("_|WARNING:"));
+        assert!(s.ends_with("ABC1234567890XYZ"));
+
+        assert_eq!(mocktail_rust_is_valid_cookie_octet(b'A'), 1);
+        assert_eq!(mocktail_rust_is_valid_cookie_octet(b' '), 0);
+    }
+
+    #[test]
+    fn test_permissions_bridge() {
+        assert_eq!(mocktail_rust_validate_json_depth(b"{\"a\":{\"b\":1}}\0".as_ptr() as *const c_char, 8), 1);
+        assert_eq!(mocktail_rust_validate_json_depth(b"{\"a\":{\"b\":{\"c\":{\"d\":1}}}}\0".as_ptr() as *const c_char, 2), 0);
+
+        let json = CString::new("{\"permissions\":[\"LOCAL_NETWORK\",\"MICROPHONE_ACCESS\"]}").unwrap();
+        let mut has_missing = 0;
+        let mut missing_buf = [0 as c_char; 256];
+
+        // Mic enabled -> none missing
+        let rc = mocktail_rust_check_permission_request(json.as_ptr(), 1, &mut has_missing, missing_buf.as_mut_ptr(), 256);
+        assert_eq!(rc, 0);
+        assert_eq!(has_missing, 0);
+
+        // Mic disabled -> MICROPHONE_ACCESS missing
+        let rc2 = mocktail_rust_check_permission_request(json.as_ptr(), 0, &mut has_missing, missing_buf.as_mut_ptr(), 256);
+        assert_eq!(rc2, 0);
+        assert_eq!(has_missing, 1);
+        let missing_str = unsafe { CStr::from_ptr(missing_buf.as_ptr()) }.to_str().unwrap();
+        assert_eq!(missing_str, "[\"MICROPHONE_ACCESS\"]");
+    }
+
+    #[test]
+    fn test_elf_parser() {
+        let mut elf_buf = vec![0u8; 256];
+        elf_buf[0..4].copy_from_slice(b"\x7fELF");
+        elf_buf[4] = 2; // 64-bit
+        elf_buf[5] = 1; // Little-Endian
+        elf_buf[18] = 0x3E; // x86_64
+        elf_buf[19] = 0x00;
+
+        assert_eq!(mocktail_rust_verify_elf_architecture(elf_buf.as_ptr(), elf_buf.len(), 0x3E), 1);
+        assert_eq!(mocktail_rust_verify_elf_architecture(elf_buf.as_ptr(), elf_buf.len(), 0xB7), 0);
+
+        // Program headers setup: e_phoff = 64, e_phentsize = 56, e_phnum = 1
+        elf_buf[32..40].copy_from_slice(&64u64.to_le_bytes());
+        elf_buf[54..56].copy_from_slice(&56u16.to_le_bytes());
+        elf_buf[56..58].copy_from_slice(&1u16.to_le_bytes());
+
+        // Phdr at 64: p_type = 4 (PT_NOTE), p_offset = 120, p_filesz = 32
+        elf_buf[64..68].copy_from_slice(&4u32.to_le_bytes());
+        elf_buf[72..80].copy_from_slice(&120u64.to_le_bytes());
+        elf_buf[96..104].copy_from_slice(&32u64.to_le_bytes());
+
+        // Note at 120: namesz = 4, descsz = 4, type = 3
+        elf_buf[120..124].copy_from_slice(&4u32.to_le_bytes());
+        elf_buf[124..128].copy_from_slice(&4u32.to_le_bytes());
+        elf_buf[128..132].copy_from_slice(&3u32.to_le_bytes());
+        // Name: "GNU\0"
+        elf_buf[132..136].copy_from_slice(b"GNU\0");
+        // Desc: 0x12, 0x34, 0x56, 0x78
+        elf_buf[136..140].copy_from_slice(&[0x12, 0x34, 0x56, 0x78]);
+
+        let mut out_hex = [0 as c_char; 64];
+        let rc = mocktail_rust_parse_elf_build_id(elf_buf.as_ptr(), elf_buf.len(), out_hex.as_mut_ptr(), 64);
+        assert_eq!(rc, 0);
+        let s = unsafe { CStr::from_ptr(out_hex.as_ptr()) }.to_str().unwrap();
+        assert_eq!(s, "12345678");
+    }
+
+    #[test]
+    fn test_key_mapping() {
+        let mut mapping = MocktailRustKeyMapping { scan_code: 0, key_code: 0 };
+        assert_eq!(mocktail_rust_map_sdl_key_to_android(4, 0, &mut mapping), 1); // SDL_SCANCODE_A
+        assert_eq!(mapping.scan_code, 30);
+        assert_eq!(mapping.key_code, 29);
+
+        assert_eq!(mocktail_rust_map_sdl_key_to_android(40, 0, &mut mapping), 1); // RETURN
+        assert_eq!(mapping.scan_code, 28);
+        assert_eq!(mapping.key_code, 66);
+
+        assert_eq!(mocktail_rust_map_sdl_mouse_button(1), 0);
+        assert_eq!(mocktail_rust_map_sdl_mouse_button(3), 1);
+        assert_eq!(mocktail_rust_map_sdl_mouse_button(2), 2);
     }
 }

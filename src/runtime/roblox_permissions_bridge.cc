@@ -1,4 +1,5 @@
 #include "runtime/roblox_permissions_bridge.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <nlohmann/json.hpp>
 
@@ -6,7 +7,6 @@ namespace mocktail {
 namespace runtime {
 namespace {
 constexpr std::size_t kMaximumJsonBytes = 64 * 1024;
-constexpr std::size_t kMaximumFeatures = 64;
 constexpr char kMicrophone[] = "MICROPHONE_ACCESS";
 constexpr char kLocalNetwork[] = "LOCAL_NETWORK";
 
@@ -15,30 +15,6 @@ struct Response {
   jint code = 0;
   const char* outcome = "DENIED";
 };
-
-bool HasBoundedDepth(const std::string& json) {
-  int depth = 0;
-  bool quoted = false;
-  bool escaped = false;
-  for (const char ch : json) {
-    if (quoted) {
-      if (escaped)
-        escaped = false;
-      else if (ch == '\\')
-        escaped = true;
-      else if (ch == '"')
-        quoted = false;
-    } else if (ch == '"') {
-      quoted = true;
-    } else if (ch == '{' || ch == '[') {
-      if (++depth > 8)
-        return false;
-    } else if (ch == '}' || ch == ']') {
-      --depth;
-    }
-  }
-  return true;  // Syntax is checked by the JSON parser below.
-}
 
 Response Answer(JNIEnv* env, jstring message, std::size_t method,
                 bool microphone_enabled) {
@@ -62,46 +38,40 @@ Response Answer(JNIEnv* env, jstring message, std::size_t method,
     return rejected;
   const std::string owned(bytes, static_cast<std::size_t>(size));
   env->ReleaseStringUTFChars(message, bytes);
-  if (!HasBoundedDepth(owned))
-    return rejected;
-  const auto request = nlohmann::json::parse(owned, nullptr, false);
-  if (!request.is_object())
-    return rejected;
+
   if (support) {
+    if (mocktail_rust_validate_json_depth(owned.c_str(), 8) != 1) return rejected;
     return {{{"permissions", {kMicrophone, kLocalNetwork}}}, 0, "supported"};
   }
-  const auto features = request.find("permissions");
-  if (features == request.end() || !features->is_array() ||
-      features->size() > kMaximumFeatures) {
+
+  int has_missing = 0;
+  std::string missing_json(kMaximumJsonBytes, '\0');
+  const int status = mocktail_rust_check_permission_request(
+      owned.c_str(),
+      microphone_enabled ? 1 : 0,
+      &has_missing,
+      missing_json.data(),
+      missing_json.size());
+
+  if (status != 0) {
     return rejected;
   }
-  auto missing = nlohmann::json::array();
-  for (const auto& feature : *features) {
-    if (!feature.is_string())
-      return rejected;
-    const auto& name = feature.get_ref<const std::string&>();
-    if (name.empty() || name.size() > 128 ||
-        name.find_first_of("\r\n\t") != std::string::npos ||
-        name.find('\0') != std::string::npos) {
-      return rejected;
-    }
-    // The APK maps LOCAL_NETWORK to no Android runtime permissions. The
-    // existing host network implementation remains subject to OS policy.
-    if (name != kLocalNetwork && (name != kMicrophone || !microphone_enabled)) {
-      missing.push_back(name);
-    }
-  }
+
   if (upsell) {
-    // The host has no Android runtime-permission dialog. Do not invite a UI
-    // request that cannot grant access, especially for camera/contacts.
-    return {{{"upsellStatus", "HIDE"}, {"hiddenUpsellPermissions", *features}},
+    const auto request = nlohmann::json::parse(owned, nullptr, false);
+    const auto features = request.is_object() ? request.find("permissions") : request.end();
+    return {{{"upsellStatus", "HIDE"},
+             {"hiddenUpsellPermissions", features != request.end() ? *features : nlohmann::json::array()}},
             0,
             "HIDE"};
   }
-  const char* status = missing.empty() ? "AUTHORIZED" : "DENIED";
-  return {{{"status", status}, {"missingPermissions", std::move(missing)}},
+
+  auto missing_parsed = nlohmann::json::parse(missing_json.c_str(), nullptr, false);
+  const char* outcome_status = has_missing == 0 ? "AUTHORIZED" : "DENIED";
+  return {{{"status", outcome_status},
+           {"missingPermissions", missing_parsed.is_array() ? missing_parsed : nlohmann::json::array()}},
           0,
-          status};
+          outcome_status};
 }
 
 }  // namespace

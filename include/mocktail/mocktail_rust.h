@@ -176,6 +176,87 @@ int mocktail_rust_build_discord_frame(
  */
 int mocktail_rust_is_valid_jni_signature(const char* sig);
 
+// ============================================================================
+// 8. JNI Modified UTF-8 (MUTF-8) Engine
+// ============================================================================
+
+int mocktail_rust_mutf8_to_utf16(
+    const uint8_t* mutf8_ptr,
+    size_t mutf8_len,
+    uint16_t* out_utf16,
+    size_t out_cap,
+    size_t* out_len);
+
+int mocktail_rust_utf16_to_mutf8(
+    const uint16_t* utf16_ptr,
+    size_t utf16_len,
+    uint8_t* out_mutf8,
+    size_t out_cap,
+    size_t* out_len);
+
+int mocktail_rust_mutf8_to_utf8(
+    const uint8_t* mutf8_ptr,
+    size_t mutf8_len,
+    uint8_t* out_utf8,
+    size_t out_cap,
+    size_t* out_len);
+
+// ============================================================================
+// 9. Roblox Cookie & Token Parser
+// ============================================================================
+
+int mocktail_rust_is_valid_cookie_octet(uint8_t byte);
+
+int mocktail_rust_parse_roblox_cookie(
+    const char* raw_input,
+    char* out_buf,
+    size_t out_cap,
+    size_t* out_len);
+
+// ============================================================================
+// 10. Roblox MessageBus JSON & Permissions Bridge
+// ============================================================================
+
+int mocktail_rust_validate_json_depth(const char* json_str, size_t max_depth);
+
+int mocktail_rust_check_permission_request(
+    const char* json_str,
+    int microphone_enabled,
+    int* out_has_missing,
+    char* out_missing_json,
+    size_t out_cap);
+
+// ============================================================================
+// 11. ELF Header & GNU Build-ID Safe Parser
+// ============================================================================
+
+int mocktail_rust_verify_elf_architecture(
+    const uint8_t* elf_bytes,
+    size_t elf_len,
+    uint16_t expected_machine);
+
+int mocktail_rust_parse_elf_build_id(
+    const uint8_t* elf_bytes,
+    size_t elf_len,
+    char* out_hex,
+    size_t out_cap);
+
+// ============================================================================
+// 12. Linux ⇄ Android Keycode & Input Translation Engine
+// ============================================================================
+
+typedef struct MocktailRustKeyMapping {
+    int32_t scan_code;
+    int32_t key_code;
+} MocktailRustKeyMapping;
+
+int mocktail_rust_map_sdl_key_to_android(
+    uint32_t sdl_scancode,
+    uint32_t sdl_key,
+    MocktailRustKeyMapping* out_mapping);
+
+int32_t mocktail_rust_map_sdl_mouse_button(uint8_t sdl_button);
+
 #ifdef __cplusplus
 }
 #endif

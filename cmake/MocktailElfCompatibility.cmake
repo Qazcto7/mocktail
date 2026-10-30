@@ -43,6 +43,7 @@ target_link_libraries(mocktail_compat PUBLIC
   PkgConfig::LIBELF
   nlohmann_json::nlohmann_json
   Threads::Threads
+  mocktail_core_rust
 )
 target_link_libraries(mocktail_compat PRIVATE OpenSSL::Crypto)
 target_compile_features(mocktail_compat PUBLIC cxx_std_17)

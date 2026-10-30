@@ -175,13 +175,6 @@ bool ReadAll(int descriptor, void* bytes, std::size_t size) {
   return true;
 }
 
-void EncodeLittleEndian(uint32_t value, unsigned char* destination) {
-  destination[0] = static_cast<unsigned char>(value & 0xffU);
-  destination[1] = static_cast<unsigned char>((value >> 8U) & 0xffU);
-  destination[2] = static_cast<unsigned char>((value >> 16U) & 0xffU);
-  destination[3] = static_cast<unsigned char>((value >> 24U) & 0xffU);
-}
-
 uint32_t DecodeLittleEndian(const unsigned char* source) {
   return static_cast<uint32_t>(source[0]) |
          (static_cast<uint32_t>(source[1]) << 8U) |
@@ -195,11 +188,20 @@ bool WriteFrame(int descriptor, DiscordOpcode opcode,
       payload.size() > std::numeric_limits<uint32_t>::max()) {
     return false;
   }
-  std::array<unsigned char, 8> header{};
-  EncodeLittleEndian(static_cast<uint32_t>(opcode), header.data());
-  EncodeLittleEndian(static_cast<uint32_t>(payload.size()), header.data() + 4);
-  return WriteAll(descriptor, header.data(), header.size()) &&
-         WriteAll(descriptor, payload.data(), payload.size());
+  std::string null_payload(payload);
+  const std::size_t required_capacity = 8U + payload.size() + 1U;
+  std::vector<uint8_t> frame_buffer(required_capacity);
+  std::size_t written_len = 0;
+  const int status = mocktail_rust_build_discord_frame(
+      static_cast<uint32_t>(opcode),
+      null_payload.c_str(),
+      frame_buffer.data(),
+      frame_buffer.size(),
+      &written_len);
+  if (status != 0 || written_len == 0) {
+    return false;
+  }
+  return WriteAll(descriptor, frame_buffer.data(), written_len);
 }
 
 bool ReadFrame(int descriptor, DiscordFrame* frame) {
@@ -266,6 +268,14 @@ std::vector<std::string> DiscordSocketDirectories() {
                              "/app/com.discordapp.Discord");
     directories.emplace_back(std::string(runtime) +
                              "/.flatpak/com.discordapp.Discord/xdg-run");
+    directories.emplace_back(std::string(runtime) +
+                             "/app/dev.vencord.Vesktop");
+    directories.emplace_back(std::string(runtime) +
+                             "/.flatpak/dev.vencord.Vesktop/xdg-run");
+    directories.emplace_back(std::string(runtime) +
+                             "/app/com.discordapp.DiscordCanary");
+    directories.emplace_back(std::string(runtime) +
+                             "/app/com.discordapp.DiscordPTB");
     directories.emplace_back(std::string(runtime) + "/snap.discord");
   }
   append(std::getenv("TMPDIR"));

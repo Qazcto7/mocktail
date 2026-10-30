@@ -1,4 +1,5 @@
 #include "jni_strings.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <algorithm>
 #include <cstring>
@@ -50,85 +51,47 @@ std::string Utf16ToUtf8(const std::vector<jchar>& utf16) {
 std::string Utf16ToModifiedUtf8(const std::vector<jchar>& utf16,
                                 std::size_t begin = 0,
                                 std::size_t count = std::string::npos) {
-  std::string output;
   if (begin >= utf16.size()) {
-    return output;
+    return {};
   }
   const std::size_t end =
       std::min(utf16.size(), begin + std::min(count, utf16.size() - begin));
-  output.reserve((end - begin) * 3);
-  for (std::size_t index = begin; index < end; ++index) {
-    const std::uint32_t code_unit = utf16[index];
-    if (code_unit == 0) {
-      output.push_back(static_cast<char>(0xc0));
-      output.push_back(static_cast<char>(0x80));
-    } else if (code_unit <= 0x7f) {
-      output.push_back(static_cast<char>(code_unit));
-    } else if (code_unit <= 0x7ff) {
-      output.push_back(static_cast<char>(0xc0 | (code_unit >> 6)));
-      output.push_back(static_cast<char>(0x80 | (code_unit & 0x3f)));
-    } else {
-      output.push_back(static_cast<char>(0xe0 | (code_unit >> 12)));
-      output.push_back(static_cast<char>(0x80 | ((code_unit >> 6) & 0x3f)));
-      output.push_back(static_cast<char>(0x80 | (code_unit & 0x3f)));
-    }
+  const std::size_t slice_len = end - begin;
+  std::string output(slice_len * 3, '\0');
+  std::size_t out_len = 0;
+  if (mocktail_rust_utf16_to_mutf8(
+          reinterpret_cast<const uint16_t*>(utf16.data() + begin), slice_len,
+          reinterpret_cast<uint8_t*>(output.data()), output.size(),
+          &out_len) == 0) {
+    output.resize(out_len);
+    return output;
   }
-  return output;
+  return {};
 }
 
 std::vector<jchar> ModifiedUtf8ToUtf16(const char* input) {
-  std::vector<jchar> output;
   if (input == nullptr) {
+    return {};
+  }
+  const std::size_t size = std::strlen(input);
+  std::vector<jchar> output(size + 1);
+  std::size_t out_len = 0;
+  if (mocktail_rust_mutf8_to_utf16(
+          reinterpret_cast<const uint8_t*>(input), size,
+          reinterpret_cast<uint16_t*>(output.data()), output.size(),
+          &out_len) == 0) {
+    output.resize(out_len);
     return output;
   }
-  const auto* bytes = reinterpret_cast<const std::uint8_t*>(input);
-  const std::size_t size = std::strlen(input);
-  for (std::size_t index = 0; index < size;) {
-    const std::uint8_t first = bytes[index];
-    std::uint32_t code_point = 0xfffd;
-    std::size_t consumed = 1;
-    if (first != 0 && first <= 0x7f) {
-      code_point = first;
-    } else if ((first & 0xe0) == 0xc0 && index + 1 < size &&
-               (bytes[index + 1] & 0xc0) == 0x80) {
-      code_point = ((first & 0x1f) << 6) | (bytes[index + 1] & 0x3f);
-      if (code_point == 0 || code_point >= 0x80) {
-        consumed = 2;
-      } else {
-        code_point = 0xfffd;
-      }
-    } else if ((first & 0xf0) == 0xe0 && index + 2 < size &&
-               (bytes[index + 1] & 0xc0) == 0x80 &&
-               (bytes[index + 2] & 0xc0) == 0x80) {
-      code_point = ((first & 0x0f) << 12) | ((bytes[index + 1] & 0x3f) << 6) |
-                   (bytes[index + 2] & 0x3f);
-      if (code_point >= 0x800) {
-        consumed = 3;
-      } else {
-        code_point = 0xfffd;
-      }
-    } else if ((first & 0xf8) == 0xf0 && index + 3 < size &&
-               (bytes[index + 1] & 0xc0) == 0x80 &&
-               (bytes[index + 2] & 0xc0) == 0x80 &&
-               (bytes[index + 3] & 0xc0) == 0x80) {
-      code_point = ((first & 0x07) << 18) | ((bytes[index + 1] & 0x3f) << 12) |
-                   ((bytes[index + 2] & 0x3f) << 6) | (bytes[index + 3] & 0x3f);
-      if (code_point >= 0x10000 && code_point <= 0x10ffff) {
-        consumed = 4;
-      } else {
-        code_point = 0xfffd;
-      }
-    }
-    if (code_point <= 0xffff) {
-      output.push_back(static_cast<jchar>(code_point));
-    } else {
-      code_point -= 0x10000;
-      output.push_back(static_cast<jchar>(0xd800 + (code_point >> 10)));
-      output.push_back(static_cast<jchar>(0xdc00 + (code_point & 0x3ff)));
-    }
-    index += consumed;
+  output.resize(size * 2);
+  if (mocktail_rust_mutf8_to_utf16(
+          reinterpret_cast<const uint8_t*>(input), size,
+          reinterpret_cast<uint16_t*>(output.data()), output.size(),
+          &out_len) == 0) {
+    output.resize(out_len);
+    return output;
   }
-  return output;
+  return {};
 }
 
 static std::vector<jchar> MakeUtf16Vector(const jchar* utf16, jsize length) {

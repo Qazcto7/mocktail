@@ -1,21 +1,11 @@
 #include "runtime/webview_roblox_cookie.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <algorithm>
 #include <utility>
 
 namespace mocktail {
 namespace runtime {
-namespace {
-
-constexpr std::string_view kCanonicalPrefix = ".ROBLOSECURITY=";
-
-bool IsCookieOctet(unsigned char byte) {
-  return byte == 0x21 || (byte >= 0x23 && byte <= 0x2b) ||
-         (byte >= 0x2d && byte <= 0x3a) || (byte >= 0x3c && byte <= 0x5b) ||
-         (byte >= 0x5d && byte <= 0x7e);
-}
-
-}  // namespace
 
 SecureWebViewRobloxCookie::SecureWebViewRobloxCookie(std::string_view value) {
   bytes_.assign(value.begin(), value.end());
@@ -42,11 +32,11 @@ SecureWebViewRobloxCookie SecureWebViewRobloxCookie::Clone() const {
 }
 
 void SecureWebViewRobloxCookie::Clear() {
-  volatile char* byte = bytes_.empty() ? nullptr : bytes_.data();
-  for (std::size_t index = 0; index < bytes_.size(); ++index) {
-    byte[index] = '\0';
+  if (!bytes_.empty()) {
+    mocktail_rust_secure_zero(reinterpret_cast<uint8_t*>(bytes_.data()),
+                              bytes_.size());
+    bytes_.clear();
   }
-  bytes_.clear();
 }
 
 WebViewRobloxCookieResult PrepareWebViewRobloxCookie(
@@ -55,18 +45,22 @@ WebViewRobloxCookieResult PrepareWebViewRobloxCookie(
     return {};
   }
   const std::string_view header = credential.view();
-  if (header.size() < kCanonicalPrefix.size() ||
-      header.compare(0, kCanonicalPrefix.size(), kCanonicalPrefix) != 0) {
-    return {{}, "WebView credential is not a canonical .ROBLOSECURITY header"};
+  std::string null_terminated_header(header);
+  std::string extracted(kMaximumWebViewRobloxCookieValueBytes + 1, '\0');
+  size_t extracted_len = 0;
+  const int status = mocktail_rust_parse_roblox_cookie(
+      null_terminated_header.c_str(),
+      extracted.data(),
+      extracted.size(),
+      &extracted_len);
+  if (status == 0 && extracted_len > 0) {
+    extracted.resize(extracted_len);
+    SecureWebViewRobloxCookie cookie(extracted);
+    mocktail_rust_secure_zero(reinterpret_cast<uint8_t*>(extracted.data()),
+                              extracted.size());
+    return {std::move(cookie), {}};
   }
-  const std::string_view value = header.substr(kCanonicalPrefix.size());
-  if (value.empty() || value.size() > kMaximumWebViewRobloxCookieValueBytes ||
-      !std::all_of(value.begin(), value.end(), [](char byte) {
-        return IsCookieOctet(static_cast<unsigned char>(byte));
-      })) {
-    return {{}, "WebView .ROBLOSECURITY value is empty, oversized, or unsafe"};
-  }
-  return {SecureWebViewRobloxCookie(value), {}};
+  return {{}, "WebView .ROBLOSECURITY value is empty, oversized, or unsafe"};
 }
 
 }  // namespace runtime
