@@ -27,6 +27,7 @@
 #include "runtime/roblox_cookie_store.h"
 #include "runtime/runtime_paths.h"
 #include "services/auth_service.h"
+#include "mocktail/mocktail_rust.h"
 
 namespace mocktail {
 namespace runtime {
@@ -802,13 +803,10 @@ bool RemoveMigratedCookieFile(const std::filesystem::path& path,
 }
 
 void ClearSensitiveString(std::string* value) {
-  if (value == nullptr) {
+  if (value == nullptr || value->empty()) {
     return;
   }
-  volatile char* byte = value->empty() ? nullptr : value->data();
-  for (size_t index = 0; index < value->size(); ++index) {
-    byte[index] = '\0';
-  }
+  mocktail_rust_secure_zero(value->data(), value->size());
   value->clear();
 }
 
@@ -894,11 +892,10 @@ SecureRobloxCredential& SecureRobloxCredential::operator=(
 }
 
 void SecureRobloxCredential::Clear() {
-  volatile char* byte = bytes_.empty() ? nullptr : bytes_.data();
-  for (size_t index = 0; index < bytes_.size(); ++index) {
-    byte[index] = '\0';
+  if (!bytes_.empty()) {
+    mocktail_rust_secure_zero(bytes_.data(), bytes_.size());
+    bytes_.clear();
   }
-  bytes_.clear();
 }
 
 ScopedRobloxCredentialBinding::ScopedRobloxCredentialBinding(

@@ -50,6 +50,7 @@
 #include "runtime/single_instance_lock.h"
 #include "runtime/support_bundle.h"
 #include "runtime/supported_launch_policy.h"
+#include "mocktail/mocktail_rust.h"
 #include "runtime/system_proxy.h"
 #include "runtime/webview_helper_launcher.h"
 #include "services/auth_service.h"
@@ -220,6 +221,9 @@ void PromptFirstLaunchSignIn(
         std::cout << "  [auth] desktop sign-in successful; launching authenticated session\n";
       }
     }
+    mocktail_rust_secure_zero(context->captured_cookie.data(),
+                              context->captured_cookie.size());
+    context->captured_cookie.clear();
   } else {
     std::cout << "  [auth] desktop sign-in window closed; continuing as guest\n";
   }
@@ -246,6 +250,7 @@ void ConfigureHostDriverEnvironment() {
 }  // namespace
 
 int main(int argc, char* argv[]) {
+  mocktail_rust_init();
   // Roblox's own runtime constructs std::locale("") (the process's
   // environment locale) during its startup sequence. If LANG/LC_* names
   // a locale that isn't actually generated on the host (common on

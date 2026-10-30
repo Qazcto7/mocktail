@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "compat/guest_abi.h"
+#include "mocktail/mocktail_rust.h"
 
 namespace mocktail::update {
 namespace {
@@ -115,17 +116,19 @@ std::string FileDigest::FinalHex(std::size_t max_chars) {
 
 std::string HashText(std::string_view text, std::size_t max_hex_chars,
                      std::string* error) {
-  unsigned char digest[EVP_MAX_MD_SIZE];
-  unsigned int len = 0;
-  if (EVP_Digest(text.data(), text.size(), digest, &len, EVP_sha256(),
-                 nullptr) != 1 ||
-      len != 32U) {
+  char hex_buf[65] = {};
+  if (mocktail_rust_sha256(reinterpret_cast<const uint8_t*>(text.data()),
+                           text.size(), hex_buf, sizeof(hex_buf)) != 0) {
     if (error != nullptr && error->empty()) {
       *error = "cannot compute SHA-256 text digest";
     }
     return {};
   }
-  return FormatHex(digest, len, max_hex_chars);
+  std::string hex(hex_buf);
+  if (max_hex_chars > 0 && max_hex_chars < hex.size()) {
+    hex.resize(max_hex_chars);
+  }
+  return hex;
 }
 
 std::string HashText(std::string_view text, std::string* error) {
@@ -136,43 +139,12 @@ std::string HashRegularFile(const std::filesystem::path& path,
                             std::string* output_error) {
   std::string local_error;
   std::string* error = output_error != nullptr ? output_error : &local_error;
-  const int descriptor = open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-  if (descriptor < 0) {
-    *error = "cannot open regular file for hashing: " + path.string();
-    return {};
+  char hex_buf[65] = {};
+  if (mocktail_rust_sha256_file(path.c_str(), hex_buf, sizeof(hex_buf)) == 0) {
+    return std::string(hex_buf);
   }
-  struct stat metadata = {};
-  if (fstat(descriptor, &metadata) != 0 || !S_ISREG(metadata.st_mode)) {
-    close(descriptor);
-    *error = "hash input is not a regular file: " + path.string();
-    return {};
-  }
-  FileDigest digest;
-  if (!digest.valid()) {
-    close(descriptor);
-    *error = "cannot initialise the file digest";
-    return {};
-  }
-  std::vector<unsigned char> buffer(256U * 1024U);
-  while (true) {
-    const ssize_t bytes = read(descriptor, buffer.data(), buffer.size());
-    if (bytes == 0) break;
-    if (bytes < 0) {
-      if (errno == EINTR) continue;
-      close(descriptor);
-      *error = "cannot hash regular file: " + path.string();
-      return {};
-    }
-    if (!digest.Update(buffer.data(), static_cast<std::size_t>(bytes))) {
-      close(descriptor);
-      *error = "cannot hash regular file: " + path.string();
-      return {};
-    }
-  }
-  close(descriptor);
-  const std::string hex = digest.FinalHex();
-  if (hex.empty()) *error = "cannot finalise the hash of " + path.string();
-  return hex;
+  *error = "cannot hash regular file: " + path.string();
+  return {};
 }
 
 std::string HashAssetTree(const std::filesystem::path& root,

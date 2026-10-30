@@ -7,12 +7,16 @@
 #include <cstdio>
 #include <string>
 
+#include "mocktail/mocktail_rust.h"
+
 namespace {
 constexpr size_t kMaximumCookieBytes = 1024 * 1024;
 
 void Clear(std::string& value) {
-  volatile char* bytes = value.empty() ? nullptr : value.data();
-  for (size_t i = 0; i < value.size(); ++i) bytes[i] = '\0';
+  if (!value.empty()) {
+    mocktail_rust_secure_zero(value.data(), value.size());
+    value.clear();
+  }
 }
 }  // namespace
 

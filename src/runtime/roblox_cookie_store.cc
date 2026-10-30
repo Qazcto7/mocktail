@@ -20,6 +20,7 @@
 #include "runtime/helper_environment.h"
 #include "runtime/runtime_config_file.h"
 #include "runtime/runtime_paths.h"
+#include "mocktail/mocktail_rust.h"
 
 extern char** environ;
 
@@ -35,8 +36,8 @@ std::atomic<void (*)(std::string_view)> warning_handler{nullptr};
 std::atomic<bool> warning_shown{false};
 
 void ClearString(std::string* value) {
-  volatile char* bytes = value->empty() ? nullptr : value->data();
-  for (size_t i = 0; i < value->size(); ++i) bytes[i] = '\0';
+  if (value == nullptr || value->empty()) return;
+  mocktail_rust_secure_zero(value->data(), value->size());
   value->clear();
 }
 

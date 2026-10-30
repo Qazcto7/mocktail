@@ -140,6 +140,32 @@ endif()
 
 find_package(OpenSSL REQUIRED)
 
+find_program(CARGO_EXECUTABLE cargo REQUIRED)
+set(MOCKTAIL_RUST_CORE_DIR "${CMAKE_SOURCE_DIR}/rust/mocktail-core")
+set(MOCKTAIL_RUST_LIB_STATIC "${CMAKE_BINARY_DIR}/cargo-target/release/libmocktail_core.a")
+
+add_custom_command(
+  OUTPUT "${MOCKTAIL_RUST_LIB_STATIC}"
+  COMMAND "${CARGO_EXECUTABLE}" build --release --manifest-path "${MOCKTAIL_RUST_CORE_DIR}/Cargo.toml" --target-dir "${CMAKE_BINARY_DIR}/cargo-target"
+  WORKING_DIRECTORY "${MOCKTAIL_RUST_CORE_DIR}"
+  DEPENDS
+    "${MOCKTAIL_RUST_CORE_DIR}/src/lib.rs"
+    "${MOCKTAIL_RUST_CORE_DIR}/Cargo.toml"
+  COMMENT "Building mocktail-core Rust library"
+  VERBATIM
+)
+
+add_custom_target(mocktail_core_rust_build
+  DEPENDS "${MOCKTAIL_RUST_LIB_STATIC}"
+)
+
+add_library(mocktail_core_rust STATIC IMPORTED GLOBAL)
+set_target_properties(mocktail_core_rust PROPERTIES
+  IMPORTED_LOCATION "${MOCKTAIL_RUST_LIB_STATIC}"
+  INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_SOURCE_DIR}/include"
+)
+add_dependencies(mocktail_core_rust mocktail_core_rust_build)
+
 include(${CMAKE_SOURCE_DIR}/cmake/MocktailPlatformGraphics.cmake)
 foreach(foundation_target IN ITEMS
     mocktail_platform_sdl
@@ -236,6 +262,7 @@ target_link_libraries(mocktail_update PUBLIC
   PkgConfig::CAPSTONE
   nlohmann_json::nlohmann_json
   Threads::Threads
+  mocktail_core_rust
 )
 mocktail_apply_compile_options(mocktail_update)
 
@@ -338,7 +365,10 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
     COMPILE_OPTIONS -Wno-array-bounds
   )
 endif()
-target_link_libraries(mocktail_runtime PUBLIC Threads::Threads)
+target_link_libraries(mocktail_runtime PUBLIC
+  Threads::Threads
+  mocktail_core_rust
+)
 target_link_libraries(mocktail_runtime PRIVATE
   OpenSSL::Crypto
   CURL::libcurl
@@ -366,6 +396,8 @@ target_link_libraries(mocktail_failure_dialog PRIVATE PkgConfig::LIBADWAITA)
 mocktail_apply_compile_options(mocktail_failure_dialog)
 
 add_executable(mocktail_cookie_helper src/runtime/mocktail_cookie_helper.cc)
+target_include_directories(mocktail_cookie_helper PRIVATE include)
+target_link_libraries(mocktail_cookie_helper PRIVATE mocktail_core_rust)
 if(LIBSECRET_FOUND)
   target_link_libraries(mocktail_cookie_helper PRIVATE PkgConfig::LIBSECRET)
   target_compile_definitions(mocktail_cookie_helper PRIVATE MOCKTAIL_HAVE_LIBSECRET=1)
@@ -613,6 +645,7 @@ target_link_libraries(mocktail PRIVATE
   mocktail_roblox_fullscreen_runtime
   mocktail_window
   libc_shim
+  mocktail_core_rust
 )
 
 # Libraries loaded with dlopen() need the stub symbols.

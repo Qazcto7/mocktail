@@ -27,6 +27,10 @@ CMakeUserPresets.json
 # clangd cache
 .cache
 
+# Rust cargo build cache
+/rust/**/target/
+target/
+
 *.o
 *.obj
 *.a
