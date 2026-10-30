@@ -2702,11 +2702,12 @@ fn flatten_yaml_node(
     prefix: &str,
     node: &serde_yaml::Value,
     depth: usize,
+    max_depth: usize,
     map: &mut std::collections::HashMap<String, String>,
 ) -> Result<(), String> {
     match node {
         serde_yaml::Value::Mapping(m) => {
-            if depth > 2 {
+            if depth > max_depth {
                 return Err(format!("{} must be a scalar", prefix));
             }
             let mut keys_seen = std::collections::HashSet::new();
@@ -2725,7 +2726,10 @@ fn flatten_yaml_node(
                 };
                 match v {
                     serde_yaml::Value::Mapping(_) => {
-                        flatten_yaml_node(&new_path, v, depth + 1, map)?;
+                        if depth >= max_depth {
+                            return Err(format!("{} must be a scalar", new_path));
+                        }
+                        flatten_yaml_node(&new_path, v, depth + 1, max_depth, map)?;
                     }
                     serde_yaml::Value::String(s) => {
                         map.insert(new_path, s.clone());
@@ -2744,7 +2748,15 @@ fn flatten_yaml_node(
             }
             Ok(())
         }
-        _ => Err("root must be a mapping".to_string()),
+        _ => Err(format!("{} must be a mapping", prefix)),
+    }
+}
+
+fn parse_yaml_bool(v: &str) -> Option<bool> {
+    match v.to_ascii_lowercase().as_str() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
     }
 }
 
@@ -2804,7 +2816,7 @@ pub extern "C" fn mocktail_rust_parse_runtime_config_yaml(
                 values.insert("device".to_string(), s.to_string());
             } else if v.is_mapping() {
                 values.insert("device.__mapping".to_string(), "1".to_string());
-                if let Err(e) = flatten_yaml_node("device", v, 1, &mut values) {
+                if let Err(e) = flatten_yaml_node("device", v, 1, 1, &mut values) {
                     set_error(&e);
                     return -6;
                 }
@@ -2816,12 +2828,12 @@ pub extern "C" fn mocktail_rust_parse_runtime_config_yaml(
             "runtime", "appearance", "auth", "graphics", "performance",
             "audio", "window", "input", "compatibility", "network",
         ].contains(&key_str) {
-            if let Err(e) = flatten_yaml_node(key_str, v, 1, &mut values) {
+            if let Err(e) = flatten_yaml_node(key_str, v, 1, 1, &mut values) {
                 set_error(&e);
                 return -8;
             }
         } else if key_str == "integrations" {
-            if let Err(e) = flatten_yaml_node("integrations", v, 1, &mut values) {
+            if let Err(e) = flatten_yaml_node("integrations", v, 1, 3, &mut values) {
                 set_error(&e);
                 return -9;
             }
@@ -2922,10 +2934,10 @@ pub extern "C" fn mocktail_rust_parse_runtime_config_yaml(
             ("device.keyboard", "MOCKTAIL_KEYBOARD_MODE"),
         ] {
             if let Some(val) = values.get(yaml_key) {
-                let parsed = match val.as_str() {
-                    "true" => "on",
-                    "false" => "off",
-                    _ => {
+                let parsed = match parse_yaml_bool(val) {
+                    Some(true) => "on",
+                    Some(false) => "off",
+                    None => {
                         set_error(&format!("{} must be true or false", yaml_key));
                         return -16;
                     }
@@ -2935,17 +2947,17 @@ pub extern "C" fn mocktail_rust_parse_runtime_config_yaml(
         }
     }
 
+    // Runtime section
     if let Some(h) = values.get("runtime.headless") {
-        match h.as_str() {
-            "true" => { env.insert("MOCKTAIL_HEADLESS".to_string(), serde_json::json!("1")); }
-            "false" => { env.insert("MOCKTAIL_HEADLESS".to_string(), serde_json::json!("0")); }
-            _ => {
+        match parse_yaml_bool(h) {
+            Some(true) => { env.insert("MOCKTAIL_HEADLESS".to_string(), serde_json::json!("1")); }
+            Some(false) => { env.insert("MOCKTAIL_HEADLESS".to_string(), serde_json::json!("0")); }
+            None => {
                 set_error("runtime.headless must be true or false");
                 return -17;
             }
         }
     }
-
     if let Some(lib) = values.get("runtime.roblox_library") {
         if lib.is_empty() {
             set_error("runtime.roblox_library must not be empty");
@@ -2954,6 +2966,7 @@ pub extern "C" fn mocktail_rust_parse_runtime_config_yaml(
         env.insert("ROBLOX_LIB_PATH".to_string(), serde_json::json!(lib));
     }
 
+    // Appearance section
     if let Some(theme) = values.get("appearance.theme") {
         if !["roblox", "system", "light", "dark"].contains(&theme.as_str()) {
             set_error("appearance.theme must be roblox, system, light, or dark");
@@ -2962,6 +2975,7 @@ pub extern "C" fn mocktail_rust_parse_runtime_config_yaml(
         env.insert("MOCKTAIL_THEME".to_string(), serde_json::json!(theme));
     }
 
+    // Graphics section
     if let Some(backend) = values.get("graphics.backend") {
         if !["direct-vulkan", "opengl", "system", "angle-vulkan"].contains(&backend.as_str()) {
             set_error(&format!("graphics.backend is not supported: {}", backend));
@@ -2969,11 +2983,9 @@ pub extern "C" fn mocktail_rust_parse_runtime_config_yaml(
         }
         env.insert("MOCKTAIL_GRAPHICS_BACKEND".to_string(), serde_json::json!(backend));
     }
-
     if let Some(fps) = values.get("graphics.frame_rate_limit") {
         env.insert("MOCKTAIL_FRAME_RATE_LIMIT".to_string(), serde_json::json!(fps));
     }
-
     if let Some(vsync) = values.get("graphics.vsync") {
         if !["auto", "on", "off"].contains(&vsync.as_str()) {
             set_error("graphics.vsync must be auto, on, or off");
@@ -2981,7 +2993,6 @@ pub extern "C" fn mocktail_rust_parse_runtime_config_yaml(
         }
         env.insert("MOCKTAIL_VSYNC".to_string(), serde_json::json!(vsync));
     }
-
     if let Some(pm) = values.get("graphics.present_mode") {
         if !["auto", "fifo", "mailbox", "immediate"].contains(&pm.as_str()) {
             set_error("graphics.present_mode must be auto, fifo, mailbox, or immediate");
@@ -2990,43 +3001,245 @@ pub extern "C" fn mocktail_rust_parse_runtime_config_yaml(
         env.insert("MOCKTAIL_PRESENT_MODE".to_string(), serde_json::json!(pm));
     }
 
+    // Performance section
+    if let Some(mr) = values.get("performance.multithreaded_rendering") {
+        match parse_yaml_bool(mr) {
+            Some(true) => { env.insert("MOCKTAIL_MULTITHREADED_RENDERING".to_string(), serde_json::json!("1")); }
+            Some(false) => { env.insert("MOCKTAIL_MULTITHREADED_RENDERING".to_string(), serde_json::json!("0")); }
+            None => {
+                set_error("performance.multithreaded_rendering must be true or false");
+                return -23;
+            }
+        }
+    }
+    if let Some(pwm) = values.get("performance.physics_worker_mode") {
+        if !["auto", "latency", "throughput"].contains(&pwm.as_str()) {
+            set_error("performance.physics_worker_mode must be auto, latency, or throughput");
+            return -24;
+        }
+        env.insert("MOCKTAIL_PHYSICS_WORKER_MODE".to_string(), serde_json::json!(pwm));
+    }
     if let Some(mem) = values.get("performance.memory_limit_mb") {
         let n: u64 = match mem.parse() {
-            Ok(v) if v > 0 => v,
-            _ => {
-                set_error("performance.memory_limit_mb must be a positive integer");
-                return -23;
+            Ok(v) => v,
+            Err(_) => {
+                set_error("performance.memory_limit_mb must be a non-negative integer");
+                return -25;
             }
         };
         env.insert("MOCKTAIL_MEMORY_LIMIT_MB".to_string(), serde_json::json!(n.to_string()));
     }
+    if let Some(gm) = values.get("performance.gamemode") {
+        if !["auto", "on", "off"].contains(&gm.as_str()) {
+            set_error("performance.gamemode must be auto, on, or off");
+            return -26;
+        }
+        env.insert("MOCKTAIL_GAMEMODE".to_string(), serde_json::json!(gm));
+    }
 
-    if let Some(rpc) = values.get("integrations.discord_rpc.enabled") {
-        match rpc.as_str() {
-            "true" => { env.insert("MOCKTAIL_DISCORD_RPC_ENABLED".to_string(), serde_json::json!("1")); }
-            "false" => { env.insert("MOCKTAIL_DISCORD_RPC_ENABLED".to_string(), serde_json::json!("0")); }
+    // Audio section
+    if let Some(out_dev) = values.get("audio.output_device") {
+        if out_dev.is_empty() || out_dev.len() > 512 || out_dev.bytes().any(|b| b < 0x20 || b == 0x7F) {
+            set_error("audio.output_device must be non-empty, bounded, and contain no control bytes");
+            return -27;
+        }
+        env.insert("MOCKTAIL_AUDIO_OUTPUT_DEVICE".to_string(), serde_json::json!(out_dev));
+    }
+    if let Some(in_dev) = values.get("audio.input_device") {
+        if in_dev.is_empty() || in_dev.len() > 512 || in_dev.bytes().any(|b| b < 0x20 || b == 0x7F) {
+            set_error("audio.input_device must be non-empty, bounded, and contain no control bytes");
+            return -28;
+        }
+        env.insert("MOCKTAIL_AUDIO_INPUT_DEVICE".to_string(), serde_json::json!(in_dev));
+    }
+
+    // Window section
+    if let Some(w) = values.get("window.width") {
+        let n: u32 = match w.parse() {
+            Ok(v) if v > 0 => v,
             _ => {
-                set_error("integrations.discord_rpc.enabled must be true or false");
-                return -24;
+                set_error("window.width must be a positive integer");
+                return -29;
+            }
+        };
+        env.insert("MOCKTAIL_WIN_WIDTH".to_string(), serde_json::json!(n.to_string()));
+    }
+    if let Some(h) = values.get("window.height") {
+        let n: u32 = match h.parse() {
+            Ok(v) if v > 0 => v,
+            _ => {
+                set_error("window.height must be a positive integer");
+                return -30;
+            }
+        };
+        env.insert("MOCKTAIL_WIN_HEIGHT".to_string(), serde_json::json!(n.to_string()));
+    }
+    if let Some(title) = values.get("window.title") {
+        if title.is_empty() {
+            set_error("window.title must not be empty");
+            return -31;
+        }
+        env.insert("MOCKTAIL_WIN_TITLE".to_string(), serde_json::json!(title));
+    }
+    if let Some(hdpi) = values.get("window.high_dpi") {
+        match parse_yaml_bool(hdpi) {
+            Some(true) => { env.insert("MOCKTAIL_WIN_HIGH_DPI".to_string(), serde_json::json!("1")); }
+            Some(false) => { env.insert("MOCKTAIL_WIN_HIGH_DPI".to_string(), serde_json::json!("0")); }
+            None => {
+                set_error("window.high_dpi must be true or false");
+                return -32;
             }
         }
     }
 
-    if let Some(fl) = values.get("integrations.fleasion.enabled") {
-        match fl.as_str() {
-            "true" => { env.insert("MOCKTAIL_FLEASION_ENABLED".to_string(), serde_json::json!("1")); }
-            "false" => { env.insert("MOCKTAIL_FLEASION_ENABLED".to_string(), serde_json::json!("0")); }
-            _ => {
-                set_error("integrations.fleasion.enabled must be true or false");
-                return -25;
+    // Input section
+    if let Some(touch) = values.get("input.touch_enabled") {
+        match parse_yaml_bool(touch) {
+            Some(true) => { env.insert("MOCKTAIL_TOUCH_MODE".to_string(), serde_json::json!("on")); }
+            Some(false) => { env.insert("MOCKTAIL_TOUCH_MODE".to_string(), serde_json::json!("off")); }
+            None => {
+                set_error("input.touch_enabled must be true or false");
+                return -33;
             }
+        }
+    }
+
+    // Compatibility section
+    if let Some(dp) = values.get("compatibility.desktop_playability") {
+        match parse_yaml_bool(dp) {
+            Some(true) => { env.insert("MOCKTAIL_DESKTOP_PLAYABILITY".to_string(), serde_json::json!("1")); }
+            Some(false) => { env.insert("MOCKTAIL_DESKTOP_PLAYABILITY".to_string(), serde_json::json!("0")); }
+            None => {
+                set_error("compatibility.desktop_playability must be true or false");
+                return -34;
+            }
+        }
+    }
+
+    // Network section
+    if let Some(sys_prox) = values.get("network.use_system_proxy") {
+        match parse_yaml_bool(sys_prox) {
+            Some(true) => { env.insert("MOCKTAIL_USE_SYSTEM_PROXY".to_string(), serde_json::json!("1")); }
+            Some(false) => { env.insert("MOCKTAIL_USE_SYSTEM_PROXY".to_string(), serde_json::json!("0")); }
+            None => {
+                set_error("network.use_system_proxy must be true or false");
+                return -35;
+            }
+        }
+    }
+    let proxy_host = values.get("network.proxy_host");
+    let proxy_port = values.get("network.proxy_port");
+    let proxy_scheme = values.get("network.proxy_scheme");
+    let proxy_username = values.get("network.proxy_username");
+    let proxy_password = values.get("network.proxy_password");
+    if proxy_host.is_some() != proxy_port.is_some() || (proxy_scheme.is_some() && proxy_host.is_none()) {
+        set_error("network.proxy_host and network.proxy_port must be configured together");
+        return -36;
+    }
+    if let Some(host) = proxy_host {
+        let port = proxy_port.unwrap();
+        env.insert("MOCKTAIL_HTTP_PROXY_HOST".to_string(), serde_json::json!(host));
+        env.insert("MOCKTAIL_HTTP_PROXY_PORT".to_string(), serde_json::json!(port));
+        env.insert("MOCKTAIL_HTTP_PROXY_SCHEME".to_string(), serde_json::json!(proxy_scheme.map(|s| s.as_str()).unwrap_or("http")));
+        if let Some(u) = proxy_username {
+            env.insert("MOCKTAIL_HTTP_PROXY_USERNAME".to_string(), serde_json::json!(u));
+        }
+        if let Some(p) = proxy_password {
+            env.insert("MOCKTAIL_HTTP_PROXY_PASSWORD".to_string(), serde_json::json!(p));
+        }
+    }
+    if let Some(ca) = values.get("network.ca_bundle") {
+        if ca.is_empty() || !ca.starts_with('/') {
+            set_error("network.ca_bundle must be an absolute file path");
+            return -37;
+        }
+        env.insert("MOCKTAIL_CA_BUNDLE".to_string(), serde_json::json!(ca));
+    }
+
+    // Auth section
+    if let Some(sec) = values.get("auth.use_libsecret") {
+        match parse_yaml_bool(sec) {
+            Some(true) => { env.insert("MOCKTAIL_USE_LIBSECRET".to_string(), serde_json::json!("1")); }
+            Some(false) => { env.insert("MOCKTAIL_USE_LIBSECRET".to_string(), serde_json::json!("0")); }
+            None => {
+                set_error("auth.use_libsecret must be true or false");
+                return -38;
+            }
+        }
+    }
+
+    // Integrations - Fleasion
+    if let Some(fl) = values.get("integrations.fleasion.enabled") {
+        match parse_yaml_bool(fl) {
+            Some(true) => { env.insert("MOCKTAIL_FLEASION_ENABLED".to_string(), serde_json::json!("1")); }
+            Some(false) => { env.insert("MOCKTAIL_FLEASION_ENABLED".to_string(), serde_json::json!("0")); }
+            None => {
+                set_error("integrations.fleasion.enabled must be true or false");
+                return -39;
+            }
+        }
+    }
+    if let Some(pm) = values.get("integrations.fleasion.proxy_mode") {
+        env.insert("MOCKTAIL_FLEASION_PROXY_MODE".to_string(), serde_json::json!(pm));
+    }
+    if let Some(port) = values.get("integrations.fleasion.proxy_port") {
+        env.insert("MOCKTAIL_FLEASION_PROXY_PORT".to_string(), serde_json::json!(port));
+    }
+    if let Some(ca) = values.get("integrations.fleasion.ca_certificate") {
+        env.insert("MOCKTAIL_FLEASION_CA_CERTIFICATE".to_string(), serde_json::json!(ca));
+    }
+
+    // Integrations - Discord RPC
+    let bool_discord_fields = [
+        ("integrations.discord_rpc.enabled", "MOCKTAIL_DISCORD_RPC_ENABLED"),
+        ("integrations.discord_rpc.show_place_name", "MOCKTAIL_DISCORD_RPC_SHOW_PLACE_NAME"),
+        ("integrations.discord_rpc.show_elapsed_time", "MOCKTAIL_DISCORD_RPC_SHOW_ELAPSED_TIME"),
+        ("integrations.discord_rpc.join.enabled", "MOCKTAIL_DISCORD_RPC_JOIN_ENABLED"),
+        ("integrations.discord_rpc.join.public_servers_only", "MOCKTAIL_DISCORD_RPC_PUBLIC_SERVERS_ONLY"),
+    ];
+    for (k, env_k) in bool_discord_fields {
+        if let Some(val) = values.get(k) {
+            match parse_yaml_bool(val) {
+                Some(true) => { env.insert(env_k.to_string(), serde_json::json!("1")); }
+                Some(false) => { env.insert(env_k.to_string(), serde_json::json!("0")); }
+                None => {
+                    set_error(&format!("{} must be true or false", k));
+                    return -40;
+                }
+            }
+        }
+    }
+
+    if let Some(app_id) = values.get("integrations.discord_rpc.application_id") {
+        if app_id.len() < 17 || app_id.len() > 20 || !app_id.chars().all(|c| c.is_ascii_digit()) {
+            set_error("integrations.discord_rpc.application_id must be a Discord snowflake");
+            return -41;
+        }
+        env.insert("MOCKTAIL_DISCORD_APPLICATION_ID".to_string(), serde_json::json!(app_id));
+    }
+
+    let string_discord_fields = [
+        ("integrations.discord_rpc.join.button_label", "MOCKTAIL_DISCORD_RPC_JOIN_BUTTON_LABEL", 32),
+        ("integrations.discord_rpc.text.browsing", "MOCKTAIL_DISCORD_RPC_TEXT_BROWSING", 128),
+        ("integrations.discord_rpc.text.joining", "MOCKTAIL_DISCORD_RPC_TEXT_JOINING", 128),
+        ("integrations.discord_rpc.text.playing", "MOCKTAIL_DISCORD_RPC_TEXT_PLAYING", 128),
+        ("integrations.discord_rpc.text.state", "MOCKTAIL_DISCORD_RPC_TEXT_STATE", 128),
+        ("integrations.discord_rpc.text.unknown_place", "MOCKTAIL_DISCORD_RPC_TEXT_UNKNOWN_PLACE", 128),
+    ];
+    for (yaml_key, env_key, max_len) in string_discord_fields {
+        if let Some(val) = values.get(yaml_key) {
+            if val.is_empty() || val.len() > max_len || val.bytes().any(|b| b < 0x20 || b == 0x7F) {
+                set_error(&format!("{} must be non-empty, bounded, and contain no control bytes", yaml_key));
+                return -42;
+            }
+            env.insert(env_key.to_string(), serde_json::json!(val));
         }
     }
 
     let dumped = serde_json::Value::Object(env).to_string();
     if dumped.len() + 1 > out_cap {
         set_error("output buffer too small");
-        return -26;
+        return -43;
     }
     unsafe {
         std::ptr::copy_nonoverlapping(dumped.as_ptr() as *const c_char, out_env_json, dumped.len());
@@ -6088,14 +6301,23 @@ performance:
   memory_limit_mb: 2048
 runtime:
   headless: false
+integrations:
+  discord_rpc:
+    enabled: true
+    show_place_name: true
+    show_elapsed_time: true
+    join:
+      enabled: true
+      public_servers_only: true
+      button_label: "Join Game"
 "#;
-        let mut out_env = [0 as c_char; 1024];
+        let mut out_env = [0 as c_char; 4096];
         let mut out_err = [0 as c_char; 256];
         let rc = mocktail_rust_parse_runtime_config_yaml(
             yaml.as_ptr(),
             yaml.len(),
             out_env.as_mut_ptr(),
-            1024,
+            4096,
             out_err.as_mut_ptr(),
             256,
         );
@@ -6105,6 +6327,10 @@ runtime:
         assert!(env_str.contains("\"MOCKTAIL_VSYNC\":\"on\""));
         assert!(env_str.contains("\"MOCKTAIL_MEMORY_LIMIT_MB\":\"2048\""));
         assert!(env_str.contains("\"MOCKTAIL_HEADLESS\":\"0\""));
+        assert!(env_str.contains("\"MOCKTAIL_DISCORD_RPC_ENABLED\":\"1\""));
+        assert!(env_str.contains("\"MOCKTAIL_DISCORD_RPC_JOIN_ENABLED\":\"1\""));
+        assert!(env_str.contains("\"MOCKTAIL_DISCORD_RPC_PUBLIC_SERVERS_ONLY\":\"1\""));
+        assert!(env_str.contains("\"MOCKTAIL_DISCORD_RPC_JOIN_BUTTON_LABEL\":\"Join Game\""));
     }
 
     #[test]
