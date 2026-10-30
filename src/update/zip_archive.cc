@@ -1,4 +1,5 @@
 #include "update/zip_archive.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <fcntl.h>
 #include <minizip/unzip.h>
@@ -126,21 +127,11 @@ bool Locate(void* archive, std::string_view entry, ZipEntry* metadata,
 }  // namespace
 
 bool IsSafeArchivePath(std::string_view path) {
-  if (path.empty() || path.front() == '/' || path.find('\0') != path.npos ||
-      path.find('\\') != path.npos) {
+  if (path.empty() || path.find('\0') != path.npos) {
     return false;
   }
-  std::size_t begin = 0;
-  while (begin < path.size()) {
-    std::size_t end = path.find('/', begin);
-    if (end == path.npos) end = path.size();
-    const std::string_view component = path.substr(begin, end - begin);
-    if (component.empty() || component == "." || component == "..") {
-      return end == path.size() && component.empty();
-    }
-    begin = end + 1;
-  }
-  return true;
+  std::string null_terminated(path);
+  return mocktail_rust_is_safe_archive_path(null_terminated.c_str()) == 1;
 }
 
 ZipListResult ListZipEntries(const std::filesystem::path& archive_path,
@@ -217,41 +208,26 @@ bool ExtractZipEntry(const std::filesystem::path& archive_path,
                      std::string_view entry,
                      const std::filesystem::path& destination,
                      std::size_t maximum_bytes, std::string* error) {
-  Archive archive = Open(archive_path, error);
-  if (!archive) return false;
-  ZipEntry metadata;
-  if (!Locate(archive.get(), entry, &metadata, error) || metadata.directory ||
-      metadata.symbolic_link || metadata.uncompressed_size > maximum_bytes) {
-    if (error->empty()) *error = "ZIP entry is invalid or too large";
-    return false;
+  std::string local_error;
+  std::string* err = error != nullptr ? error : &local_error;
+  std::string entry_str(entry);
+  const int rc = mocktail_rust_extract_zip_entry(
+      archive_path.c_str(), entry_str.c_str(), destination.c_str(), maximum_bytes);
+  if (rc == 0) {
+    return true;
   }
-  std::error_code filesystem_error;
-  std::filesystem::create_directories(destination.parent_path(),
-                                      filesystem_error);
-  if (filesystem_error) {
-    *error = "cannot create ZIP extraction directory";
-    return false;
+  switch (rc) {
+    case -2: *err = "cannot open ZIP archive: " + archive_path.string(); break;
+    case -3: *err = "cannot read ZIP metadata: " + archive_path.string(); break;
+    case -4: *err = "ZIP entry is missing: " + entry_str; break;
+    case -5: *err = "ZIP entry violates Zip-Slip security path check: " + entry_str; break;
+    case -6:
+    case -7: *err = "ZIP entry is invalid or too large"; break;
+    case -8: *err = "cannot create ZIP extraction directory"; break;
+    case -15: *err = "extracted ZIP entry already exists: " + destination.string(); break;
+    default: *err = "cannot extract ZIP entry safely"; break;
   }
-  const int descriptor =
-      open(destination.c_str(),
-           O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
-  if (descriptor < 0) {
-    *error = "cannot create extracted ZIP entry";
-    return false;
-  }
-  std::size_t written = 0;
-  const bool extracted =
-      WriteCurrent(archive.get(), descriptor, maximum_bytes, &written, error);
-  const bool synced = fsync(descriptor) == 0;
-  close(descriptor);
-  if (!extracted || !synced || written != metadata.uncompressed_size) {
-    std::filesystem::remove(destination, filesystem_error);
-    if (extracted && (!synced || written != metadata.uncompressed_size)) {
-      *error = "extracted ZIP entry is truncated";
-    }
-    return false;
-  }
-  return true;
+  return false;
 }
 
 bool ExtractZipPrefix(const std::filesystem::path& archive_path,

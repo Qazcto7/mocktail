@@ -59,6 +59,29 @@ int mocktail_rust_is_valid_json(const char* json_str);
  */
 int mocktail_rust_is_safe_url(const char* url);
 
+/**
+ * Validates whether an archive relative path is safe against Zip-Slip and path traversal.
+ * Returns 1 if safe, 0 if unsafe.
+ */
+int mocktail_rust_is_safe_archive_path(const char* path);
+
+/**
+ * Safely extracts an individual entry from a ZIP / APK archive with Zip-Slip protection
+ * and atomic replacement.
+ * Returns 0 on success, negative error code on failure.
+ */
+int mocktail_rust_extract_zip_entry(
+    const char* archive_path,
+    const char* entry_name,
+    const char* dest_path,
+    size_t max_bytes);
+
+/**
+ * Validates whether a JNI method descriptor strictly conforms to JVMS §4.3.3.
+ * Returns 1 if valid, 0 if invalid.
+ */
+int mocktail_rust_is_valid_jni_signature(const char* sig);
+
 #ifdef __cplusplus
 }
 #endif

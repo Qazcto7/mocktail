@@ -3,6 +3,7 @@
 #include "jni_references.h"
 #include "jni_fields.h"
 #include "jni_strings.h"
+#include "mocktail/mocktail_rust.h"
 
 #include "mocktail/audio/fmod_thread_floating_point.h"
 
@@ -217,6 +218,10 @@ const char* MethodSignature(jmethodID method_id) {
 jmethodID StoreMethodId(const char* name, const char* sig) {
   std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
   if (!name) {
+    return nullptr;
+  }
+  if (sig != nullptr && sig[0] == '(' && mocktail_rust_is_valid_jni_signature(sig) == 0) {
+    std::cerr << "[JNI] Warning: Invalid method signature rejected by Rust core: " << sig << '\n';
     return nullptr;
   }
   std::string key = name;

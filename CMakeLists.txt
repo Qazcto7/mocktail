@@ -282,6 +282,7 @@ add_library(mocktail_legacy_jnivm STATIC
 )
 add_library(Mocktail::LegacyJni ALIAS mocktail_legacy_jnivm)
 target_include_directories(mocktail_legacy_jnivm PUBLIC include)
+target_link_libraries(mocktail_legacy_jnivm PUBLIC mocktail_core_rust)
 mocktail_apply_compile_options(mocktail_legacy_jnivm)
 # A JDK is not required for these ABI-only headers.
 set(MOCKTAIL_JNI_INCLUDE_DIRS
