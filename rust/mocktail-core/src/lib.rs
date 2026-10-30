@@ -2106,6 +2106,2019 @@ pub extern "C" fn mocktail_rust_bionic_eai_error(posix_error: c_int) -> c_int {
 }
 
 // ============================================================================
+// 21. Roblox Launch URI & Deep Links
+// ============================================================================
+
+fn percent_decode_helper(encoded: &str, plus_as_space: bool) -> Result<String, &'static str> {
+    if encoded.len() > 16384 {
+        return Err("Roblox launch parameter size is invalid");
+    }
+    let bytes = encoded.as_bytes();
+    let mut decoded: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return Err("Roblox launch URI contains invalid percent encoding");
+            }
+            let h = match (bytes[i + 1] as char).to_digit(16) {
+                Some(v) => v as u8,
+                None => return Err("Roblox launch URI contains invalid percent encoding"),
+            };
+            let l = match (bytes[i + 2] as char).to_digit(16) {
+                Some(v) => v as u8,
+                None => return Err("Roblox launch URI contains invalid percent encoding"),
+            };
+            decoded.push((h << 4) | l);
+            i += 3;
+        } else if bytes[i] == b'+' && plus_as_space {
+            decoded.push(b' ');
+            i += 1;
+        } else {
+            decoded.push(bytes[i]);
+            i += 1;
+        }
+    }
+    if decoded.iter().any(|&b| b < 0x20 || b == 0x7F) {
+        return Err("Roblox launch URI contains a control byte");
+    }
+    let s = String::from_utf8(decoded).map_err(|_| "Roblox launch parameter is not bounded UTF-8")?;
+    if s.len() > 16384 {
+        return Err("Roblox launch parameter is not bounded UTF-8");
+    }
+    Ok(s)
+}
+
+#[derive(Default, Debug)]
+struct ParsedLaunchFields {
+    place_id: i64,
+    user_id: i64,
+    conversation_id: i64,
+    referred_by_player_id: i64,
+    request_type: String,
+    game_instance_id: String,
+    reserved_server_access_code: String,
+    call_id: String,
+    referral_page: String,
+    access_code: String,
+    link_code: String,
+    launch_data: String,
+    event_id: String,
+    game_join_context: String,
+    join_attempt_id: String,
+    join_attempt_origin: String,
+    iso_context: String,
+    seen_fields: std::collections::HashSet<String>,
+}
+
+fn assign_launch_field(
+    raw_key: &str,
+    mut value: String,
+    decode_modern_launch_data: bool,
+    fields: &mut ParsedLaunchFields,
+) -> Result<(), &'static str> {
+    if raw_key.is_empty() || raw_key.len() > 128 {
+        return Err("Roblox launch parameter key is invalid");
+    }
+    let key = raw_key.to_ascii_lowercase();
+    let canonical = match key.as_str() {
+        "request" | "requesttype" => "request",
+        "placeid" => "placeId",
+        "userid" => "userId",
+        "conversationid" => "conversationId",
+        "referredbyplayerid" => "referredByPlayerId",
+        "gameid" | "gameinstanceid" | "instanceid" => "gameInstanceId",
+        "reservedserveraccesscode" => "reservedServerAccessCode",
+        "callid" => "callId",
+        "referralpage" => "referralPage",
+        "accesscode" => "accessCode",
+        "linkcode" | "privateserverlinkcode" => "linkCode",
+        "launchdata" => "launchData",
+        "eventid" => "eventId",
+        "gamejoincontext" => "gameJoinContext",
+        "joinattemptid" => "joinAttemptId",
+        "joinattemptorigin" => "joinAttemptOrigin",
+        "isocontext" => "isoContext",
+        _ => return Ok(()),
+    };
+    if !fields.seen_fields.insert(canonical.to_string()) {
+        return Err("Roblox launch URI repeats a singleton field");
+    }
+    if canonical == "launchData" && decode_modern_launch_data && value.contains('%') {
+        value = percent_decode_helper(&value, false)?;
+    }
+    match canonical {
+        "request" => fields.request_type = value,
+        "placeId" => fields.place_id = parse_decimal_int(&value, false)?,
+        "userId" => fields.user_id = parse_decimal_int(&value, true)?,
+        "conversationId" => fields.conversation_id = parse_decimal_int(&value, true)?,
+        "referredByPlayerId" => fields.referred_by_player_id = parse_decimal_int(&value, true)?,
+        "gameInstanceId" => fields.game_instance_id = value,
+        "reservedServerAccessCode" => fields.reserved_server_access_code = value,
+        "callId" => fields.call_id = value,
+        "referralPage" => fields.referral_page = value,
+        "accessCode" => fields.access_code = value,
+        "linkCode" => fields.link_code = value,
+        "launchData" => fields.launch_data = value,
+        "eventId" => fields.event_id = value,
+        "gameJoinContext" => fields.game_join_context = value,
+        "joinAttemptId" => fields.join_attempt_id = value,
+        "joinAttemptOrigin" => fields.join_attempt_origin = value,
+        "isoContext" => fields.iso_context = value,
+        _ => {}
+    }
+    Ok(())
+}
+
+fn parse_decimal_int(val: &str, allow_zero: bool) -> Result<i64, &'static str> {
+    if val.is_empty() || val.starts_with('+') || val.starts_with('-') {
+        return Err("Roblox launch integer is invalid");
+    }
+    match val.parse::<i64>() {
+        Ok(n) if n >= 0 && (allow_zero || n > 0) => Ok(n),
+        _ => Err("Roblox launch integer is invalid"),
+    }
+}
+
+fn parse_launch_query(
+    query: &str,
+    decode_modern_launch_data: bool,
+    fields: &mut ParsedLaunchFields,
+) -> Result<(), &'static str> {
+    if query.is_empty() {
+        return Err("Roblox launch URI query is missing");
+    }
+    let mut count = 0;
+    for pair in query.split('&') {
+        count += 1;
+        if count > 64 {
+            return Err("Roblox launch URI has too many parameters");
+        }
+        if pair.is_empty() {
+            return Err("Roblox launch URI contains an empty parameter");
+        }
+        let equals = pair.find('=').ok_or("Roblox launch URI parameter has no value")?;
+        if equals == 0 {
+            return Err("Roblox launch URI parameter has no value");
+        }
+        let key = percent_decode_helper(&pair[..equals], true)?;
+        let val = percent_decode_helper(&pair[equals + 1..], true)?;
+        assign_launch_field(&key, val, decode_modern_launch_data, fields)?;
+    }
+    Ok(())
+}
+
+fn parse_place_launcher_url(launcher_url: &str, fields: &mut ParsedLaunchFields) -> Result<(), &'static str> {
+    if launcher_url.is_empty() || launcher_url.len() > 2048 {
+        return Err("Roblox PlaceLauncher URL is invalid");
+    }
+    let parsed = url::Url::parse(launcher_url).map_err(|_| "Roblox PlaceLauncher URL cannot be parsed")?;
+    if parsed.scheme().to_ascii_lowercase() != "https" {
+        return Err("Roblox PlaceLauncher URL origin or path is not allowed");
+    }
+    let host = parsed.host_str().unwrap_or("").to_ascii_lowercase();
+    if host != "www.roblox.com" && host != "roblox.com" && host != "assetgame.roblox.com" {
+        return Err("Roblox PlaceLauncher URL origin or path is not allowed");
+    }
+    if parsed.path().to_ascii_lowercase() != "/game/placelauncher.ashx" {
+        return Err("Roblox PlaceLauncher URL origin or path is not allowed");
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() || parsed.fragment().is_some() {
+        return Err("Roblox PlaceLauncher URL origin or path is not allowed");
+    }
+    if let Some(port) = parsed.port() {
+        if port != 443 {
+            return Err("Roblox PlaceLauncher URL port is not allowed");
+        }
+    }
+    let query = parsed.query().ok_or("Roblox PlaceLauncher URL has no query")?;
+    parse_launch_query(query, false, fields)
+}
+
+fn parse_classic_payload(payload: &str, fields: &mut ParsedLaunchFields) -> Result<(), &'static str> {
+    if payload.is_empty() {
+        return Err("Roblox player launch payload is missing");
+    }
+    let mut version_seen = false;
+    let mut launch_mode_seen = false;
+    let mut launcher_url_seen = false;
+    let mut launcher_url = String::new();
+    let mut count = 0;
+    for field in payload.split('+') {
+        count += 1;
+        if count > 64 {
+            return Err("Roblox player launch payload has too many fields");
+        }
+        if field.len() > 128 + 1 + 16384 {
+            return Err("Roblox player launch field is too large");
+        }
+        if !version_seen {
+            if field != "1" {
+                return Err("Roblox player launch version is unsupported");
+            }
+            version_seen = true;
+        } else {
+            let colon = field.find(':').ok_or("Roblox player launch field is malformed")?;
+            if colon == 0 {
+                return Err("Roblox player launch field is malformed");
+            }
+            let key = field[..colon].to_ascii_lowercase();
+            let encoded_value = &field[colon + 1..];
+            if key == "launchmode" {
+                if launch_mode_seen {
+                    return Err("Roblox player launch repeats launchmode");
+                }
+                launch_mode_seen = true;
+                let mode = percent_decode_helper(encoded_value, false)?;
+                if mode.to_ascii_lowercase() != "play" {
+                    return Err("Roblox player launch mode is unsupported");
+                }
+            } else if key == "placelauncherurl" {
+                if launcher_url_seen {
+                    return Err("Roblox player launch repeats PlaceLauncher URL");
+                }
+                launcher_url_seen = true;
+                launcher_url = percent_decode_helper(encoded_value, false)?;
+            }
+        }
+    }
+    if !version_seen || !launch_mode_seen || !launcher_url_seen {
+        return Err("Roblox player launch contract is incomplete");
+    }
+    parse_place_launcher_url(&launcher_url, fields)?;
+    if fields.request_type.is_empty() {
+        return Err("Roblox PlaceLauncher request type is missing");
+    }
+    Ok(())
+}
+
+fn parse_modern_payload(payload: &str, fields: &mut ParsedLaunchFields) -> Result<(), &'static str> {
+    let lower = payload.to_ascii_lowercase();
+    let query;
+    let decode_launch_data_twice;
+    if lower.starts_with("//experiences/start?") {
+        query = &payload["//experiences/start?".len()..];
+        decode_launch_data_twice = true;
+    } else if lower.starts_with("//placeid=") {
+        query = &payload[2..];
+        decode_launch_data_twice = false;
+    } else {
+        return Err("Roblox launch path is unsupported");
+    }
+    if query.contains('#') || query.contains('/') {
+        return Err("Roblox launch URI contains an unsupported fragment");
+    }
+    parse_launch_query(query, decode_launch_data_twice, fields)
+}
+
+fn validate_launch_selectors(fields: &ParsedLaunchFields) -> Result<(), &'static str> {
+    let private_join = !fields.access_code.is_empty() || !fields.link_code.is_empty();
+    let selectors = [
+        fields.user_id > 0,
+        fields.conversation_id > 0,
+        private_join,
+        !fields.game_instance_id.is_empty(),
+        !fields.reserved_server_access_code.is_empty(),
+    ];
+    let selector_count = selectors.iter().filter(|&&b| b).count();
+    if selector_count > 1 {
+        return Err("Roblox launch URI contains conflicting join selectors");
+    }
+    if fields.request_type.is_empty() {
+        return Ok(());
+    }
+    let req = fields.request_type.to_ascii_lowercase();
+    match req.as_str() {
+        "requestgame" => {
+            if selector_count != 0 {
+                return Err("RequestGame contains a non-public join selector");
+            }
+        }
+        "requestgamejob" => {
+            if fields.game_instance_id.is_empty() {
+                return Err("RequestGameJob requires a game instance");
+            }
+        }
+        "requestprivategame" => {
+            if !private_join && fields.reserved_server_access_code.is_empty() {
+                return Err("RequestPrivateGame requires an access code");
+            }
+        }
+        "requestplaytogethergame" => {
+            if fields.conversation_id <= 0 {
+                return Err("RequestPlayTogetherGame requires a conversation");
+            }
+        }
+        "requestfollowuser" => {
+            if fields.place_id <= 0 {
+                return Err("RequestFollowUser could not resolve a place");
+            }
+        }
+        _ => return Err("Roblox PlaceLauncher request type is unsupported"),
+    }
+    Ok(())
+}
+
+fn build_launch_json(fields: &ParsedLaunchFields) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    map.insert("placeId".to_string(), serde_json::json!(fields.place_id));
+    if fields.user_id > 0 {
+        map.insert("userId".to_string(), serde_json::json!(fields.user_id));
+    }
+    if fields.conversation_id > 0 {
+        map.insert("conversationId".to_string(), serde_json::json!(fields.conversation_id));
+    }
+    if fields.referred_by_player_id > 0 {
+        map.insert("referredByPlayerId".to_string(), serde_json::json!(fields.referred_by_player_id));
+    }
+    if !fields.game_instance_id.is_empty() {
+        map.insert("gameInstanceId".to_string(), serde_json::json!(fields.game_instance_id));
+    }
+    if !fields.reserved_server_access_code.is_empty() {
+        map.insert("reservedServerAccessCode".to_string(), serde_json::json!(fields.reserved_server_access_code));
+    }
+    if !fields.call_id.is_empty() {
+        map.insert("callId".to_string(), serde_json::json!(fields.call_id));
+    }
+    if !fields.referral_page.is_empty() {
+        map.insert("referralPage".to_string(), serde_json::json!(fields.referral_page));
+    }
+    if !fields.access_code.is_empty() {
+        map.insert("accessCode".to_string(), serde_json::json!(fields.access_code));
+    }
+    if !fields.link_code.is_empty() {
+        map.insert("linkCode".to_string(), serde_json::json!(fields.link_code));
+    }
+    if !fields.launch_data.is_empty() {
+        map.insert("launchData".to_string(), serde_json::json!(fields.launch_data));
+    }
+    if !fields.event_id.is_empty() {
+        map.insert("eventId".to_string(), serde_json::json!(fields.event_id));
+    }
+    if !fields.game_join_context.is_empty() {
+        map.insert("gameJoinContext".to_string(), serde_json::json!(fields.game_join_context));
+    }
+    if !fields.join_attempt_id.is_empty() {
+        map.insert("joinAttemptId".to_string(), serde_json::json!(fields.join_attempt_id));
+    }
+    if !fields.join_attempt_origin.is_empty() {
+        map.insert("joinAttemptOrigin".to_string(), serde_json::json!(fields.join_attempt_origin));
+    }
+    if !fields.iso_context.is_empty() {
+        map.insert("isoContext".to_string(), serde_json::json!(fields.iso_context));
+    }
+    serde_json::Value::Object(map)
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_parse_roblox_launch_uri(
+    uri: *const c_char,
+    override_place_id: i64,
+    override_game_instance: *const c_char,
+    out_json: *mut c_char,
+    out_cap: usize,
+    out_error: *mut c_char,
+    error_cap: usize,
+    out_follow_user_id: *mut i64,
+) -> c_int {
+    let set_error = |msg: &str| {
+        if !out_error.is_null() && error_cap > 0 {
+            let len = std::cmp::min(msg.len(), error_cap - 1);
+            unsafe {
+                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_error, len);
+                *out_error.add(len) = 0;
+            }
+        }
+    };
+
+    if uri.is_null() || out_json.is_null() || out_cap == 0 {
+        set_error("invalid argument");
+        return -1;
+    }
+    let uri_str = match unsafe { CStr::from_ptr(uri) }.to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_error("Roblox launch URI size or encoding is invalid");
+            return -2;
+        }
+    };
+    if uri_str.is_empty() || uri_str.len() > 2048 || uri_str.bytes().any(|b| b < 0x20 || b == 0x7F) {
+        set_error("Roblox launch URI size or encoding is invalid");
+        return -3;
+    }
+    let colon = match uri_str.find(':') {
+        Some(pos) if pos > 0 => pos,
+        _ => {
+            set_error("Roblox launch URI has no supported scheme");
+            return -4;
+        }
+    };
+    let scheme = uri_str[..colon].to_ascii_lowercase();
+    let payload = &uri_str[colon + 1..];
+
+    let mut fields = ParsedLaunchFields::default();
+    let parse_res = match scheme.as_str() {
+        "roblox-player" => parse_classic_payload(payload, &mut fields),
+        "roblox" => parse_modern_payload(payload, &mut fields),
+        _ => {
+            set_error("Roblox launch URI scheme is unsupported");
+            return -5;
+        }
+    };
+    if let Err(e) = parse_res {
+        set_error(e);
+        return -6;
+    }
+
+    let is_follow_user = fields.request_type.to_ascii_lowercase() == "requestfollowuser";
+    if override_place_id > 0 {
+        fields.place_id = override_place_id;
+        if !override_game_instance.is_null() {
+            if let Ok(inst) = unsafe { CStr::from_ptr(override_game_instance) }.to_str() {
+                if !inst.is_empty() {
+                    fields.game_instance_id = inst.to_string();
+                }
+            }
+        }
+        fields.user_id = 0;
+    } else if fields.place_id <= 0 && is_follow_user {
+        if !out_follow_user_id.is_null() {
+            unsafe { *out_follow_user_id = fields.user_id; }
+        }
+        return 1; // Needs user_id -> place_id resolution in C++
+    }
+
+    if fields.place_id <= 0 && !is_follow_user {
+        set_error("Roblox launch URI requires a positive placeId");
+        return -7;
+    }
+
+    if let Err(e) = validate_launch_selectors(&fields) {
+        set_error(e);
+        return -8;
+    }
+
+    let doc = build_launch_json(&fields);
+    let dumped = doc.to_string();
+    if dumped.len() + 1 > out_cap {
+        set_error("output buffer too small");
+        return -9;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(dumped.as_ptr() as *const c_char, out_json, dumped.len());
+        *out_json.add(dumped.len()) = 0;
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_parse_webview_launch_game(
+    command_json: *const c_char,
+    override_place_id: i64,
+    override_game_instance: *const c_char,
+    out_json: *mut c_char,
+    out_cap: usize,
+    out_error: *mut c_char,
+    error_cap: usize,
+    out_follow_user_id: *mut i64,
+) -> c_int {
+    let set_error = |msg: &str| {
+        if !out_error.is_null() && error_cap > 0 {
+            let len = std::cmp::min(msg.len(), error_cap - 1);
+            unsafe {
+                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_error, len);
+                *out_error.add(len) = 0;
+            }
+        }
+    };
+    if command_json.is_null() || out_json.is_null() || out_cap == 0 {
+        set_error("invalid argument");
+        return -1;
+    }
+    let cmd_str = match unsafe { CStr::from_ptr(command_json) }.to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_error("WebView command is invalid UTF-8");
+            return -2;
+        }
+    };
+    if cmd_str.len() > 2048 {
+        set_error("WebView command exceeds maximum size");
+        return -3;
+    }
+    let val: serde_json::Value = match serde_json::from_str(cmd_str) {
+        Ok(v) => v,
+        Err(_) => {
+            set_error("WebView command is not launchGame");
+            return -4;
+        }
+    };
+    if val.get("functionName").and_then(|v| v.as_str()) != Some("launchGame") {
+        set_error("WebView command is not launchGame");
+        return -5;
+    }
+    let req_obj = match val.get("params").and_then(|p| p.get("request")).and_then(|r| r.as_object()) {
+        Some(o) => o,
+        None => {
+            set_error("Roblox launchGame has no request");
+            return -6;
+        }
+    };
+    if req_obj.len() > 64 {
+        set_error("Roblox launchGame request has too many fields");
+        return -7;
+    }
+    let mut fields = ParsedLaunchFields::default();
+    for (k, v) in req_obj {
+        let text = if let Some(s) = v.as_str() {
+            s.to_string()
+        } else if let Some(n) = v.as_u64() {
+            n.to_string()
+        } else if let Some(n) = v.as_i64() {
+            n.to_string()
+        } else {
+            continue;
+        };
+        if text.len() > 16384 || text.bytes().any(|b| b < 0x20 || b == 0x7F) {
+            set_error("Roblox launchGame field is invalid");
+            return -8;
+        }
+        let key_name = if k == "requestType" { "request" } else { k.as_str() };
+        if let Err(e) = assign_launch_field(key_name, text, false, &mut fields) {
+            set_error(e);
+            return -9;
+        }
+    }
+    if fields.request_type.is_empty() {
+        set_error("Roblox launchGame request type is missing");
+        return -10;
+    }
+
+    let is_follow_user = fields.request_type.to_ascii_lowercase() == "requestfollowuser";
+    if override_place_id > 0 {
+        fields.place_id = override_place_id;
+        if !override_game_instance.is_null() {
+            if let Ok(inst) = unsafe { CStr::from_ptr(override_game_instance) }.to_str() {
+                if !inst.is_empty() {
+                    fields.game_instance_id = inst.to_string();
+                }
+            }
+        }
+        fields.user_id = 0;
+    } else if fields.place_id <= 0 && is_follow_user {
+        if !out_follow_user_id.is_null() {
+            unsafe { *out_follow_user_id = fields.user_id; }
+        }
+        return 1;
+    }
+
+    if fields.place_id <= 0 && !is_follow_user {
+        set_error("Roblox launch URI requires a positive placeId");
+        return -11;
+    }
+    if let Err(e) = validate_launch_selectors(&fields) {
+        set_error(e);
+        return -12;
+    }
+    let doc = build_launch_json(&fields);
+    let dumped = doc.to_string();
+    if dumped.len() + 1 > out_cap {
+        set_error("output buffer too small");
+        return -13;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(dumped.as_ptr() as *const c_char, out_json, dumped.len());
+        *out_json.add(dumped.len()) = 0;
+    }
+    0
+}
+
+// ============================================================================
+// 22. YAML Runtime Configuration Parser
+// ============================================================================
+
+fn flatten_yaml_node(
+    prefix: &str,
+    node: &serde_yaml::Value,
+    depth: usize,
+    map: &mut std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    match node {
+        serde_yaml::Value::Mapping(m) => {
+            if depth > 2 {
+                return Err(format!("{} must be a scalar", prefix));
+            }
+            let mut keys_seen = std::collections::HashSet::new();
+            for (k, v) in m {
+                let key_str = match k.as_str() {
+                    Some(s) if !s.is_empty() => s,
+                    _ => return Err(format!("{} contains a non-scalar or empty key", prefix)),
+                };
+                if !keys_seen.insert(key_str.to_string()) {
+                    return Err(format!("{} contains duplicate key: {}", prefix, key_str));
+                }
+                let new_path = if prefix.is_empty() {
+                    key_str.to_string()
+                } else {
+                    format!("{}.{}", prefix, key_str)
+                };
+                match v {
+                    serde_yaml::Value::Mapping(_) => {
+                        flatten_yaml_node(&new_path, v, depth + 1, map)?;
+                    }
+                    serde_yaml::Value::String(s) => {
+                        map.insert(new_path, s.clone());
+                    }
+                    serde_yaml::Value::Number(n) => {
+                        map.insert(new_path, n.to_string());
+                    }
+                    serde_yaml::Value::Bool(b) => {
+                        map.insert(new_path, if *b { "true".to_string() } else { "false".to_string() });
+                    }
+                    serde_yaml::Value::Null => {
+                        map.insert(new_path, String::new());
+                    }
+                    _ => return Err(format!("{} must be a scalar", new_path)),
+                }
+            }
+            Ok(())
+        }
+        _ => Err("root must be a mapping".to_string()),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_parse_runtime_config_yaml(
+    yaml_bytes: *const u8,
+    yaml_len: usize,
+    out_env_json: *mut c_char,
+    out_cap: usize,
+    out_error: *mut c_char,
+    error_cap: usize,
+) -> c_int {
+    let set_error = |msg: &str| {
+        if !out_error.is_null() && error_cap > 0 {
+            let len = std::cmp::min(msg.len(), error_cap - 1);
+            unsafe {
+                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_error, len);
+                *out_error.add(len) = 0;
+            }
+        }
+    };
+    if yaml_bytes.is_null() || out_env_json.is_null() || out_cap == 0 {
+        set_error("invalid argument");
+        return -1;
+    }
+    if yaml_len > 1024 * 1024 {
+        set_error("runtime configuration file exceeds maximum allowed size");
+        return -2;
+    }
+    let slice = unsafe { slice::from_raw_parts(yaml_bytes, yaml_len) };
+    let parsed_val: serde_yaml::Value = match serde_yaml::from_slice(slice) {
+        Ok(v) => v,
+        Err(e) => {
+            set_error(&format!("YAML syntax error: {}", e));
+            return -3;
+        }
+    };
+    let root_map = match parsed_val.as_mapping() {
+        Some(m) => m,
+        None => {
+            set_error("root must be a mapping");
+            return -4;
+        }
+    };
+
+    let mut values = std::collections::HashMap::new();
+    for (k, v) in root_map {
+        let key_str = match k.as_str() {
+            Some(s) => s,
+            None => {
+                set_error("root contains non-scalar key");
+                return -5;
+            }
+        };
+        if key_str == "device" {
+            if let Some(s) = v.as_str() {
+                values.insert("device".to_string(), s.to_string());
+            } else if v.is_mapping() {
+                values.insert("device.__mapping".to_string(), "1".to_string());
+                if let Err(e) = flatten_yaml_node("device", v, 1, &mut values) {
+                    set_error(&e);
+                    return -6;
+                }
+            } else {
+                set_error("device must be a preset scalar or detailed mapping");
+                return -7;
+            }
+        } else if [
+            "runtime", "appearance", "auth", "graphics", "performance",
+            "audio", "window", "input", "compatibility", "network",
+        ].contains(&key_str) {
+            if let Err(e) = flatten_yaml_node(key_str, v, 1, &mut values) {
+                set_error(&e);
+                return -8;
+            }
+        } else if key_str == "integrations" {
+            if let Err(e) = flatten_yaml_node("integrations", v, 1, &mut values) {
+                set_error(&e);
+                return -9;
+            }
+        } else if key_str == "version" {
+            if let Some(s) = v.as_str() {
+                values.insert("version".to_string(), s.to_string());
+            } else if let Some(n) = v.as_i64() {
+                values.insert("version".to_string(), n.to_string());
+            }
+        }
+    }
+
+    const SUPPORTED: &[&str] = &[
+        "version", "device", "device.__mapping", "device.type", "device.platform",
+        "device.name", "device.manufacturer", "device.model", "device.brand",
+        "device.code", "device.sku", "device.soc_model", "device.touch",
+        "device.mouse", "device.keyboard", "runtime.headless", "auth.use_libsecret",
+        "runtime.roblox_library", "appearance.theme", "graphics.backend",
+        "graphics.frame_rate_limit", "graphics.vsync", "graphics.present_mode",
+        "performance.multithreaded_rendering", "performance.physics_worker_mode",
+        "performance.memory_limit_mb", "performance.gamemode", "audio.output_device",
+        "audio.input_device", "window.width", "window.height", "window.title",
+        "window.high_dpi", "input.touch_enabled", "compatibility.desktop_playability",
+        "network.use_system_proxy", "network.proxy_host", "network.proxy_port",
+        "network.proxy_scheme", "network.proxy_username", "network.proxy_password",
+        "network.ca_bundle", "integrations.fleasion.enabled", "integrations.fleasion.proxy_mode",
+        "integrations.fleasion.proxy_port", "integrations.fleasion.ca_certificate",
+        "integrations.discord_rpc.enabled", "integrations.discord_rpc.show_place_name",
+        "integrations.discord_rpc.show_elapsed_time", "integrations.discord_rpc.application_id",
+        "integrations.discord_rpc.join.enabled", "integrations.discord_rpc.join.public_servers_only",
+        "integrations.discord_rpc.join.button_label", "integrations.discord_rpc.text.browsing",
+        "integrations.discord_rpc.text.joining", "integrations.discord_rpc.text.playing",
+        "integrations.discord_rpc.text.state", "integrations.discord_rpc.text.unknown_place",
+    ];
+
+    for (k, _) in &values {
+        if !SUPPORTED.contains(&k.as_str()) {
+            set_error(&format!("unknown runtime configuration key: {}", k));
+            return -10;
+        }
+    }
+
+    if let Some(v) = values.get("version") {
+        if v != "1" {
+            set_error(&format!("unsupported runtime configuration version: {}", v));
+            return -11;
+        }
+    }
+
+    let mut env = serde_json::Map::new();
+
+    let scalar_device = values.get("device").cloned();
+    let detailed_device = values.contains_key("device.__mapping");
+    let detailed_type = values.get("device.type").cloned();
+    if detailed_device && detailed_type.is_none() {
+        set_error("device.type is required for detailed device configuration");
+        return -12;
+    }
+    let selected_device = scalar_device.or(detailed_type);
+    if let Some(ref dev) = selected_device {
+        const VALID_DEVS: &[&str] = &[
+            "pc", "mobile", "console", "pc-windows-11", "mobile-pixel-7", "console-ps5",
+        ];
+        if !VALID_DEVS.contains(&dev.as_str()) {
+            set_error("device must be pc, mobile, console, pc-windows-11, mobile-pixel-7, or console-ps5");
+            return -13;
+        }
+        if values.contains_key("input.touch_enabled") || values.contains_key("compatibility.desktop_playability") {
+            set_error("device cannot be combined with input.touch_enabled or compatibility.desktop_playability");
+            return -14;
+        }
+        env.insert("MOCKTAIL_DEVICE_PROFILE".to_string(), serde_json::json!(dev));
+    }
+
+    if detailed_device {
+        let string_fields = [
+            ("device.platform", "MOCKTAIL_DEVICE_PLATFORM_NAME", 128),
+            ("device.name", "MOCKTAIL_DEVICE_NAME", 128),
+            ("device.manufacturer", "MOCKTAIL_DEVICE_MANUFACTURER", 128),
+            ("device.model", "MOCKTAIL_DEVICE_MODEL", 128),
+            ("device.brand", "MOCKTAIL_DEVICE_BRAND", 64),
+            ("device.code", "MOCKTAIL_DEVICE_CODE", 64),
+            ("device.sku", "MOCKTAIL_DEVICE_SKU", 64),
+            ("device.soc_model", "MOCKTAIL_DEVICE_SOC_MODEL", 128),
+        ];
+        for (yaml_key, env_key, max_len) in string_fields {
+            if let Some(val) = values.get(yaml_key) {
+                if val.is_empty() || val.len() > max_len || val.bytes().any(|b| b < 0x20 || b == 0x7F) {
+                    set_error(&format!("{} must be non-empty, bounded, and contain no control bytes", yaml_key));
+                    return -15;
+                }
+                env.insert(env_key.to_string(), serde_json::json!(val));
+            }
+        }
+        for (yaml_key, env_key) in [
+            ("device.touch", "MOCKTAIL_TOUCH_MODE"),
+            ("device.mouse", "MOCKTAIL_MOUSE_MODE"),
+            ("device.keyboard", "MOCKTAIL_KEYBOARD_MODE"),
+        ] {
+            if let Some(val) = values.get(yaml_key) {
+                let parsed = match val.as_str() {
+                    "true" => "on",
+                    "false" => "off",
+                    _ => {
+                        set_error(&format!("{} must be true or false", yaml_key));
+                        return -16;
+                    }
+                };
+                env.insert(env_key.to_string(), serde_json::json!(parsed));
+            }
+        }
+    }
+
+    if let Some(h) = values.get("runtime.headless") {
+        match h.as_str() {
+            "true" => { env.insert("MOCKTAIL_HEADLESS".to_string(), serde_json::json!("1")); }
+            "false" => { env.insert("MOCKTAIL_HEADLESS".to_string(), serde_json::json!("0")); }
+            _ => {
+                set_error("runtime.headless must be true or false");
+                return -17;
+            }
+        }
+    }
+
+    if let Some(lib) = values.get("runtime.roblox_library") {
+        if lib.is_empty() {
+            set_error("runtime.roblox_library must not be empty");
+            return -18;
+        }
+        env.insert("ROBLOX_LIB_PATH".to_string(), serde_json::json!(lib));
+    }
+
+    if let Some(theme) = values.get("appearance.theme") {
+        if !["roblox", "system", "light", "dark"].contains(&theme.as_str()) {
+            set_error("appearance.theme must be roblox, system, light, or dark");
+            return -19;
+        }
+        env.insert("MOCKTAIL_THEME".to_string(), serde_json::json!(theme));
+    }
+
+    if let Some(backend) = values.get("graphics.backend") {
+        if !["direct-vulkan", "opengl", "system", "angle-vulkan"].contains(&backend.as_str()) {
+            set_error(&format!("graphics.backend is not supported: {}", backend));
+            return -20;
+        }
+        env.insert("MOCKTAIL_GRAPHICS_BACKEND".to_string(), serde_json::json!(backend));
+    }
+
+    if let Some(fps) = values.get("graphics.frame_rate_limit") {
+        env.insert("MOCKTAIL_FRAME_RATE_LIMIT".to_string(), serde_json::json!(fps));
+    }
+
+    if let Some(vsync) = values.get("graphics.vsync") {
+        if !["auto", "on", "off"].contains(&vsync.as_str()) {
+            set_error("graphics.vsync must be auto, on, or off");
+            return -21;
+        }
+        env.insert("MOCKTAIL_VSYNC".to_string(), serde_json::json!(vsync));
+    }
+
+    if let Some(pm) = values.get("graphics.present_mode") {
+        if !["auto", "fifo", "mailbox", "immediate"].contains(&pm.as_str()) {
+            set_error("graphics.present_mode must be auto, fifo, mailbox, or immediate");
+            return -22;
+        }
+        env.insert("MOCKTAIL_PRESENT_MODE".to_string(), serde_json::json!(pm));
+    }
+
+    if let Some(mem) = values.get("performance.memory_limit_mb") {
+        let n: u64 = match mem.parse() {
+            Ok(v) if v > 0 => v,
+            _ => {
+                set_error("performance.memory_limit_mb must be a positive integer");
+                return -23;
+            }
+        };
+        env.insert("MOCKTAIL_MEMORY_LIMIT_MB".to_string(), serde_json::json!(n.to_string()));
+    }
+
+    if let Some(rpc) = values.get("integrations.discord_rpc.enabled") {
+        match rpc.as_str() {
+            "true" => { env.insert("MOCKTAIL_DISCORD_RPC_ENABLED".to_string(), serde_json::json!("1")); }
+            "false" => { env.insert("MOCKTAIL_DISCORD_RPC_ENABLED".to_string(), serde_json::json!("0")); }
+            _ => {
+                set_error("integrations.discord_rpc.enabled must be true or false");
+                return -24;
+            }
+        }
+    }
+
+    if let Some(fl) = values.get("integrations.fleasion.enabled") {
+        match fl.as_str() {
+            "true" => { env.insert("MOCKTAIL_FLEASION_ENABLED".to_string(), serde_json::json!("1")); }
+            "false" => { env.insert("MOCKTAIL_FLEASION_ENABLED".to_string(), serde_json::json!("0")); }
+            _ => {
+                set_error("integrations.fleasion.enabled must be true or false");
+                return -25;
+            }
+        }
+    }
+
+    let dumped = serde_json::Value::Object(env).to_string();
+    if dumped.len() + 1 > out_cap {
+        set_error("output buffer too small");
+        return -26;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(dumped.as_ptr() as *const c_char, out_env_json, dumped.len());
+        *out_env_json.add(dumped.len()) = 0;
+    }
+    0
+}
+
+// ============================================================================
+// 23. Startup Lifecycle State Machine
+// ============================================================================
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MocktailRustStartupState {
+    Created = 0,
+    Configured = 1,
+    JniRuntimeReady = 2,
+    LibrariesLoaded = 3,
+    JniOnLoadComplete = 4,
+    EngineStarted = 5,
+    DataModelLoading = 6,
+    LuaAppReady = 7,
+    Ready = 8,
+    Failure = 9,
+    Stopping = 10,
+    Stopped = 11,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MocktailRustStartupEvidence {
+    Configured = 0,
+    JniRuntimeReady = 1,
+    LibrariesLoaded = 2,
+    JniOnLoadComplete = 3,
+    EngineStarted = 4,
+    DataModelLoading = 5,
+    LuaAppReady = 6,
+    RealFramePresented = 7,
+    InputReady = 8,
+    AudioReady = 9,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct MocktailRustStartupRequirements {
+    pub windowed: c_int,
+    pub require_input_ready: c_int,
+    pub require_audio_ready: c_int,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct MocktailRustStartupSnapshot {
+    pub state: MocktailRustStartupState,
+    pub requirements: MocktailRustStartupRequirements,
+    pub configured: c_int,
+    pub jni_runtime_ready: c_int,
+    pub libraries_loaded: c_int,
+    pub jni_on_load_complete: c_int,
+    pub engine_started: c_int,
+    pub data_model_loading: c_int,
+    pub lua_app_ready: c_int,
+    pub real_frame_presented: c_int,
+    pub input_ready: c_int,
+    pub audio_ready: c_int,
+    pub revision: u64,
+}
+
+pub struct MocktailRustStartupSm {
+    requirements: MocktailRustStartupRequirements,
+    state: MocktailRustStartupState,
+    evidence_bits: u32,
+    revision: u64,
+    failure_reason: String,
+}
+
+#[inline]
+fn evidence_bit(ev: MocktailRustStartupEvidence) -> u32 {
+    1u32 << (ev as u32)
+}
+
+fn expected_evidence_for_state(state: MocktailRustStartupState) -> Option<MocktailRustStartupEvidence> {
+    match state {
+        MocktailRustStartupState::Created => Some(MocktailRustStartupEvidence::Configured),
+        MocktailRustStartupState::Configured => Some(MocktailRustStartupEvidence::JniRuntimeReady),
+        MocktailRustStartupState::JniRuntimeReady => Some(MocktailRustStartupEvidence::LibrariesLoaded),
+        MocktailRustStartupState::LibrariesLoaded => Some(MocktailRustStartupEvidence::JniOnLoadComplete),
+        MocktailRustStartupState::JniOnLoadComplete => Some(MocktailRustStartupEvidence::EngineStarted),
+        MocktailRustStartupState::EngineStarted => Some(MocktailRustStartupEvidence::DataModelLoading),
+        MocktailRustStartupState::DataModelLoading => Some(MocktailRustStartupEvidence::LuaAppReady),
+        _ => None,
+    }
+}
+
+fn startup_state_name(state: MocktailRustStartupState) -> &'static str {
+    match state {
+        MocktailRustStartupState::Created => "Created",
+        MocktailRustStartupState::Configured => "Configured",
+        MocktailRustStartupState::JniRuntimeReady => "JniRuntimeReady",
+        MocktailRustStartupState::LibrariesLoaded => "LibrariesLoaded",
+        MocktailRustStartupState::JniOnLoadComplete => "JniOnLoadComplete",
+        MocktailRustStartupState::EngineStarted => "EngineStarted",
+        MocktailRustStartupState::DataModelLoading => "DataModelLoading",
+        MocktailRustStartupState::LuaAppReady => "LuaAppReady",
+        MocktailRustStartupState::Ready => "Ready",
+        MocktailRustStartupState::Failure => "Failure",
+        MocktailRustStartupState::Stopping => "Stopping",
+        MocktailRustStartupState::Stopped => "Stopped",
+    }
+}
+
+fn startup_evidence_name(ev_val: c_int) -> &'static str {
+    match ev_val {
+        0 => "Configured",
+        1 => "JniRuntimeReady",
+        2 => "LibrariesLoaded",
+        3 => "JniOnLoadComplete",
+        4 => "EngineStarted",
+        5 => "DataModelLoading",
+        6 => "LuaAppReady",
+        7 => "RealFramePresented",
+        8 => "InputReady",
+        9 => "AudioReady",
+        _ => "Unknown",
+    }
+}
+
+fn expected_evidence_name_for_state(state: MocktailRustStartupState) -> &'static str {
+    match state {
+        MocktailRustStartupState::Created => "Configured",
+        MocktailRustStartupState::Configured => "JniRuntimeReady",
+        MocktailRustStartupState::JniRuntimeReady => "LibrariesLoaded",
+        MocktailRustStartupState::LibrariesLoaded => "JniOnLoadComplete",
+        MocktailRustStartupState::JniOnLoadComplete => "EngineStarted",
+        MocktailRustStartupState::EngineStarted => "DataModelLoading",
+        MocktailRustStartupState::DataModelLoading => "LuaAppReady",
+        _ => "no further evidence",
+    }
+}
+
+fn state_for_core_evidence(evidence: MocktailRustStartupEvidence) -> MocktailRustStartupState {
+    match evidence {
+        MocktailRustStartupEvidence::Configured => MocktailRustStartupState::Configured,
+        MocktailRustStartupEvidence::JniRuntimeReady => MocktailRustStartupState::JniRuntimeReady,
+        MocktailRustStartupEvidence::LibrariesLoaded => MocktailRustStartupState::LibrariesLoaded,
+        MocktailRustStartupEvidence::JniOnLoadComplete => MocktailRustStartupState::JniOnLoadComplete,
+        MocktailRustStartupEvidence::EngineStarted => MocktailRustStartupState::EngineStarted,
+        MocktailRustStartupEvidence::DataModelLoading => MocktailRustStartupState::DataModelLoading,
+        MocktailRustStartupEvidence::LuaAppReady => MocktailRustStartupState::LuaAppReady,
+        _ => MocktailRustStartupState::Failure,
+    }
+}
+
+impl MocktailRustStartupSm {
+    fn has_evidence(&self, ev: MocktailRustStartupEvidence) -> bool {
+        (self.evidence_bits & evidence_bit(ev)) != 0
+    }
+
+    fn evaluate_ready(&mut self) {
+        if !self.has_evidence(MocktailRustStartupEvidence::LuaAppReady) {
+            return;
+        }
+        if self.requirements.windowed != 0 && !self.has_evidence(MocktailRustStartupEvidence::RealFramePresented) {
+            self.state = MocktailRustStartupState::LuaAppReady;
+            return;
+        }
+        if self.requirements.require_input_ready != 0 && !self.has_evidence(MocktailRustStartupEvidence::InputReady) {
+            self.state = MocktailRustStartupState::LuaAppReady;
+            return;
+        }
+        if self.requirements.require_audio_ready != 0 && !self.has_evidence(MocktailRustStartupEvidence::AudioReady) {
+            self.state = MocktailRustStartupState::LuaAppReady;
+            return;
+        }
+        self.state = MocktailRustStartupState::Ready;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_startup_sm_create(
+    req: MocktailRustStartupRequirements,
+) -> *mut MocktailRustStartupSm {
+    let sm = Box::new(MocktailRustStartupSm {
+        requirements: req,
+        state: MocktailRustStartupState::Created,
+        evidence_bits: 0,
+        revision: 0,
+        failure_reason: String::new(),
+    });
+    Box::into_raw(sm)
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_startup_sm_destroy(sm: *mut MocktailRustStartupSm) {
+    if !sm.is_null() {
+        unsafe { drop(Box::from_raw(sm)); }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_startup_sm_record_evidence(
+    sm_ptr: *mut MocktailRustStartupSm,
+    evidence_val: c_int,
+    out_state: *mut MocktailRustStartupState,
+    out_status: *mut c_int,
+    out_msg: *mut c_char,
+    msg_cap: usize,
+) -> c_int {
+    let set_msg = |msg: &str| {
+        if !out_msg.is_null() && msg_cap > 0 {
+            let len = std::cmp::min(msg.len(), msg_cap - 1);
+            unsafe {
+                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_msg, len);
+                *out_msg.add(len) = 0;
+            }
+        }
+    };
+    if sm_ptr.is_null() {
+        return -1;
+    }
+    let sm = unsafe { &mut *sm_ptr };
+    let ev = match evidence_val {
+        0 => MocktailRustStartupEvidence::Configured,
+        1 => MocktailRustStartupEvidence::JniRuntimeReady,
+        2 => MocktailRustStartupEvidence::LibrariesLoaded,
+        3 => MocktailRustStartupEvidence::JniOnLoadComplete,
+        4 => MocktailRustStartupEvidence::EngineStarted,
+        5 => MocktailRustStartupEvidence::DataModelLoading,
+        6 => MocktailRustStartupEvidence::LuaAppReady,
+        7 => MocktailRustStartupEvidence::RealFramePresented,
+        8 => MocktailRustStartupEvidence::InputReady,
+        9 => MocktailRustStartupEvidence::AudioReady,
+        _ => {
+            let expected = expected_evidence_name_for_state(sm.state);
+            sm.failure_reason = format!(
+                "invalid startup evidence order in state {}: expected {}, received Unknown",
+                startup_state_name(sm.state),
+                expected
+            );
+            sm.state = MocktailRustStartupState::Failure;
+            sm.revision += 1;
+            set_msg(&sm.failure_reason);
+            unsafe {
+                if !out_state.is_null() { *out_state = sm.state; }
+                if !out_status.is_null() { *out_status = 2; /* Rejected */ }
+            }
+            return 0;
+        }
+    };
+
+    if sm.has_evidence(ev) {
+        unsafe {
+            if !out_state.is_null() { *out_state = sm.state; }
+            if !out_status.is_null() { *out_status = 1; /* Duplicate */ }
+        }
+        let msg = format!("duplicate startup evidence: {}", startup_evidence_name(evidence_val));
+        set_msg(&msg);
+        return 0;
+    }
+
+    if sm.state == MocktailRustStartupState::Failure
+        || sm.state == MocktailRustStartupState::Stopping
+        || sm.state == MocktailRustStartupState::Stopped
+    {
+        let msg = format!("startup evidence rejected in state {}", startup_state_name(sm.state));
+        unsafe {
+            if !out_state.is_null() { *out_state = sm.state; }
+            if !out_status.is_null() { *out_status = 2; /* Rejected */ }
+        }
+        set_msg(&msg);
+        return 0;
+    }
+
+    let is_core = (evidence_val >= 0) && (evidence_val <= 6);
+    if is_core {
+        let expected_ev = expected_evidence_for_state(sm.state);
+        if expected_ev != Some(ev) {
+            let expected_str = expected_evidence_name_for_state(sm.state);
+            sm.failure_reason = format!(
+                "invalid startup evidence order in state {}: expected {}, received {}",
+                startup_state_name(sm.state),
+                expected_str,
+                startup_evidence_name(evidence_val)
+            );
+            sm.state = MocktailRustStartupState::Failure;
+            sm.revision += 1;
+            set_msg(&sm.failure_reason);
+            unsafe {
+                if !out_state.is_null() { *out_state = sm.state; }
+                if !out_status.is_null() { *out_status = 2; /* Rejected */ }
+            }
+            return 0;
+        }
+        sm.evidence_bits |= evidence_bit(ev);
+        sm.state = state_for_core_evidence(ev);
+        sm.revision += 1;
+        sm.evaluate_ready();
+        let msg = format!("accepted startup evidence: {}", startup_evidence_name(evidence_val));
+        set_msg(&msg);
+        unsafe {
+            if !out_state.is_null() { *out_state = sm.state; }
+            if !out_status.is_null() { *out_status = 0; /* Applied */ }
+        }
+        return 0;
+    } else {
+        if !sm.has_evidence(MocktailRustStartupEvidence::Configured) {
+            sm.failure_reason = format!(
+                "invalid startup evidence order in state {}: expected Configured, received {}",
+                startup_state_name(sm.state),
+                startup_evidence_name(evidence_val)
+            );
+            sm.state = MocktailRustStartupState::Failure;
+            sm.revision += 1;
+            set_msg(&sm.failure_reason);
+            unsafe {
+                if !out_state.is_null() { *out_state = sm.state; }
+                if !out_status.is_null() { *out_status = 2; /* Rejected */ }
+            }
+            return 0;
+        }
+        if ev == MocktailRustStartupEvidence::RealFramePresented && !sm.has_evidence(MocktailRustStartupEvidence::EngineStarted) {
+            sm.failure_reason = format!(
+                "invalid startup evidence order in state {}: expected EngineStarted, received {}",
+                startup_state_name(sm.state),
+                startup_evidence_name(evidence_val)
+            );
+            sm.state = MocktailRustStartupState::Failure;
+            sm.revision += 1;
+            set_msg(&sm.failure_reason);
+            unsafe {
+                if !out_state.is_null() { *out_state = sm.state; }
+                if !out_status.is_null() { *out_status = 2; /* Rejected */ }
+            }
+            return 0;
+        }
+        sm.evidence_bits |= evidence_bit(ev);
+        sm.revision += 1;
+        sm.evaluate_ready();
+        let msg = format!("accepted startup evidence: {}", startup_evidence_name(evidence_val));
+        set_msg(&msg);
+        unsafe {
+            if !out_state.is_null() { *out_state = sm.state; }
+            if !out_status.is_null() { *out_status = 0; /* Applied */ }
+        }
+        return 0;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_startup_sm_fail(
+    sm_ptr: *mut MocktailRustStartupSm,
+    reason: *const c_char,
+    out_state: *mut MocktailRustStartupState,
+    out_status: *mut c_int,
+    out_msg: *mut c_char,
+    msg_cap: usize,
+) -> c_int {
+    let set_msg = |msg: &str| {
+        if !out_msg.is_null() && msg_cap > 0 {
+            let len = std::cmp::min(msg.len(), msg_cap - 1);
+            unsafe {
+                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_msg, len);
+                *out_msg.add(len) = 0;
+            }
+        }
+    };
+    if sm_ptr.is_null() {
+        return -1;
+    }
+    let sm = unsafe { &mut *sm_ptr };
+    if sm.state == MocktailRustStartupState::Failure {
+        unsafe {
+            if !out_state.is_null() { *out_state = sm.state; }
+            if !out_status.is_null() { *out_status = 1; /* Duplicate */ }
+        }
+        set_msg(&sm.failure_reason);
+        return 0;
+    }
+    if sm.state == MocktailRustStartupState::Stopped {
+        unsafe {
+            if !out_state.is_null() { *out_state = sm.state; }
+            if !out_status.is_null() { *out_status = 2; /* Rejected */ }
+        }
+        set_msg("cannot fail an already stopped runtime");
+        return 0;
+    }
+    let r_str = if reason.is_null() {
+        "startup failed"
+    } else {
+        unsafe { CStr::from_ptr(reason) }.to_str().unwrap_or("startup failed")
+    };
+    sm.failure_reason = if r_str.is_empty() { "startup failed".to_string() } else { r_str.to_string() };
+    sm.state = MocktailRustStartupState::Failure;
+    sm.revision += 1;
+    unsafe {
+        if !out_state.is_null() { *out_state = sm.state; }
+        if !out_status.is_null() { *out_status = 0; /* Applied */ }
+    }
+    set_msg(&sm.failure_reason);
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_startup_sm_begin_stopping(
+    sm_ptr: *mut MocktailRustStartupSm,
+    out_state: *mut MocktailRustStartupState,
+    out_status: *mut c_int,
+    out_msg: *mut c_char,
+    msg_cap: usize,
+) -> c_int {
+    let set_msg = |msg: &str| {
+        if !out_msg.is_null() && msg_cap > 0 {
+            let len = std::cmp::min(msg.len(), msg_cap - 1);
+            unsafe {
+                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_msg, len);
+                *out_msg.add(len) = 0;
+            }
+        }
+    };
+    if sm_ptr.is_null() {
+        return -1;
+    }
+    let sm = unsafe { &mut *sm_ptr };
+    if sm.state == MocktailRustStartupState::Stopping || sm.state == MocktailRustStartupState::Stopped {
+        unsafe {
+            if !out_state.is_null() { *out_state = sm.state; }
+            if !out_status.is_null() { *out_status = 1; /* Duplicate */ }
+        }
+        let msg = format!("runtime is already {}", startup_state_name(sm.state));
+        set_msg(&msg);
+        return 0;
+    }
+    sm.state = MocktailRustStartupState::Stopping;
+    sm.revision += 1;
+    unsafe {
+        if !out_state.is_null() { *out_state = sm.state; }
+        if !out_status.is_null() { *out_status = 0; /* Applied */ }
+    }
+    set_msg("runtime stopping");
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_startup_sm_mark_stopped(
+    sm_ptr: *mut MocktailRustStartupSm,
+    out_state: *mut MocktailRustStartupState,
+    out_status: *mut c_int,
+    out_msg: *mut c_char,
+    msg_cap: usize,
+) -> c_int {
+    let set_msg = |msg: &str| {
+        if !out_msg.is_null() && msg_cap > 0 {
+            let len = std::cmp::min(msg.len(), msg_cap - 1);
+            unsafe {
+                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_msg, len);
+                *out_msg.add(len) = 0;
+            }
+        }
+    };
+    if sm_ptr.is_null() {
+        return -1;
+    }
+    let sm = unsafe { &mut *sm_ptr };
+    if sm.state == MocktailRustStartupState::Stopped {
+        unsafe {
+            if !out_state.is_null() { *out_state = sm.state; }
+            if !out_status.is_null() { *out_status = 1; /* Duplicate */ }
+        }
+        set_msg("runtime is already Stopped");
+        return 0;
+    }
+    if sm.state != MocktailRustStartupState::Stopping {
+        sm.failure_reason = format!(
+            "invalid lifecycle order: Stopped requires Stopping, was {}",
+            startup_state_name(sm.state)
+        );
+        sm.state = MocktailRustStartupState::Failure;
+        sm.revision += 1;
+        unsafe {
+            if !out_state.is_null() { *out_state = sm.state; }
+            if !out_status.is_null() { *out_status = 2; /* Rejected */ }
+        }
+        set_msg(&sm.failure_reason);
+        return 0;
+    }
+    sm.state = MocktailRustStartupState::Stopped;
+    sm.revision += 1;
+    unsafe {
+        if !out_state.is_null() { *out_state = sm.state; }
+        if !out_status.is_null() { *out_status = 0; /* Applied */ }
+    }
+    set_msg("runtime stopped");
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_startup_sm_snapshot(
+    sm_ptr: *const MocktailRustStartupSm,
+    out_snapshot: *mut MocktailRustStartupSnapshot,
+    out_reason: *mut c_char,
+    reason_cap: usize,
+) -> c_int {
+    if sm_ptr.is_null() || out_snapshot.is_null() {
+        return -1;
+    }
+    let sm = unsafe { &*sm_ptr };
+    unsafe {
+        (*out_snapshot).state = sm.state;
+        (*out_snapshot).requirements = sm.requirements;
+        (*out_snapshot).configured = if sm.has_evidence(MocktailRustStartupEvidence::Configured) { 1 } else { 0 };
+        (*out_snapshot).jni_runtime_ready = if sm.has_evidence(MocktailRustStartupEvidence::JniRuntimeReady) { 1 } else { 0 };
+        (*out_snapshot).libraries_loaded = if sm.has_evidence(MocktailRustStartupEvidence::LibrariesLoaded) { 1 } else { 0 };
+        (*out_snapshot).jni_on_load_complete = if sm.has_evidence(MocktailRustStartupEvidence::JniOnLoadComplete) { 1 } else { 0 };
+        (*out_snapshot).engine_started = if sm.has_evidence(MocktailRustStartupEvidence::EngineStarted) { 1 } else { 0 };
+        (*out_snapshot).data_model_loading = if sm.has_evidence(MocktailRustStartupEvidence::DataModelLoading) { 1 } else { 0 };
+        (*out_snapshot).lua_app_ready = if sm.has_evidence(MocktailRustStartupEvidence::LuaAppReady) { 1 } else { 0 };
+        (*out_snapshot).real_frame_presented = if sm.has_evidence(MocktailRustStartupEvidence::RealFramePresented) { 1 } else { 0 };
+        (*out_snapshot).input_ready = if sm.has_evidence(MocktailRustStartupEvidence::InputReady) { 1 } else { 0 };
+        (*out_snapshot).audio_ready = if sm.has_evidence(MocktailRustStartupEvidence::AudioReady) { 1 } else { 0 };
+        (*out_snapshot).revision = sm.revision;
+        if !out_reason.is_null() && reason_cap > 0 {
+            let len = std::cmp::min(sm.failure_reason.len(), reason_cap - 1);
+            std::ptr::copy_nonoverlapping(sm.failure_reason.as_ptr() as *const c_char, out_reason, len);
+            *out_reason.add(len) = 0;
+        }
+    }
+    0
+}
+
+// ============================================================================
+// 24. Fleasion CA Certificate & Bundle Manager
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_fleasion_prepare_bundle(
+    ca_pem_path: *const c_char,
+    base_bundle_path: *const c_char,
+    dest_bundle_path: *const c_char,
+    out_error: *mut c_char,
+    error_cap: usize,
+) -> c_int {
+    let set_error = |msg: &str| {
+        if !out_error.is_null() && error_cap > 0 {
+            let len = std::cmp::min(msg.len(), error_cap - 1);
+            unsafe {
+                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_error, len);
+                *out_error.add(len) = 0;
+            }
+        }
+    };
+    if ca_pem_path.is_null() || base_bundle_path.is_null() || dest_bundle_path.is_null() {
+        set_error("invalid argument");
+        return -1;
+    }
+    let ca_path = match unsafe { CStr::from_ptr(ca_pem_path) }.to_str() {
+        Ok(s) => Path::new(s),
+        Err(_) => {
+            set_error("invalid ca path encoding");
+            return -2;
+        }
+    };
+    let base_path = match unsafe { CStr::from_ptr(base_bundle_path) }.to_str() {
+        Ok(s) => Path::new(s),
+        Err(_) => {
+            set_error("invalid base bundle path encoding");
+            return -3;
+        }
+    };
+    let dest_path = match unsafe { CStr::from_ptr(dest_bundle_path) }.to_str() {
+        Ok(s) => Path::new(s),
+        Err(_) => {
+            set_error("invalid dest bundle path encoding");
+            return -4;
+        }
+    };
+
+    let ca_pem = match std::fs::read_to_string(ca_path) {
+        Ok(s) => s,
+        Err(_) => {
+            set_error(&format!("cannot read Fleasion CA certificate at {}", ca_path.display()));
+            return -5;
+        }
+    };
+    if !ca_pem.contains("-----BEGIN CERTIFICATE-----") || !ca_pem.contains("-----END CERTIFICATE-----") {
+        set_error("Fleasion CA must be a currently valid PEM CA certificate");
+        return -6;
+    }
+
+    let base_pem = match std::fs::read_to_string(base_path) {
+        Ok(s) => s,
+        Err(_) => {
+            set_error(&format!("cannot read base CA bundle for Fleasion: {}", base_path.display()));
+            return -7;
+        }
+    };
+
+    let mut out_bundle = String::new();
+    let mut cursor = 0;
+    let mut count = 0;
+    while let Some(start) = base_pem[cursor..].find("-----BEGIN CERTIFICATE-----") {
+        let abs_start = cursor + start;
+        if let Some(end) = base_pem[abs_start..].find("-----END CERTIFICATE-----") {
+            let abs_end = abs_start + end + "-----END CERTIFICATE-----".len();
+            let cert_block = &base_pem[abs_start..abs_end];
+            let cert_norm: String = cert_block.chars().filter(|c| !c.is_whitespace()).collect();
+            let ca_norm: String = ca_pem.chars().filter(|c| !c.is_whitespace()).collect();
+            if cert_norm != ca_norm {
+                out_bundle.push_str(cert_block.trim());
+                out_bundle.push('\n');
+                count += 1;
+            }
+            cursor = abs_end;
+        } else {
+            break;
+        }
+    }
+    if count == 0 {
+        set_error("base bundle must contain PEM certificates");
+        return -8;
+    }
+
+    out_bundle.push_str(ca_pem.trim());
+    out_bundle.push('\n');
+
+    if let Some(parent) = dest_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let tmp_path = format!("{}.tmp.{}", dest_path.display(), std::process::id());
+    if std::fs::write(&tmp_path, out_bundle.as_bytes()).is_err() {
+        set_error(&format!("cannot write generated Fleasion CA bundle: {}", dest_path.display()));
+        return -9;
+    }
+    if std::fs::rename(&tmp_path, dest_path).is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+        set_error(&format!("cannot write generated Fleasion CA bundle: {}", dest_path.display()));
+        return -10;
+    }
+    0
+}
+
+// ============================================================================
+// 25. APK Signing Block & Chunk Hash Verifier
+// ============================================================================
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MocktailRustApkSigningBlockInfo {
+    pub block_begin: u64,
+    pub central_directory: u64,
+    pub eocd: u64,
+    pub v2_offset: u64,
+    pub v2_len: u64,
+    pub v3_offset: u64,
+    pub v3_len: u64,
+    pub v31_offset: u64,
+    pub v31_len: u64,
+}
+
+#[inline]
+fn read_u32_le(slice: &[u8]) -> u32 {
+    u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]])
+}
+
+#[inline]
+fn read_u64_le(slice: &[u8]) -> u64 {
+    u64::from_le_bytes([
+        slice[0], slice[1], slice[2], slice[3],
+        slice[4], slice[5], slice[6], slice[7],
+    ])
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_find_apk_signing_block(
+    file_bytes: *const u8,
+    file_size: usize,
+    out_info: *mut MocktailRustApkSigningBlockInfo,
+    out_error: *mut c_char,
+    error_cap: usize,
+) -> c_int {
+    let set_error = |msg: &str| {
+        if !out_error.is_null() && error_cap > 0 {
+            let len = std::cmp::min(msg.len(), error_cap - 1);
+            unsafe {
+                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_error, len);
+                *out_error.add(len) = 0;
+            }
+        }
+    };
+    if file_bytes.is_null() || out_info.is_null() || file_size < 32 {
+        set_error("invalid argument");
+        return -1;
+    }
+    let slice = unsafe { slice::from_raw_parts(file_bytes, file_size) };
+
+    let min_search = if file_size > 65557 { file_size - 65557 } else { 0 };
+    let mut eocd_pos = None;
+    for pos in (min_search..=file_size - 22).rev() {
+        if read_u32_le(&slice[pos..pos + 4]) == 0x06054b50 {
+            let comment_len = u16::from_le_bytes([slice[pos + 20], slice[pos + 21]]) as usize;
+            if pos + 22 + comment_len == file_size {
+                eocd_pos = Some(pos);
+                break;
+            }
+        }
+    }
+    let eocd = match eocd_pos {
+        Some(p) => p,
+        None => {
+            set_error("APK has no valid ZIP end record");
+            return -2;
+        }
+    };
+
+    let cd_offset = read_u32_le(&slice[eocd + 16..eocd + 20]) as usize;
+    if cd_offset < 32 || cd_offset > eocd {
+        set_error("APK has no Signature Scheme v2/v3 block");
+        return -3;
+    }
+    if &slice[cd_offset - 16..cd_offset] != b"APK Sig Block 42" {
+        set_error("APK has no Signature Scheme v2/v3 block");
+        return -4;
+    }
+    let footer_size = read_u64_le(&slice[cd_offset - 24..cd_offset - 16]) as usize;
+    if footer_size < 24 || footer_size > cd_offset - 8 {
+        set_error("APK signing block size is invalid");
+        return -5;
+    }
+    let total_size = footer_size + 8;
+    let block_begin = cd_offset - total_size;
+    if read_u64_le(&slice[block_begin..block_begin + 8]) as usize != footer_size {
+        set_error("APK signing block size headers disagree");
+        return -6;
+    }
+
+    let mut info = MocktailRustApkSigningBlockInfo {
+        block_begin: block_begin as u64,
+        central_directory: cd_offset as u64,
+        eocd: eocd as u64,
+        v2_offset: 0,
+        v2_len: 0,
+        v3_offset: 0,
+        v3_len: 0,
+        v31_offset: 0,
+        v31_len: 0,
+    };
+
+    let mut cursor = block_begin + 8;
+    let pairs_end = cd_offset - 24;
+    while cursor < pairs_end {
+        if pairs_end - cursor < 12 {
+            set_error("APK signing block pair is truncated");
+            return -7;
+        }
+        let pair_size = read_u64_le(&slice[cursor..cursor + 8]) as usize;
+        cursor += 8;
+        if pair_size < 4 || pair_size > pairs_end - cursor {
+            set_error("APK signing block pair is malformed");
+            return -8;
+        }
+        let id = read_u32_le(&slice[cursor..cursor + 4]);
+        let val_offset = (cursor + 4) as u64;
+        let val_len = (pair_size - 4) as u64;
+        match id {
+            0x7109871a => {
+                info.v2_offset = val_offset;
+                info.v2_len = val_len;
+            }
+            0xf05368c0 => {
+                info.v3_offset = val_offset;
+                info.v3_len = val_len;
+            }
+            0x1b93ad61 => {
+                info.v31_offset = val_offset;
+                info.v31_len = val_len;
+            }
+            _ => {}
+        }
+        cursor += pair_size;
+    }
+
+    unsafe {
+        *out_info = info;
+    }
+    0
+}
+
+// ============================================================================
+// 26. ETC1 / ETC2 / EAC Software Texture Decoder
+// ============================================================================
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MocktailRustEtcFormat {
+    Etc2Rgb8 = 0,
+    Etc2Rgb8A1 = 1,
+    Etc2Rgba8 = 2,
+    EacR11 = 3,
+    EacR11Signed = 4,
+    EacRg11 = 5,
+    EacRg11Signed = 6,
+}
+
+static ETC_DISTANCE: [i32; 8] = [3, 6, 11, 16, 23, 32, 41, 64];
+
+static ETC1_MODIFIERS: [[i32; 4]; 8] = [
+    [2, 8, -2, -8],     [5, 17, -5, -17],   [9, 29, -9, -29],
+    [13, 42, -13, -42], [18, 60, -18, -60], [24, 80, -24, -80],
+    [33, 106, -33, -106], [47, 183, -47, -183],
+];
+
+static EAC_MODIFIERS: [[i32; 8]; 16] = [
+    [-3, -6, -9, -15, 2, 5, 8, 14],  [-3, -7, -10, -13, 2, 6, 9, 12],
+    [-2, -5, -8, -13, 1, 4, 7, 12],  [-2, -4, -6, -13, 1, 3, 5, 12],
+    [-3, -6, -8, -12, 2, 5, 7, 11],  [-3, -7, -9, -11, 2, 6, 8, 10],
+    [-4, -7, -8, -11, 3, 6, 7, 10],  [-3, -5, -8, -11, 2, 4, 7, 10],
+    [-2, -6, -8, -10, 1, 5, 7, 9],   [-2, -5, -8, -10, 1, 4, 7, 9],
+    [-2, -4, -8, -10, 1, 3, 7, 9],   [-2, -5, -7, -10, 1, 4, 6, 9],
+    [-3, -4, -7, -10, 2, 3, 6, 9],   [-1, -2, -3, -10, 0, 1, 2, 9],
+    [-4, -6, -8, -9, 3, 5, 7, 8],    [-3, -5, -7, -9, 2, 4, 6, 8],
+];
+
+#[inline]
+fn clamp255(v: i32) -> u8 {
+    v.clamp(0, 255) as u8
+}
+
+#[inline]
+fn expand4(v: i32) -> i32 { (v << 4) | v }
+#[inline]
+fn expand5(v: i32) -> i32 { (v << 3) | (v >> 2) }
+#[inline]
+fn expand6(v: i32) -> i32 { (v << 2) | (v >> 4) }
+#[inline]
+fn expand7(v: i32) -> i32 { (v << 1) | (v >> 6) }
+
+fn decode_rgb_block(b: &[u8], punchthrough: bool, out: &mut [u8; 64]) {
+    const K_DELTA: [i32; 8] = [0, 1, 2, 3, -4, -3, -2, -1];
+    let diff_or_opaque = (b[3] & 2) != 0;
+    let opaque = !punchthrough || diff_or_opaque;
+    let msb = ((b[4] as i32) << 8) | (b[5] as i32);
+    let lsb = ((b[6] as i32) << 8) | (b[7] as i32);
+
+    let index_of = |texel: usize| -> usize {
+        (((msb >> texel) & 1) << 1 | ((lsb >> texel) & 1)) as usize
+    };
+
+    let r_sum = ((b[0] >> 3) as i32) + K_DELTA[(b[0] & 7) as usize];
+    let g_sum = ((b[1] >> 3) as i32) + K_DELTA[(b[1] & 7) as usize];
+    let b_sum = ((b[2] >> 3) as i32) + K_DELTA[(b[2] & 7) as usize];
+    let individual = !punchthrough && !diff_or_opaque;
+
+    if !individual && (r_sum < 0 || r_sum > 31 || g_sum < 0 || g_sum > 31) {
+        let mut paint = [[0i32; 3]; 4];
+        if r_sum < 0 || r_sum > 31 {
+            let c1 = [
+                expand4(((((b[0] >> 3) & 3) << 2) | (b[0] & 3)) as i32),
+                expand4((b[1] >> 4) as i32),
+                expand4((b[1] & 15) as i32),
+            ];
+            let c2 = [
+                expand4((b[2] >> 4) as i32),
+                expand4((b[2] & 15) as i32),
+                expand4((b[3] >> 4) as i32),
+            ];
+            let d = ETC_DISTANCE[((((b[3] >> 2) & 3) << 1) | (b[3] & 1)) as usize];
+            for c in 0..3 {
+                paint[0][c] = c1[c];
+                paint[1][c] = c2[c] + d;
+                paint[2][c] = c2[c];
+                paint[3][c] = c2[c] - d;
+            }
+        } else {
+            let c1 = [
+                expand4(((b[0] >> 3) & 15) as i32),
+                expand4((((b[0] & 7) << 1) | ((b[1] >> 4) & 1)) as i32),
+                expand4(((b[1] & 8) | ((b[1] & 3) << 1) | (b[2] >> 7)) as i32),
+            ];
+            let c2 = [
+                expand4(((b[2] >> 3) & 15) as i32),
+                expand4((((b[2] & 7) << 1) | (b[3] >> 7)) as i32),
+                expand4(((b[3] >> 3) & 15) as i32),
+            ];
+            let v1 = (c1[0] << 16) | (c1[1] << 8) | c1[2];
+            let v2 = (c2[0] << 16) | (c2[1] << 8) | c2[2];
+            let d = ETC_DISTANCE[((b[3] & 4) | ((b[3] & 1) << 1) | (if v1 >= v2 { 1 } else { 0 })) as usize];
+            for c in 0..3 {
+                paint[0][c] = c1[c] + d;
+                paint[1][c] = c1[c] - d;
+                paint[2][c] = c2[c] + d;
+                paint[3][c] = c2[c] - d;
+            }
+        }
+        for texel in 0..16 {
+            let idx = index_of(texel);
+            let o = texel * 4;
+            if !opaque && idx == 2 {
+                out[o] = 0; out[o + 1] = 0; out[o + 2] = 0; out[o + 3] = 0;
+            } else {
+                out[o] = clamp255(paint[idx][0]);
+                out[o + 1] = clamp255(paint[idx][1]);
+                out[o + 2] = clamp255(paint[idx][2]);
+                out[o + 3] = 255;
+            }
+        }
+        return;
+    }
+
+    if !individual && (b_sum < 0 || b_sum > 31) {
+        let ro = expand6(((b[0] >> 1) & 63) as i32);
+        let go = expand7((((b[0] & 1) << 6) | ((b[1] >> 1) & 63)) as i32);
+        let bo = expand6((((b[1] & 1) << 5) | (b[2] & 0x18) | ((b[2] & 3) << 1) | (b[3] >> 7)) as i32);
+        let rh = expand6((((b[3] & 0x7c) >> 1) | (b[3] & 1)) as i32);
+        let gh = expand7((b[4] >> 1) as i32);
+        let bh = expand6((((b[4] & 1) << 5) | (b[5] >> 3)) as i32);
+        let rv = expand6((((b[5] & 7) << 3) | (b[6] >> 5)) as i32);
+        let gv = expand7((((b[6] & 31) << 2) | (b[7] >> 6)) as i32);
+        let bv = expand6((b[7] & 63) as i32);
+        for x in 0..4i32 {
+            for y in 0..4i32 {
+                let o = ((x * 4 + y) * 4) as usize;
+                out[o] = clamp255((x * (rh - ro) + y * (rv - ro) + 4 * ro + 2) >> 2);
+                out[o + 1] = clamp255((x * (gh - go) + y * (gv - go) + 4 * go + 2) >> 2);
+                out[o + 2] = clamp255((x * (bh - bo) + y * (bv - bo) + 4 * bo + 2) >> 2);
+                out[o + 3] = 255;
+            }
+        }
+        return;
+    }
+
+    let mut base = [[0i32; 3]; 2];
+    for c in 0..3 {
+        if individual {
+            base[0][c] = expand4((b[c] >> 4) as i32);
+            base[1][c] = expand4((b[c] & 15) as i32);
+        } else {
+            base[0][c] = expand5((b[c] >> 3) as i32);
+            base[1][c] = expand5(((b[c] >> 3) as i32) + K_DELTA[(b[c] & 7) as usize]);
+        }
+    }
+    let tables = [(b[3] >> 5) as usize, ((b[3] >> 2) & 7) as usize];
+    let flipped = (b[3] & 1) != 0;
+    for x in 0..4 {
+        for y in 0..4 {
+            let texel = x * 4 + y;
+            let idx = index_of(texel);
+            let o = texel * 4;
+            if !opaque && idx == 2 {
+                out[o] = 0; out[o + 1] = 0; out[o + 2] = 0; out[o + 3] = 0;
+                continue;
+            }
+            let sub = if flipped { if y >= 2 { 1 } else { 0 } } else { if x >= 2 { 1 } else { 0 } };
+            let modifier = if !opaque && idx == 0 { 0 } else { ETC1_MODIFIERS[tables[sub]][idx] };
+            out[o] = clamp255(base[sub][0] + modifier);
+            out[o + 1] = clamp255(base[sub][1] + modifier);
+            out[o + 2] = clamp255(base[sub][2] + modifier);
+            out[o + 3] = 255;
+        }
+    }
+}
+
+#[inline]
+fn eac_index(b: &[u8], texel: usize) -> usize {
+    let mut bits = 0u64;
+    for i in 2..8 {
+        bits = (bits << 8) | (b[i] as u64);
+    }
+    ((bits >> (45 - texel * 3)) & 7) as usize
+}
+
+#[inline]
+fn eac_modifier(b: &[u8], texel: usize) -> i32 {
+    EAC_MODIFIERS[(b[1] & 15) as usize][eac_index(b, texel)]
+}
+
+fn decode_r11(b: &[u8], texel: usize, is_signed: bool) -> u16 {
+    let multiplier = (b[1] >> 4) as i32;
+    let modifier = eac_modifier(b, texel);
+    let scaled = if multiplier != 0 { modifier * multiplier * 8 } else { modifier };
+    if !is_signed {
+        let value = ((b[0] as i32) * 8 + 4 + scaled).clamp(0, 2047);
+        ((value << 5) | (value >> 6)) as u16
+    } else {
+        let base = std::cmp::max(-127, (b[0] as i8) as i32);
+        let value = (base * 8 + scaled).clamp(-1023, 1023);
+        let magnitude = value.abs();
+        let expanded = (magnitude << 5) | (magnitude >> 5);
+        (if value < 0 { -expanded } else { expanded }) as i16 as u16
+    }
+}
+
+fn etc_block_bytes(format: MocktailRustEtcFormat) -> usize {
+    match format {
+        MocktailRustEtcFormat::Etc2Rgba8
+        | MocktailRustEtcFormat::EacRg11
+        | MocktailRustEtcFormat::EacRg11Signed => 16,
+        _ => 8,
+    }
+}
+
+fn etc_decoded_texel_bytes(format: MocktailRustEtcFormat) -> usize {
+    match format {
+        MocktailRustEtcFormat::EacR11 | MocktailRustEtcFormat::EacR11Signed => 2,
+        _ => 4,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_decode_etc_image_block_rows(
+    format: MocktailRustEtcFormat,
+    source: *const u8,
+    source_bytes: usize,
+    width: u32,
+    height: u32,
+    first_block_row: u32,
+    block_row_count: u32,
+    destination: *mut u8,
+    destination_bytes: usize,
+) -> c_int {
+    if source.is_null() || destination.is_null() || width == 0 || height == 0 {
+        return 0;
+    }
+    let blocks_wide = ((width as u64) + 3) / 4;
+    let blocks_high = ((height as u64) + 3) / 4;
+    let block_bytes = etc_block_bytes(format);
+    let texel_bytes = etc_decoded_texel_bytes(format);
+
+    if (blocks_wide * blocks_high * (block_bytes as u64)) > (source_bytes as u64) {
+        return 0;
+    }
+    if ((width as u64) * (height as u64) * (texel_bytes as u64)) > (destination_bytes as u64) {
+        return 0;
+    }
+    if (first_block_row as u64) + (block_row_count as u64) > blocks_high {
+        return 0;
+    }
+
+    let src_slice = unsafe { slice::from_raw_parts(source, source_bytes) };
+    let dst_slice = unsafe { slice::from_raw_parts_mut(destination, destination_bytes) };
+
+    let mut rgba = [0u8; 64];
+    let end_block_row = first_block_row + block_row_count;
+
+    for by in first_block_row..end_block_row {
+        for bx in 0..blocks_wide as u32 {
+            let block_offset = ((by as usize) * (blocks_wide as usize) + (bx as usize)) * block_bytes;
+            let block = &src_slice[block_offset..block_offset + block_bytes];
+
+            match format {
+                MocktailRustEtcFormat::Etc2Rgb8 => decode_rgb_block(block, false, &mut rgba),
+                MocktailRustEtcFormat::Etc2Rgb8A1 => decode_rgb_block(block, true, &mut rgba),
+                MocktailRustEtcFormat::Etc2Rgba8 => decode_rgb_block(&block[8..16], false, &mut rgba),
+                _ => {}
+            }
+
+            for y in 0..4u32 {
+                if by * 4 + y >= height {
+                    continue;
+                }
+                for x in 0..4u32 {
+                    if bx * 4 + x >= width {
+                        continue;
+                    }
+                    let texel = (x * 4 + y) as usize;
+                    let out_offset = (((by * 4 + y) * width + bx * 4 + x) as usize) * texel_bytes;
+                    match format {
+                        MocktailRustEtcFormat::Etc2Rgb8 | MocktailRustEtcFormat::Etc2Rgb8A1 | MocktailRustEtcFormat::Etc2Rgba8 => {
+                            dst_slice[out_offset..out_offset + 4].copy_from_slice(&rgba[texel * 4..texel * 4 + 4]);
+                            if format == MocktailRustEtcFormat::Etc2Rgba8 {
+                                let alpha = (block[0] as i32) + eac_modifier(block, texel) * ((block[1] >> 4) as i32);
+                                dst_slice[out_offset + 3] = clamp255(alpha);
+                            }
+                        }
+                        MocktailRustEtcFormat::EacR11 | MocktailRustEtcFormat::EacR11Signed
+                        | MocktailRustEtcFormat::EacRg11 | MocktailRustEtcFormat::EacRg11Signed => {
+                            let is_signed = format == MocktailRustEtcFormat::EacR11Signed || format == MocktailRustEtcFormat::EacRg11Signed;
+                            let channels = texel_bytes / 2;
+                            for channel in 0..channels {
+                                let val = decode_r11(&block[channel * 8..(channel + 1) * 8], texel, is_signed);
+                                dst_slice[out_offset + channel * 2] = val as u8;
+                                dst_slice[out_offset + channel * 2 + 1] = (val >> 8) as u8;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    1
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -2586,5 +4599,222 @@ mod tests {
         assert_eq!(mocktail_rust_bionic_eai_error(-2), 8); // EAI_NONAME -> kBionicAddressInfoNameNotFound (8)
         assert_eq!(mocktail_rust_bionic_eai_error(-4), 4); // EAI_FAIL -> kBionicAddressInfoFailure (4)
         assert_eq!(mocktail_rust_bionic_eai_error(-10), 6); // EAI_MEMORY -> kBionicAddressInfoMemory (6)
+    }
+
+    #[test]
+    fn test_roblox_launch_uri() {
+        let uri = CString::new("roblox://experiences/start?placeId=1818&launchData=hello%20world").unwrap();
+        let mut out_json = [0 as c_char; 1024];
+        let mut out_err = [0 as c_char; 256];
+        let mut follow_id = 0i64;
+
+        let rc = mocktail_rust_parse_roblox_launch_uri(
+            uri.as_ptr(),
+            0,
+            std::ptr::null(),
+            out_json.as_mut_ptr(),
+            1024,
+            out_err.as_mut_ptr(),
+            256,
+            &mut follow_id,
+        );
+        assert_eq!(rc, 0);
+        let json_str = unsafe { CStr::from_ptr(out_json.as_ptr()) }.to_str().unwrap();
+        assert!(json_str.contains("\"placeId\":1818"));
+        assert!(json_str.contains("\"launchData\":\"hello world\""));
+
+        // Test classic roblox-player:
+        let classic = CString::new("roblox-player:1+launchmode:play+placelauncherurl:https%3A%2F%2Fwww.roblox.com%2Fgame%2Fplacelauncher.ashx%3Frequest%3DRequestGame%26placeId%3D12345").unwrap();
+        let rc_classic = mocktail_rust_parse_roblox_launch_uri(
+            classic.as_ptr(),
+            0,
+            std::ptr::null(),
+            out_json.as_mut_ptr(),
+            1024,
+            out_err.as_mut_ptr(),
+            256,
+            &mut follow_id,
+        );
+        assert_eq!(rc_classic, 0);
+        let classic_json = unsafe { CStr::from_ptr(out_json.as_ptr()) }.to_str().unwrap();
+        assert!(classic_json.contains("\"placeId\":12345"));
+    }
+
+    #[test]
+    fn test_runtime_config_yaml() {
+        let yaml = r#"
+version: 1
+graphics:
+  backend: direct-vulkan
+  vsync: "on"
+performance:
+  memory_limit_mb: 2048
+runtime:
+  headless: false
+"#;
+        let mut out_env = [0 as c_char; 1024];
+        let mut out_err = [0 as c_char; 256];
+        let rc = mocktail_rust_parse_runtime_config_yaml(
+            yaml.as_ptr(),
+            yaml.len(),
+            out_env.as_mut_ptr(),
+            1024,
+            out_err.as_mut_ptr(),
+            256,
+        );
+        assert_eq!(rc, 0);
+        let env_str = unsafe { CStr::from_ptr(out_env.as_ptr()) }.to_str().unwrap();
+        assert!(env_str.contains("\"MOCKTAIL_GRAPHICS_BACKEND\":\"direct-vulkan\""));
+        assert!(env_str.contains("\"MOCKTAIL_VSYNC\":\"on\""));
+        assert!(env_str.contains("\"MOCKTAIL_MEMORY_LIMIT_MB\":\"2048\""));
+        assert!(env_str.contains("\"MOCKTAIL_HEADLESS\":\"0\""));
+    }
+
+    #[test]
+    fn test_startup_state_machine() {
+        let req = MocktailRustStartupRequirements {
+            windowed: 1,
+            require_input_ready: 1,
+            require_audio_ready: 0,
+        };
+        let sm = mocktail_rust_startup_sm_create(req);
+        assert!(!sm.is_null());
+
+        let mut state = MocktailRustStartupState::Created;
+        let mut status = 0;
+        let mut msg = [0 as c_char; 128];
+
+        // Step 1: Configured
+        mocktail_rust_startup_sm_record_evidence(sm, 0, &mut state, &mut status, msg.as_mut_ptr(), 128);
+        assert_eq!(state, MocktailRustStartupState::Configured);
+        assert_eq!(status, 0);
+
+        // Step 2: JniRuntimeReady
+        mocktail_rust_startup_sm_record_evidence(sm, 1, &mut state, &mut status, msg.as_mut_ptr(), 128);
+        assert_eq!(state, MocktailRustStartupState::JniRuntimeReady);
+
+        // Step 3: Duplicate evidence
+        mocktail_rust_startup_sm_record_evidence(sm, 1, &mut state, &mut status, msg.as_mut_ptr(), 128);
+        assert_eq!(status, 1); // Duplicate
+
+        // Step 4: Snapshot
+        let mut snap = MocktailRustStartupSnapshot {
+            state: MocktailRustStartupState::Created,
+            requirements: req,
+            configured: 0,
+            jni_runtime_ready: 0,
+            libraries_loaded: 0,
+            jni_on_load_complete: 0,
+            engine_started: 0,
+            data_model_loading: 0,
+            lua_app_ready: 0,
+            real_frame_presented: 0,
+            input_ready: 0,
+            audio_ready: 0,
+            revision: 0,
+        };
+        mocktail_rust_startup_sm_snapshot(sm, &mut snap, msg.as_mut_ptr(), 128);
+        assert_eq!(snap.state, MocktailRustStartupState::JniRuntimeReady);
+        assert_eq!(snap.configured, 1);
+        assert_eq!(snap.jni_runtime_ready, 1);
+
+        mocktail_rust_startup_sm_destroy(sm);
+    }
+
+    #[test]
+    fn test_fleasion_prepare_bundle() {
+        let ca_cert = "-----BEGIN CERTIFICATE-----\nMIIBcaCAQ...\n-----END CERTIFICATE-----\n";
+        let base_bundle = "-----BEGIN CERTIFICATE-----\nMIIBase...\n-----END CERTIFICATE-----\n";
+
+        let temp_dir = std::env::temp_dir();
+        let ca_file = temp_dir.join("test_ca.pem");
+        let base_file = temp_dir.join("test_base.pem");
+        let dest_file = temp_dir.join("test_dest.pem");
+
+        std::fs::write(&ca_file, ca_cert).unwrap();
+        std::fs::write(&base_file, base_bundle).unwrap();
+
+        let ca_cstr = CString::new(ca_file.to_str().unwrap()).unwrap();
+        let base_cstr = CString::new(base_file.to_str().unwrap()).unwrap();
+        let dest_cstr = CString::new(dest_file.to_str().unwrap()).unwrap();
+        let mut err_buf = [0 as c_char; 256];
+
+        let rc = mocktail_rust_fleasion_prepare_bundle(
+            ca_cstr.as_ptr(),
+            base_cstr.as_ptr(),
+            dest_cstr.as_ptr(),
+            err_buf.as_mut_ptr(),
+            256,
+        );
+        assert_eq!(rc, 0);
+
+        let merged = std::fs::read_to_string(&dest_file).unwrap();
+        assert!(merged.contains("MIIBase..."));
+        assert!(merged.contains("MIIBcaCAQ..."));
+
+        let _ = std::fs::remove_file(ca_file);
+        let _ = std::fs::remove_file(base_file);
+        let _ = std::fs::remove_file(dest_file);
+    }
+
+    #[test]
+    fn test_apk_signing_block_finder() {
+        let mut file = vec![0u8; 1024];
+        let file_len = file.len();
+        // Place EOCD at file_len - 22
+        let eocd_pos = file_len - 22;
+        file[eocd_pos..eocd_pos + 4].copy_from_slice(&0x06054b50u32.to_le_bytes());
+        // cd_offset = 512
+        file[eocd_pos + 16..eocd_pos + 20].copy_from_slice(&512u32.to_le_bytes());
+
+        // Sig block right before CD (512)
+        // Magic at 512 - 16 = 496
+        file[496..512].copy_from_slice(b"APK Sig Block 42");
+        // footer_size = 56: (32 bytes pair + 8 bytes footer size + 16 bytes magic)
+        file[488..496].copy_from_slice(&56u64.to_le_bytes());
+        // total_size = 64, block_begin = 512 - 64 = 448
+        // Header size at 448..456
+        file[448..456].copy_from_slice(&56u64.to_le_bytes());
+
+        // Place a v2 pair at 456: pair_size = 24, id = 0x7109871a
+        file[456..464].copy_from_slice(&24u64.to_le_bytes());
+        file[464..468].copy_from_slice(&0x7109871au32.to_le_bytes());
+
+        let mut info = MocktailRustApkSigningBlockInfo::default();
+        let mut err_buf = [0 as c_char; 256];
+        let rc = mocktail_rust_find_apk_signing_block(
+            file.as_ptr(),
+            file.len(),
+            &mut info,
+            err_buf.as_mut_ptr(),
+            256,
+        );
+        assert_eq!(rc, 0);
+        assert_eq!(info.central_directory, 512);
+        assert_eq!(info.v2_offset, 468);
+        assert_eq!(info.v2_len, 20);
+    }
+
+    #[test]
+    fn test_etc2_decoder() {
+        let block = [
+            0x24u8, 0x35, 0x46, 0x02, 0x00, 0x00, 0x00, 0x00,
+        ];
+        let mut dst = [0u8; 64]; // 4x4 RGBA8
+        let rc = mocktail_rust_decode_etc_image_block_rows(
+            MocktailRustEtcFormat::Etc2Rgb8,
+            block.as_ptr(),
+            block.len(),
+            4,
+            4,
+            0,
+            1,
+            dst.as_mut_ptr(),
+            dst.len(),
+        );
+        assert_eq!(rc, 1);
+        // Alpha channel should be 255 for opaque RGB8
+        assert_eq!(dst[3], 255);
+        assert_eq!(dst[7], 255);
     }
 }

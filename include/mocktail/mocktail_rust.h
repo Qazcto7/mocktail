@@ -347,6 +347,198 @@ int mocktail_rust_is_blocked_crash_host(const char* host);
 
 int mocktail_rust_bionic_eai_error(int posix_error);
 
+// ============================================================================
+// 21. Roblox Launch URI & Deep Links
+// ============================================================================
+
+int mocktail_rust_parse_roblox_launch_uri(
+    const char* uri,
+    int64_t override_place_id,
+    const char* override_game_instance,
+    char* out_json,
+    size_t out_cap,
+    char* out_error,
+    size_t error_cap,
+    int64_t* out_follow_user_id);
+
+int mocktail_rust_parse_webview_launch_game(
+    const char* command_json,
+    int64_t override_place_id,
+    const char* override_game_instance,
+    char* out_json,
+    size_t out_cap,
+    char* out_error,
+    size_t error_cap,
+    int64_t* out_follow_user_id);
+
+// ============================================================================
+// 22. YAML Runtime Configuration Parser
+// ============================================================================
+
+int mocktail_rust_parse_runtime_config_yaml(
+    const uint8_t* yaml_bytes,
+    size_t yaml_len,
+    char* out_env_json,
+    size_t out_cap,
+    char* out_error,
+    size_t error_cap);
+
+// ============================================================================
+// 23. Startup Lifecycle State Machine
+// ============================================================================
+
+typedef enum MocktailRustStartupState {
+    kRustStartupCreated = 0,
+    kRustStartupConfigured = 1,
+    kRustStartupJniRuntimeReady = 2,
+    kRustStartupLibrariesLoaded = 3,
+    kRustStartupJniOnLoadComplete = 4,
+    kRustStartupEngineStarted = 5,
+    kRustStartupDataModelLoading = 6,
+    kRustStartupLuaAppReady = 7,
+    kRustStartupReady = 8,
+    kRustStartupFailure = 9,
+    kRustStartupStopping = 10,
+    kRustStartupStopped = 11,
+} MocktailRustStartupState;
+
+typedef enum MocktailRustStartupEvidence {
+    kRustEvidenceConfigured = 0,
+    kRustEvidenceJniRuntimeReady = 1,
+    kRustEvidenceLibrariesLoaded = 2,
+    kRustEvidenceJniOnLoadComplete = 3,
+    kRustEvidenceEngineStarted = 4,
+    kRustEvidenceDataModelLoading = 5,
+    kRustEvidenceLuaAppReady = 6,
+    kRustEvidenceRealFramePresented = 7,
+    kRustEvidenceInputReady = 8,
+    kRustEvidenceAudioReady = 9,
+} MocktailRustStartupEvidence;
+
+typedef struct MocktailRustStartupRequirements {
+    int windowed;
+    int require_input_ready;
+    int require_audio_ready;
+} MocktailRustStartupRequirements;
+
+typedef struct MocktailRustStartupSnapshot {
+    MocktailRustStartupState state;
+    MocktailRustStartupRequirements requirements;
+    int configured;
+    int jni_runtime_ready;
+    int libraries_loaded;
+    int jni_on_load_complete;
+    int engine_started;
+    int data_model_loading;
+    int lua_app_ready;
+    int real_frame_presented;
+    int input_ready;
+    int audio_ready;
+    uint64_t revision;
+} MocktailRustStartupSnapshot;
+
+typedef struct MocktailRustStartupSm MocktailRustStartupSm;
+
+MocktailRustStartupSm* mocktail_rust_startup_sm_create(
+    MocktailRustStartupRequirements req);
+
+void mocktail_rust_startup_sm_destroy(MocktailRustStartupSm* sm);
+
+int mocktail_rust_startup_sm_record_evidence(
+    MocktailRustStartupSm* sm,
+    int evidence_val,
+    MocktailRustStartupState* out_state,
+    int* out_status,
+    char* out_msg,
+    size_t msg_cap);
+
+int mocktail_rust_startup_sm_fail(
+    MocktailRustStartupSm* sm,
+    const char* reason,
+    MocktailRustStartupState* out_state,
+    int* out_status,
+    char* out_msg,
+    size_t msg_cap);
+
+int mocktail_rust_startup_sm_begin_stopping(
+    MocktailRustStartupSm* sm,
+    MocktailRustStartupState* out_state,
+    int* out_status,
+    char* out_msg,
+    size_t msg_cap);
+
+int mocktail_rust_startup_sm_mark_stopped(
+    MocktailRustStartupSm* sm,
+    MocktailRustStartupState* out_state,
+    int* out_status,
+    char* out_msg,
+    size_t msg_cap);
+
+int mocktail_rust_startup_sm_snapshot(
+    const MocktailRustStartupSm* sm,
+    MocktailRustStartupSnapshot* out_snapshot,
+    char* out_reason,
+    size_t reason_cap);
+
+// ============================================================================
+// 24. Fleasion CA Certificate & Bundle Manager
+// ============================================================================
+
+int mocktail_rust_fleasion_prepare_bundle(
+    const char* ca_pem_path,
+    const char* base_bundle_path,
+    const char* dest_bundle_path,
+    char* out_error,
+    size_t error_cap);
+
+// ============================================================================
+// 25. APK Signing Block & Chunk Hash Verifier
+// ============================================================================
+
+typedef struct MocktailRustApkSigningBlockInfo {
+    uint64_t block_begin;
+    uint64_t central_directory;
+    uint64_t eocd;
+    uint64_t v2_offset;
+    uint64_t v2_len;
+    uint64_t v3_offset;
+    uint64_t v3_len;
+    uint64_t v31_offset;
+    uint64_t v31_len;
+} MocktailRustApkSigningBlockInfo;
+
+int mocktail_rust_find_apk_signing_block(
+    const uint8_t* file_bytes,
+    size_t file_size,
+    MocktailRustApkSigningBlockInfo* out_info,
+    char* out_error,
+    size_t error_cap);
+
+// ============================================================================
+// 26. ETC1 / ETC2 / EAC Software Texture Decoder
+// ============================================================================
+
+typedef enum MocktailRustEtcFormat {
+    kRustEtc2Rgb8 = 0,
+    kRustEtc2Rgb8A1 = 1,
+    kRustEtc2Rgba8 = 2,
+    kRustEacR11 = 3,
+    kRustEacR11Signed = 4,
+    kRustEacRg11 = 5,
+    kRustEacRg11Signed = 6,
+} MocktailRustEtcFormat;
+
+int mocktail_rust_decode_etc_image_block_rows(
+    MocktailRustEtcFormat format,
+    const uint8_t* source,
+    size_t source_bytes,
+    uint32_t width,
+    uint32_t height,
+    uint32_t first_block_row,
+    uint32_t block_row_count,
+    uint8_t* destination,
+    size_t destination_bytes);
+
 #ifdef __cplusplus
 }
 #endif

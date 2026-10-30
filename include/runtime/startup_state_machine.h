@@ -89,6 +89,7 @@ struct StartupSnapshot {
 class StartupStateMachine {
  public:
   explicit StartupStateMachine(StartupRequirements requirements = {});
+  ~StartupStateMachine();
 
   StartupStateMachine(const StartupStateMachine&) = delete;
   StartupStateMachine& operator=(const StartupStateMachine&) = delete;
@@ -103,21 +104,8 @@ class StartupStateMachine {
   StartupSnapshot Snapshot() const;
 
  private:
-  StartupUpdateResult RecordCoreEvidenceLocked(StartupEvidence evidence);
-  StartupUpdateResult RecordAuxiliaryEvidenceLocked(StartupEvidence evidence);
-  StartupUpdateResult RejectInvalidOrderLocked(StartupEvidence evidence,
-                                               const char* expected);
-  void EvaluateReadyLocked();
-  bool HasEvidenceLocked(StartupEvidence evidence) const;
-  void AddEvidenceLocked(StartupEvidence evidence);
-  StartupSnapshot SnapshotLocked() const;
-
   mutable std::mutex mutex_;
-  const StartupRequirements requirements_;
-  StartupState state_ = StartupState::kCreated;
-  uint32_t evidence_bits_ = 0;
-  uint64_t revision_ = 0;
-  std::string failure_reason_;
+  void* sm_ = nullptr;
 };
 
 const char* StartupStateName(StartupState state);

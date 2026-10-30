@@ -1,261 +1,144 @@
 #include "runtime/startup_state_machine.h"
 
+#include <array>
 #include <utility>
+
+#include "mocktail/mocktail_rust.h"
 
 namespace mocktail {
 namespace runtime {
 namespace {
 
-constexpr bool IsCoreEvidence(StartupEvidence evidence) {
-  return evidence >= StartupEvidence::kConfigured &&
-         evidence <= StartupEvidence::kLuaAppReady;
-}
-
-constexpr bool IsKnownEvidence(StartupEvidence evidence) {
-  switch (evidence) {
-    case StartupEvidence::kConfigured:
-    case StartupEvidence::kJniRuntimeReady:
-    case StartupEvidence::kLibrariesLoaded:
-    case StartupEvidence::kJniOnLoadComplete:
-    case StartupEvidence::kEngineStarted:
-    case StartupEvidence::kDataModelLoading:
-    case StartupEvidence::kLuaAppReady:
-    case StartupEvidence::kRealFramePresented:
-    case StartupEvidence::kInputReady:
-    case StartupEvidence::kAudioReady:
-      return true;
+StartupUpdateResult MakeResult(int status, MocktailRustStartupState state,
+                               const char* msg) {
+  StartupUpdateResult result;
+  switch (status) {
+    case 0:
+      result.status = StartupUpdateStatus::kApplied;
+      break;
+    case 1:
+      result.status = StartupUpdateStatus::kDuplicate;
+      break;
+    default:
+      result.status = StartupUpdateStatus::kRejected;
+      break;
   }
-  return false;
-}
-
-constexpr uint32_t EvidenceBit(StartupEvidence evidence) {
-  return uint32_t{1} << static_cast<uint32_t>(evidence);
-}
-
-StartupState StateForCoreEvidence(StartupEvidence evidence) {
-  switch (evidence) {
-    case StartupEvidence::kConfigured:
-      return StartupState::kConfigured;
-    case StartupEvidence::kJniRuntimeReady:
-      return StartupState::kJniRuntimeReady;
-    case StartupEvidence::kLibrariesLoaded:
-      return StartupState::kLibrariesLoaded;
-    case StartupEvidence::kJniOnLoadComplete:
-      return StartupState::kJniOnLoadComplete;
-    case StartupEvidence::kEngineStarted:
-      return StartupState::kEngineStarted;
-    case StartupEvidence::kDataModelLoading:
-      return StartupState::kDataModelLoading;
-    case StartupEvidence::kLuaAppReady:
-      return StartupState::kLuaAppReady;
-    case StartupEvidence::kRealFramePresented:
-    case StartupEvidence::kInputReady:
-    case StartupEvidence::kAudioReady:
-      return StartupState::kFailure;
-  }
-  return StartupState::kFailure;
-}
-
-StartupEvidence ExpectedEvidenceForState(StartupState state) {
-  switch (state) {
-    case StartupState::kCreated:
-      return StartupEvidence::kConfigured;
-    case StartupState::kConfigured:
-      return StartupEvidence::kJniRuntimeReady;
-    case StartupState::kJniRuntimeReady:
-      return StartupEvidence::kLibrariesLoaded;
-    case StartupState::kLibrariesLoaded:
-      return StartupEvidence::kJniOnLoadComplete;
-    case StartupState::kJniOnLoadComplete:
-      return StartupEvidence::kEngineStarted;
-    case StartupState::kEngineStarted:
-      return StartupEvidence::kDataModelLoading;
-    case StartupState::kDataModelLoading:
-      return StartupEvidence::kLuaAppReady;
-    case StartupState::kLuaAppReady:
-    case StartupState::kReady:
-    case StartupState::kFailure:
-    case StartupState::kStopping:
-    case StartupState::kStopped:
-      return StartupEvidence::kLuaAppReady;
-  }
-  return StartupEvidence::kConfigured;
+  result.state = static_cast<StartupState>(state);
+  result.message = msg != nullptr ? msg : "";
+  return result;
 }
 
 }  // namespace
 
-StartupStateMachine::StartupStateMachine(StartupRequirements requirements)
-    : requirements_(requirements) {}
+StartupStateMachine::StartupStateMachine(StartupRequirements requirements) {
+  MocktailRustStartupRequirements req = {
+      requirements.windowed ? 1 : 0,
+      requirements.require_input_ready ? 1 : 0,
+      requirements.require_audio_ready ? 1 : 0,
+  };
+  sm_ = mocktail_rust_startup_sm_create(req);
+}
+
+StartupStateMachine::~StartupStateMachine() {
+  if (sm_ != nullptr) {
+    mocktail_rust_startup_sm_destroy(
+        reinterpret_cast<MocktailRustStartupSm*>(sm_));
+    sm_ = nullptr;
+  }
+}
 
 StartupUpdateResult StartupStateMachine::RecordEvidence(
     StartupEvidence evidence) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (!IsKnownEvidence(evidence)) {
-    return RejectInvalidOrderLocked(
-        evidence, StartupEvidenceName(ExpectedEvidenceForState(state_)));
+  if (sm_ == nullptr) {
+    return {StartupUpdateStatus::kRejected, StartupState::kFailure,
+            "state machine uninitialized"};
   }
-  if (HasEvidenceLocked(evidence)) {
-    return {StartupUpdateStatus::kDuplicate, state_,
-            std::string("duplicate startup evidence: ") +
-                StartupEvidenceName(evidence)};
-  }
-  if (state_ == StartupState::kFailure || state_ == StartupState::kStopping ||
-      state_ == StartupState::kStopped) {
-    return {StartupUpdateStatus::kRejected, state_,
-            std::string("startup evidence rejected in state ") +
-                StartupStateName(state_)};
-  }
-  return IsCoreEvidence(evidence) ? RecordCoreEvidenceLocked(evidence)
-                                  : RecordAuxiliaryEvidenceLocked(evidence);
-}
-
-StartupUpdateResult StartupStateMachine::RecordCoreEvidenceLocked(
-    StartupEvidence evidence) {
-  const StartupEvidence expected = ExpectedEvidenceForState(state_);
-  if (evidence != expected) {
-    return RejectInvalidOrderLocked(evidence, StartupEvidenceName(expected));
-  }
-
-  AddEvidenceLocked(evidence);
-  state_ = StateForCoreEvidence(evidence);
-  ++revision_;
-  EvaluateReadyLocked();
-  return {StartupUpdateStatus::kApplied, state_,
-          std::string("accepted startup evidence: ") +
-              StartupEvidenceName(evidence)};
-}
-
-StartupUpdateResult StartupStateMachine::RecordAuxiliaryEvidenceLocked(
-    StartupEvidence evidence) {
-  if (!HasEvidenceLocked(StartupEvidence::kConfigured)) {
-    return RejectInvalidOrderLocked(evidence, "Configured");
-  }
-  if (evidence == StartupEvidence::kRealFramePresented &&
-      !HasEvidenceLocked(StartupEvidence::kEngineStarted)) {
-    return RejectInvalidOrderLocked(evidence, "EngineStarted");
-  }
-
-  AddEvidenceLocked(evidence);
-  ++revision_;
-  EvaluateReadyLocked();
-  return {StartupUpdateStatus::kApplied, state_,
-          std::string("accepted startup evidence: ") +
-              StartupEvidenceName(evidence)};
-}
-
-StartupUpdateResult StartupStateMachine::RejectInvalidOrderLocked(
-    StartupEvidence evidence, const char* expected) {
-  failure_reason_ = std::string("invalid startup evidence order in state ") +
-                    StartupStateName(state_) + ": expected " +
-                    (expected != nullptr ? expected : "no further evidence") +
-                    ", received " + StartupEvidenceName(evidence);
-  state_ = StartupState::kFailure;
-  ++revision_;
-  return {StartupUpdateStatus::kRejected, state_, failure_reason_};
-}
-
-void StartupStateMachine::EvaluateReadyLocked() {
-  if (!HasEvidenceLocked(StartupEvidence::kLuaAppReady)) {
-    return;
-  }
-  if (requirements_.windowed &&
-      !HasEvidenceLocked(StartupEvidence::kRealFramePresented)) {
-    state_ = StartupState::kLuaAppReady;
-    return;
-  }
-  if (requirements_.require_input_ready &&
-      !HasEvidenceLocked(StartupEvidence::kInputReady)) {
-    state_ = StartupState::kLuaAppReady;
-    return;
-  }
-  if (requirements_.require_audio_ready &&
-      !HasEvidenceLocked(StartupEvidence::kAudioReady)) {
-    state_ = StartupState::kLuaAppReady;
-    return;
-  }
-  state_ = StartupState::kReady;
+  MocktailRustStartupState out_state = kRustStartupCreated;
+  int out_status = 2;
+  std::array<char, 512> msg{};
+  mocktail_rust_startup_sm_record_evidence(
+      reinterpret_cast<MocktailRustStartupSm*>(sm_),
+      static_cast<int>(evidence), &out_state, &out_status, msg.data(),
+      msg.size());
+  return MakeResult(out_status, out_state, msg.data());
 }
 
 StartupUpdateResult StartupStateMachine::Fail(std::string reason) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (state_ == StartupState::kFailure) {
-    return {StartupUpdateStatus::kDuplicate, state_, failure_reason_};
+  if (sm_ == nullptr) {
+    return {StartupUpdateStatus::kRejected, StartupState::kFailure,
+            "state machine uninitialized"};
   }
-  if (state_ == StartupState::kStopped) {
-    return {StartupUpdateStatus::kRejected, state_,
-            "cannot fail an already stopped runtime"};
-  }
-  failure_reason_ = reason.empty() ? "startup failed" : std::move(reason);
-  state_ = StartupState::kFailure;
-  ++revision_;
-  return {StartupUpdateStatus::kApplied, state_, failure_reason_};
+  MocktailRustStartupState out_state = kRustStartupCreated;
+  int out_status = 2;
+  std::array<char, 512> msg{};
+  mocktail_rust_startup_sm_fail(reinterpret_cast<MocktailRustStartupSm*>(sm_),
+                                reason.c_str(), &out_state, &out_status,
+                                msg.data(), msg.size());
+  return MakeResult(out_status, out_state, msg.data());
 }
 
 StartupUpdateResult StartupStateMachine::BeginStopping() {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (state_ == StartupState::kStopping || state_ == StartupState::kStopped) {
-    return {StartupUpdateStatus::kDuplicate, state_,
-            std::string("runtime is already ") + StartupStateName(state_)};
+  if (sm_ == nullptr) {
+    return {StartupUpdateStatus::kRejected, StartupState::kFailure,
+            "state machine uninitialized"};
   }
-  state_ = StartupState::kStopping;
-  ++revision_;
-  return {StartupUpdateStatus::kApplied, state_, "runtime stopping"};
+  MocktailRustStartupState out_state = kRustStartupCreated;
+  int out_status = 2;
+  std::array<char, 512> msg{};
+  mocktail_rust_startup_sm_begin_stopping(
+      reinterpret_cast<MocktailRustStartupSm*>(sm_), &out_state, &out_status,
+      msg.data(), msg.size());
+  return MakeResult(out_status, out_state, msg.data());
 }
 
 StartupUpdateResult StartupStateMachine::MarkStopped() {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (state_ == StartupState::kStopped) {
-    return {StartupUpdateStatus::kDuplicate, state_,
-            "runtime is already Stopped"};
+  if (sm_ == nullptr) {
+    return {StartupUpdateStatus::kRejected, StartupState::kFailure,
+            "state machine uninitialized"};
   }
-  if (state_ != StartupState::kStopping) {
-    failure_reason_ =
-        std::string(
-            "invalid lifecycle order: Stopped requires Stopping, was ") +
-        StartupStateName(state_);
-    state_ = StartupState::kFailure;
-    ++revision_;
-    return {StartupUpdateStatus::kRejected, state_, failure_reason_};
-  }
-  state_ = StartupState::kStopped;
-  ++revision_;
-  return {StartupUpdateStatus::kApplied, state_, "runtime stopped"};
+  MocktailRustStartupState out_state = kRustStartupCreated;
+  int out_status = 2;
+  std::array<char, 512> msg{};
+  mocktail_rust_startup_sm_mark_stopped(
+      reinterpret_cast<MocktailRustStartupSm*>(sm_), &out_state, &out_status,
+      msg.data(), msg.size());
+  return MakeResult(out_status, out_state, msg.data());
 }
 
 StartupSnapshot StartupStateMachine::Snapshot() const {
   std::lock_guard<std::mutex> lock(mutex_);
-  return SnapshotLocked();
-}
-
-bool StartupStateMachine::HasEvidenceLocked(StartupEvidence evidence) const {
-  return (evidence_bits_ & EvidenceBit(evidence)) != 0;
-}
-
-void StartupStateMachine::AddEvidenceLocked(StartupEvidence evidence) {
-  evidence_bits_ |= EvidenceBit(evidence);
-}
-
-StartupSnapshot StartupStateMachine::SnapshotLocked() const {
   StartupSnapshot snapshot;
-  snapshot.state = state_;
-  snapshot.requirements = requirements_;
-  snapshot.configured = HasEvidenceLocked(StartupEvidence::kConfigured);
-  snapshot.jni_runtime_ready =
-      HasEvidenceLocked(StartupEvidence::kJniRuntimeReady);
-  snapshot.libraries_loaded =
-      HasEvidenceLocked(StartupEvidence::kLibrariesLoaded);
-  snapshot.jni_on_load_complete =
-      HasEvidenceLocked(StartupEvidence::kJniOnLoadComplete);
-  snapshot.engine_started = HasEvidenceLocked(StartupEvidence::kEngineStarted);
-  snapshot.data_model_loading =
-      HasEvidenceLocked(StartupEvidence::kDataModelLoading);
-  snapshot.lua_app_ready = HasEvidenceLocked(StartupEvidence::kLuaAppReady);
-  snapshot.real_frame_presented =
-      HasEvidenceLocked(StartupEvidence::kRealFramePresented);
-  snapshot.input_ready = HasEvidenceLocked(StartupEvidence::kInputReady);
-  snapshot.audio_ready = HasEvidenceLocked(StartupEvidence::kAudioReady);
-  snapshot.revision = revision_;
-  snapshot.failure_reason = failure_reason_;
+  if (sm_ == nullptr) {
+    return snapshot;
+  }
+  MocktailRustStartupSnapshot raw{};
+  std::array<char, 512> reason{};
+  mocktail_rust_startup_sm_snapshot(
+      reinterpret_cast<const MocktailRustStartupSm*>(sm_), &raw, reason.data(),
+      reason.size());
+
+  snapshot.state = static_cast<StartupState>(raw.state);
+  snapshot.requirements.windowed = raw.requirements.windowed != 0;
+  snapshot.requirements.require_input_ready =
+      raw.requirements.require_input_ready != 0;
+  snapshot.requirements.require_audio_ready =
+      raw.requirements.require_audio_ready != 0;
+  snapshot.configured = raw.configured != 0;
+  snapshot.jni_runtime_ready = raw.jni_runtime_ready != 0;
+  snapshot.libraries_loaded = raw.libraries_loaded != 0;
+  snapshot.jni_on_load_complete = raw.jni_on_load_complete != 0;
+  snapshot.engine_started = raw.engine_started != 0;
+  snapshot.data_model_loading = raw.data_model_loading != 0;
+  snapshot.lua_app_ready = raw.lua_app_ready != 0;
+  snapshot.real_frame_presented = raw.real_frame_presented != 0;
+  snapshot.input_ready = raw.input_ready != 0;
+  snapshot.audio_ready = raw.audio_ready != 0;
+  snapshot.revision = raw.revision;
+  snapshot.failure_reason = reason.data();
   return snapshot;
 }
 

@@ -26,21 +26,12 @@
 namespace mocktail::update {
 namespace {
 
-constexpr std::uint32_t kZipEocdSignature = 0x06054b50U;
-constexpr std::uint32_t kV2BlockId = 0x7109871aU;
-constexpr std::uint32_t kV3BlockId = 0xf05368c0U;
-constexpr std::uint32_t kV31BlockId = 0x1b93ad61U;
 constexpr std::size_t kChunkBytes = 1024U * 1024U;
 
 std::uint32_t U32(const unsigned char* value) {
   return value[0] | static_cast<std::uint32_t>(value[1]) << 8U |
          static_cast<std::uint32_t>(value[2]) << 16U |
          static_cast<std::uint32_t>(value[3]) << 24U;
-}
-
-std::uint64_t U64(const unsigned char* value) {
-  return static_cast<std::uint64_t>(U32(value)) |
-         static_cast<std::uint64_t>(U32(value + 4)) << 32U;
 }
 
 void PutU32(std::uint32_t value, unsigned char* output) {
@@ -137,24 +128,6 @@ bool MapFile(const std::filesystem::path& path, Mapping* mapping,
   return true;
 }
 
-bool FindEocd(const Mapping& mapping, std::size_t* eocd, std::string* error) {
-  const std::size_t minimum = mapping.size > 65557U ? mapping.size - 65557U : 0;
-  for (std::size_t position = mapping.size - 22U;; --position) {
-    if (U32(mapping.bytes + position) == kZipEocdSignature) {
-      const std::uint16_t comment =
-          mapping.bytes[position + 20] |
-          static_cast<std::uint16_t>(mapping.bytes[position + 21]) << 8U;
-      if (position + 22U + comment == mapping.size) {
-        *eocd = position;
-        return true;
-      }
-    }
-    if (position == minimum) break;
-  }
-  *error = "APK has no valid ZIP end record";
-  return false;
-}
-
 struct SigningBlock {
   Span v2;
   Span v3;
@@ -166,62 +139,29 @@ struct SigningBlock {
 
 bool ParseSigningBlock(const Mapping& mapping, SigningBlock* block,
                        std::string* error) {
-  if (!FindEocd(mapping, &block->eocd, error)) return false;
-  block->central_directory = U32(mapping.bytes + block->eocd + 16U);
-  if (block->central_directory < 32U ||
-      block->central_directory > block->eocd ||
-      mocktail_rust_verify_apk_signing_magic(
-          mapping.bytes + block->central_directory - 16U, 16U) != 1) {
-    *error = "APK has no Signature Scheme v2/v3 block";
+  MocktailRustApkSigningBlockInfo info{};
+  std::array<char, 256> out_err{};
+  const int rc = mocktail_rust_find_apk_signing_block(
+      mapping.bytes, mapping.size, &info, out_err.data(), out_err.size());
+  if (rc != 0) {
+    *error = out_err[0] != '\0' ? out_err.data()
+                                : "APK signing block parsing failed";
     return false;
   }
-  const std::uint64_t footer_size =
-      U64(mapping.bytes + block->central_directory - 24U);
-  if (footer_size < 24U || footer_size > block->central_directory - 8U ||
-      footer_size > std::numeric_limits<std::size_t>::max() - 8U) {
-    *error = "APK signing block size is invalid";
-    return false;
+  block->begin = static_cast<std::size_t>(info.block_begin);
+  block->central_directory = static_cast<std::size_t>(info.central_directory);
+  block->eocd = static_cast<std::size_t>(info.eocd);
+  if (info.v2_len > 0) {
+    block->v2 = {mapping.bytes + info.v2_offset,
+                 static_cast<std::size_t>(info.v2_len)};
   }
-  const std::size_t total_size = static_cast<std::size_t>(footer_size) + 8U;
-  block->begin = block->central_directory - total_size;
-  if (U64(mapping.bytes + block->begin) != footer_size) {
-    *error = "APK signing block size headers disagree";
-    return false;
+  if (info.v3_len > 0) {
+    block->v3 = {mapping.bytes + info.v3_offset,
+                 static_cast<std::size_t>(info.v3_len)};
   }
-  std::size_t cursor = block->begin + 8U;
-  const std::size_t pairs_end = block->central_directory - 24U;
-  while (cursor < pairs_end) {
-    if (pairs_end - cursor < 12U) {
-      *error = "APK signing block pair is truncated";
-      return false;
-    }
-    const std::uint64_t pair_size = U64(mapping.bytes + cursor);
-    cursor += 8U;
-    if (pair_size < 4U || pair_size > pairs_end - cursor) {
-      *error = "APK signing block pair has an invalid size";
-      return false;
-    }
-    const std::uint32_t id = U32(mapping.bytes + cursor);
-    const Span value{mapping.bytes + cursor + 4U,
-                     static_cast<std::size_t>(pair_size - 4U)};
-    Span* selected = nullptr;
-    if (id == kV2BlockId) selected = &block->v2;
-    if (id == kV3BlockId) selected = &block->v3;
-    if (id == kV31BlockId) selected = &block->v31;
-    if (selected != nullptr) {
-      if (selected->data != nullptr) {
-        *error = "APK contains a duplicate signature scheme block";
-        return false;
-      }
-      *selected = value;
-    }
-    cursor += static_cast<std::size_t>(pair_size);
-  }
-  if (cursor != pairs_end ||
-      (block->v2.data == nullptr && block->v3.data == nullptr &&
-       block->v31.data == nullptr)) {
-    *error = "APK has no supported signing scheme";
-    return false;
+  if (info.v31_len > 0) {
+    block->v31 = {mapping.bytes + info.v31_offset,
+                  static_cast<std::size_t>(info.v31_len)};
   }
   return true;
 }
