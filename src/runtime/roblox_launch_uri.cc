@@ -4,6 +4,7 @@
 
 // [patch.py] RequestFollowUser support
 #include "runtime/roblox_presence_resolver.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <algorithm>
 #include <array>
@@ -97,65 +98,13 @@ std::string AsciiLower(std::string_view value) {
 }
 
 bool ContainsControlBytes(std::string_view value) {
-  return std::any_of(value.begin(), value.end(), [](unsigned char character) {
-    return character < 0x20 || character == 0x7f;
-  });
+  return mocktail_rust_contains_control_bytes(
+      reinterpret_cast<const uint8_t*>(value.data()), value.size()) != 0;
 }
 
 bool IsValidUtf8(std::string_view value) {
-  for (std::size_t index = 0; index < value.size();) {
-    const unsigned char first = static_cast<unsigned char>(value[index]);
-    if (first <= 0x7f) {
-      ++index;
-      continue;
-    }
-    std::size_t continuation_count = 0;
-    uint32_t code_point = 0;
-    if (first >= 0xc2 && first <= 0xdf) {
-      continuation_count = 1;
-      code_point = first & 0x1f;
-    } else if (first >= 0xe0 && first <= 0xef) {
-      continuation_count = 2;
-      code_point = first & 0x0f;
-    } else if (first >= 0xf0 && first <= 0xf4) {
-      continuation_count = 3;
-      code_point = first & 0x07;
-    } else {
-      return false;
-    }
-    if (index + continuation_count >= value.size()) {
-      return false;
-    }
-    for (std::size_t offset = 1; offset <= continuation_count; ++offset) {
-      const unsigned char continuation =
-          static_cast<unsigned char>(value[index + offset]);
-      if ((continuation & 0xc0) != 0x80) {
-        return false;
-      }
-      code_point = (code_point << 6) | (continuation & 0x3f);
-    }
-    if ((continuation_count == 2 && code_point < 0x800) ||
-        (continuation_count == 3 && code_point < 0x10000) ||
-        (code_point >= 0xd800 && code_point <= 0xdfff) ||
-        code_point > 0x10ffff) {
-      return false;
-    }
-    index += continuation_count + 1;
-  }
-  return true;
-}
-
-int HexDigitValue(char character) {
-  if (character >= '0' && character <= '9') {
-    return character - '0';
-  }
-  if (character >= 'a' && character <= 'f') {
-    return character - 'a' + 10;
-  }
-  if (character >= 'A' && character <= 'F') {
-    return character - 'A' + 10;
-  }
-  return -1;
+  return mocktail_rust_is_valid_utf8(
+      reinterpret_cast<const uint8_t*>(value.data()), value.size()) != 0;
 }
 
 Status PercentDecode(std::string_view encoded, bool plus_as_space,
@@ -163,28 +112,16 @@ Status PercentDecode(std::string_view encoded, bool plus_as_space,
   if (decoded == nullptr || encoded.size() > kMaximumParameterValueBytes) {
     return Invalid("Roblox launch parameter size is invalid");
   }
-  decoded->clear();
-  decoded->reserve(encoded.size());
-  for (std::size_t index = 0; index < encoded.size(); ++index) {
-    unsigned char value = static_cast<unsigned char>(encoded[index]);
-    if (encoded[index] == '%') {
-      if (index + 2 >= encoded.size()) {
-        return Invalid("Roblox launch URI contains invalid percent encoding");
-      }
-      const int high = HexDigitValue(encoded[index + 1]);
-      const int low = HexDigitValue(encoded[index + 2]);
-      if (high < 0 || low < 0) {
-        return Invalid("Roblox launch URI contains invalid percent encoding");
-      }
-      value = static_cast<unsigned char>((high << 4) | low);
-      index += 2;
-    } else if (encoded[index] == '+' && plus_as_space) {
-      value = ' ';
-    }
-    if (value < 0x20 || value == 0x7f) {
-      return Invalid("Roblox launch URI contains a control byte");
-    }
-    decoded->push_back(static_cast<char>(value));
+  std::string null_encoded(encoded);
+  std::vector<char> buffer(encoded.size() + 1);
+  const int rc = mocktail_rust_percent_decode(
+      null_encoded.c_str(), plus_as_space ? 1 : 0, buffer.data(), buffer.size());
+  if (rc != 0) {
+    return Invalid("Roblox launch URI contains invalid percent encoding");
+  }
+  decoded->assign(buffer.data());
+  if (ContainsControlBytes(*decoded)) {
+    return Invalid("Roblox launch URI contains a control byte");
   }
   if (decoded->size() > kMaximumParameterValueBytes || !IsValidUtf8(*decoded)) {
     return Invalid("Roblox launch parameter is not bounded UTF-8");

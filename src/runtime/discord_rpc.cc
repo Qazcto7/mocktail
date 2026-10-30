@@ -1,4 +1,5 @@
 #include "runtime/discord_rpc.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <curl/curl.h>
 #include <poll.h>
@@ -456,10 +457,9 @@ struct ResolvedPlaceMetadata {
 };
 
 bool IsSafeExternalImageUrl(std::string_view url) {
-  return url.size() <= 512 && url.substr(0, 8) == "https://" &&
-         std::none_of(url.begin(), url.end(), [](unsigned char byte) {
-           return byte < 0x20U || byte == 0x7fU;
-         });
+  if (url.empty() || url.size() > 512) return false;
+  std::string null_url(url);
+  return mocktail_rust_is_safe_url(null_url.c_str()) == 1;
 }
 
 ResolvedPlaceMetadata ResolvePlaceMetadata(int64_t place_id) {

@@ -9,6 +9,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "mocktail/mocktail_rust.h"
+
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -29,9 +31,6 @@ constexpr std::uint32_t kV2BlockId = 0x7109871aU;
 constexpr std::uint32_t kV3BlockId = 0xf05368c0U;
 constexpr std::uint32_t kV31BlockId = 0x1b93ad61U;
 constexpr std::size_t kChunkBytes = 1024U * 1024U;
-constexpr std::array<unsigned char, 16> kSigningMagic = {
-    'A', 'P', 'K', ' ', 'S', 'i', 'g', ' ',
-    'B', 'l', 'o', 'c', 'k', ' ', '4', '2'};
 
 std::uint32_t U32(const unsigned char* value) {
   return value[0] | static_cast<std::uint32_t>(value[1]) << 8U |
@@ -171,8 +170,8 @@ bool ParseSigningBlock(const Mapping& mapping, SigningBlock* block,
   block->central_directory = U32(mapping.bytes + block->eocd + 16U);
   if (block->central_directory < 32U ||
       block->central_directory > block->eocd ||
-      std::memcmp(mapping.bytes + block->central_directory - 16U,
-                  kSigningMagic.data(), kSigningMagic.size()) != 0) {
+      mocktail_rust_verify_apk_signing_magic(
+          mapping.bytes + block->central_directory - 16U, 16U) != 1) {
     *error = "APK has no Signature Scheme v2/v3 block";
     return false;
   }
