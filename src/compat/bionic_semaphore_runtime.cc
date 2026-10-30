@@ -102,8 +102,11 @@ int mocktail_bionic_sem_wait(sem_t* semaphore) {
       return 0;
     }
     const int rc = SemFutex(count, FUTEX_WAIT, kSemMinusOne);
-    if (rc != 0 && errno == EINTR) {
-      continue;
+    if (rc != 0) {
+      if (errno == EINTR || errno == EAGAIN) {
+        continue;
+      }
+      return -1;
     }
   }
 }
