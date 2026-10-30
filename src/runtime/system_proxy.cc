@@ -5,15 +5,13 @@
 #include <string>
 #include <vector>
 
+#include "mocktail/mocktail_rust.h"
+
 namespace mocktail {
 namespace runtime {
 namespace {
 
 constexpr char kSystemProxyProbeUrl[] = "https://www.roblox.com/";
-
-bool IsDirectProxy(const std::string& candidate) {
-  return g_ascii_strcasecmp(candidate.c_str(), "direct://") == 0;
-}
 
 }  // namespace
 
@@ -26,35 +24,43 @@ SystemProxyResult SelectSystemProxy(
   }
 
   const std::string& candidate = candidates.front();
-  if (IsDirectProxy(candidate)) {
-    return result;
-  }
+  char scheme_buf[64] = {0};
+  char host_buf[256] = {0};
+  uint16_t port = 0;
+  int is_direct = 0;
+  int has_auth = 0;
 
-  GError* parse_error = nullptr;
-  GUri* uri = g_uri_parse(candidate.c_str(), G_URI_FLAGS_SCHEME_NORMALIZE,
-                          &parse_error);
-  if (uri == nullptr) {
-    if (parse_error != nullptr) g_error_free(parse_error);
+  const int rc = mocktail_rust_parse_proxy_uri(
+      candidate.c_str(),
+      scheme_buf,
+      sizeof(scheme_buf),
+      host_buf,
+      sizeof(host_buf),
+      &port,
+      &is_direct,
+      &has_auth);
+
+  if (rc != 0) {
     result.error = "system proxy resolver returned an invalid proxy URI";
     return result;
   }
-
-  const char* scheme = g_uri_get_scheme(uri);
-  const char* host = g_uri_get_host(uri);
-  const char* user_info = g_uri_get_userinfo(uri);
-  const int port = g_uri_get_port(uri);
-  if (user_info != nullptr && user_info[0] != '\0') {
-    result.error = "authenticated system proxies are not supported";
-  } else if (host == nullptr || port <= 0 || port > 65535) {
-    result.error = "system proxy has no valid host and port";
-  } else {
-    result.proxy = ParseNetworkProxyConfig(
-        host, std::to_string(port), scheme != nullptr ? scheme : "");
-    if (!result.proxy.has_value()) {
-      result.error = "system proxy must use HTTP, HTTPS, or SOCKS5";
-    }
+  if (is_direct != 0) {
+    return result;
   }
-  g_uri_unref(uri);
+  if (has_auth != 0) {
+    result.error = "authenticated system proxies are not supported";
+    return result;
+  }
+  if (host_buf[0] == '\0' || port == 0) {
+    result.error = "system proxy has no valid host and port";
+    return result;
+  }
+
+  result.proxy = ParseNetworkProxyConfig(
+      host_buf, std::to_string(port), scheme_buf);
+  if (!result.proxy.has_value()) {
+    result.error = "system proxy must use HTTP, HTTPS, or SOCKS5";
+  }
   return result;
 }
 

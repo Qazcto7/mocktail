@@ -257,6 +257,96 @@ int mocktail_rust_map_sdl_key_to_android(
 
 int32_t mocktail_rust_map_sdl_mouse_button(uint8_t sdl_button);
 
+// ============================================================================
+// 15. System Proxy & URI Resolver
+// ============================================================================
+
+int mocktail_rust_parse_proxy_uri(
+    const char* candidate,
+    char* out_scheme,
+    size_t scheme_cap,
+    char* out_host,
+    size_t host_cap,
+    uint16_t* out_port,
+    int* out_is_direct,
+    int* out_has_auth);
+
+// ============================================================================
+// 16. Single Instance Lock & Instance Key
+// ============================================================================
+
+int mocktail_rust_compute_instance_key(
+    const char* exe_path,
+    char* out_key,
+    size_t out_cap);
+
+int mocktail_rust_is_positive_decimal(const char* val);
+
+// ============================================================================
+// 17. Compatibility Catalog & Approval Manifest
+// ============================================================================
+
+typedef struct MocktailRustPayloadProfile {
+    char version_name[64];
+    uint64_t version_code;
+    char elf_build_id[41];
+} MocktailRustPayloadProfile;
+
+int mocktail_rust_parse_compatibility_catalog(
+    const uint8_t* json_bytes,
+    size_t json_len,
+    const char* guest_abi,
+    MocktailRustPayloadProfile* out_profiles,
+    size_t out_cap,
+    size_t* out_count,
+    char* out_error,
+    size_t error_cap);
+
+// ============================================================================
+// 18. Crash Report Policy & FFlags Injection
+// ============================================================================
+
+int mocktail_rust_merge_crash_report_settings(
+    const char* base_json,
+    int fast_flags_only,
+    char* out_buf,
+    size_t out_cap,
+    size_t* out_len);
+
+// ============================================================================
+// 19. Device Profile & Hardware Presets
+// ============================================================================
+
+int mocktail_rust_canonical_device_profile_name(
+    const char* name,
+    char* out_buf,
+    size_t out_cap);
+
+int mocktail_rust_is_valid_device_profile_value(
+    const char* value,
+    size_t maximum);
+
+int mocktail_rust_build_device_profile_cache_key(
+    const char* name,
+    const char* platform,
+    const char* display,
+    const char* manufacturer,
+    const char* model,
+    const char* brand,
+    const char* code,
+    const char* sku,
+    const char* soc,
+    char* out_key,
+    size_t out_cap);
+
+// ============================================================================
+// 20. Bionic DNS & Crash Host Blocker
+// ============================================================================
+
+int mocktail_rust_is_blocked_crash_host(const char* host);
+
+int mocktail_rust_bionic_eai_error(int posix_error);
+
 #ifdef __cplusplus
 }
 #endif

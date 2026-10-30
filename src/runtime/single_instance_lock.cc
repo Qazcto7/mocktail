@@ -17,6 +17,8 @@
 #include <string_view>
 #include <utility>
 
+#include "mocktail/mocktail_rust.h"
+
 namespace mocktail {
 namespace runtime {
 namespace {
@@ -98,30 +100,21 @@ std::string ErrnoMessage(std::string_view operation,
 }
 
 bool IsPositiveDecimal(std::string_view value) {
-  if (value.empty() || value == "0") {
-    return false;
-  }
-  return std::all_of(value.begin(), value.end(), [](unsigned char character) {
-    return character >= '0' && character <= '9';
-  });
+  const std::string s(value);
+  return mocktail_rust_is_positive_decimal(s.c_str()) == 1;
 }
 
 }  // namespace
 
 std::string CurrentExecutableInstanceKey() {
   static const std::string instance_key = []() {
-    // FNV-1a is used only for a compact deterministic namespace. The endpoint
-    // still requires private same-user ownership and peer credential checks;
-    // this value is not an authorization token.
-    std::uint64_t hash = 14695981039346656037ULL;
-    for (const unsigned char byte : ExecutableIdentityPath()) {
-      hash ^= byte;
-      hash *= 1099511628211ULL;
+    const std::string exe_path = ExecutableIdentityPath();
+    std::array<char, 32> encoded{};
+    if (mocktail_rust_compute_instance_key(exe_path.c_str(), encoded.data(),
+                                           encoded.size()) == 0) {
+      return std::string(encoded.data());
     }
-    std::array<char, 17> encoded{};
-    std::snprintf(encoded.data(), encoded.size(), "%016llx",
-                  static_cast<unsigned long long>(hash));
-    return std::string(encoded.data());
+    return std::string("0000000000000000");
   }();
   return instance_key;
 }

@@ -3,6 +3,8 @@
 #include <array>
 #include <cstdint>
 
+#include "mocktail/mocktail_rust.h"
+
 namespace mocktail {
 namespace runtime {
 namespace {
@@ -64,23 +66,20 @@ const std::array<DeviceProfile, 3> kProfiles = {{
     },
 }};
 
-std::string_view CanonicalName(std::string_view name) {
-  if (name == "pc") {
-    return "pc-windows-11";
+std::string CanonicalName(std::string_view name) {
+  const std::string name_str(name);
+  std::array<char, 64> buf{};
+  if (mocktail_rust_canonical_device_profile_name(
+          name_str.c_str(), buf.data(), buf.size()) == 0) {
+    return std::string(buf.data());
   }
-  if (name == "mobile") {
-    return "mobile-pixel-7";
-  }
-  if (name == "console" || name == "console-xbox-series-x") {
-    return "console-ps5";
-  }
-  return name;
+  return name_str;
 }
 
 }  // namespace
 
 const DeviceProfile* FindDeviceProfile(std::string_view name) {
-  const std::string_view canonical = CanonicalName(name);
+  const std::string canonical = CanonicalName(name);
   for (const DeviceProfile& profile : kProfiles) {
     if (profile.name == canonical) {
       return &profile;
@@ -90,45 +89,27 @@ const DeviceProfile* FindDeviceProfile(std::string_view name) {
 }
 
 bool IsValidDeviceProfileValue(std::string_view value, std::size_t maximum) {
-  if (value.empty() || value.size() > maximum) {
-    return false;
-  }
-  for (const unsigned char character : value) {
-    if (character < 0x20U || character == 0x7fU) {
-      return false;
-    }
-  }
-  return true;
+  const std::string s(value);
+  return mocktail_rust_is_valid_device_profile_value(s.c_str(), maximum) == 1;
 }
 
 std::string BuildCustomDeviceProfileCacheKey(const DeviceProfile& profile) {
-  std::uint64_t hash = UINT64_C(14695981039346656037);
-  const auto consume = [&hash](std::string_view value) {
-    for (const unsigned char character : value) {
-      hash ^= character;
-      hash *= UINT64_C(1099511628211);
-    }
-    hash ^= UINT64_C(0xff);
-    hash *= UINT64_C(1099511628211);
-  };
-  consume(profile.name);
-  consume(profile.platform_name);
-  consume(profile.display_name);
-  consume(profile.manufacturer);
-  consume(profile.model);
-  consume(profile.brand);
-  consume(profile.device_code);
-  consume(profile.device_sku);
-  consume(profile.soc_model);
-
-  constexpr char kHex[] = "0123456789abcdef";
-  std::array<char, 16> encoded{};
-  for (std::size_t index = 0; index < encoded.size(); ++index) {
-    const std::size_t shift = (encoded.size() - index - 1) * 4;
-    encoded[index] = kHex[(hash >> shift) & 0xfU];
+  std::array<char, 256> out_key{};
+  if (mocktail_rust_build_device_profile_cache_key(
+          profile.name.c_str(),
+          profile.platform_name.c_str(),
+          profile.display_name.c_str(),
+          profile.manufacturer.c_str(),
+          profile.model.c_str(),
+          profile.brand.c_str(),
+          profile.device_code.c_str(),
+          profile.device_sku.c_str(),
+          profile.soc_model.c_str(),
+          out_key.data(),
+          out_key.size()) == 0) {
+    return std::string(out_key.data());
   }
-  return profile.name + "-custom-" +
-         std::string(encoded.data(), encoded.size());
+  return profile.name + "-custom-error";
 }
 
 std::string_view DeviceClassName(DeviceClass device_class) {

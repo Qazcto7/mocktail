@@ -7,7 +7,10 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <string_view>
+
+#include "mocktail/mocktail_rust.h"
 
 namespace mocktail {
 namespace compat {
@@ -16,87 +19,8 @@ namespace {
 constexpr int kBionicAddressInfoFailure = 4;
 constexpr int kBionicAddressInfoMemory = 6;
 
-constexpr std::array<std::string_view, 3> kBlockedUploadSuffixes = {
-    "crashes.rbxinfra.com",
-    "backtrace.rbx.com",
-    "backtrace.io",
-};
-
-bool EqualAsciiCaseInsensitive(std::string_view left,
-                               std::string_view right) noexcept {
-  if (left.size() != right.size()) {
-    return false;
-  }
-  for (std::size_t index = 0; index < left.size(); ++index) {
-    const auto left_char = static_cast<unsigned char>(left[index]);
-    const auto right_char = static_cast<unsigned char>(right[index]);
-    if (std::tolower(left_char) != std::tolower(right_char)) {
-      return false;
-    }
-  }
-  return true;
-}
-
-bool IsHostOrSubdomain(std::string_view host,
-                       std::string_view suffix) noexcept {
-  if (EqualAsciiCaseInsensitive(host, suffix)) {
-    return true;
-  }
-  if (host.size() <= suffix.size() ||
-      host[host.size() - suffix.size() - 1] != '.') {
-    return false;
-  }
-  return EqualAsciiCaseInsensitive(host.substr(host.size() - suffix.size()),
-                                   suffix);
-}
-
 int BionicAddressInfoError(int host_error) noexcept {
-  if (host_error == 0) {
-    return 0;
-  }
-#ifdef EAI_ADDRFAMILY
-  if (host_error == EAI_ADDRFAMILY) {
-    return 1;
-  }
-#endif
-  if (host_error == EAI_AGAIN) {
-    return 2;
-  }
-  if (host_error == EAI_BADFLAGS) {
-    return 3;
-  }
-  if (host_error == EAI_FAIL) {
-    return kBionicAddressInfoFailure;
-  }
-  if (host_error == EAI_FAMILY) {
-    return 5;
-  }
-  if (host_error == EAI_MEMORY) {
-    return kBionicAddressInfoMemory;
-  }
-#ifdef EAI_NODATA
-  if (host_error == EAI_NODATA) {
-    return 7;
-  }
-#endif
-  if (host_error == EAI_NONAME) {
-    return kBionicAddressInfoNameNotFound;
-  }
-  if (host_error == EAI_SERVICE) {
-    return 9;
-  }
-  if (host_error == EAI_SOCKTYPE) {
-    return 10;
-  }
-  if (host_error == EAI_SYSTEM) {
-    return 11;
-  }
-#ifdef EAI_OVERFLOW
-  if (host_error == EAI_OVERFLOW) {
-    return 14;
-  }
-#endif
-  return kBionicAddressInfoFailure;
+  return mocktail_rust_bionic_eai_error(host_error);
 }
 
 addrinfo HostHints(const BionicAddressInfo* hints) noexcept {
@@ -166,15 +90,8 @@ static_assert(offsetof(BionicAddressInfo, ai_canonname) == 24);
 static_assert(offsetof(BionicAddressInfo, ai_addr) == 32);
 
 bool IsBlockedCrashReportUploadHost(std::string_view host) noexcept {
-  while (!host.empty() && host.back() == '.') {
-    host.remove_suffix(1);
-  }
-  for (const std::string_view suffix : kBlockedUploadSuffixes) {
-    if (IsHostOrSubdomain(host, suffix)) {
-      return true;
-    }
-  }
-  return false;
+  const std::string s(host);
+  return mocktail_rust_is_blocked_crash_host(s.c_str()) == 1;
 }
 
 int BionicGetAddressInfo(const char* node, const char* service,

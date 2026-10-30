@@ -14,20 +14,12 @@
 #include <string_view>
 
 #include "compat/guest_abi.h"
+#include "mocktail/mocktail_rust.h"
 
 namespace mocktail::update {
 namespace {
 
 constexpr std::size_t kMaximumManifestBytes = 4U * 1024U * 1024U;
-
-bool LowerBuildId(std::string_view value) {
-  if (value.size() != 40) {
-    return false;
-  }
-  return std::all_of(value.begin(), value.end(), [](unsigned char character) {
-    return std::isdigit(character) || (character >= 'a' && character <= 'f');
-  });
-}
 
 bool ReadManifest(const std::filesystem::path& path, std::string* contents,
                   std::string* error) {
@@ -70,68 +62,45 @@ CompatibilityCatalogResult LoadCompatibilityCatalog(
   if (!ReadManifest(path, &contents, &result.error)) {
     return result;
   }
-  const nlohmann::json document =
-      nlohmann::json::parse(contents, nullptr, false, true);
-  if (document.is_discarded() || !document.is_object() ||
-      !document.contains("schema_version") ||
-      !document["schema_version"].is_number_integer() ||
-      document["schema_version"] != 1 ||
-      !document.contains("profiles") || !document["profiles"].is_array()) {
-    result.error = "compatibility manifest has an unsupported schema";
+  std::vector<MocktailRustPayloadProfile> rust_profiles(64);
+  std::size_t count = 0;
+  std::array<char, 256> error_buf{};
+
+  int rc = mocktail_rust_parse_compatibility_catalog(
+      reinterpret_cast<const uint8_t*>(contents.data()),
+      contents.size(),
+      compat::kGuestAbi.data(),
+      rust_profiles.data(),
+      rust_profiles.size(),
+      &count,
+      error_buf.data(),
+      error_buf.size());
+
+  if (rc == 0 && count > rust_profiles.size()) {
+    rust_profiles.resize(count);
+    rc = mocktail_rust_parse_compatibility_catalog(
+        reinterpret_cast<const uint8_t*>(contents.data()),
+        contents.size(),
+        compat::kGuestAbi.data(),
+        rust_profiles.data(),
+        rust_profiles.size(),
+        &count,
+        error_buf.data(),
+        error_buf.size());
+  }
+
+  if (rc != 0) {
+    result.error = error_buf[0] != '\0' ? error_buf.data()
+                                        : "cannot parse compatibility catalog";
     return result;
   }
-  for (const nlohmann::json& profile : document["profiles"]) {
-    if (!profile.is_object()) continue;
-    const auto status = profile.find("status");
-    const auto allowed = profile.find("default_allowed");
-    const auto patches = profile.find("allow_legacy_binary_patches");
-    if ((status != profile.end() && !status->is_string()) ||
-        (allowed != profile.end() && !allowed->is_boolean()) ||
-        (patches != profile.end() && !patches->is_boolean())) {
-      result.error = "compatibility profile has invalid policy field types";
-      return result;
-    }
-    if (status == profile.end() || *status != "supported" ||
-        allowed == profile.end() || !allowed->get<bool>() ||
-        patches == profile.end() || patches->get<bool>()) {
-      continue;
-    }
-    const auto declared_abi = profile.find("abi");
-    if (declared_abi != profile.end() && !declared_abi->is_string()) {
-      result.error = "supported compatibility profile is incomplete";
-      return result;
-    }
-    const std::string_view profile_abi =
-        declared_abi == profile.end()
-            ? std::string_view("x86_64")
-            : std::string_view(declared_abi->get_ref<const std::string&>());
-    if (profile_abi != compat::kGuestAbi) continue;
-    if (!profile.contains("version_name") ||
-        !profile["version_name"].is_string() ||
-        !profile.contains("version_code") ||
-        !profile["version_code"].is_number_unsigned() ||
-        !profile.contains("elf_build_id") ||
-        !profile["elf_build_id"].is_string()) {
-      result.error = "supported compatibility profile is incomplete";
-      return result;
-    }
+
+  for (std::size_t i = 0; i < count; ++i) {
     SupportedPayloadProfile supported;
-    supported.version_name = profile["version_name"].get<std::string>();
-    supported.version_code = profile["version_code"].get<std::uint64_t>();
-    supported.elf_build_id = profile["elf_build_id"].get<std::string>();
-    std::transform(supported.elf_build_id.begin(), supported.elf_build_id.end(),
-                   supported.elf_build_id.begin(), [](unsigned char value) {
-                     return static_cast<char>(std::tolower(value));
-                   });
-    if (supported.version_name.empty() || supported.version_code == 0 ||
-        !LowerBuildId(supported.elf_build_id)) {
-      result.error = "supported compatibility profile has invalid identity";
-      return result;
-    }
+    supported.version_name = rust_profiles[i].version_name;
+    supported.version_code = rust_profiles[i].version_code;
+    supported.elf_build_id = rust_profiles[i].elf_build_id;
     result.profiles.push_back(std::move(supported));
-  }
-  if (result.profiles.empty()) {
-    result.error = "compatibility manifest has no default-supported payload";
   }
   return result;
 }

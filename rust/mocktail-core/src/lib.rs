@@ -1518,6 +1518,594 @@ pub extern "C" fn mocktail_rust_map_sdl_mouse_button(sdl_button: u8) -> i32 {
 }
 
 // ============================================================================
+// 15. System Proxy & URI Resolver
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_parse_proxy_uri(
+    candidate: *const c_char,
+    out_scheme: *mut c_char,
+    scheme_cap: usize,
+    out_host: *mut c_char,
+    host_cap: usize,
+    out_port: *mut u16,
+    out_is_direct: *mut c_int,
+    out_has_auth: *mut c_int,
+) -> c_int {
+    if candidate.is_null()
+        || out_scheme.is_null()
+        || out_host.is_null()
+        || out_port.is_null()
+        || out_is_direct.is_null()
+        || out_has_auth.is_null()
+    {
+        return -1;
+    }
+    let c_str = unsafe { CStr::from_ptr(candidate) };
+    let s = match c_str.to_str() {
+        Ok(s) => s.trim(),
+        Err(_) => return -2,
+    };
+    if s.is_empty() {
+        return -3;
+    }
+    if s.eq_ignore_ascii_case("direct://") {
+        unsafe {
+            *out_is_direct = 1;
+            *out_has_auth = 0;
+            *out_port = 0;
+            if scheme_cap > 0 { *out_scheme = 0; }
+            if host_cap > 0 { *out_host = 0; }
+        }
+        return 0;
+    }
+    unsafe {
+        *out_is_direct = 0;
+    }
+    let parsed_url = match url::Url::parse(s) {
+        Ok(u) => u,
+        Err(_) => return -4,
+    };
+    let scheme = parsed_url.scheme();
+    let has_auth = !parsed_url.username().is_empty() || parsed_url.password().is_some();
+    unsafe {
+        *out_has_auth = if has_auth { 1 } else { 0 };
+    }
+    let host = match parsed_url.host_str() {
+        Some(h) => h,
+        None => return -5,
+    };
+    let clean_host = host.trim_start_matches('[').trim_end_matches(']');
+    let port = parsed_url.port().unwrap_or(match scheme {
+        "http" => 80,
+        "https" => 443,
+        "socks5" | "socks5h" => 1080,
+        _ => 0,
+    });
+    if port == 0 {
+        return -6;
+    }
+    if scheme.len() + 1 > scheme_cap || clean_host.len() + 1 > host_cap {
+        return -7;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(scheme.as_ptr() as *const c_char, out_scheme, scheme.len());
+        *out_scheme.add(scheme.len()) = 0;
+
+        std::ptr::copy_nonoverlapping(clean_host.as_ptr() as *const c_char, out_host, clean_host.len());
+        *out_host.add(clean_host.len()) = 0;
+
+        *out_port = port;
+    }
+    0
+}
+
+// ============================================================================
+// 16. Single Instance Lock & Instance Key
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_compute_instance_key(
+    exe_path: *const c_char,
+    out_key: *mut c_char,
+    out_cap: usize,
+) -> c_int {
+    if exe_path.is_null() || out_key.is_null() || out_cap < 17 {
+        return -1;
+    }
+    let c_str = unsafe { CStr::from_ptr(exe_path) };
+    let bytes = c_str.to_bytes();
+    let mut hash: u64 = 14695981039346656037;
+    for &b in bytes {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(1099511628211);
+    }
+    let hex_str = format!("{:016x}", hash);
+    unsafe {
+        std::ptr::copy_nonoverlapping(hex_str.as_ptr() as *const c_char, out_key, 16);
+        *out_key.add(16) = 0;
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_is_positive_decimal(val: *const c_char) -> c_int {
+    if val.is_null() {
+        return 0;
+    }
+    let c_str = unsafe { CStr::from_ptr(val) };
+    let bytes = c_str.to_bytes();
+    if bytes.is_empty() || bytes == b"0" {
+        return 0;
+    }
+    if bytes.iter().all(|&b| b >= b'0' && b <= b'9') {
+        1
+    } else {
+        0
+    }
+}
+
+// ============================================================================
+// 17. Compatibility Catalog & Approval Manifest
+// ============================================================================
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct MocktailRustPayloadProfile {
+    pub version_name: [c_char; 64],
+    pub version_code: u64,
+    pub elf_build_id: [c_char; 41],
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_parse_compatibility_catalog(
+    json_bytes: *const u8,
+    json_len: usize,
+    guest_abi: *const c_char,
+    out_profiles: *mut MocktailRustPayloadProfile,
+    out_cap: usize,
+    out_count: *mut usize,
+    out_error: *mut c_char,
+    error_cap: usize,
+) -> c_int {
+    let set_error = |msg: &str| {
+        if !out_error.is_null() && error_cap > 0 {
+            let len = std::cmp::min(msg.len(), error_cap - 1);
+            unsafe {
+                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_error, len);
+                *out_error.add(len) = 0;
+            }
+        }
+    };
+
+    if json_bytes.is_null() || out_count.is_null() || (out_profiles.is_null() && out_cap > 0) {
+        set_error("invalid argument");
+        return -1;
+    }
+    let slice = unsafe { slice::from_raw_parts(json_bytes, json_len) };
+    let val: serde_json::Value = match serde_json::from_slice(slice) {
+        Ok(v) => v,
+        Err(_) => {
+            set_error("compatibility manifest is not valid JSON");
+            return -2;
+        }
+    };
+    let obj = match val.as_object() {
+        Some(o) => o,
+        None => {
+            set_error("compatibility manifest has an unsupported schema");
+            return -3;
+        }
+    };
+    if obj.get("schema_version").and_then(|v| v.as_i64()) != Some(1) {
+        set_error("compatibility manifest has an unsupported schema");
+        return -4;
+    }
+    let profiles_arr = match obj.get("profiles").and_then(|p| p.as_array()) {
+        Some(a) => a,
+        None => {
+            set_error("compatibility manifest has an unsupported schema");
+            return -5;
+        }
+    };
+    let target_abi = if guest_abi.is_null() {
+        "x86_64"
+    } else {
+        unsafe { CStr::from_ptr(guest_abi).to_str().unwrap_or("x86_64") }
+    };
+
+    let mut parsed_list: Vec<MocktailRustPayloadProfile> = Vec::new();
+    for p in profiles_arr {
+        let p_obj = match p.as_object() {
+            Some(o) => o,
+            None => continue,
+        };
+        if let Some(status) = p_obj.get("status") {
+            if !status.is_string() {
+                set_error("compatibility profile has invalid policy field types");
+                return -6;
+            }
+            if status.as_str() != Some("supported") {
+                continue;
+            }
+        } else {
+            continue;
+        }
+        if let Some(allowed) = p_obj.get("default_allowed") {
+            if !allowed.is_boolean() {
+                set_error("compatibility profile has invalid policy field types");
+                return -6;
+            }
+            if allowed.as_bool() != Some(true) {
+                continue;
+            }
+        } else {
+            continue;
+        }
+        if let Some(patches) = p_obj.get("allow_legacy_binary_patches") {
+            if !patches.is_boolean() {
+                set_error("compatibility profile has invalid policy field types");
+                return -6;
+            }
+            if patches.as_bool() != Some(false) {
+                continue;
+            }
+        } else {
+            continue;
+        }
+        let profile_abi = match p_obj.get("abi") {
+            Some(v) => match v.as_str() {
+                Some(s) => s,
+                None => {
+                    set_error("supported compatibility profile is incomplete");
+                    return -7;
+                }
+            },
+            None => "x86_64",
+        };
+        if profile_abi != target_abi {
+            continue;
+        }
+        let version_name = match p_obj.get("version_name").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s,
+            _ => {
+                set_error("supported compatibility profile is incomplete");
+                return -8;
+            }
+        };
+        let version_code = match p_obj.get("version_code").and_then(|v| v.as_u64()) {
+            Some(c) if c > 0 => c,
+            _ => {
+                set_error("supported compatibility profile is incomplete");
+                return -9;
+            }
+        };
+        let elf_build_id = match p_obj.get("elf_build_id").and_then(|v| v.as_str()) {
+            Some(s) if s.len() == 40 && s.bytes().all(|b| (b >= b'0' && b <= b'9') || (b >= b'a' && b <= b'f') || (b >= b'A' && b <= b'F')) => s,
+            _ => {
+                set_error("supported compatibility profile has invalid identity");
+                return -10;
+            }
+        };
+
+        let mut prof = MocktailRustPayloadProfile {
+            version_name: [0; 64],
+            version_code,
+            elf_build_id: [0; 41],
+        };
+        let vn_bytes = version_name.as_bytes();
+        let vn_len = std::cmp::min(vn_bytes.len(), 63);
+        unsafe {
+            std::ptr::copy_nonoverlapping(vn_bytes.as_ptr() as *const c_char, prof.version_name.as_mut_ptr(), vn_len);
+        }
+        let id_lower = elf_build_id.to_ascii_lowercase();
+        unsafe {
+            std::ptr::copy_nonoverlapping(id_lower.as_ptr() as *const c_char, prof.elf_build_id.as_mut_ptr(), 40);
+        }
+        parsed_list.push(prof);
+    }
+    if parsed_list.is_empty() {
+        set_error("compatibility manifest has no default-supported payload");
+        return -11;
+    }
+    let count = std::cmp::min(parsed_list.len(), out_cap);
+    if count > 0 {
+        unsafe {
+            std::ptr::copy_nonoverlapping(parsed_list.as_ptr(), out_profiles, count);
+        }
+    }
+    unsafe {
+        *out_count = parsed_list.len();
+    }
+    0
+}
+
+// ============================================================================
+// 18. Crash Report Policy & FFlags Injection
+// ============================================================================
+
+static CRASH_SETTINGS: &[(&str, &str)] = &[
+    ("DFFlagUseCrashpad", "False"),
+    ("FFlagUseCrashpad", "False"),
+    ("UseCrashpad", "False"),
+    ("UseAppCrashpadReporterAndroid", "False"),
+    ("FFlagUseAppCrashpadReporterForAndroidHangMonitor", "False"),
+    ("FFlagUseCrashpadDirectlyForAndroidHangMonitor", "False"),
+    ("EnableAppHangMonitor", "False"),
+    ("CrashpadUploadToBacktraceUrl", ""),
+    ("CrashpadUploadToBacktraceAndroidPlayerToken", ""),
+    ("CrashpadUploadToBacktraceAndroidPlayerToken_PlaceFilter", ""),
+    ("DFStringCrashpadUploadToBacktraceAndroidPlayerToken", ""),
+    ("DFStringCrashpadUploadToBacktraceAndroidPlayerToken_PlaceFilter", ""),
+    ("CrashpadUploadAttachmentKiloByteLimit", "0"),
+    ("DFIntCrashUploadAttachmentKiloByteLimit", "0"),
+    ("DFIntCrashReportingHundredthsPercentage", "0"),
+    ("CrashUploadToBacktraceBaseUrl", ""),
+    ("DFStringCrashUploadToBacktraceBaseUrl", ""),
+    ("CrashUploadToBacktracePercentage", "0"),
+    ("DFIntCrashUploadToBacktracePercentage", "0"),
+    ("DFIntCrashUploadToBacktracePercentage_DataCenterFilter", ""),
+    ("DFIntCrashUploadToBacktracePercentage_PlaceFilter", ""),
+    ("CrashUploadToBacktraceRolloutMinimumEnabled", "False"),
+    ("DFFlagCrashUploadToBacktraceRolloutMinimumEnabled", "False"),
+    ("CrashUploadToBacktraceRolloutMinimumPercentage", "0"),
+    ("DFIntCrashUploadToBacktraceRolloutMinimumPercentage", "0"),
+    ("ErrorUploadToBacktraceBaseUrl", ""),
+    ("DFStringErrorUploadToBacktraceBaseUrl", ""),
+    ("ErrorUploadToBacktraceLuaAppToken", ""),
+    ("DFStringErrorUploadToBacktraceLuaAppToken", ""),
+    ("JavaCrashUploadToBacktracePercentage", "0"),
+    ("JavaCrashUploadToBacktraceUrl", ""),
+    ("JavaCrashUploadToBacktraceToken", ""),
+    ("JavaANRUploadToBacktracePercentage", "0"),
+    ("DFFlagReportCrashReasonWithTelemetry", "False"),
+    ("DFFlagUseCrashReportLogGroup", "False"),
+    ("DFFlagEnableCrashHandlerSessionDurationAndroid", "False"),
+    ("DFFlagCrashMetricStorageEnableBufferConstantReporting", "False"),
+    ("DFIntCrashMetricStorageHundredthPercentageSent", "0"),
+    ("DFIntSessionReportCrashErrorEventIngestThrottleHundredthsPercent", "0"),
+    ("DFIntSessionReportCrashErrorPointsThrottleHundredthsPercent", "0"),
+    ("FIntCoreScriptBacktraceErrorReportPercentage", "0"),
+    ("FIntLuaAppBacktraceErrorReportPercentage", "0"),
+    ("FStringCoreScriptBacktraceErrorUploadToken", ""),
+    ("FFlagBacktraceReporterSourceCodeFieldAndEndpoint2", "False"),
+    ("FFlagUserAgentInBacktraceReports", "False"),
+    ("FFlagEnableBacktraceRobloxChannel2", "False"),
+    ("FStringBacktraceLogTags", ""),
+    ("BacktraceLogSize", "0"),
+    ("DFIntBacktraceMetricKitUploadHundrethsPercent", "0"),
+    ("FFlagEnableBacktraceMetricKitReporter2", "False"),
+    ("FFlagEnableBacktraceMetricKitReporter3", "False"),
+    ("FFlagenableBacktraceMetricKitReporterMinidump", "False"),
+    ("FFlagEnablePLCrashReporterApi", "False"),
+    ("DFFlagInferredCrashReportToBacktrace", "False"),
+    ("DFFlagInferredCrashReportToBacktrace2", "False"),
+    ("InferredCrashReportToBacktrace", "False"),
+    ("InferredCrashReportToBacktraceRegister", "False"),
+    ("DFFlagInferredCrashReportToBacktraceRegister", "False"),
+    ("InferredCrashReportSynchronous", "False"),
+    ("DFFlagInferredCrashReportSynchronous", "False"),
+    ("FFlagInferredCrashReportSynchronous", "False"),
+    ("InferredCrashReportToBacktraceHundredthPercent", "0"),
+    ("DFIntInferredCrashReportToBacktraceHundredthPercent", "0"),
+    ("InferredCrashReportToBacktraceThrottleHundredthsPercentage", "0"),
+    ("DFIntInferredCrashReportToBacktraceThrottleHundredthsPercentage", "0"),
+    ("InferredCrashReportBacktraceToken", ""),
+    ("DFStringInferredCrashReportBacktraceToken", ""),
+    ("InferredCrashReportBacktraceTokenSync", ""),
+    ("DFStringInferredCrashReportBacktraceTokenSync", ""),
+    ("DFFlagObtainAndroidInferredCrashExitLog", "False"),
+    ("DFFlagStoreUniqueIdInferredCrashSystem", "False"),
+    ("FFlagLuaAppInferredCrashReportOnStateChange", "False"),
+    ("FFlagVideoSessionTrackingOnInferredCrash", "False"),
+    ("SkipReportingIsolatedProcessAsInferredCrash", "True"),
+    ("FFlagEnableIsolatedAdsBacktrace", "False"),
+    ("FFlagEnableIsolatedAdsBacktraceAnrDetection", "False"),
+    ("FIntIsolatedAdsBacktraceCrashUploadPercent", "0"),
+    ("FIntIsolatedAdsBacktraceAnrUploadPercent", "0"),
+];
+
+#[inline]
+fn is_fast_variable(name: &str) -> bool {
+    const PREFIXES: &[&str] = &["DFFlag", "DFInt", "DFString", "FFlag", "FInt", "FString"];
+    PREFIXES.iter().any(|&p| name.starts_with(p))
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_merge_crash_report_settings(
+    base_json: *const c_char,
+    fast_flags_only: c_int,
+    out_buf: *mut c_char,
+    out_cap: usize,
+    out_len: *mut usize,
+) -> c_int {
+    if out_buf.is_null() || out_len.is_null() {
+        return -1;
+    }
+    let base_slice = if base_json.is_null() {
+        b"{}"
+    } else {
+        let c_str = unsafe { CStr::from_ptr(base_json) };
+        let b = c_str.to_bytes();
+        if b.is_empty() { b"{}" } else { b }
+    };
+    let mut root: serde_json::Value = match serde_json::from_slice::<serde_json::Value>(base_slice) {
+        Ok(v) if v.is_object() => v,
+        _ => return -2,
+    };
+    let obj = match root.as_object_mut() {
+        Some(o) => o,
+        None => return -3,
+    };
+    for &(name, val) in CRASH_SETTINGS {
+        if fast_flags_only == 0 || is_fast_variable(name) {
+            obj.insert(name.to_string(), serde_json::Value::String(val.to_string()));
+        }
+    }
+    let dumped = match serde_json::to_string(&root) {
+        Ok(s) => s,
+        Err(_) => return -4,
+    };
+    if dumped.len() + 1 > out_cap {
+        return -5;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(dumped.as_ptr() as *const c_char, out_buf, dumped.len());
+        *out_buf.add(dumped.len()) = 0;
+        *out_len = dumped.len();
+    }
+    0
+}
+
+// ============================================================================
+// 19. Device Profile & Hardware Presets
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_canonical_device_profile_name(
+    name: *const c_char,
+    out_buf: *mut c_char,
+    out_cap: usize,
+) -> c_int {
+    if name.is_null() || out_buf.is_null() || out_cap == 0 {
+        return -1;
+    }
+    let c_str = unsafe { CStr::from_ptr(name) };
+    let s = match c_str.to_str() {
+        Ok(s) => s,
+        Err(_) => return -2,
+    };
+    let canonical = match s {
+        "pc" => "pc-windows-11",
+        "mobile" => "mobile-pixel-7",
+        "console" | "console-xbox-series-x" => "console-ps5",
+        other => other,
+    };
+    if canonical.len() + 1 > out_cap {
+        return -3;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(canonical.as_ptr() as *const c_char, out_buf, canonical.len());
+        *out_buf.add(canonical.len()) = 0;
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_is_valid_device_profile_value(
+    value: *const c_char,
+    maximum: usize,
+) -> c_int {
+    if value.is_null() {
+        return 0;
+    }
+    let c_str = unsafe { CStr::from_ptr(value) };
+    let bytes = c_str.to_bytes();
+    if bytes.is_empty() || bytes.len() > maximum {
+        return 0;
+    }
+    if bytes.iter().all(|&b| b >= 0x20 && b != 0x7F) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_build_device_profile_cache_key(
+    name: *const c_char,
+    platform: *const c_char,
+    display: *const c_char,
+    manufacturer: *const c_char,
+    model: *const c_char,
+    brand: *const c_char,
+    code: *const c_char,
+    sku: *const c_char,
+    soc: *const c_char,
+    out_key: *mut c_char,
+    out_cap: usize,
+) -> c_int {
+    if name.is_null() || out_key.is_null() {
+        return -1;
+    }
+    let fields = [name, platform, display, manufacturer, model, brand, code, sku, soc];
+    let mut hash: u64 = 14695981039346656037;
+    for &f in &fields {
+        if !f.is_null() {
+            let bytes = unsafe { CStr::from_ptr(f) }.to_bytes();
+            for &b in bytes {
+                hash ^= b as u64;
+                hash = hash.wrapping_mul(1099511628211);
+            }
+        }
+        hash ^= 0xFF;
+        hash = hash.wrapping_mul(1099511628211);
+    }
+    let name_str = match unsafe { CStr::from_ptr(name) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return -2,
+    };
+    let key = format!("{}-custom-{:016x}", name_str, hash);
+    if key.len() + 1 > out_cap {
+        return -3;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(key.as_ptr() as *const c_char, out_key, key.len());
+        *out_key.add(key.len()) = 0;
+    }
+    0
+}
+
+// ============================================================================
+// 20. Bionic DNS & Crash Host Blocker
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_is_blocked_crash_host(host: *const c_char) -> c_int {
+    if host.is_null() {
+        return 0;
+    }
+    let c_str = unsafe { CStr::from_ptr(host) };
+    let s = match c_str.to_str() {
+        Ok(s) => s.trim_end_matches('.'),
+        Err(_) => return 0,
+    };
+    const BLOCKED: &[&str] = &["crashes.rbxinfra.com", "backtrace.rbx.com", "backtrace.io"];
+    for &suffix in BLOCKED {
+        if s.eq_ignore_ascii_case(suffix) {
+            return 1;
+        }
+        if s.len() > suffix.len() && s.ends_with(suffix) {
+            let prefix_len = s.len() - suffix.len();
+            if s.as_bytes()[prefix_len - 1] == b'.' {
+                return 1;
+            }
+        }
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_bionic_eai_error(posix_error: c_int) -> c_int {
+    if posix_error == 0 {
+        return 0;
+    }
+    match posix_error {
+        -1 => 3,   // EAI_BADFLAGS
+        -2 => 8,   // EAI_NONAME -> kBionicAddressInfoNameNotFound
+        -3 => 2,   // EAI_AGAIN
+        -4 => 4,   // EAI_FAIL -> kBionicAddressInfoFailure
+        -6 => 5,   // EAI_FAMILY
+        -7 => 10,  // EAI_SOCKTYPE
+        -8 => 9,   // EAI_SERVICE
+        -10 => 6,  // EAI_MEMORY -> kBionicAddressInfoMemory
+        -11 => 11, // EAI_SYSTEM
+        -12 => 14, // EAI_OVERFLOW
+        _ => 4,    // kBionicAddressInfoFailure
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -1792,5 +2380,211 @@ mod tests {
         assert_eq!(mocktail_rust_map_sdl_mouse_button(1), 0);
         assert_eq!(mocktail_rust_map_sdl_mouse_button(3), 1);
         assert_eq!(mocktail_rust_map_sdl_mouse_button(2), 2);
+    }
+
+    #[test]
+    fn test_system_proxy_resolver() {
+        let uri = CString::new("http://127.0.0.1:8080").unwrap();
+        let mut scheme = [0 as c_char; 32];
+        let mut host = [0 as c_char; 64];
+        let mut port: u16 = 0;
+        let mut is_direct: c_int = 0;
+        let mut has_auth: c_int = 0;
+
+        let rc = mocktail_rust_parse_proxy_uri(
+            uri.as_ptr(),
+            scheme.as_mut_ptr(),
+            32,
+            host.as_mut_ptr(),
+            64,
+            &mut port,
+            &mut is_direct,
+            &mut has_auth,
+        );
+        assert_eq!(rc, 0);
+        assert_eq!(unsafe { CStr::from_ptr(scheme.as_ptr()) }.to_str().unwrap(), "http");
+        assert_eq!(unsafe { CStr::from_ptr(host.as_ptr()) }.to_str().unwrap(), "127.0.0.1");
+        assert_eq!(port, 8080);
+        assert_eq!(is_direct, 0);
+        assert_eq!(has_auth, 0);
+
+        // Test direct://
+        let direct_uri = CString::new("direct://").unwrap();
+        let rc_dir = mocktail_rust_parse_proxy_uri(
+            direct_uri.as_ptr(),
+            scheme.as_mut_ptr(),
+            32,
+            host.as_mut_ptr(),
+            64,
+            &mut port,
+            &mut is_direct,
+            &mut has_auth,
+        );
+        assert_eq!(rc_dir, 0);
+        assert_eq!(is_direct, 1);
+        assert_eq!(port, 0);
+
+        // Test auth
+        let auth_uri = CString::new("socks5://user:pass@192.168.1.1").unwrap();
+        let rc_auth = mocktail_rust_parse_proxy_uri(
+            auth_uri.as_ptr(),
+            scheme.as_mut_ptr(),
+            32,
+            host.as_mut_ptr(),
+            64,
+            &mut port,
+            &mut is_direct,
+            &mut has_auth,
+        );
+        assert_eq!(rc_auth, 0);
+        assert_eq!(has_auth, 1);
+        assert_eq!(port, 1080);
+    }
+
+    #[test]
+    fn test_single_instance_lock() {
+        let exe = CString::new("/usr/bin/mocktail").unwrap();
+        let mut key = [0 as c_char; 32];
+        let rc = mocktail_rust_compute_instance_key(exe.as_ptr(), key.as_mut_ptr(), 32);
+        assert_eq!(rc, 0);
+        let key_str = unsafe { CStr::from_ptr(key.as_ptr()) }.to_str().unwrap();
+        assert_eq!(key_str.len(), 16);
+
+        let valid_dec = CString::new("12345").unwrap();
+        let zero_dec = CString::new("0").unwrap();
+        let neg_dec = CString::new("-5").unwrap();
+        let text_dec = CString::new("123a").unwrap();
+        assert_eq!(mocktail_rust_is_positive_decimal(valid_dec.as_ptr()), 1);
+        assert_eq!(mocktail_rust_is_positive_decimal(zero_dec.as_ptr()), 0);
+        assert_eq!(mocktail_rust_is_positive_decimal(neg_dec.as_ptr()), 0);
+        assert_eq!(mocktail_rust_is_positive_decimal(text_dec.as_ptr()), 0);
+        assert_eq!(mocktail_rust_is_positive_decimal(std::ptr::null()), 0);
+    }
+
+    #[test]
+    fn test_compatibility_catalog() {
+        let json = r#"{
+            "schema_version": 1,
+            "profiles": [
+                {
+                    "abi": "x86_64",
+                    "version_name": "2.600.123",
+                    "version_code": 600123,
+                    "elf_build_id": "0123456789abcdef0123456789abcdef01234567",
+                    "status": "supported",
+                    "default_allowed": true,
+                    "allow_legacy_binary_patches": false
+                },
+                {
+                    "abi": "arm64-v8a",
+                    "version_name": "2.600.123",
+                    "version_code": 600123,
+                    "elf_build_id": "abcdef0123456789abcdef0123456789abcdef01",
+                    "status": "supported",
+                    "default_allowed": true,
+                    "allow_legacy_binary_patches": false
+                }
+            ]
+        }"#;
+
+        let abi = CString::new("x86_64").unwrap();
+        let mut profiles = [MocktailRustPayloadProfile {
+            version_name: [0; 64],
+            version_code: 0,
+            elf_build_id: [0; 41],
+        }; 4];
+        let mut count: usize = 0;
+        let mut err_buf = [0 as c_char; 128];
+
+        let rc = mocktail_rust_parse_compatibility_catalog(
+            json.as_ptr(),
+            json.len(),
+            abi.as_ptr(),
+            profiles.as_mut_ptr(),
+            4,
+            &mut count,
+            err_buf.as_mut_ptr(),
+            128,
+        );
+        assert_eq!(rc, 0);
+        assert_eq!(count, 1);
+        let vn = unsafe { CStr::from_ptr(profiles[0].version_name.as_ptr()) }.to_str().unwrap();
+        assert_eq!(vn, "2.600.123");
+        assert_eq!(profiles[0].version_code, 600123);
+        let bid = unsafe { CStr::from_ptr(profiles[0].elf_build_id.as_ptr()) }.to_str().unwrap();
+        assert_eq!(bid, "0123456789abcdef0123456789abcdef01234567");
+    }
+
+    #[test]
+    fn test_crash_report_policy() {
+        let base = CString::new("{\"CustomFlag\":\"123\"}").unwrap();
+        let mut out_buf = [0 as c_char; 8192];
+        let mut out_len: usize = 0;
+
+        let rc = mocktail_rust_merge_crash_report_settings(
+            base.as_ptr(),
+            0,
+            out_buf.as_mut_ptr(),
+            8192,
+            &mut out_len,
+        );
+        assert_eq!(rc, 0);
+        let merged_str = unsafe { CStr::from_ptr(out_buf.as_ptr()) }.to_str().unwrap();
+        assert!(merged_str.contains("\"CustomFlag\":\"123\""));
+        assert!(merged_str.contains("\"DFFlagUseCrashpad\":\"False\""));
+        assert!(merged_str.contains("\"EnableAppHangMonitor\":\"False\""));
+    }
+
+    #[test]
+    fn test_device_profile() {
+        let mut name_buf = [0 as c_char; 64];
+        let pc = CString::new("pc").unwrap();
+        assert_eq!(mocktail_rust_canonical_device_profile_name(pc.as_ptr(), name_buf.as_mut_ptr(), 64), 0);
+        assert_eq!(unsafe { CStr::from_ptr(name_buf.as_ptr()) }.to_str().unwrap(), "pc-windows-11");
+
+        let val_valid = CString::new("Valid_Value-1").unwrap();
+        let val_invalid = CString::new("Invalid\nValue").unwrap();
+        assert_eq!(mocktail_rust_is_valid_device_profile_value(val_valid.as_ptr(), 32), 1);
+        assert_eq!(mocktail_rust_is_valid_device_profile_value(val_invalid.as_ptr(), 32), 0);
+
+        let mut key_buf = [0 as c_char; 128];
+        let platform = CString::new("Android").unwrap();
+        let rc_key = mocktail_rust_build_device_profile_cache_key(
+            pc.as_ptr(),
+            platform.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            key_buf.as_mut_ptr(),
+            128,
+        );
+        assert_eq!(rc_key, 0);
+        let key_str = unsafe { CStr::from_ptr(key_buf.as_ptr()) }.to_str().unwrap();
+        assert!(key_str.starts_with("pc-custom-"));
+    }
+
+    #[test]
+    fn test_bionic_dns_blocker() {
+        let blocked1 = CString::new("crashes.rbxinfra.com").unwrap();
+        let blocked2 = CString::new("sub.crashes.rbxinfra.com.").unwrap();
+        let blocked3 = CString::new("backtrace.io").unwrap();
+        let safe1 = CString::new("roblox.com").unwrap();
+        let safe2 = CString::new("notcrashes.rbxinfra.com").unwrap();
+
+        assert_eq!(mocktail_rust_is_blocked_crash_host(blocked1.as_ptr()), 1);
+        assert_eq!(mocktail_rust_is_blocked_crash_host(blocked2.as_ptr()), 1);
+        assert_eq!(mocktail_rust_is_blocked_crash_host(blocked3.as_ptr()), 1);
+        assert_eq!(mocktail_rust_is_blocked_crash_host(safe1.as_ptr()), 0);
+        assert_eq!(mocktail_rust_is_blocked_crash_host(safe2.as_ptr()), 0);
+
+        // POSIX EAI codes to Bionic error codes
+        assert_eq!(mocktail_rust_bionic_eai_error(0), 0);
+        assert_eq!(mocktail_rust_bionic_eai_error(-2), 8); // EAI_NONAME -> kBionicAddressInfoNameNotFound (8)
+        assert_eq!(mocktail_rust_bionic_eai_error(-4), 4); // EAI_FAIL -> kBionicAddressInfoFailure (4)
+        assert_eq!(mocktail_rust_bionic_eai_error(-10), 6); // EAI_MEMORY -> kBionicAddressInfoMemory (6)
     }
 }
