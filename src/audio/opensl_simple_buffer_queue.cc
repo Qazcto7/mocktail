@@ -1,4 +1,5 @@
 #include "mocktail/audio/opensl_simple_buffer_queue.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <pthread.h>
 
@@ -27,21 +28,8 @@ using opensl_abi::Result;
 using opensl_abi::Uint32;
 
 Result ToOpenSlResult(const Status& status) {
-  switch (status.code()) {
-    case StatusCode::kOk:
-      return opensl_abi::kResultSuccess;
-    case StatusCode::kInvalidArgument:
-      return opensl_abi::kResultParameterInvalid;
-    case StatusCode::kFailedPrecondition:
-      return opensl_abi::kResultPreconditionsViolated;
-    case StatusCode::kUnavailable:
-      return opensl_abi::kResultResourceError;
-    case StatusCode::kUnsupported:
-      return opensl_abi::kResultFeatureUnsupported;
-    case StatusCode::kPlatformError:
-      return opensl_abi::kResultIoError;
-  }
-  return opensl_abi::kResultInternalError;
+  return static_cast<Result>(mocktail_rust_opensl_result_from_status_code(
+      static_cast<int32_t>(status.code())));
 }
 
 }  // namespace

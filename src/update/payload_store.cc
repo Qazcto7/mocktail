@@ -1,4 +1,5 @@
 #include "update/payload_store.h"
+#include "mocktail/mocktail_rust.h"
 
 #define JSON_NOEXCEPTION 1
 #include <fcntl.h>
@@ -58,21 +59,7 @@ class StoreLock final {
 };
 
 bool ValidPayloadId(std::string_view value) {
-  const std::size_t dash = value.find('-');
-  if (dash == std::string_view::npos || dash == 0 ||
-      value.size() - dash - 1 != 40) {
-    return false;
-  }
-  for (std::size_t index = 0; index < value.size(); ++index) {
-    if (index == dash) continue;
-    const unsigned char character = value[index];
-    if ((index < dash && !std::isdigit(character)) ||
-        (index > dash && !std::isdigit(character) &&
-         !(character >= 'a' && character <= 'f'))) {
-      return false;
-    }
-  }
-  return true;
+  return mocktail_rust_payload_store_valid_id(value.data(), value.size()) != 0;
 }
 
 std::string ReadRegular(const std::filesystem::path& path, std::size_t maximum,

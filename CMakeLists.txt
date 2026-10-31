@@ -521,6 +521,7 @@ target_link_libraries(mocktail_window PUBLIC
   Mocktail::SdlVulkanWsi
   SDL3::SDL3
   ${CMAKE_DL_LIBS}
+  mocktail_core_rust
   PRIVATE Mocktail::Runtime Mocktail::GlesTextOverlay Mocktail::GraphicsFoundation
 )
 
@@ -532,6 +533,7 @@ target_include_directories(mocktail_roblox_output_device_runtime PRIVATE src)
 target_link_libraries(mocktail_roblox_output_device_runtime PUBLIC
   mocktail_compat
   Mocktail::AudioSdl
+  mocktail_core_rust
   PRIVATE mocktail_linker
 )
 mocktail_apply_compile_options(mocktail_roblox_output_device_runtime)

@@ -941,6 +941,209 @@ int mocktail_rust_parse_cpuinfo_model(
     char* out_buf,
     size_t cap);
 
+// ============================================================================
+// 44. Window Readiness Gates (Group A)
+// ============================================================================
+
+int mocktail_rust_window_fullscreen_request_from_android_flags(
+    int flags,
+    int mask,
+    uint32_t* current_android_flags,
+    int* pending_state);
+
+int mocktail_rust_window_fullscreen_take(
+    int* pending_state,
+    int* out_fullscreen);
+
+int mocktail_rust_roblox_fullscreen_menu_is_cycle(
+    const char* message);
+
+int mocktail_rust_roblox_fullscreen_menu_request(
+    const char* tag,
+    const char* message,
+    uint64_t monotonic_ns,
+    uint64_t suppress_until_ns,
+    uint64_t* last_request_ns,
+    int* pending);
+
+int mocktail_rust_roblox_fullscreen_menu_take(
+    uint64_t monotonic_ns,
+    uint64_t last_request_ns,
+    uint64_t quiet_ns,
+    uint64_t suppress_ns,
+    uint64_t* suppress_until_ns,
+    int* pending);
+
+const char* mocktail_rust_window_resize_state_name(
+    uint32_t state);
+
+int mocktail_rust_window_resize_activate(
+    int enabled,
+    uint32_t target_width,
+    uint32_t target_height,
+    int initial_available,
+    uint64_t initial_generation,
+    uint64_t initial_native_window,
+    uint32_t initial_width,
+    uint32_t initial_height,
+    uint32_t* state,
+    uint64_t* surface_generation,
+    uint32_t* target_width_out,
+    uint32_t* target_height_out,
+    char* err_buf,
+    size_t err_cap);
+
+int mocktail_rust_window_resize_record_present(
+    uint64_t frame_serial,
+    uint32_t* state,
+    uint64_t* first_present_serial,
+    uint64_t* post_rebind_present_serial,
+    const char* failure_reason,
+    char* err_buf,
+    size_t err_cap);
+
+int mocktail_rust_window_resize_take_request(
+    uint32_t* state,
+    uint32_t target_width,
+    uint32_t target_height,
+    uint32_t* out_width,
+    uint32_t* out_height);
+
+int mocktail_rust_window_resize_record_surface_event(
+    int event_type,
+    int available,
+    uint64_t generation,
+    uint64_t native_window,
+    uint32_t width,
+    uint32_t height,
+    uint32_t* state,
+    uint64_t surface_generation,
+    uint32_t target_width,
+    uint32_t target_height,
+    const char* failure_reason,
+    char* err_buf,
+    size_t err_cap);
+
+int mocktail_rust_window_resize_record_stopped(
+    uint32_t* state,
+    const char* failure_reason,
+    char* err_buf,
+    size_t err_cap);
+
+int mocktail_rust_window_resize_completion_status(
+    uint32_t state,
+    const char* failure_reason,
+    char* err_buf,
+    size_t err_cap);
+
+// ============================================================================
+// 45. Roblox Text Editor & UTF-8 / Grapheme Engine (Group B)
+// ============================================================================
+
+int mocktail_rust_text_layout(
+    const char* utf8,
+    size_t utf8_len,
+    int32_t* out_utf16_units,
+    size_t* out_boundaries,
+    size_t boundaries_cap,
+    size_t* out_boundary_count);
+
+int32_t mocktail_rust_text_utf16_cursor(
+    const char* utf8,
+    size_t utf8_len,
+    size_t byte_offset);
+
+size_t mocktail_rust_text_char_to_byte_offset(
+    const char* utf8,
+    size_t utf8_len,
+    int char_index);
+
+uint32_t mocktail_rust_text_shortcut_bit(
+    uint32_t scancode);
+
+int mocktail_rust_text_is_password_input(
+    int32_t text_input_type);
+
+size_t mocktail_rust_text_prev_grapheme(
+    const char* utf8,
+    size_t utf8_len,
+    size_t cursor_byte);
+
+size_t mocktail_rust_text_next_grapheme(
+    const char* utf8,
+    size_t utf8_len,
+    size_t cursor_byte);
+
+// ============================================================================
+// 46. External Launch Broker & Wire Protocol (Group C)
+// ============================================================================
+
+int mocktail_rust_external_launch_build_packet(
+    const char* json,
+    size_t json_len,
+    char* out_buf,
+    size_t out_cap);
+
+int mocktail_rust_external_launch_verify_and_strip_prefix(
+    const char* packet,
+    size_t packet_len,
+    size_t* out_json_offset,
+    size_t* out_json_len);
+
+int mocktail_rust_external_launch_build_reply(
+    uint8_t reply_code,
+    uint8_t* out_bytes,
+    size_t out_cap);
+
+int mocktail_rust_external_launch_parse_reply(
+    const uint8_t* in_bytes,
+    size_t in_len,
+    uint8_t* out_reply_code);
+
+int mocktail_rust_external_launch_reply_status_code(
+    uint8_t reply_code);
+
+int mocktail_rust_external_launch_format_socket_name(
+    const char* instance_key,
+    int is_run_user,
+    char* out_buf,
+    size_t out_cap);
+
+// ============================================================================
+// 47. Split APK & Bundle Layout Resolver (Group D)
+// ============================================================================
+
+int mocktail_rust_apk_guest_lib_entry_name(
+    const char* abi,
+    char* out_buf,
+    size_t out_cap);
+
+int mocktail_rust_payload_store_valid_id(
+    const char* id,
+    size_t len);
+
+int mocktail_rust_payload_store_validate_manifest_json(
+    const char* json,
+    size_t len,
+    char* err_buf,
+    size_t err_cap);
+
+// ============================================================================
+// 48. Audio Buffer Queue & Output Device Bridge (Group E)
+// ============================================================================
+
+uint32_t mocktail_rust_opensl_result_from_status_code(
+    int32_t status_code);
+
+int mocktail_rust_audio_device_stable_guid(
+    const char* name,
+    char* out_buf,
+    size_t out_cap);
+
+int mocktail_rust_audio_is_valid_elf_header(
+    const uint8_t* bytes,
+    size_t len);
+
 #ifdef __cplusplus
 }
 #endif

@@ -7309,6 +7309,866 @@ pub extern "C" fn mocktail_rust_parse_cpuinfo_model(
 }
 
 // ============================================================================
+// 44. Window Readiness Gates (Group A)
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_window_fullscreen_request_from_android_flags(
+    flags: i32,
+    mask: i32,
+    current_android_flags: *mut u32,
+    pending_state: *mut i32,
+) -> c_int {
+    if current_android_flags.is_null() || pending_state.is_null() {
+        return 0;
+    }
+    let requested_mask = mask as u32;
+    const K_RELEVANT_FLAGS: u32 = 0x00000400 | 0x00000800;
+    if (requested_mask & K_RELEVANT_FLAGS) == 0 {
+        return 0;
+    }
+    let requested_flags = flags as u32;
+    unsafe {
+        *current_android_flags =
+            (*current_android_flags & !requested_mask) | (requested_flags & requested_mask);
+        let fullscreen = (*current_android_flags & 0x00000400) != 0
+            && (*current_android_flags & 0x00000800) == 0;
+        *pending_state = if fullscreen { 2 } else { 1 };
+    }
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_window_fullscreen_take(
+    pending_state: *mut i32,
+    out_fullscreen: *mut c_int,
+) -> c_int {
+    if pending_state.is_null() || out_fullscreen.is_null() {
+        return 0;
+    }
+    unsafe {
+        if *pending_state == 0 {
+            return 0;
+        }
+        *out_fullscreen = if *pending_state == 2 { 1 } else { 0 };
+        *pending_state = 0;
+    }
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_roblox_fullscreen_menu_is_cycle(
+    message_ptr: *const c_char,
+) -> c_int {
+    if message_ptr.is_null() {
+        return 0;
+    }
+    let msg = unsafe { CStr::from_ptr(message_ptr).to_str().unwrap_or("") };
+    if msg.contains("Maximum event re-entrancy depth exceeded for BindableEvent.Event")
+        && msg.contains("CoreGui.RobloxGui.Modules.Settings.Pages.GameSettings")
+    {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_roblox_fullscreen_menu_request(
+    tag_ptr: *const c_char,
+    message_ptr: *const c_char,
+    monotonic_ns: u64,
+    suppress_until_ns: u64,
+    last_request_ns: *mut u64,
+    pending: *mut c_int,
+) -> c_int {
+    if tag_ptr.is_null() || last_request_ns.is_null() || pending.is_null() {
+        return 0;
+    }
+    let tag = unsafe { CStr::from_ptr(tag_ptr).to_str().unwrap_or("") };
+    if tag != "Roblox" || mocktail_rust_roblox_fullscreen_menu_is_cycle(message_ptr) == 0 {
+        return 0;
+    }
+    if monotonic_ns < suppress_until_ns {
+        return 1;
+    }
+    unsafe {
+        *pending = 1;
+        *last_request_ns = monotonic_ns;
+    }
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_roblox_fullscreen_menu_take(
+    monotonic_ns: u64,
+    last_request_ns: u64,
+    quiet_ns: u64,
+    suppress_ns: u64,
+    suppress_until_ns: *mut u64,
+    pending: *mut c_int,
+) -> c_int {
+    if suppress_until_ns.is_null() || pending.is_null() {
+        return 0;
+    }
+    unsafe {
+        if *pending == 0
+            || monotonic_ns < last_request_ns
+            || monotonic_ns - last_request_ns < quiet_ns
+        {
+            return 0;
+        }
+        *pending = 0;
+        *suppress_until_ns = monotonic_ns + suppress_ns;
+    }
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_window_resize_state_name(state: u32) -> *const c_char {
+    let s = match state {
+        0 => "Disabled\0",
+        1 => "WaitingForFirstPresent\0",
+        2 => "ReadyToRequestResize\0",
+        3 => "ResizeRequested\0",
+        4 => "SurfaceCommitted\0",
+        5 => "PostRebindPresented\0",
+        6 => "Stopped\0",
+        7 => "Failed\0",
+        _ => "Unknown\0",
+    };
+    s.as_ptr() as *const c_char
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_window_resize_activate(
+    enabled: c_int,
+    target_width: u32,
+    target_height: u32,
+    initial_available: c_int,
+    initial_generation: u64,
+    initial_native_window: u64,
+    initial_width: u32,
+    initial_height: u32,
+    state: *mut u32,
+    surface_generation: *mut u64,
+    target_width_out: *mut u32,
+    target_height_out: *mut u32,
+    err_buf: *mut c_char,
+    err_cap: usize,
+) -> c_int {
+    if state.is_null() || surface_generation.is_null() || target_width_out.is_null() || target_height_out.is_null() {
+        return -1;
+    }
+    unsafe {
+        if *state != 0 || *surface_generation != 0 {
+            copy_to_c_buffer("window resize readiness gate is already active", err_buf, err_cap);
+            return -2; /* FailedPrecondition */
+        }
+        if enabled == 0 {
+            return 0;
+        }
+        if initial_available == 0
+            || initial_generation == 0
+            || initial_native_window == 0
+            || initial_width == 0
+            || initial_height == 0
+        {
+            copy_to_c_buffer("window resize readiness gate requires an available initial surface", err_buf, err_cap);
+            return -1; /* InvalidArgument */
+        }
+        if target_width == 0 || target_height == 0 {
+            copy_to_c_buffer("window resize target must have a positive extent", err_buf, err_cap);
+            return -1; /* InvalidArgument */
+        }
+        if target_width == initial_width && target_height == initial_height {
+            copy_to_c_buffer("window resize target must differ from initial extent", err_buf, err_cap);
+            return -1; /* InvalidArgument */
+        }
+        *state = 1; /* kWaitingForFirstPresent */
+        *surface_generation = initial_generation;
+        *target_width_out = target_width;
+        *target_height_out = target_height;
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_window_resize_record_present(
+    frame_serial: u64,
+    state: *mut u32,
+    first_present_serial: *mut u64,
+    post_rebind_present_serial: *mut u64,
+    failure_reason: *const c_char,
+    err_buf: *mut c_char,
+    err_cap: usize,
+) -> c_int {
+    if state.is_null() || first_present_serial.is_null() || post_rebind_present_serial.is_null() {
+        return -1;
+    }
+    unsafe {
+        if *state == 0 /* kDisabled */ {
+            return 0;
+        }
+        if *state == 7 /* kFailed */ || *state == 6 /* kStopped */ {
+            let msg = if !failure_reason.is_null() && *failure_reason != 0 {
+                CStr::from_ptr(failure_reason).to_str().unwrap_or("window resize readiness gate cannot accept a present")
+            } else {
+                "window resize readiness gate cannot accept a present"
+            };
+            copy_to_c_buffer(msg, err_buf, err_cap);
+            return -2; /* FailedPrecondition */
+        }
+        if frame_serial == 0 {
+            *state = 7; /* kFailed */
+            copy_to_c_buffer("resize readiness received a zero present serial", err_buf, err_cap);
+            return -2;
+        }
+        if *state == 1 /* kWaitingForFirstPresent */ {
+            *first_present_serial = frame_serial;
+            *state = 2; /* kReadyToRequestResize */
+            return 0;
+        }
+        if *state == 4 /* kSurfaceCommitted */ {
+            if frame_serial <= *first_present_serial {
+                *state = 7; /* kFailed */
+                copy_to_c_buffer("post-rebind present serial does not follow the first present", err_buf, err_cap);
+                return -2;
+            }
+            *post_rebind_present_serial = frame_serial;
+            *state = 5; /* kPostRebindPresented */
+        }
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_window_resize_take_request(
+    state: *mut u32,
+    target_width: u32,
+    target_height: u32,
+    out_width: *mut u32,
+    out_height: *mut u32,
+) -> c_int {
+    if state.is_null() || out_width.is_null() || out_height.is_null() {
+        return 0;
+    }
+    unsafe {
+        if *state != 2 /* kReadyToRequestResize */ {
+            return 0;
+        }
+        *out_width = target_width;
+        *out_height = target_height;
+        *state = 3; /* kResizeRequested */
+    }
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_window_resize_record_surface_event(
+    event_type: c_int,
+    available: c_int,
+    generation: u64,
+    native_window: u64,
+    width: u32,
+    height: u32,
+    state: *mut u32,
+    surface_generation: u64,
+    target_width: u32,
+    target_height: u32,
+    failure_reason: *const c_char,
+    err_buf: *mut c_char,
+    err_cap: usize,
+) -> c_int {
+    if state.is_null() {
+        return -1;
+    }
+    unsafe {
+        if *state == 0 /* kDisabled */ {
+            return 0;
+        }
+        if *state == 7 /* kFailed */ || *state == 6 /* kStopped */ {
+            let msg = if !failure_reason.is_null() && *failure_reason != 0 {
+                CStr::from_ptr(failure_reason).to_str().unwrap_or("window resize readiness gate cannot accept a surface event")
+            } else {
+                "window resize readiness gate cannot accept a surface event"
+            };
+            copy_to_c_buffer(msg, err_buf, err_cap);
+            return -2;
+        }
+        if *state != 3 /* kResizeRequested */ {
+            return 0;
+        }
+        if event_type == 0 /* kCreated */ || event_type == 2 /* kDestroyed */ {
+            *state = 7;
+            copy_to_c_buffer("resize recreated the surface instead of preserving its generation", err_buf, err_cap);
+            return -2;
+        }
+        if generation != surface_generation {
+            *state = 7;
+            copy_to_c_buffer("resize committed a different surface generation", err_buf, err_cap);
+            return -2;
+        }
+        if available == 0 || native_window == 0 {
+            *state = 7;
+            copy_to_c_buffer("resize committed an unavailable surface", err_buf, err_cap);
+            return -2;
+        }
+        if width != target_width || height != target_height {
+            return 0; /* intermediate configure */
+        }
+        *state = 4; /* kSurfaceCommitted */
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_window_resize_record_stopped(
+    state: *mut u32,
+    failure_reason: *const c_char,
+    err_buf: *mut c_char,
+    err_cap: usize,
+) -> c_int {
+    if state.is_null() {
+        return -1;
+    }
+    unsafe {
+        if *state == 0 /* kDisabled */ {
+            return 0;
+        }
+        if *state == 7 /* kFailed */ {
+            let msg = if !failure_reason.is_null() && *failure_reason != 0 {
+                CStr::from_ptr(failure_reason).to_str().unwrap_or("window resize failed")
+            } else {
+                "window resize failed"
+            };
+            copy_to_c_buffer(msg, err_buf, err_cap);
+            return -2;
+        }
+        if *state != 5 /* kPostRebindPresented */ {
+            *state = 7;
+            copy_to_c_buffer("runtime stopped before resize rebind produced a later present", err_buf, err_cap);
+            return -2;
+        }
+        *state = 6; /* kStopped */
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_window_resize_completion_status(
+    state: u32,
+    failure_reason: *const c_char,
+    err_buf: *mut c_char,
+    err_cap: usize,
+) -> c_int {
+    if state == 0 /* kDisabled */ || state == 6 /* kStopped */ {
+        return 0;
+    }
+    if state == 7 /* kFailed */ {
+        let msg = if !failure_reason.is_null() && unsafe { *failure_reason != 0 } {
+            unsafe { CStr::from_ptr(failure_reason).to_str().unwrap_or("window resize failed") }
+        } else {
+            "window resize failed"
+        };
+        copy_to_c_buffer(msg, err_buf, err_cap);
+        return -2;
+    }
+    copy_to_c_buffer("window resize readiness evidence is incomplete", err_buf, err_cap);
+    -2
+}
+
+// ============================================================================
+// 45. Roblox Text Editor & UTF-8 / Grapheme Engine (Group B)
+// ============================================================================
+
+use unicode_segmentation::UnicodeSegmentation;
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_text_layout(
+    utf8_ptr: *const c_char,
+    utf8_len: usize,
+    out_utf16_units: *mut i32,
+    out_boundaries: *mut usize,
+    boundaries_cap: usize,
+    out_boundary_count: *mut usize,
+) -> c_int {
+    if utf8_ptr.is_null() && utf8_len > 0 {
+        return 0;
+    }
+    let slice = if utf8_len == 0 {
+        ""
+    } else {
+        let raw_slice = unsafe { slice::from_raw_parts(utf8_ptr as *const u8, utf8_len) };
+        match std::str::from_utf8(raw_slice) {
+            Ok(s) => s,
+            Err(_) => return 0,
+        }
+    };
+
+    let mut utf16_units: i64 = 0;
+    for c in slice.chars() {
+        utf16_units += c.len_utf16() as i64;
+    }
+    if utf16_units > i32::MAX as i64 {
+        return 0;
+    }
+    if !out_utf16_units.is_null() {
+        unsafe { *out_utf16_units = utf16_units as i32 };
+    }
+
+    let mut boundaries = Vec::new();
+    boundaries.push(0);
+    for (offset, _) in slice.grapheme_indices(true) {
+        if offset > 0 {
+            boundaries.push(offset);
+        }
+    }
+    if boundaries.last() != Some(&slice.len()) {
+        boundaries.push(slice.len());
+    }
+
+    if !out_boundary_count.is_null() {
+        unsafe { *out_boundary_count = boundaries.len() };
+    }
+
+    if !out_boundaries.is_null() && boundaries_cap > 0 {
+        let to_copy = std::cmp::min(boundaries.len(), boundaries_cap);
+        unsafe {
+            let dst = slice::from_raw_parts_mut(out_boundaries, to_copy);
+            dst.copy_from_slice(&boundaries[..to_copy]);
+        }
+    }
+
+    1 /* valid */
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_text_utf16_cursor(
+    utf8_ptr: *const c_char,
+    utf8_len: usize,
+    byte_offset: usize,
+) -> i32 {
+    if utf8_ptr.is_null() || utf8_len == 0 || byte_offset == 0 {
+        return 0;
+    }
+    let limit = std::cmp::min(utf8_len, byte_offset);
+    let raw_slice = unsafe { slice::from_raw_parts(utf8_ptr as *const u8, limit) };
+    let s = match std::str::from_utf8(raw_slice) {
+        Ok(valid) => valid,
+        Err(e) => match std::str::from_utf8(&raw_slice[..e.valid_up_to()]) {
+            Ok(part) => part,
+            Err(_) => return 0,
+        },
+    };
+    let mut units: i32 = 0;
+    for c in s.chars() {
+        units += c.len_utf16() as i32;
+    }
+    units
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_text_char_to_byte_offset(
+    utf8_ptr: *const c_char,
+    utf8_len: usize,
+    char_index: i32,
+) -> usize {
+    if utf8_ptr.is_null() || utf8_len == 0 || char_index < 0 {
+        return utf8_len;
+    }
+    let raw_slice = unsafe { slice::from_raw_parts(utf8_ptr as *const u8, utf8_len) };
+    let s = match std::str::from_utf8(raw_slice) {
+        Ok(val) => val,
+        Err(_) => return utf8_len,
+    };
+    for (i, (byte_offset, _)) in s.char_indices().enumerate() {
+        if i == char_index as usize {
+            return byte_offset;
+        }
+    }
+    utf8_len
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_text_shortcut_bit(scancode: u32) -> u32 {
+    match scancode {
+        4 => 1 << 0,  /* SDL_SCANCODE_A -> kShortcutSelectAll */
+        6 => 1 << 1,  /* SDL_SCANCODE_C -> kShortcutCopy */
+        25 => 1 << 2, /* SDL_SCANCODE_V -> kShortcutPaste */
+        27 => 1 << 3, /* SDL_SCANCODE_X -> kShortcutCut */
+        _ => 0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_text_is_password_input(text_input_type: i32) -> c_int {
+    if text_input_type == 5 || text_input_type == 9 || text_input_type == 10 {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_text_prev_grapheme(
+    utf8_ptr: *const c_char,
+    utf8_len: usize,
+    cursor_byte: usize,
+) -> usize {
+    if utf8_ptr.is_null() || utf8_len == 0 || cursor_byte == 0 {
+        return 0;
+    }
+    let raw_slice = unsafe { slice::from_raw_parts(utf8_ptr as *const u8, utf8_len) };
+    let s = match std::str::from_utf8(raw_slice) {
+        Ok(v) => v,
+        Err(_) => return cursor_byte,
+    };
+    let mut prev = 0;
+    for (offset, _) in s.grapheme_indices(true) {
+        if offset >= cursor_byte {
+            return prev;
+        }
+        prev = offset;
+    }
+    prev
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_text_next_grapheme(
+    utf8_ptr: *const c_char,
+    utf8_len: usize,
+    cursor_byte: usize,
+) -> usize {
+    if utf8_ptr.is_null() || utf8_len == 0 {
+        return 0;
+    }
+    let raw_slice = unsafe { slice::from_raw_parts(utf8_ptr as *const u8, utf8_len) };
+    let s = match std::str::from_utf8(raw_slice) {
+        Ok(v) => v,
+        Err(_) => return cursor_byte,
+    };
+    for (offset, _) in s.grapheme_indices(true) {
+        if offset > cursor_byte {
+            return offset;
+        }
+    }
+    utf8_len
+}
+
+// ============================================================================
+// 46. External Launch Broker & Wire Protocol (Group C)
+// ============================================================================
+
+const EXTERNAL_LAUNCH_WIRE_PREFIX: &[u8] = b"MOCKTAIL-EXTERNAL-LAUNCH/1\n";
+const EXTERNAL_LAUNCH_REPLY_PREFIX: &[u8] = b"MTL1";
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_external_launch_build_packet(
+    json_ptr: *const c_char,
+    json_len: usize,
+    out_buf: *mut c_char,
+    out_cap: usize,
+) -> c_int {
+    if json_ptr.is_null() || out_buf.is_null() {
+        return -1;
+    }
+    let total_len = EXTERNAL_LAUNCH_WIRE_PREFIX.len() + json_len;
+    if total_len + 1 > out_cap {
+        return -1;
+    }
+    unsafe {
+        let dst = slice::from_raw_parts_mut(out_buf as *mut u8, out_cap);
+        dst[..EXTERNAL_LAUNCH_WIRE_PREFIX.len()].copy_from_slice(EXTERNAL_LAUNCH_WIRE_PREFIX);
+        let json_slice = slice::from_raw_parts(json_ptr as *const u8, json_len);
+        dst[EXTERNAL_LAUNCH_WIRE_PREFIX.len()..total_len].copy_from_slice(json_slice);
+        dst[total_len] = 0;
+    }
+    total_len as c_int
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_external_launch_verify_and_strip_prefix(
+    packet_ptr: *const c_char,
+    packet_len: usize,
+    out_json_offset: *mut usize,
+    out_json_len: *mut usize,
+) -> c_int {
+    if packet_ptr.is_null() || out_json_offset.is_null() || out_json_len.is_null() {
+        return -1;
+    }
+    if packet_len <= EXTERNAL_LAUNCH_WIRE_PREFIX.len() {
+        return -1;
+    }
+    let slice = unsafe { slice::from_raw_parts(packet_ptr as *const u8, packet_len) };
+    if !slice.starts_with(EXTERNAL_LAUNCH_WIRE_PREFIX) {
+        return -1;
+    }
+    unsafe {
+        *out_json_offset = EXTERNAL_LAUNCH_WIRE_PREFIX.len();
+        *out_json_len = packet_len - EXTERNAL_LAUNCH_WIRE_PREFIX.len();
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_external_launch_build_reply(
+    reply_code: u8,
+    out_bytes: *mut u8,
+    out_cap: usize,
+) -> c_int {
+    if out_bytes.is_null() || out_cap < 5 {
+        return -1;
+    }
+    unsafe {
+        let dst = slice::from_raw_parts_mut(out_bytes, out_cap);
+        dst[..4].copy_from_slice(EXTERNAL_LAUNCH_REPLY_PREFIX);
+        dst[4] = reply_code;
+    }
+    5
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_external_launch_parse_reply(
+    in_bytes: *const u8,
+    in_len: usize,
+    out_reply_code: *mut u8,
+) -> c_int {
+    if in_bytes.is_null() || out_reply_code.is_null() || in_len != 5 {
+        return -1;
+    }
+    let slice = unsafe { slice::from_raw_parts(in_bytes, in_len) };
+    if &slice[..4] != EXTERNAL_LAUNCH_REPLY_PREFIX {
+        return -1;
+    }
+    unsafe { *out_reply_code = slice[4] };
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_external_launch_reply_status_code(reply_code: u8) -> c_int {
+    match reply_code {
+        0 => 0, /* kOk */
+        1 => 1, /* kInvalidArgument */
+        2 => 3, /* kUnavailable */
+        3 => 2, /* kFailedPrecondition */
+        4 => 3, /* kUnavailable */
+        _ => 5, /* kPlatformError */
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_external_launch_format_socket_name(
+    instance_key_ptr: *const c_char,
+    is_run_user: c_int,
+    out_buf: *mut c_char,
+    out_cap: usize,
+) -> c_int {
+    if instance_key_ptr.is_null() || out_buf.is_null() {
+        return -1;
+    }
+    let key = unsafe { CStr::from_ptr(instance_key_ptr).to_str().unwrap_or("") };
+    let name = if is_run_user != 0 {
+        format!("mocktail.{}.external-launch-v1.sock", key)
+    } else {
+        format!("{}.external-launch-v1.sock", key)
+    };
+    copy_to_c_buffer(&name, out_buf, out_cap)
+}
+
+// ============================================================================
+// 47. Split APK & Bundle Layout Resolver (Group D)
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_apk_guest_lib_entry_name(
+    abi_ptr: *const c_char,
+    out_buf: *mut c_char,
+    out_cap: usize,
+) -> c_int {
+    if abi_ptr.is_null() || out_buf.is_null() {
+        return -1;
+    }
+    let abi = unsafe { CStr::from_ptr(abi_ptr).to_str().unwrap_or("arm64-v8a") };
+    let entry = format!("lib/{}/libroblox.so", abi);
+    copy_to_c_buffer(&entry, out_buf, out_cap)
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_payload_store_valid_id(
+    id_ptr: *const c_char,
+    len: usize,
+) -> c_int {
+    if id_ptr.is_null() || len == 0 {
+        return 0;
+    }
+    let slice = unsafe { slice::from_raw_parts(id_ptr as *const u8, len) };
+    let s = match std::str::from_utf8(slice) {
+        Ok(val) => val,
+        Err(_) => return 0,
+    };
+    let dash = match s.find('-') {
+        Some(pos) => pos,
+        None => return 0,
+    };
+    if dash == 0 || s.len() - dash - 1 != 40 {
+        return 0;
+    }
+    for (i, c) in s.char_indices() {
+        if i == dash {
+            continue;
+        }
+        if i < dash {
+            if !c.is_ascii_digit() {
+                return 0;
+            }
+        } else {
+            if !c.is_ascii_digit() && !(c >= 'a' && c <= 'f') {
+                return 0;
+            }
+        }
+    }
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_payload_store_validate_manifest_json(
+    json_ptr: *const c_char,
+    len: usize,
+    err_buf: *mut c_char,
+    err_cap: usize,
+) -> c_int {
+    if json_ptr.is_null() || len == 0 {
+        copy_to_c_buffer("manifest json is empty", err_buf, err_cap);
+        return -1;
+    }
+    let slice = unsafe { slice::from_raw_parts(json_ptr as *const u8, len) };
+    let s = match std::str::from_utf8(slice) {
+        Ok(val) => val,
+        Err(_) => {
+            copy_to_c_buffer("manifest json is not valid UTF-8", err_buf, err_cap);
+            return -1;
+        }
+    };
+    let v: serde_json::Value = match serde_json::from_str(s) {
+        Ok(val) => val,
+        Err(_) => {
+            copy_to_c_buffer("manifest json is not a valid JSON document", err_buf, err_cap);
+            return -1;
+        }
+    };
+    let obj = match v.as_object() {
+        Some(o) => o,
+        None => {
+            copy_to_c_buffer("manifest root must be an object", err_buf, err_cap);
+            return -1;
+        }
+    };
+    if obj.get("format").and_then(|x| x.as_i64()) != Some(1) {
+        copy_to_c_buffer("unsupported manifest format", err_buf, err_cap);
+        return -1;
+    }
+    let pid = obj.get("payload_id").and_then(|x| x.as_str()).unwrap_or("");
+    let pid_c = match CString::new(pid) {
+        Ok(c) => c,
+        Err(_) => {
+            copy_to_c_buffer("invalid payload_id", err_buf, err_cap);
+            return -1;
+        }
+    };
+    if mocktail_rust_payload_store_valid_id(pid_c.as_ptr(), pid.len()) == 0 {
+        copy_to_c_buffer("invalid payload_id format", err_buf, err_cap);
+        return -1;
+    }
+    if obj.get("version_name").and_then(|x| x.as_str()).unwrap_or("").is_empty() {
+        copy_to_c_buffer("version_name must not be empty", err_buf, err_cap);
+        return -1;
+    }
+    if obj.get("version_code").and_then(|x| x.as_u64()).unwrap_or(0) == 0 {
+        copy_to_c_buffer("version_code must be positive", err_buf, err_cap);
+        return -1;
+    }
+    let bid = obj.get("build_id").and_then(|x| x.as_str()).unwrap_or("");
+    let bid_c = match CString::new(bid) {
+        Ok(c) => c,
+        Err(_) => {
+            copy_to_c_buffer("invalid build_id", err_buf, err_cap);
+            return -1;
+        }
+    };
+    if mocktail_rust_is_lower_hex(bid_c.as_ptr(), 40) == 0 {
+        copy_to_c_buffer("build_id must be a 40-character hex string", err_buf, err_cap);
+        return -1;
+    }
+    if obj.get("staging_timestamp").and_then(|x| x.as_str()).unwrap_or("").is_empty() {
+        copy_to_c_buffer("staging_timestamp must not be empty", err_buf, err_cap);
+        return -1;
+    }
+    if obj.get("source").and_then(|x| x.as_str()).unwrap_or("").is_empty() {
+        copy_to_c_buffer("source must not be empty", err_buf, err_cap);
+        return -1;
+    }
+    0
+}
+
+// ============================================================================
+// 48. Audio Buffer Queue & Output Device Bridge (Group E)
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_opensl_result_from_status_code(status_code: i32) -> u32 {
+    match status_code {
+        0 => 0,  /* SL_RESULT_SUCCESS */
+        1 => 2,  /* SL_RESULT_PARAMETER_INVALID */
+        2 => 3,  /* SL_RESULT_PRECONDITIONS_VIOLATED */
+        3 => 4,  /* SL_RESULT_RESOURCE_ERROR */
+        4 => 12, /* SL_RESULT_FEATURE_UNSUPPORTED */
+        5 => 6,  /* SL_RESULT_IO_ERROR */
+        _ => 1,  /* SL_RESULT_INTERNAL_ERROR */
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_audio_device_stable_guid(
+    name_ptr: *const c_char,
+    out_buf: *mut c_char,
+    out_cap: usize,
+) -> c_int {
+    if name_ptr.is_null() || out_buf.is_null() {
+        return -1;
+    }
+    let name = unsafe { CStr::from_ptr(name_ptr).to_str().unwrap_or("") };
+    let hash = Sha256::digest(name.as_bytes());
+    let b = &hash[..16];
+    let guid = format!(
+        "{{{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}}}",
+        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]
+    );
+    copy_to_c_buffer(&guid, out_buf, out_cap)
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_audio_is_valid_elf_header(
+    bytes_ptr: *const u8,
+    len: usize,
+) -> c_int {
+    if bytes_ptr.is_null() || len < 64 {
+        return 0;
+    }
+    let slice = unsafe { slice::from_raw_parts(bytes_ptr, len) };
+    if &slice[0..4] != b"\x7fELF" || slice[4] != 2 /* ELFCLASS64 */ {
+        return 0;
+    }
+    let phoff = u64::from_le_bytes(slice[32..40].try_into().unwrap());
+    let phnum = u16::from_le_bytes(slice[56..58].try_into().unwrap());
+    if phoff != 0 && phnum != 0 {
+        1
+    } else {
+        0
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -8514,4 +9374,111 @@ integrations:
         mocktail_rust_parse_cpuinfo_model(cpuinfo.as_ptr(), model_buf.as_mut_ptr(), model_buf.len());
         assert_eq!(unsafe { CStr::from_ptr(model_buf.as_ptr()).to_str().unwrap() }, "Intel Core i7-4500U CPU @ 1.80GHz");
     }
+
+    #[test]
+    fn test_window_readiness_gates() {
+        let mut flags: u32 = 0;
+        let mut pending: i32 = 0;
+        let r = mocktail_rust_window_fullscreen_request_from_android_flags(0x400, 0x400, &mut flags, &mut pending);
+        assert_eq!(r, 1);
+        assert_eq!(pending, 2);
+        let mut fs: c_int = 0;
+        assert_eq!(mocktail_rust_window_fullscreen_take(&mut pending, &mut fs), 1);
+        assert_eq!(fs, 1);
+        assert_eq!(pending, 0);
+
+        let msg = CString::new("Maximum event re-entrancy depth exceeded for BindableEvent.Event in CoreGui.RobloxGui.Modules.Settings.Pages.GameSettings").unwrap();
+        assert_eq!(mocktail_rust_roblox_fullscreen_menu_is_cycle(msg.as_ptr()), 1);
+
+        let mut state: u32 = 0;
+        let mut surf_gen: u64 = 0;
+        let mut tw: u32 = 0;
+        let mut th: u32 = 0;
+        let mut err = [0 as c_char; 128];
+        let rc = mocktail_rust_window_resize_activate(1, 1920, 1080, 1, 10, 100, 800, 600, &mut state, &mut surf_gen, &mut tw, &mut th, err.as_mut_ptr(), err.len());
+        assert_eq!(rc, 0);
+        assert_eq!(state, 1);
+        assert_eq!(surf_gen, 10);
+        assert_eq!(tw, 1920);
+        assert_eq!(th, 1080);
+    }
+
+    #[test]
+    fn test_text_editor_layout_and_graphemes() {
+        let family = "👨‍👩‍👧‍👦é";
+        let family_c = CString::new(family).unwrap();
+        let mut units: i32 = 0;
+        let mut bounds = [0usize; 8];
+        let mut count: usize = 0;
+        let valid = mocktail_rust_text_layout(family_c.as_ptr(), family.len(), &mut units, bounds.as_mut_ptr(), bounds.len(), &mut count);
+        assert_eq!(valid, 1);
+        assert_eq!(count, 3);
+        assert_eq!(&bounds[..count], &[0, 25, 28]);
+        assert_eq!(units, 13); // 7 units for family (surrogates: 👨=2, ‍=1, 👩=2, ‍=1, 👧=2, ‍=1, 👦=2 -> 11) wait chars utf16 length
+
+        assert_eq!(mocktail_rust_text_shortcut_bit(4), 1);
+        assert_eq!(mocktail_rust_text_shortcut_bit(6), 2);
+        assert_eq!(mocktail_rust_text_shortcut_bit(25), 4);
+        assert_eq!(mocktail_rust_text_shortcut_bit(27), 8);
+        assert_eq!(mocktail_rust_text_is_password_input(5), 1);
+        assert_eq!(mocktail_rust_text_is_password_input(1), 0);
+
+        assert_eq!(mocktail_rust_text_prev_grapheme(family_c.as_ptr(), family.len(), 28), 25);
+        assert_eq!(mocktail_rust_text_prev_grapheme(family_c.as_ptr(), family.len(), 25), 0);
+        assert_eq!(mocktail_rust_text_next_grapheme(family_c.as_ptr(), family.len(), 0), 25);
+        assert_eq!(mocktail_rust_text_next_grapheme(family_c.as_ptr(), family.len(), 25), 28);
+    }
+
+    #[test]
+    fn test_external_launch_wire_protocol() {
+        let json = "{\"placeId\":123}";
+        let json_c = CString::new(json).unwrap();
+        let mut pkt = [0 as c_char; 256];
+        let len = mocktail_rust_external_launch_build_packet(json_c.as_ptr(), json.len(), pkt.as_mut_ptr(), pkt.len());
+        assert!(len > 0);
+
+        let mut off: usize = 0;
+        let mut jlen: usize = 0;
+        let ok = mocktail_rust_external_launch_verify_and_strip_prefix(pkt.as_ptr(), len as usize, &mut off, &mut jlen);
+        assert_eq!(ok, 0);
+        assert_eq!(off, 27);
+        assert_eq!(jlen, json.len());
+
+        let mut reply = [0u8; 8];
+        assert_eq!(mocktail_rust_external_launch_build_reply(0, reply.as_mut_ptr(), reply.len()), 5);
+        let mut code: u8 = 99;
+        assert_eq!(mocktail_rust_external_launch_parse_reply(reply.as_ptr(), 5, &mut code), 0);
+        assert_eq!(code, 0);
+        assert_eq!(mocktail_rust_external_launch_reply_status_code(code), 0);
+    }
+
+    #[test]
+    fn test_apk_bundle_and_payload_store() {
+        let abi = CString::new("arm64-v8a").unwrap();
+        let mut entry = [0 as c_char; 64];
+        mocktail_rust_apk_guest_lib_entry_name(abi.as_ptr(), entry.as_mut_ptr(), entry.len());
+        assert_eq!(unsafe { CStr::from_ptr(entry.as_ptr()).to_str().unwrap() }, "lib/arm64-v8a/libroblox.so");
+
+        let pid_valid = CString::new("650-0123456789abcdef0123456789abcdef01234567").unwrap();
+        assert_eq!(mocktail_rust_payload_store_valid_id(pid_valid.as_ptr(), 44), 1);
+        let pid_invalid = CString::new("650_invalid").unwrap();
+        assert_eq!(mocktail_rust_payload_store_valid_id(pid_invalid.as_ptr(), 11), 0);
+    }
+
+    #[test]
+    fn test_audio_queue_and_output_device_bridge() {
+        assert_eq!(mocktail_rust_opensl_result_from_status_code(0), 0);
+        assert_eq!(mocktail_rust_opensl_result_from_status_code(1), 2);
+        assert_eq!(mocktail_rust_opensl_result_from_status_code(2), 3);
+        assert_eq!(mocktail_rust_opensl_result_from_status_code(3), 4);
+        assert_eq!(mocktail_rust_opensl_result_from_status_code(4), 12);
+        assert_eq!(mocktail_rust_opensl_result_from_status_code(5), 6);
+
+        let dev_name = CString::new("Built-in Audio").unwrap();
+        let mut guid_buf = [0 as c_char; 64];
+        assert_eq!(mocktail_rust_audio_device_stable_guid(dev_name.as_ptr(), guid_buf.as_mut_ptr(), guid_buf.len()), 0);
+        let guid = unsafe { CStr::from_ptr(guid_buf.as_ptr()).to_str().unwrap() };
+        assert!(guid.starts_with("{") && guid.ends_with("}") && guid.len() == 38);
+    }
+
 }

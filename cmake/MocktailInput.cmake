@@ -34,6 +34,7 @@ target_link_libraries(mocktail_input_runtime PUBLIC
   Mocktail::PlatformSdl
   Mocktail::Runtime
   mocktail_window
+  mocktail_core_rust
   PkgConfig::UTF8PROC
   PRIVATE
     PkgConfig::FONTCONFIG

@@ -1,4 +1,5 @@
 #include "update/apk_bundle.h"
+#include "mocktail/mocktail_rust.h"
 
 #define JSON_NOEXCEPTION 1
 #include <elf.h>
@@ -179,6 +180,11 @@ struct ApkCandidate {
 };
 
 std::string GuestLibEntryName() {
+  char buf[128]{};
+  if (mocktail_rust_apk_guest_lib_entry_name(
+          std::string(compat::kGuestAbi).c_str(), buf, sizeof(buf)) == 0) {
+    return buf;
+  }
   return std::string(compat::kGuestLibApkEntryPrefix) +
          std::string(compat::kGuestAbi) + "/libroblox.so";
 }

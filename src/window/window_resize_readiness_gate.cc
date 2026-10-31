@@ -1,5 +1,7 @@
 #include "window/window_resize_readiness_gate.h"
+#include "mocktail/mocktail_rust.h"
 
+#include <array>
 #include <utility>
 
 namespace mocktail {
@@ -14,67 +16,56 @@ Status FailedPrecondition(std::string message) {
   return Status::Error(StatusCode::kFailedPrecondition, std::move(message));
 }
 
+Status StatusFromRust(int rc, const char* err_buf) {
+  if (rc == 0) {
+    return Status::Ok();
+  }
+  if (rc == -1) {
+    return InvalidArgument(err_buf != nullptr && err_buf[0] != '\0'
+                               ? err_buf
+                               : "invalid argument");
+  }
+  return FailedPrecondition(err_buf != nullptr && err_buf[0] != '\0'
+                                ? err_buf
+                                : "failed precondition");
+}
+
 }  // namespace
 
 Status WindowResizeReadinessGate::Activate(
     WindowResizeReadinessConfig config,
     const WindowSurfaceSnapshot& initial_surface) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (snapshot_.state != WindowResizeReadinessState::kDisabled ||
-      snapshot_.surface_generation != 0) {
-    return FailedPrecondition("window resize readiness gate is already active");
+  std::array<char, 256> err{};
+  uint32_t state = static_cast<uint32_t>(snapshot_.state);
+  const int rc = mocktail_rust_window_resize_activate(
+      config.enabled ? 1 : 0, config.target_width, config.target_height,
+      initial_surface.available ? 1 : 0, initial_surface.generation,
+      initial_surface.native_window, initial_surface.width,
+      initial_surface.height, &state, &snapshot_.surface_generation,
+      &snapshot_.target_width, &snapshot_.target_height, err.data(),
+      err.size());
+  snapshot_.state = static_cast<WindowResizeReadinessState>(state);
+  if (rc != 0) {
+    return StatusFromRust(rc, err.data());
   }
-  if (!config.enabled) {
-    return Status::Ok();
-  }
-  if (!initial_surface.available || initial_surface.generation == 0 ||
-      initial_surface.native_window == 0 || initial_surface.width == 0 ||
-      initial_surface.height == 0) {
-    return InvalidArgument(
-        "window resize readiness gate requires an available initial surface");
-  }
-  if (config.target_width == 0 || config.target_height == 0) {
-    return InvalidArgument("window resize target must have a positive extent");
-  }
-  if (config.target_width == initial_surface.width &&
-      config.target_height == initial_surface.height) {
-    return InvalidArgument("window resize target must differ from initial extent");
-  }
-  snapshot_.state = WindowResizeReadinessState::kWaitingForFirstPresent;
-  snapshot_.surface_generation = initial_surface.generation;
-  snapshot_.target_width = config.target_width;
-  snapshot_.target_height = config.target_height;
   return Status::Ok();
 }
 
 Status WindowResizeReadinessGate::RecordPresent(uint64_t frame_serial) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (snapshot_.state == WindowResizeReadinessState::kDisabled) {
-    return Status::Ok();
-  }
-  if (snapshot_.state == WindowResizeReadinessState::kFailed ||
-      snapshot_.state == WindowResizeReadinessState::kStopped) {
-    return FailedPrecondition(
-        snapshot_.failure_reason.empty()
-            ? "window resize readiness gate cannot accept a present"
-            : snapshot_.failure_reason);
-  }
-  if (frame_serial == 0) {
-    return FailLocked("resize readiness received a zero present serial");
-  }
-  if (snapshot_.state ==
-      WindowResizeReadinessState::kWaitingForFirstPresent) {
-    snapshot_.first_present_serial = frame_serial;
-    snapshot_.state = WindowResizeReadinessState::kReadyToRequestResize;
-    return Status::Ok();
-  }
-  if (snapshot_.state == WindowResizeReadinessState::kSurfaceCommitted) {
-    if (frame_serial <= snapshot_.first_present_serial) {
-      return FailLocked(
-          "post-rebind present serial does not follow the first present");
+  std::array<char, 256> err{};
+  uint32_t state = static_cast<uint32_t>(snapshot_.state);
+  const int rc = mocktail_rust_window_resize_record_present(
+      frame_serial, &state, &snapshot_.first_present_serial,
+      &snapshot_.post_rebind_present_serial, snapshot_.failure_reason.c_str(),
+      err.data(), err.size());
+  snapshot_.state = static_cast<WindowResizeReadinessState>(state);
+  if (rc != 0) {
+    if (snapshot_.state == WindowResizeReadinessState::kFailed) {
+      snapshot_.failure_reason = err.data();
     }
-    snapshot_.post_rebind_present_serial = frame_serial;
-    snapshot_.state = WindowResizeReadinessState::kPostRebindPresented;
+    return StatusFromRust(rc, err.data());
   }
   return Status::Ok();
 }
@@ -85,80 +76,68 @@ bool WindowResizeReadinessGate::TakeResizeRequest(
     return false;
   }
   std::lock_guard<std::mutex> lock(mutex_);
-  if (snapshot_.state != WindowResizeReadinessState::kReadyToRequestResize) {
-    return false;
+  uint32_t state = static_cast<uint32_t>(snapshot_.state);
+  uint32_t out_w = 0;
+  uint32_t out_h = 0;
+  if (mocktail_rust_window_resize_take_request(
+          &state, snapshot_.target_width, snapshot_.target_height, &out_w,
+          &out_h) != 0) {
+    snapshot_.state = static_cast<WindowResizeReadinessState>(state);
+    request->width = out_w;
+    request->height = out_h;
+    return true;
   }
-  request->width = snapshot_.target_width;
-  request->height = snapshot_.target_height;
-  snapshot_.state = WindowResizeReadinessState::kResizeRequested;
-  return true;
+  return false;
 }
 
 Status WindowResizeReadinessGate::RecordCommittedSurfaceEvent(
     const WindowSurfaceEvent& event) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (snapshot_.state == WindowResizeReadinessState::kDisabled) {
-    return Status::Ok();
+  std::array<char, 256> err{};
+  uint32_t state = static_cast<uint32_t>(snapshot_.state);
+  const int rc = mocktail_rust_window_resize_record_surface_event(
+      static_cast<int>(event.type), event.surface.available ? 1 : 0,
+      event.surface.generation, event.surface.native_window,
+      event.surface.width, event.surface.height, &state,
+      snapshot_.surface_generation, snapshot_.target_width,
+      snapshot_.target_height, snapshot_.failure_reason.c_str(), err.data(),
+      err.size());
+  snapshot_.state = static_cast<WindowResizeReadinessState>(state);
+  if (rc != 0) {
+    if (snapshot_.state == WindowResizeReadinessState::kFailed) {
+      snapshot_.failure_reason = err.data();
+    }
+    return StatusFromRust(rc, err.data());
   }
-  if (snapshot_.state == WindowResizeReadinessState::kFailed ||
-      snapshot_.state == WindowResizeReadinessState::kStopped) {
-    return FailedPrecondition(
-        snapshot_.failure_reason.empty()
-            ? "window resize readiness gate cannot accept a surface event"
-            : snapshot_.failure_reason);
-  }
-  if (snapshot_.state != WindowResizeReadinessState::kResizeRequested) {
-    return Status::Ok();
-  }
-  if (event.type == WindowSurfaceEventType::kCreated ||
-      event.type == WindowSurfaceEventType::kDestroyed) {
-    return FailLocked(
-        "resize recreated the surface instead of preserving its generation");
-  }
-  if (event.surface.generation != snapshot_.surface_generation) {
-    return FailLocked("resize committed a different surface generation");
-  }
-  if (!event.surface.available || event.surface.native_window == 0) {
-    return FailLocked("resize committed an unavailable surface");
-  }
-  if (event.surface.width != snapshot_.target_width ||
-      event.surface.height != snapshot_.target_height) {
-    // Window managers may emit intermediate configure events. The exact
-    // compositor-confirmed target remains the only readiness evidence.
-    return Status::Ok();
-  }
-  snapshot_.state = WindowResizeReadinessState::kSurfaceCommitted;
   return Status::Ok();
 }
 
 Status WindowResizeReadinessGate::RecordStopped() {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (snapshot_.state == WindowResizeReadinessState::kDisabled) {
-    return Status::Ok();
+  std::array<char, 256> err{};
+  uint32_t state = static_cast<uint32_t>(snapshot_.state);
+  const int rc = mocktail_rust_window_resize_record_stopped(
+      &state, snapshot_.failure_reason.c_str(), err.data(), err.size());
+  snapshot_.state = static_cast<WindowResizeReadinessState>(state);
+  if (rc != 0) {
+    if (snapshot_.state == WindowResizeReadinessState::kFailed) {
+      snapshot_.failure_reason = err.data();
+    }
+    return StatusFromRust(rc, err.data());
   }
-  if (snapshot_.state == WindowResizeReadinessState::kFailed) {
-    return FailedPrecondition(snapshot_.failure_reason);
-  }
-  if (snapshot_.state !=
-      WindowResizeReadinessState::kPostRebindPresented) {
-    return FailLocked(
-        "runtime stopped before resize rebind produced a later present");
-  }
-  snapshot_.state = WindowResizeReadinessState::kStopped;
   return Status::Ok();
 }
 
 Status WindowResizeReadinessGate::CompletionStatus() const {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (snapshot_.state == WindowResizeReadinessState::kDisabled ||
-      snapshot_.state == WindowResizeReadinessState::kStopped) {
-    return Status::Ok();
+  std::array<char, 256> err{};
+  const int rc = mocktail_rust_window_resize_completion_status(
+      static_cast<uint32_t>(snapshot_.state), snapshot_.failure_reason.c_str(),
+      err.data(), err.size());
+  if (rc != 0) {
+    return StatusFromRust(rc, err.data());
   }
-  if (snapshot_.state == WindowResizeReadinessState::kFailed) {
-    return FailedPrecondition(snapshot_.failure_reason);
-  }
-  return FailedPrecondition(
-      "window resize readiness evidence is incomplete");
+  return Status::Ok();
 }
 
 WindowResizeReadinessSnapshot WindowResizeReadinessGate::Snapshot() const {
@@ -173,25 +152,7 @@ Status WindowResizeReadinessGate::FailLocked(std::string reason) {
 }
 
 const char* WindowResizeReadinessStateName(WindowResizeReadinessState state) {
-  switch (state) {
-    case WindowResizeReadinessState::kDisabled:
-      return "Disabled";
-    case WindowResizeReadinessState::kWaitingForFirstPresent:
-      return "WaitingForFirstPresent";
-    case WindowResizeReadinessState::kReadyToRequestResize:
-      return "ReadyToRequestResize";
-    case WindowResizeReadinessState::kResizeRequested:
-      return "ResizeRequested";
-    case WindowResizeReadinessState::kSurfaceCommitted:
-      return "SurfaceCommitted";
-    case WindowResizeReadinessState::kPostRebindPresented:
-      return "PostRebindPresented";
-    case WindowResizeReadinessState::kStopped:
-      return "Stopped";
-    case WindowResizeReadinessState::kFailed:
-      return "Failed";
-  }
-  return "Unknown";
+  return mocktail_rust_window_resize_state_name(static_cast<uint32_t>(state));
 }
 
 }  // namespace window

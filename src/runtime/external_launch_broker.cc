@@ -3,6 +3,7 @@
 #endif
 
 #include "runtime/external_launch_broker.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <fcntl.h>
 #include <poll.h>
@@ -169,9 +170,11 @@ bool SetPeerTimeouts(int descriptor) {
 }
 
 bool SendReply(int descriptor, WireReply reply) {
-  std::array<unsigned char, kReplySize> bytes{};
-  std::copy(kReplyPrefix.begin(), kReplyPrefix.end(), bytes.begin());
-  bytes.back() = static_cast<unsigned char>(reply);
+  std::array<uint8_t, 5> bytes{};
+  if (mocktail_rust_external_launch_build_reply(
+          static_cast<uint8_t>(reply), bytes.data(), bytes.size()) != 5) {
+    return false;
+  }
   return send(descriptor, bytes.data(), bytes.size(), MSG_NOSIGNAL) ==
          static_cast<ssize_t>(bytes.size());
 }
@@ -278,13 +281,17 @@ Status SendForwardPacket(
                ? Unavailable("external-launch owner ACK timed out")
                : Platform(ErrnoMessage("cannot wait for launch ACK", errno));
   }
-  std::array<unsigned char, kReplySize> reply{};
+  std::array<uint8_t, 5> reply{};
   const ssize_t received = recv(descriptor, reply.data(), reply.size(), 0);
+  uint8_t reply_code = 0;
   if (received != static_cast<ssize_t>(reply.size()) ||
-      !std::equal(kReplyPrefix.begin(), kReplyPrefix.end(), reply.begin())) {
+      mocktail_rust_external_launch_parse_reply(reply.data(), reply.size(),
+                                                &reply_code) != 0) {
     return Platform("external-launch owner returned an invalid ACK");
   }
-  switch (static_cast<WireReply>(reply.back())) {
+  const int status_code =
+      mocktail_rust_external_launch_reply_status_code(reply_code);
+  switch (static_cast<WireReply>(reply_code)) {
     case WireReply::kAccepted:
       return Status::Ok();
     case WireReply::kInvalid:
@@ -296,6 +303,7 @@ Status SendForwardPacket(
     case WireReply::kStopping:
       return Unavailable("external-launch owner is stopping");
   }
+  (void)status_code;
   return Platform("external-launch owner returned an unknown ACK");
 }
 
@@ -315,10 +323,11 @@ Status ResolveExternalLaunchSocketPath(bool owner,
   // here would make both processes agree on the lock but disagree on IPC.
   const std::filesystem::path runtime_directory =
       std::filesystem::path("/run/user") / std::to_string(user_id);
+  char name_buf[256]{};
   if (IsPrivateOwnedDirectory(runtime_directory)) {
-    *socket_path = runtime_directory /
-                   ("mocktail." + instance_key +
-                    ".external-launch-v1.sock");
+    mocktail_rust_external_launch_format_socket_name(
+        instance_key.c_str(), 1, name_buf, sizeof(name_buf));
+    *socket_path = runtime_directory / name_buf;
     return ValidateSocketPath(*socket_path);
   }
 
@@ -326,8 +335,9 @@ Status ResolveExternalLaunchSocketPath(bool owner,
       std::filesystem::path("/tmp") / ("mocktail-" + std::to_string(user_id));
   Status status = EnsureFallbackDirectory(fallback, owner);
   if (!status.ok()) return status;
-  *socket_path =
-      fallback / (instance_key + ".external-launch-v1.sock");
+  mocktail_rust_external_launch_format_socket_name(
+      instance_key.c_str(), 0, name_buf, sizeof(name_buf));
+  *socket_path = fallback / name_buf;
   return ValidateSocketPath(*socket_path);
 }
 
@@ -542,15 +552,16 @@ class ExternalLaunchBroker::Impl final {
                              kMaximumExperienceLaunchJsonBytes);
     const ssize_t received =
         recv(peer, packet.data(), packet.size(), MSG_TRUNC);
-    if (received <= static_cast<ssize_t>(kWirePrefix.size()) ||
-        received > static_cast<ssize_t>(packet.size()) ||
-        !std::equal(kWirePrefix.begin(), kWirePrefix.end(), packet.begin())) {
+    size_t json_offset = 0;
+    size_t json_len = 0;
+    if (received <= 0 ||
+        mocktail_rust_external_launch_verify_and_strip_prefix(
+            packet.data(), static_cast<size_t>(received), &json_offset,
+            &json_len) != 0) {
       (void)SendReply(peer, WireReply::kInvalid);
       return;
     }
-    const std::string canonical_json(
-        packet.data() + kWirePrefix.size(),
-        static_cast<std::size_t>(received) - kWirePrefix.size());
+    const std::string canonical_json(packet.data() + json_offset, json_len);
     RobloxExperienceLaunchRequest request;
     Status status = ParseRobloxExperienceLaunchJson(canonical_json, &request);
     if (!status.ok()) {

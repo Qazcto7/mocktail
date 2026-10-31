@@ -1,4 +1,5 @@
 #include "mocktail/audio/roblox_output_device_bridge.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <elf.h>
 #include <sys/mman.h>
@@ -51,10 +52,8 @@ bool IsValidElfImage(std::uintptr_t image_base) {
   if (image_base == 0) {
     return false;
   }
-  const auto* header = reinterpret_cast<const Elf64_Ehdr*>(image_base);
-  return std::memcmp(header->e_ident, ELFMAG, SELFMAG) == 0 &&
-         header->e_ident[EI_CLASS] == ELFCLASS64 && header->e_phoff != 0 &&
-         header->e_phnum != 0;
+  return mocktail_rust_audio_is_valid_elf_header(
+             reinterpret_cast<const uint8_t*>(image_base), 64) != 0;
 }
 
 bool IsProgramHeaderRange(std::uintptr_t image_base, std::uintptr_t rva,

@@ -1,4 +1,5 @@
 #include "runtime/roblox_text_editor.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <SDL3/SDL_keycode.h>
 #include <SDL3/SDL_scancode.h>
@@ -40,75 +41,30 @@ struct Utf8Layout {
 
 Utf8Layout Layout(const std::string& text) {
   Utf8Layout layout;
-  layout.grapheme_boundaries.push_back(0);
-  utf8proc_int32_t previous = 0;
-  utf8proc_int32_t break_state = 0;
-  bool have_previous = false;
-  std::size_t offset = 0;
-  int64_t utf16_units = 0;
-  while (offset < text.size()) {
-    utf8proc_int32_t codepoint = 0;
-    const utf8proc_ssize_t count = utf8proc_iterate(
-        reinterpret_cast<const utf8proc_uint8_t*>(text.data() + offset),
-        static_cast<utf8proc_ssize_t>(text.size() - offset), &codepoint);
-    if (count <= 0) {
-      return layout;
-    }
-    if (have_previous &&
-        utf8proc_grapheme_break_stateful(previous, codepoint, &break_state)) {
-      layout.grapheme_boundaries.push_back(offset);
-    }
-    utf16_units += codepoint > 0xffff ? 2 : 1;
-    if (utf16_units > std::numeric_limits<int32_t>::max()) {
-      return layout;
-    }
-    previous = codepoint;
-    have_previous = true;
-    offset += static_cast<std::size_t>(count);
+  std::vector<std::size_t> boundaries(text.size() + 2);
+  std::size_t count = 0;
+  int32_t units = 0;
+  const int valid = mocktail_rust_text_layout(
+      text.data(), text.size(), &units, boundaries.data(), boundaries.size(),
+      &count);
+  if (valid != 1) {
+    return layout;
   }
-  if (layout.grapheme_boundaries.back() != text.size()) {
-    layout.grapheme_boundaries.push_back(text.size());
-  }
+  boundaries.resize(count);
   layout.valid = true;
-  layout.utf16_units = static_cast<int32_t>(utf16_units);
+  layout.utf16_units = units;
+  layout.grapheme_boundaries = std::move(boundaries);
   return layout;
 }
 
 int32_t Utf16Cursor(const std::string& text, std::size_t byte_offset) {
-  std::size_t offset = 0;
-  int32_t units = 0;
-  while (offset < byte_offset) {
-    utf8proc_int32_t codepoint = 0;
-    const utf8proc_ssize_t count = utf8proc_iterate(
-        reinterpret_cast<const utf8proc_uint8_t*>(text.data() + offset),
-        static_cast<utf8proc_ssize_t>(byte_offset - offset), &codepoint);
-    if (count <= 0) {
-      return 0;
-    }
-    units += codepoint > 0xffff ? 2 : 1;
-    offset += static_cast<std::size_t>(count);
-  }
-  return units;
+  return mocktail_rust_text_utf16_cursor(text.data(), text.size(), byte_offset);
 }
 
 std::size_t Utf8CharacterByteOffset(const std::string& text,
                                     int character_index) {
-  if (character_index < 0) {
-    return text.size();
-  }
-  std::size_t offset = 0;
-  for (int index = 0; index < character_index && offset < text.size();
-       ++index) {
-    utf8proc_int32_t codepoint = 0;
-    const utf8proc_ssize_t count = utf8proc_iterate(
-        reinterpret_cast<const utf8proc_uint8_t*>(text.data() + offset),
-        static_cast<utf8proc_ssize_t>(text.size() - offset), &codepoint);
-    if (count <= 0) {
-      return text.size();
-    }
-    offset += static_cast<std::size_t>(count);
-  }
-  return offset;
+  return mocktail_rust_text_char_to_byte_offset(text.data(), text.size(),
+                                                character_index);
 }
 
 RobloxTextEditResult Result(bool handled, bool dispatched, bool ended,
@@ -117,35 +73,21 @@ RobloxTextEditResult Result(bool handled, bool dispatched, bool ended,
 }
 
 void SecureClear(std::string* text) {
-  if (text == nullptr) {
+  if (text == nullptr || text->empty()) {
     return;
   }
-  volatile char* bytes = text->empty() ? nullptr : &(*text)[0];
-  for (std::size_t index = 0; index < text->size(); ++index) {
-    bytes[index] = 0;
-  }
+  mocktail_rust_secure_zero(reinterpret_cast<uint8_t*>(&(*text)[0]),
+                            text->size());
   std::string empty;
   text->swap(empty);
 }
 
 uint32_t ShortcutBit(SDL_Scancode scancode) {
-  switch (scancode) {
-    case SDL_SCANCODE_A:
-      return kShortcutSelectAll;
-    case SDL_SCANCODE_C:
-      return kShortcutCopy;
-    case SDL_SCANCODE_V:
-      return kShortcutPaste;
-    case SDL_SCANCODE_X:
-      return kShortcutCut;
-    default:
-      return 0;
-  }
+  return mocktail_rust_text_shortcut_bit(static_cast<uint32_t>(scancode));
 }
 
 bool IsPasswordInputType(int32_t text_input_type) {
-  return text_input_type == 5 || text_input_type == 9 ||
-         text_input_type == 10;
+  return mocktail_rust_text_is_password_input(text_input_type) != 0;
 }
 
 }  // namespace
