@@ -2215,6 +2215,33 @@ int32_t mocktail_rust_client_settings_build_url(
     char* out_buf,
     size_t out_cap);
 
+// ============================================================================
+// 105. Interactive Process Launch Resource & Scheduler Policy Engine
+// ============================================================================
+
+int32_t mocktail_rust_process_launch_format_limit(
+    uint64_t value,
+    int32_t is_infinity,
+    char* out_buf,
+    size_t out_cap);
+
+int32_t mocktail_rust_process_launch_eval_scheduler(
+    int32_t inherited_policy,
+    int32_t* out_target_policy,
+    int32_t* out_is_realtime);
+
+int32_t mocktail_rust_process_launch_eval_cpu_limit(
+    uint64_t cur,
+    int32_t cur_is_inf,
+    uint64_t max,
+    int32_t max_is_inf,
+    int32_t* out_action);
+
+int32_t mocktail_rust_apply_interactive_process_launch_policy(
+    char* out_buf,
+    size_t out_cap,
+    size_t* out_written);
+
 #ifdef __cplusplus
 }
 #endif

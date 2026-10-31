@@ -12814,6 +12814,262 @@ pub extern "C" fn mocktail_rust_client_settings_build_url(
 }
 
 // ============================================================================
+// 105. Interactive Process Launch Resource & Scheduler Policy Engine
+// ============================================================================
+
+pub const RLIM_INFINITY_U64: u64 = 0xffff_ffff_ffff_ffff;
+pub const SCHED_OTHER_CONST: i32 = 0;
+pub const SCHED_FIFO_CONST: i32 = 1;
+pub const SCHED_RR_CONST: i32 = 2;
+pub const SCHED_RESET_ON_FORK_CONST: i32 = 0x4000_0000;
+pub const RLIMIT_CPU_CONST: i32 = 0;
+pub const RLIMIT_RTTIME_CONST: i32 = 15;
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct RustRLimit {
+    pub rlim_cur: u64,
+    pub rlim_max: u64,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct RustSchedParam {
+    pub sched_priority: std::ffi::c_int,
+}
+
+extern "C" {
+    fn sched_getscheduler(pid: std::ffi::c_int) -> std::ffi::c_int;
+    fn sched_setscheduler(
+        pid: std::ffi::c_int,
+        policy: std::ffi::c_int,
+        param: *const RustSchedParam,
+    ) -> std::ffi::c_int;
+    fn getrlimit(resource: std::ffi::c_int, rlim: *mut RustRLimit) -> std::ffi::c_int;
+    fn setrlimit(resource: std::ffi::c_int, rlim: *const RustRLimit) -> std::ffi::c_int;
+    fn strerror(errnum: std::ffi::c_int) -> *const std::ffi::c_char;
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn get_c_errno() -> std::ffi::c_int {
+    extern "C" {
+        fn __errno_location() -> *mut std::ffi::c_int;
+    }
+    *__errno_location()
+}
+
+#[cfg(not(target_os = "linux"))]
+unsafe fn get_c_errno() -> std::ffi::c_int {
+    0
+}
+
+fn get_c_strerror(err: std::ffi::c_int) -> String {
+    unsafe {
+        let p = strerror(err);
+        if p.is_null() {
+            format!("error {}", err)
+        } else {
+            CStr::from_ptr(p).to_string_lossy().into_owned()
+        }
+    }
+}
+
+pub fn format_rlimit_value(value: u64, is_infinity: bool) -> String {
+    if is_infinity || value == RLIM_INFINITY_U64 {
+        "unlimited".to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+pub fn format_rlimit_entry(
+    name: &str,
+    cur: u64,
+    cur_is_inf: bool,
+    max: u64,
+    max_is_inf: bool,
+    units: &str,
+) -> String {
+    format!(
+        "  [process] {} soft={} hard={} units={}\n",
+        name,
+        format_rlimit_value(cur, cur_is_inf),
+        format_rlimit_value(max, max_is_inf),
+        units
+    )
+}
+
+pub fn evaluate_scheduler_policy(policy: i32) -> (bool, i32) {
+    let base_policy = policy & !SCHED_RESET_ON_FORK_CONST;
+    let is_realtime = base_policy == SCHED_FIFO_CONST || base_policy == SCHED_RR_CONST;
+    let target_policy = SCHED_OTHER_CONST | (policy & SCHED_RESET_ON_FORK_CONST);
+    (is_realtime, target_policy)
+}
+
+pub fn evaluate_cpu_limit(cur: u64, cur_is_inf: bool, max: u64, max_is_inf: bool) -> i32 {
+    let cur_inf = cur_is_inf || cur == RLIM_INFINITY_U64;
+    let max_inf = max_is_inf || max == RLIM_INFINITY_U64;
+    if !cur_inf && max_inf {
+        1 // Clear soft limit
+    } else if !max_inf {
+        2 // Finite limit warning
+    } else {
+        0 // No action
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_process_launch_format_limit(
+    value: u64,
+    is_infinity: i32,
+    out_buf: *mut c_char,
+    out_cap: usize,
+) -> i32 {
+    let s = format_rlimit_value(value, is_infinity != 0);
+    copy_to_c_buffer(&s, out_buf, out_cap)
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_process_launch_eval_scheduler(
+    inherited_policy: i32,
+    out_target_policy: *mut i32,
+    out_is_realtime: *mut i32,
+) -> i32 {
+    let (is_rt, target) = evaluate_scheduler_policy(inherited_policy);
+    if !out_target_policy.is_null() {
+        unsafe { *out_target_policy = target };
+    }
+    if !out_is_realtime.is_null() {
+        unsafe { *out_is_realtime = if is_rt { 1 } else { 0 } };
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_process_launch_eval_cpu_limit(
+    cur: u64,
+    cur_is_inf: i32,
+    max: u64,
+    max_is_inf: i32,
+    out_action: *mut i32,
+) -> i32 {
+    let action = evaluate_cpu_limit(cur, cur_is_inf != 0, max, max_is_inf != 0);
+    if !out_action.is_null() {
+        unsafe { *out_action = action };
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_apply_interactive_process_launch_policy(
+    out_buf: *mut c_char,
+    out_cap: usize,
+    out_written: *mut usize,
+) -> i32 {
+    let mut log = String::new();
+
+    // Browser protocol handlers inherit the browser's scheduling policy. A
+    // compute-heavy engine thread running FIFO/RR can exhaust RLIMIT_RTTIME and
+    // receive SIGXCPU even when the ordinary CPU-time limit is unlimited.
+    let policy = unsafe { sched_getscheduler(0) };
+    if policy < 0 {
+        let err = unsafe { get_c_errno() };
+        log.push_str(&format!(
+            "  [process] cannot read scheduling policy: {}\n",
+            get_c_strerror(err)
+        ));
+    } else {
+        log.push_str(&format!("  [process] inherited scheduler={}\n", policy));
+        let (is_rt, target_policy) = evaluate_scheduler_policy(policy);
+        if is_rt {
+            let parameters = RustSchedParam::default();
+            // Clearing RESET_ON_FORK requires CAP_SYS_NICE, even when demoting.
+            let res = unsafe { sched_setscheduler(0, target_policy, &parameters) };
+            if res == 0 {
+                log.push_str("  [process] reset inherited real-time scheduler to SCHED_OTHER\n");
+            } else {
+                let err = unsafe { get_c_errno() };
+                log.push_str(&format!(
+                    "  [process] cannot reset real-time scheduler: {}; RLIMIT_RTTIME may terminate startup\n",
+                    get_c_strerror(err)
+                ));
+            }
+        }
+    }
+
+    let mut cpu = RustRLimit::default();
+    if unsafe { getrlimit(RLIMIT_CPU_CONST, &mut cpu) } == 0 {
+        log.push_str(&format_rlimit_entry(
+            "RLIMIT_CPU",
+            cpu.rlim_cur,
+            cpu.rlim_cur == RLIM_INFINITY_U64,
+            cpu.rlim_max,
+            cpu.rlim_max == RLIM_INFINITY_U64,
+            "seconds",
+        ));
+        let action = evaluate_cpu_limit(
+            cpu.rlim_cur,
+            cpu.rlim_cur == RLIM_INFINITY_U64,
+            cpu.rlim_max,
+            cpu.rlim_max == RLIM_INFINITY_U64,
+        );
+        if action == 1 {
+            cpu.rlim_cur = RLIM_INFINITY_U64;
+            if unsafe { setrlimit(RLIMIT_CPU_CONST, &cpu) } == 0 {
+                log.push_str("  [process] cleared inherited soft CPU-time limit\n");
+            } else {
+                let err = unsafe { get_c_errno() };
+                log.push_str(&format!(
+                    "  [process] cannot clear soft CPU-time limit: {}\n",
+                    get_c_strerror(err)
+                ));
+            }
+        } else if action == 2 {
+            log.push_str("  [process] finite CPU-time limit retained; if startup ends with SIGXCPU, adjust the launching service's LimitCPU or launch from a terminal with an unlimited CPU-time limit\n");
+        }
+    } else {
+        let err = unsafe { get_c_errno() };
+        log.push_str(&format!(
+            "  [process] cannot read RLIMIT_CPU: {}\n",
+            get_c_strerror(err)
+        ));
+    }
+
+    // Keep the real-time watchdog intact for any threads that deliberately opt
+    // into real-time scheduling later (for example, an audio backend).
+    let mut realtime = RustRLimit::default();
+    if unsafe { getrlimit(RLIMIT_RTTIME_CONST, &mut realtime) } == 0 {
+        log.push_str(&format_rlimit_entry(
+            "RLIMIT_RTTIME",
+            realtime.rlim_cur,
+            realtime.rlim_cur == RLIM_INFINITY_U64,
+            realtime.rlim_max,
+            realtime.rlim_max == RLIM_INFINITY_U64,
+            "microseconds",
+        ));
+    } else {
+        let err = unsafe { get_c_errno() };
+        log.push_str(&format!(
+            "  [process] cannot read RLIMIT_RTTIME: {}\n",
+            get_c_strerror(err)
+        ));
+    }
+
+    let bytes = log.as_bytes();
+    if !out_written.is_null() {
+        unsafe { *out_written = bytes.len() };
+    }
+    if out_buf.is_null() || out_cap <= bytes.len() {
+        return -1;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr() as *const c_char, out_buf, bytes.len());
+        *out_buf.add(bytes.len()) = 0;
+    }
+    0
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -15516,6 +15772,54 @@ integrations:
             unsafe { CStr::from_ptr(url_buf.as_ptr()).to_str().unwrap() },
             "https://clientsettingscdn.roblox.com/v2/settings/application/RobloxStudio"
         );
+    }
+
+    #[test]
+    fn test_section105_process_launch_policy() {
+        let mut buf = [0 as c_char; 32];
+        mocktail_rust_process_launch_format_limit(100, 0, buf.as_mut_ptr(), buf.len());
+        assert_eq!(unsafe { CStr::from_ptr(buf.as_ptr()).to_str().unwrap() }, "100");
+
+        mocktail_rust_process_launch_format_limit(0, 1, buf.as_mut_ptr(), buf.len());
+        assert_eq!(unsafe { CStr::from_ptr(buf.as_ptr()).to_str().unwrap() }, "unlimited");
+
+        let mut target = -1i32;
+        let mut is_rt = -1i32;
+        mocktail_rust_process_launch_eval_scheduler(0, &mut target, &mut is_rt);
+        assert_eq!(is_rt, 0);
+        assert_eq!(target, 0);
+
+        mocktail_rust_process_launch_eval_scheduler(1, &mut target, &mut is_rt); // SCHED_FIFO
+        assert_eq!(is_rt, 1);
+        assert_eq!(target, 0);
+
+        mocktail_rust_process_launch_eval_scheduler(2 | 0x4000_0000, &mut target, &mut is_rt); // SCHED_RR | RESET_ON_FORK
+        assert_eq!(is_rt, 1);
+        assert_eq!(target, 0x4000_0000);
+
+        let mut action = -1i32;
+        mocktail_rust_process_launch_eval_cpu_limit(30, 0, 0, 1, &mut action);
+        assert_eq!(action, 1); // clear soft limit
+
+        mocktail_rust_process_launch_eval_cpu_limit(30, 0, 60, 0, &mut action);
+        assert_eq!(action, 2); // finite limit retained
+
+        mocktail_rust_process_launch_eval_cpu_limit(0, 1, 0, 1, &mut action);
+        assert_eq!(action, 0); // no action
+
+        let mut diag = [0 as c_char; 2048];
+        let mut written = 0usize;
+        assert_eq!(
+            mocktail_rust_apply_interactive_process_launch_policy(
+                diag.as_mut_ptr(),
+                diag.len(),
+                &mut written
+            ),
+            0
+        );
+        let s = unsafe { CStr::from_ptr(diag.as_ptr()).to_str().unwrap() };
+        assert!(s.contains("[process]"));
+        assert!(s.contains("RLIMIT_CPU"));
     }
 
 }
