@@ -1015,6 +1015,13 @@ int main(int argc, char* argv[]) {
         std::cerr << " (HTTP " << composition.http_status << ')';
       }
       std::cerr << '\n';
+      failure_dialog.SetMessage(
+          "Mocktail could not authenticate with Roblox.\n\n"
+          "Detail: " + composition.error +
+          (composition.http_status != 0
+               ? " (HTTP " + std::to_string(composition.http_status) + ")"
+               : "") +
+          "\n\nPlease check your internet connection or proxy settings.");
       return EXIT_FAILURE;
     }
     composition.jni_vm->SetPlatformIdentity(jnivm::PlatformIdentity{

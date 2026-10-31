@@ -228,6 +228,7 @@ bool Configure(CURL* handle, const HttpTransferRequest& request,
          curl_easy_setopt(handle, CURLOPT_LOW_SPEED_TIME,
                           request.low_speed_seconds) == CURLE_OK &&
          curl_easy_setopt(handle, CURLOPT_ACCEPT_ENCODING, "") == CURLE_OK &&
+         curl_easy_setopt(handle, CURLOPT_SSL_EC_CURVES, "X25519:P-256:P-384") == CURLE_OK &&
          curl_easy_setopt(handle, CURLOPT_USERAGENT,
                           "Mocktail-native-updater/1") == CURLE_OK &&
          curl_easy_setopt(handle, CURLOPT_ERRORBUFFER, error_buffer->data()) ==

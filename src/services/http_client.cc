@@ -114,6 +114,7 @@ HttpResponse PerformRequest(const HttpRequest& request,
   curl_easy_setopt(handle, CURLOPT_ACCEPT_ENCODING, "");
   curl_easy_setopt(handle, CURLOPT_USERAGENT, "Mocktail/0.1");
   curl_easy_setopt(handle, CURLOPT_ERRORBUFFER, error_buffer.data());
+  curl_easy_setopt(handle, CURLOPT_SSL_EC_CURVES, "X25519:P-256:P-384");
   curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, WriteResponse);
   curl_easy_setopt(handle, CURLOPT_WRITEDATA, &writer);
   curl_easy_setopt(handle, CURLOPT_HEADERFUNCTION, WriteHeader);
