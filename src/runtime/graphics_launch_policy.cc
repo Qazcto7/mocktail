@@ -45,9 +45,19 @@ constexpr const char* kForeignArchitectures[] = {
 
 struct HostGpus {
   bool intel = false;
+  bool intel_haswell = false;
   bool nvidia = false;
   bool amd = false;
 };
+
+bool IsHaswellOrIvyBridgeIntel(unsigned int device_id) {
+  if (device_id >= 0x0150 && device_id <= 0x016a) return true;
+  if (device_id >= 0x0400 && device_id <= 0x042f) return true;
+  if (device_id >= 0x0a00 && device_id <= 0x0a2f) return true;
+  if (device_id >= 0x0c00 && device_id <= 0x0c2f) return true;
+  if (device_id >= 0x0d00 && device_id <= 0x0d2f) return true;
+  return false;
+}
 
 bool ForeignArchitecture(const std::string& name) {
   for (const char* architecture : kForeignArchitectures) {
@@ -114,6 +124,16 @@ HostGpus DetectHostGpus() {
     }
     if (vendor == 0x8086) {
       gpus.intel = true;
+      const std::string dev_path = "/sys/class/drm/card" + std::to_string(index) +
+                                   "/device/device";
+      std::ifstream dev_input(dev_path);
+      std::string dev_raw;
+      unsigned int device_id = 0;
+      if ((dev_input >> dev_raw) && ParsePciVendor(dev_raw, &device_id)) {
+        if (IsHaswellOrIvyBridgeIntel(device_id)) {
+          gpus.intel_haswell = true;
+        }
+      }
     } else if (vendor == 0x10de) {
       gpus.nvidia = true;
     } else if (vendor == 0x1002) {
@@ -153,6 +173,12 @@ std::string SelectHardwareIcd(const HostGpus& gpus) {
     }
   }
   if (gpus.intel) {
+    if (gpus.intel_haswell) {
+      std::string hasvk = FindIcdFile("intel_hasvk_icd");
+      if (!hasvk.empty()) {
+        return hasvk;
+      }
+    }
     std::string intel = FindIcdFile("intel_icd");
     if (intel.empty()) {
       intel = FindIcdFile("intel_hasvk_icd");

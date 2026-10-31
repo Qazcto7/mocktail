@@ -1,26 +1,14 @@
 #include "runtime/texture_memory_policy.h"
+#include "mocktail/mocktail_rust.h"
 
-#define JSON_NOEXCEPTION 1
-#include <algorithm>
 #include <cstdint>
 #include <fstream>
 #include <limits>
-#include <nlohmann/json.hpp>
 #include <string>
+#include <vector>
 
 namespace mocktail {
 namespace runtime {
-namespace {
-
-constexpr std::uint64_t kMebibyte = 1024U * 1024U;
-// Below this the guest default is already a reasonable share of the host.
-constexpr std::uint64_t kMinimumHostMemoryBytes = 4096U * kMebibyte;
-constexpr std::uint64_t kMinimumBudgetBytes = 256U * kMebibyte;
-constexpr std::uint64_t kMaximumBudgetBytes = 1536U * kMebibyte;
-constexpr std::string_view kVideoMemoryOverride =
-    "FIntRenderForceVideoMemorySize";
-
-}  // namespace
 
 std::uint64_t DetectHostMemoryBytes() {
   std::ifstream input("/proc/meminfo");
@@ -44,11 +32,7 @@ std::uint64_t DetectHostMemoryBytes() {
 
 std::uint64_t CalculateTextureMemoryBudgetBytes(
     std::uint64_t host_memory_bytes) {
-  if (host_memory_bytes < kMinimumHostMemoryBytes) {
-    return 0;
-  }
-  return std::clamp(host_memory_bytes / 8U, kMinimumBudgetBytes,
-                    kMaximumBudgetBytes);
+  return mocktail_rust_texture_memory_calculate_budget(host_memory_bytes);
 }
 
 bool MergeTextureMemoryClientSettingsOverrides(std::uint64_t budget_bytes,
@@ -61,23 +45,26 @@ bool MergeTextureMemoryClientSettingsOverrides(std::uint64_t budget_bytes,
     }
     return false;
   }
-  nlohmann::json overrides = nlohmann::json::parse(
-      base_json.empty() ? "{}" : base_json, nullptr, false, true);
-  if (overrides.is_discarded() || !overrides.is_object()) {
+  std::vector<char> out_buf(base_json.size() + 512);
+  std::vector<char> err_buf(256, '\0');
+  size_t out_len = 0;
+  int32_t rc = mocktail_rust_texture_memory_merge_overrides(
+      budget_bytes, base_json.data(), base_json.size(), out_buf.data(),
+      out_buf.size(), &out_len, err_buf.data(), err_buf.size());
+  if (rc == -5) {
+    out_buf.resize(out_len + 128);
+    rc = mocktail_rust_texture_memory_merge_overrides(
+        budget_bytes, base_json.data(), base_json.size(), out_buf.data(),
+        out_buf.size(), &out_len, err_buf.data(), err_buf.size());
+  }
+  if (rc != 0) {
     if (error != nullptr) {
-      *error = "texture memory client-settings input must be a JSON object";
+      *error = err_buf[0] != '\0' ? err_buf.data()
+                                  : "cannot merge texture memory client-settings";
     }
     return false;
   }
-  const std::string key(kVideoMemoryOverride);
-  if (budget_bytes != 0 && !overrides.contains(key)) {
-    // The override is a Roblox FInt, so it cannot carry more than INT32_MAX.
-    const std::uint64_t clamped = std::min<std::uint64_t>(
-        budget_bytes,
-        static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max()));
-    overrides[key] = std::to_string(clamped);
-  }
-  *merged_json = overrides.dump();
+  merged_json->assign(out_buf.data(), out_len);
   return true;
 }
 

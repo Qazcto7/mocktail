@@ -2,6 +2,7 @@
 #include "mocktail/mocktail_rust.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <string>
 
@@ -102,36 +103,19 @@ int ResolveSwapInterval(PresentModePolicy policy, int requested) {
 }
 
 const char *PresentModeKhrName(VkPresentModeKHR mode) {
-  switch (mode) {
-  case VK_PRESENT_MODE_IMMEDIATE_KHR:
-    return "immediate";
-  case VK_PRESENT_MODE_MAILBOX_KHR:
-    return "mailbox";
-  case VK_PRESENT_MODE_FIFO_KHR:
-    return "fifo";
-  case VK_PRESENT_MODE_FIFO_RELAXED_KHR:
-    return "fifo-relaxed";
-  case VK_PRESENT_MODE_FIFO_LATEST_READY_KHR:
-    return "fifo-latest-ready";
-  default:
-    return "other";
+  static thread_local std::array<char, 32> buffer{};
+  if (mocktail_rust_present_mode_khr_name(static_cast<uint32_t>(mode),
+                                          buffer.data(), buffer.size()) == 0) {
+    return buffer.data();
   }
+  return "other";
 }
 
 const char *PresentModePolicyName(PresentModePolicy policy) {
-  switch (policy) {
-  case PresentModePolicy::kHostDefault:
-    return "host-default";
-  case PresentModePolicy::kVsync:
-    return "vsync";
-  case PresentModePolicy::kUnthrottled:
-    return "unthrottled";
-  case PresentModePolicy::kFifo:
-    return "fifo";
-  case PresentModePolicy::kMailbox:
-    return "mailbox";
-  case PresentModePolicy::kImmediate:
-    return "immediate";
+  static thread_local std::array<char, 32> buffer{};
+  if (mocktail_rust_present_mode_policy_name(ToRustPolicy(policy),
+                                             buffer.data(), buffer.size()) == 0) {
+    return buffer.data();
   }
   return "unknown";
 }

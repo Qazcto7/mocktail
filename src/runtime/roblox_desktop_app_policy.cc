@@ -178,36 +178,6 @@ bool AtomicWriteJson(const std::filesystem::path& path,
   return true;
 }
 
-bool HasSuffix(std::string_view value, std::string_view suffix) {
-  return value.size() >= suffix.size() &&
-         value.compare(value.size() - suffix.size(), suffix.size(), suffix) ==
-             0;
-}
-
-void NormalizeDesktopLayout(nlohmann::json* policy,
-                            std::string_view forced_theme = "") {
-  const std::string dumped = policy->dump();
-  std::vector<uint8_t> out(dumped.size() + 512);
-  std::size_t out_len = 0;
-  if (mocktail_rust_normalize_desktop_layout(
-          dumped.data(), dumped.size(), forced_theme.data(),
-          forced_theme.size(), out.data(), out.size(), &out_len) == 0 &&
-      out_len > 0) {
-    *policy = nlohmann::json::parse(
-        std::string_view(reinterpret_cast<const char*>(out.data()), out_len),
-        nullptr, false, true);
-  }
-}
-
-bool DecodePolicy(const nlohmann::json& encoded, nlohmann::json* policy) {
-  if (!encoded.is_string()) {
-    return false;
-  }
-  *policy = nlohmann::json::parse(encoded.get_ref<const std::string&>(),
-                                  nullptr, false, true);
-  return !policy->is_discarded() && policy->is_object();
-}
-
 }  // namespace
 
 DesktopAppPolicyResult ApplyDesktopAppPolicy(
@@ -222,108 +192,78 @@ DesktopAppPolicyResult ApplyDesktopAppPolicy(
     result.error = "desktop app-policy paths, user ID, or theme are invalid";
     return result;
   }
-  const std::string forced_theme =
-      theme_mode == "light" || theme_mode == "dark" ? std::string(theme_mode)
-                                                     : std::string();
-
   JsonReadResult storage =
       ReadJsonObject(app_storage_file, "Roblox appStorage");
   if (storage.status == ReadStatus::kInvalid) {
     result.error = storage.error;
     return result;
   }
+  const bool has_storage = (storage.status == ReadStatus::kReady);
   if (storage.status == ReadStatus::kMissing) {
-    storage.status = ReadStatus::kReady;
-    storage.value = nlohmann::json::object();
     result.app_storage_created = true;
   }
 
-  nlohmann::json configurations = nlohmann::json::object();
-  const auto encoded_configurations = storage.value.find("AppConfiguration");
-  if (encoded_configurations != storage.value.end()) {
-    if (!encoded_configurations->is_string()) {
-      result.error = "Roblox AppConfiguration is not an encoded object";
-      return result;
-    }
-    configurations = nlohmann::json::parse(
-        encoded_configurations->get_ref<const std::string&>(), nullptr, false,
-        true);
-    if (configurations.is_discarded() || !configurations.is_object()) {
-      result.error = "Roblox AppConfiguration encoding is invalid";
-      return result;
-    }
+  const std::string storage_str = has_storage ? storage.value.dump() : std::string();
+
+  std::string default_policy_str;
+  const JsonReadResult default_read =
+      ReadJsonObject(default_policy_file, "Roblox default app-policy");
+  if (default_read.status == ReadStatus::kReady) {
+    default_policy_str = default_read.value.dump();
   }
 
-  nlohmann::json template_policy;
-  nlohmann::json guest_policy;
-  nlohmann::json authenticated_policy;
-  const std::string authenticated_key =
-      authenticated_user_id >= 0
-          ? "GUAC:" + std::to_string(authenticated_user_id) + ":app-policy"
-          : std::string();
-  for (auto& entry : configurations.items()) {
-    if (!HasSuffix(entry.key(), kAppPolicySuffix)) {
-      continue;
-    }
-    nlohmann::json policy;
-    if (!DecodePolicy(entry.value(), &policy)) {
-      result.error = "cached Roblox app-policy encoding is invalid";
-      return result;
-    }
-    NormalizeDesktopLayout(&policy);
-    policy["ForceTheme"] = forced_theme;
-    entry.value() = policy.dump();
-    if (!template_policy.is_object()) {
-      template_policy = policy;
-    }
-    if (entry.key() == "GUAC:-1:app-policy") {
-      guest_policy = policy;
-    }
-    if (!authenticated_key.empty() && entry.key() == authenticated_key) {
-      authenticated_policy = policy;
-    }
-    ++result.normalized_policy_count;
+  std::vector<char> out_storage(storage_str.size() + 16384);
+  size_t out_storage_len = 0;
+  std::vector<char> out_policy(16384);
+  size_t out_policy_len = 0;
+  bool updated = false;
+  size_t normalized_count = 0;
+  std::array<char, 256> err_buf{};
+
+  const std::string theme_str(theme_mode);
+  int32_t rc = mocktail_rust_process_desktop_app_policy(
+      storage_str.data(), storage_str.size(), has_storage,
+      default_policy_str.data(), default_policy_str.size(),
+      authenticated_user_id, theme_str.c_str(),
+      out_storage.data(), out_storage.size(), &out_storage_len,
+      out_policy.data(), out_policy.size(), &out_policy_len,
+      &updated, &normalized_count, err_buf.data(), err_buf.size());
+
+  if (rc == -7 || rc == -8) {
+    out_storage.resize(out_storage_len + 4096);
+    out_policy.resize(out_policy_len + 4096);
+    rc = mocktail_rust_process_desktop_app_policy(
+        storage_str.data(), storage_str.size(), has_storage,
+        default_policy_str.data(), default_policy_str.size(),
+        authenticated_user_id, theme_str.c_str(),
+        out_storage.data(), out_storage.size(), &out_storage_len,
+        out_policy.data(), out_policy.size(), &out_policy_len,
+        &updated, &normalized_count, err_buf.data(), err_buf.size());
   }
 
-  if (authenticated_policy.is_object()) {
-    template_policy = std::move(authenticated_policy);
-  } else if (guest_policy.is_object()) {
-    template_policy = std::move(guest_policy);
-  }
-
-  if (!template_policy.is_object()) {
-    const JsonReadResult fallback =
-        ReadJsonObject(default_policy_file, "Roblox default app-policy");
-    if (fallback.status != ReadStatus::kReady) {
-      result.error = fallback.status == ReadStatus::kMissing
-                         ? "Roblox default app-policy is missing"
-                         : fallback.error;
-      return result;
+  if (rc != 0) {
+    if (rc == -6 && default_read.status == ReadStatus::kMissing) {
+      result.error = "Roblox default app-policy is missing";
+    } else if (rc == -6 && default_read.status == ReadStatus::kInvalid) {
+      result.error = default_read.error;
+    } else {
+      result.error = err_buf[0] != '\0' ? err_buf.data() : "desktop app-policy processing failed";
     }
-    template_policy = fallback.value;
-    NormalizeDesktopLayout(&template_policy);
-    template_policy["ForceTheme"] = forced_theme;
-  }
-
-  const std::string encoded_policy = template_policy.dump();
-  result.policy_json = encoded_policy;
-  configurations["GUAC:-1:app-policy"] = encoded_policy;
-  if (authenticated_user_id >= 0) {
-    configurations[authenticated_key] = encoded_policy;
-  }
-
-  const std::string encoded = configurations.dump();
-  const bool changed =
-      encoded_configurations == storage.value.end() ||
-      encoded_configurations->get_ref<const std::string&>() != encoded;
-  if (!changed) {
     return result;
   }
-  storage.value["AppConfiguration"] = encoded;
-  if (!AtomicWriteJson(app_storage_file, storage.value, &result.error)) {
-    return result;
+
+  result.policy_json.assign(out_policy.data(), out_policy_len);
+  result.normalized_policy_count = normalized_count;
+  result.updated = updated;
+
+  if (updated) {
+    nlohmann::json new_storage_val = nlohmann::json::parse(
+        std::string_view(out_storage.data(), out_storage_len), nullptr, false, true);
+    if (!AtomicWriteJson(app_storage_file, new_storage_val, &result.error)) {
+      return result;
+    }
   }
-  result.updated = true;
+
   return result;
 }
 

@@ -1,6 +1,8 @@
 #include "mocktail/graphics/android_vulkan_wsi_adapter.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 
 namespace mocktail {
@@ -12,22 +14,11 @@ bool Contains(const std::vector<std::string>& values,
   return std::find(values.begin(), values.end(), candidate) != values.end();
 }
 
-Status AppendUniqueExtension(const std::string& extension,
-                             std::vector<std::string>* output) {
-  if (extension.empty()) {
-    return Status::Error(StatusCode::kInvalidArgument,
-                         "Vulkan extension names must not be empty");
-  }
-  if (!Contains(*output, extension)) {
-    output->push_back(extension);
-  }
-  return Status::Ok();
-}
-
 }  // namespace
 
 VkResult NormalizeAndroidSwapchainResult(VkResult result) {
-  return result == VK_SUBOPTIMAL_KHR ? VK_SUCCESS : result;
+  return static_cast<VkResult>(mocktail_rust_normalize_android_swapchain_result(
+      static_cast<int32_t>(result)));
 }
 
 Status TranslateAndroidVulkanInstanceExtensions(
@@ -39,31 +30,49 @@ Status TranslateAndroidVulkanInstanceExtensions(
                          "Vulkan extension output is required");
   }
 
-  std::vector<std::string> translated;
-  translated.reserve(android_extensions.size() + host_wsi_extensions.size());
-  bool requested_android_surface = false;
-  for (const std::string& extension : android_extensions) {
-    if (extension == kAndroidSurfaceExtension) {
-      requested_android_surface = true;
-      continue;
-    }
-    Status status = AppendUniqueExtension(extension, &translated);
-    if (!status.ok()) {
-      return status;
-    }
+  std::vector<const char*> android_ptrs;
+  android_ptrs.reserve(android_extensions.size());
+  for (const auto& s : android_extensions) {
+    android_ptrs.push_back(s.c_str());
   }
 
-  if (requested_android_surface) {
-    if (host_wsi_extensions.empty()) {
-      return Status::Error(
-          StatusCode::kFailedPrecondition,
-          "Android Vulkan surface requested without host WSI extensions");
+  std::vector<const char*> host_ptrs;
+  host_ptrs.reserve(host_wsi_extensions.size());
+  for (const auto& s : host_wsi_extensions) {
+    host_ptrs.push_back(s.c_str());
+  }
+
+  std::vector<char*> out_ptrs(android_extensions.size() + host_wsi_extensions.size() + 8, nullptr);
+  size_t out_count = 0;
+  std::array<char, 256> err_buf{};
+
+  int32_t rc = mocktail_rust_translate_android_vulkan_instance_extensions(
+      android_ptrs.data(), android_ptrs.size(), host_ptrs.data(),
+      host_ptrs.size(), out_ptrs.data(), out_ptrs.size(), &out_count,
+      err_buf.data(), err_buf.size());
+
+  if (rc == -5) {
+    out_ptrs.resize(out_count);
+    rc = mocktail_rust_translate_android_vulkan_instance_extensions(
+        android_ptrs.data(), android_ptrs.size(), host_ptrs.data(),
+        host_ptrs.size(), out_ptrs.data(), out_ptrs.size(), &out_count,
+        err_buf.data(), err_buf.size());
+  }
+
+  if (rc != 0) {
+    const std::string err_msg = err_buf[0] != '\0' ? err_buf.data() : "failed to translate Vulkan extensions";
+    if (rc == -2) {
+      return Status::Error(StatusCode::kFailedPrecondition, err_msg);
     }
-    for (const std::string& extension : host_wsi_extensions) {
-      Status status = AppendUniqueExtension(extension, &translated);
-      if (!status.ok()) {
-        return status;
-      }
+    return Status::Error(StatusCode::kInvalidArgument, err_msg);
+  }
+
+  std::vector<std::string> translated;
+  translated.reserve(out_count);
+  for (size_t i = 0; i < out_count; ++i) {
+    if (out_ptrs[i] != nullptr) {
+      translated.emplace_back(out_ptrs[i]);
+      mocktail_rust_free_c_string(out_ptrs[i]);
     }
   }
 

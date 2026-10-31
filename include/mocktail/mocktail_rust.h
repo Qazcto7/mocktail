@@ -1747,6 +1747,125 @@ int32_t mocktail_rust_audio_capture_merge_overrides(
     size_t cap,
     size_t* out_len);
 
+// ============================================================================
+// 67. Texture Memory Policy Engine
+// ============================================================================
+
+uint64_t mocktail_rust_texture_memory_calculate_budget(uint64_t host_memory_bytes);
+
+int32_t mocktail_rust_texture_memory_merge_overrides(
+    uint64_t budget_bytes,
+    const char* base_json,
+    size_t base_len,
+    char* out_json,
+    size_t cap,
+    size_t* out_len,
+    char* err_buf,
+    size_t err_cap);
+
+// ============================================================================
+// 68. Roblox Desktop App Policy Engine
+// ============================================================================
+
+int32_t mocktail_rust_process_desktop_app_policy(
+    const char* storage_json,
+    size_t storage_json_len,
+    bool has_storage,
+    const char* default_policy_json,
+    size_t default_policy_json_len,
+    int64_t authenticated_user_id,
+    const char* theme_mode,
+    char* out_storage_json,
+    size_t out_storage_cap,
+    size_t* out_storage_len,
+    char* out_policy_json,
+    size_t out_policy_cap,
+    size_t* out_policy_len,
+    bool* out_updated,
+    size_t* out_normalized_count,
+    char* err_buf,
+    size_t err_cap);
+
+// ============================================================================
+// 69. Launch Experience JSON Engine
+// ============================================================================
+
+typedef struct MocktailRustExperienceLaunchData {
+  int64_t place_id;
+  int64_t user_id;
+  int64_t conversation_id;
+  int64_t referred_by_player_id;
+} MocktailRustExperienceLaunchData;
+
+int32_t mocktail_rust_parse_experience_launch_json(
+    const char* json_ptr,
+    size_t json_len,
+    MocktailRustExperienceLaunchData* out_data,
+    char* canonical_buf,
+    size_t canonical_cap,
+    size_t* canonical_len,
+    char* err_buf,
+    size_t err_cap);
+
+// ============================================================================
+// 70. Environment Abstraction Engine
+// ============================================================================
+
+int32_t mocktail_rust_env_has_non_empty(const char* name);
+
+int32_t mocktail_rust_env_get(
+    const char* name,
+    char* out_buf,
+    size_t out_cap,
+    size_t* out_len);
+
+int32_t mocktail_rust_env_get_or(
+    const char* name,
+    const char* default_val,
+    char* out_buf,
+    size_t out_cap,
+    size_t* out_len);
+
+// ============================================================================
+// 71. Command Line Engine
+// ============================================================================
+
+int32_t mocktail_rust_command_line_usage(
+    const char* program_name,
+    const char* guest_abi,
+    char* out_buf,
+    size_t out_cap,
+    size_t* out_len);
+
+// ============================================================================
+// 72. Frame Rate Policy Helpers
+// ============================================================================
+
+int32_t mocktail_rust_frame_rate_policy_name(
+    int32_t mode,
+    int32_t fps,
+    char* out_buf,
+    size_t out_cap);
+
+// ============================================================================
+// 73. Present Mode Policy & Vulkan WSI Extension Translation
+// ============================================================================
+
+int32_t mocktail_rust_normalize_android_swapchain_result(int32_t result);
+
+int32_t mocktail_rust_translate_android_vulkan_instance_extensions(
+    const char* const* android_exts,
+    size_t android_count,
+    const char* const* host_wsi_exts,
+    size_t host_count,
+    char** out_exts,
+    size_t out_cap,
+    size_t* out_count,
+    char* err_buf,
+    size_t err_cap);
+
+void mocktail_rust_free_c_string(char* ptr);
+
 #ifdef __cplusplus
 }
 #endif

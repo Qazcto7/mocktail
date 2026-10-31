@@ -1,4 +1,5 @@
 #include "runtime/command_line.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <cstdlib>
 #include <sstream>
@@ -238,38 +239,20 @@ bool ApplyCommandLineEnvironment(const CommandLineOptions& options,
 }
 
 std::string CommandLineUsage(const std::string& program_name) {
-  std::ostringstream usage;
-  usage
-      << "Usage: " << (program_name.empty() ? "mocktail" : program_name)
-      << " [options] [roblox-uri]\n\n"
-      << "Normal startup downloads and activates a verified managed "
-      << compat::kGuestAbi
-      << " Roblox payload automatically.\n\n"
-      << "Options:\n"
-      << "  --roblox-lib <path>      Development override for a specific "
-      << compat::kGuestAbi << " libroblox.so\n"
-      << "  --headless               Run without creating an SDL window\n"
-      << "  --windowed               Force windowed startup (default)\n"
-      << "  --graphics <backend>     direct-vulkan | opengl | system | "
-         "angle-vulkan (default: direct-vulkan)\n"
-      << "  --allow-unverified-build Run a known but unverified Build-ID "
-         "profile\n"
-      << "  --force-run-latest       Download and run the provider latest once "
-         "without approval; it is not activated\n"
-      << "  --launch-uri <uri>       Join from a roblox: or roblox-player: "
-         "website link\n"
-      << "  --help, -h               Show this help\n\n"
-      << "Auth:\n"
-      << "  When no saved Roblox session is found, Roblox's welcome screen "
-         "opens with the native sign-in flow.\n"
-      << "  Set MOCKTAIL_NATIVE_LOGIN=0 to use the optional WebView sign-in "
-         "window.\n"
-      << "  Roblox may still open a WebView for required verification "
-         "challenges.\n"
-      << "  New credentials are stored privately.\n\n"
-      << "Additional runtime options are available as MOCKTAIL_* environment "
-         "variables.\n";
-  return usage.str();
+  std::vector<char> out_buf(4096);
+  size_t out_len = 0;
+  const std::string abi(compat::kGuestAbi);
+  int32_t rc = mocktail_rust_command_line_usage(
+      program_name.c_str(), abi.c_str(), out_buf.data(), out_buf.size(), &out_len);
+  if (rc == -2) {
+    out_buf.resize(out_len + 128);
+    rc = mocktail_rust_command_line_usage(
+        program_name.c_str(), abi.c_str(), out_buf.data(), out_buf.size(), &out_len);
+  }
+  if (rc == 0) {
+    return std::string(out_buf.data(), out_len);
+  }
+  return "";
 }
 
 }  // namespace runtime

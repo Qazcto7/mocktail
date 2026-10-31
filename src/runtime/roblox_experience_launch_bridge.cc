@@ -1,4 +1,5 @@
 #include "runtime/roblox_experience_launch_bridge.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <nlohmann/json.hpp>
 
@@ -26,26 +27,6 @@ Status Unavailable(std::string message) {
 
 Status FailedPrecondition(std::string message) {
   return Status::Error(StatusCode::kFailedPrecondition, std::move(message));
-}
-
-Status ReadOptionalInteger(const nlohmann::json &object, const char *name,
-                           int64_t *value) {
-  const auto found = object.find(name);
-  if (found == object.end() || found->is_null()) {
-    return Status::Ok();
-  }
-  if (!found->is_number_integer()) {
-    return Invalid(std::string("experience launch field is not an integer: ") +
-                   name);
-  }
-  if (found->is_number_unsigned() &&
-      found->get<uint64_t>() >
-          static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
-    return Invalid(std::string("experience launch integer is out of range: ") +
-                   name);
-  }
-  *value = found->get<int64_t>();
-  return Status::Ok();
 }
 
 Status ReadOptionalString(const nlohmann::json &object, const char *name,
@@ -80,8 +61,24 @@ Status ParseRobloxExperienceLaunchJson(const std::string &json,
     return Invalid("experience launch output is null");
   }
   *request = {};
-  if (json.empty() || json.size() > kMaximumExperienceLaunchJsonBytes) {
-    return Invalid("experience launch JSON size is invalid");
+
+  MocktailRustExperienceLaunchData data{};
+  std::vector<char> canonical_buf(json.size() + 512);
+  size_t canonical_len = 0;
+  std::array<char, 256> err_buf{};
+
+  int32_t rc = mocktail_rust_parse_experience_launch_json(
+      json.data(), json.size(), &data, canonical_buf.data(),
+      canonical_buf.size(), &canonical_len, err_buf.data(), err_buf.size());
+  if (rc == -7) {
+    canonical_buf.resize(canonical_len + 128);
+    rc = mocktail_rust_parse_experience_launch_json(
+        json.data(), json.size(), &data, canonical_buf.data(),
+        canonical_buf.size(), &canonical_len, err_buf.data(), err_buf.size());
+  }
+  if (rc != 0) {
+    return Invalid(err_buf[0] != '\0' ? err_buf.data()
+                                      : "experience launch JSON is invalid");
   }
 
   const nlohmann::json document =
@@ -91,18 +88,11 @@ Status ParseRobloxExperienceLaunchJson(const std::string &json,
   }
 
   RobloxExperienceLaunchRequest parsed;
-  Status status = ReadOptionalInteger(document, "placeId", &parsed.place_id);
-  if (status.ok()) {
-    status = ReadOptionalInteger(document, "userId", &parsed.user_id);
-  }
-  if (status.ok()) {
-    status = ReadOptionalInteger(document, "conversationId",
-                                 &parsed.conversation_id);
-  }
-  if (status.ok()) {
-    status = ReadOptionalInteger(document, "referredByPlayerId",
-                                 &parsed.referred_by_player_id);
-  }
+  parsed.place_id = data.place_id;
+  parsed.user_id = data.user_id;
+  parsed.conversation_id = data.conversation_id;
+  parsed.referred_by_player_id = data.referred_by_player_id;
+
   struct StringField {
     const char *name;
     std::string RobloxExperienceLaunchRequest::*member;
@@ -123,29 +113,15 @@ Status ParseRobloxExperienceLaunchJson(const std::string &json,
        &RobloxExperienceLaunchRequest::join_attempt_origin},
       {"isoContext", &RobloxExperienceLaunchRequest::iso_context},
   };
+  Status status = Status::Ok();
   for (const StringField &field : kStringFields) {
-    if (!status.ok()) {
-      break;
-    }
     status = ReadOptionalString(document, field.name, &(parsed.*field.member));
+    if (!status.ok()) {
+      return status;
+    }
   }
-  if (!status.ok()) {
-    return status;
-  }
-  // This matches APK ug.l: a launch must identify a place or a user. Mocktail
-  // currently supports place joins only, so reject follow-user requests at the
-  // boundary rather than silently launching place 0.
-  if (parsed.place_id <= 0) {
-    return Invalid("experience launch requires a positive placeId");
-  }
-  if (parsed.user_id < 0 || parsed.conversation_id < 0 ||
-      parsed.referred_by_player_id < 0) {
-    return Invalid("experience launch identifiers cannot be negative");
-  }
-  parsed.canonical_json = document.dump();
-  if (parsed.canonical_json.size() > kMaximumExperienceLaunchJsonBytes) {
-    return Invalid("canonical experience launch JSON is too large");
-  }
+
+  parsed.canonical_json.assign(canonical_buf.data(), canonical_len);
   *request = std::move(parsed);
   return Status::Ok();
 }
