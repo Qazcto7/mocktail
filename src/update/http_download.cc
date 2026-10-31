@@ -1,4 +1,5 @@
 #include "update/http_download.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <curl/curl.h>
 #include <fcntl.h>
@@ -26,10 +27,8 @@ CURLcode g_curl_status = CURLE_FAILED_INIT;
 void InitialiseCurl() { g_curl_status = curl_global_init(CURL_GLOBAL_DEFAULT); }
 
 bool HostMatches(std::string_view host, std::string_view allowed) {
-  if (host == allowed) return true;
-  return host.size() > allowed.size() &&
-         host[host.size() - allowed.size() - 1] == '.' &&
-         host.substr(host.size() - allowed.size()) == allowed;
+  return mocktail_rust_update_host_matches(host.data(), host.size(),
+                                           allowed.data(), allowed.size());
 }
 
 std::string Lower(std::string value) {
@@ -66,29 +65,15 @@ struct CurlHeadersDeleter {
 };
 
 bool RedirectStatus(long status) {
-  return status == 301 || status == 302 || status == 303 || status == 307 ||
-         status == 308;
+  return mocktail_rust_update_is_redirect_status(status);
 }
 
 bool RetryableTransport(CURLcode status) {
-  switch (status) {
-    case CURLE_COULDNT_CONNECT:
-    case CURLE_COULDNT_RESOLVE_HOST:
-    case CURLE_COULDNT_RESOLVE_PROXY:
-    case CURLE_OPERATION_TIMEDOUT:
-    case CURLE_PARTIAL_FILE:
-    case CURLE_RECV_ERROR:
-    case CURLE_SEND_ERROR:
-    case CURLE_GOT_NOTHING:
-    case CURLE_SSL_CONNECT_ERROR:
-      return true;
-    default:
-      return false;
-  }
+  return mocktail_rust_update_is_retryable_curl_code(static_cast<int32_t>(status));
 }
 
 bool RetryableStatus(long status) {
-  return status == 408 || status == 425 || status == 429 || status >= 500;
+  return mocktail_rust_update_is_retryable_status(status);
 }
 
 void Sleep(long milliseconds) {

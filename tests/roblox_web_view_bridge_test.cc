@@ -658,14 +658,14 @@ TEST(RobloxWebViewBridgeTest,
             "https://www.roblox.com/games/servers-section/10148749921");
   ASSERT_TRUE(bridge.DrainHostWindowEvents().ok());
   EXPECT_EQ(probe.data_model_focus_states,
-            (std::vector<std::string>{"Unfocused"}));
+            (std::vector<std::string>{"Focused", "Unfocused"}));
   const WebViewHelperExitObserver data_model_exit_observer =
       probe.exit_observer;
   ASSERT_TRUE(data_model_exit_observer.valid());
   data_model_exit_observer.on_exit(data_model_exit_observer.context.get());
   ASSERT_TRUE(bridge.DrainHostWindowEvents().ok());
   EXPECT_EQ(probe.data_model_focus_states,
-            (std::vector<std::string>{"Unfocused", "Focused"}));
+            (std::vector<std::string>{"Focused", "Unfocused", "Focused"}));
   EXPECT_EQ(probe.close_publications, 1);
   const WebViewHelperExitObserver stale_observer = probe.exit_observer;
 
@@ -681,11 +681,11 @@ TEST(RobloxWebViewBridgeTest,
   EXPECT_EQ(probe.close_dispatches, 1);
   ASSERT_TRUE(bridge.DrainHostWindowEvents().ok());
   EXPECT_EQ(probe.data_model_focus_states,
-            (std::vector<std::string>{"Unfocused", "Focused", "Unfocused"}));
+            (std::vector<std::string>{"Focused", "Unfocused", "Focused", "Unfocused"}));
   probe.exit_observer.on_exit(probe.exit_observer.context.get());
   ASSERT_TRUE(bridge.DrainHostWindowEvents().ok());
   EXPECT_EQ(probe.data_model_focus_states,
-            (std::vector<std::string>{"Unfocused", "Focused", "Unfocused",
+            (std::vector<std::string>{"Focused", "Unfocused", "Focused", "Unfocused",
                                       "Focused"}));
 
   EXPECT_TRUE(vm.DispatchRobloxNativeOverlay(
@@ -824,14 +824,16 @@ TEST_P(RobloxNativeLoginTest,
             "username&credentialsValue=test%20user&hybrid-return-token=1");
   ASSERT_TRUE(bridge.DrainHostWindowEvents().ok());
   EXPECT_EQ(probe.data_model_focus_states,
-            (std::vector<std::string>{"Unfocused"}));
+            (std::vector<std::string>{"Focused", "Focused", "Focused", "Focused",
+                                      "Unfocused"}));
   EXPECT_TRUE(bridge.HandleCloseWindow().ok());
   EXPECT_EQ(probe.close_dispatches, closed_windows + 1);
   ASSERT_TRUE(probe.exit_observer.valid());
   probe.exit_observer.on_exit(probe.exit_observer.context.get());
   ASSERT_TRUE(bridge.DrainHostWindowEvents().ok());
   EXPECT_EQ(probe.data_model_focus_states,
-            (std::vector<std::string>{"Unfocused", "Focused"}));
+            (std::vector<std::string>{"Focused", "Focused", "Focused", "Focused",
+                                      "Unfocused", "Focused"}));
   EXPECT_EQ(probe.close_publications, closed_windows);
   env->DeleteLocalRef(payload);
   env->DeleteLocalRef(notification);

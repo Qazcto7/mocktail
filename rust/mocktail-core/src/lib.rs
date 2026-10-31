@@ -8171,6 +8171,516 @@ pub extern "C" fn mocktail_rust_audio_is_valid_elf_header(
 }
 
 // ============================================================================
+// 49. Discord RPC & Rich Presence Helpers
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_discord_has_join_target(
+    place_id: i64,
+    instance_id: *const c_char,
+    instance_id_len: usize,
+) -> bool {
+    if place_id <= 0 {
+        return false;
+    }
+    if instance_id.is_null() || instance_id_len == 0 {
+        return true;
+    }
+    if instance_id_len > 128 {
+        return false;
+    }
+    let slice = std::slice::from_raw_parts(instance_id as *const u8, instance_id_len);
+    for &b in slice {
+        if b < 0x20 || b == 0x7f {
+            return false;
+        }
+    }
+    true
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_discord_truncate_utf8(
+    src: *const c_char,
+    src_len: usize,
+    maximum: usize,
+) -> usize {
+    if src.is_null() || src_len == 0 {
+        return 0;
+    }
+    if src_len <= maximum {
+        return src_len;
+    }
+    let slice = std::slice::from_raw_parts(src as *const u8, src_len);
+    let mut boundary = maximum;
+    while boundary > 0 && (slice[boundary] & 0xc0) == 0x80 {
+        boundary -= 1;
+    }
+    boundary
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_discord_percent_encode(
+    src: *const c_char,
+    src_len: usize,
+    out_buf: *mut u8,
+    out_cap: usize,
+    out_len: *mut usize,
+) -> i32 {
+    if out_len.is_null() {
+        return -1;
+    }
+    if src.is_null() || src_len == 0 {
+        *out_len = 0;
+        return 0;
+    }
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let slice = std::slice::from_raw_parts(src as *const u8, src_len);
+    let mut written = 0;
+    for &b in slice {
+        let is_unreserved = (b >= b'a' && b <= b'z')
+            || (b >= b'A' && b <= b'Z')
+            || (b >= b'0' && b <= b'9')
+            || b == b'-'
+            || b == b'_'
+            || b == b'.'
+            || b == b'~';
+        if is_unreserved {
+            if !out_buf.is_null() && written < out_cap {
+                *out_buf.add(written) = b;
+            }
+            written += 1;
+        } else {
+            if !out_buf.is_null() && written + 2 < out_cap {
+                *out_buf.add(written) = b'%';
+                *out_buf.add(written + 1) = HEX[(b >> 4) as usize];
+                *out_buf.add(written + 2) = HEX[(b & 0x0f) as usize];
+            }
+            written += 3;
+        }
+    }
+    *out_len = written;
+    if !out_buf.is_null() && written > out_cap {
+        return -2;
+    }
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_discord_render_place_template(
+    template: *const c_char,
+    template_len: usize,
+    place_name: *const c_char,
+    place_name_len: usize,
+    out_buf: *mut u8,
+    out_cap: usize,
+    out_len: *mut usize,
+) -> i32 {
+    if out_len.is_null() {
+        return -1;
+    }
+    let t_slice = if template.is_null() || template_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(template as *const u8, template_len)
+    };
+    let p_slice = if place_name.is_null() || place_name_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(place_name as *const u8, place_name_len)
+    };
+
+    let placeholder = b"{place_name}";
+    let mut rendered: Vec<u8> = Vec::with_capacity(t_slice.len() + p_slice.len());
+    let mut i = 0;
+    while i < t_slice.len() {
+        if i + placeholder.len() <= t_slice.len() && &t_slice[i..i + placeholder.len()] == placeholder {
+            rendered.extend_from_slice(p_slice);
+            i += placeholder.len();
+        } else {
+            rendered.push(t_slice[i]);
+            i += 1;
+        }
+    }
+
+    let truncated_len = mocktail_rust_discord_truncate_utf8(
+        rendered.as_ptr() as *const c_char,
+        rendered.len(),
+        128,
+    );
+    *out_len = truncated_len;
+    if out_buf.is_null() || out_cap < truncated_len {
+        return if out_buf.is_null() { 0 } else { -2 };
+    }
+    std::ptr::copy_nonoverlapping(rendered.as_ptr(), out_buf, truncated_len);
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_discord_build_join_url(
+    place_id: i64,
+    instance_id: *const c_char,
+    instance_id_len: usize,
+    out_buf: *mut u8,
+    out_cap: usize,
+    out_len: *mut usize,
+) -> i32 {
+    if out_len.is_null() {
+        return -1;
+    }
+    if !mocktail_rust_discord_has_join_target(place_id, instance_id, instance_id_len) {
+        *out_len = 0;
+        return 0;
+    }
+    let base = "https://komaruworld.github.io/mocktail/join.html#placeId=";
+    let place_str = place_id.to_string();
+    let mut url = Vec::with_capacity(256);
+    url.extend_from_slice(base.as_bytes());
+    url.extend_from_slice(place_str.as_bytes());
+
+    if !instance_id.is_null() && instance_id_len > 0 {
+        url.extend_from_slice(b"&gameInstanceId=");
+        let mut enc_len = 0usize;
+        mocktail_rust_discord_percent_encode(instance_id, instance_id_len, std::ptr::null_mut(), 0, &mut enc_len);
+        let cur_len = url.len();
+        url.resize(cur_len + enc_len, 0);
+        let mut actual_enc = 0usize;
+        mocktail_rust_discord_percent_encode(
+            instance_id,
+            instance_id_len,
+            url[cur_len..].as_mut_ptr(),
+            enc_len,
+            &mut actual_enc,
+        );
+    }
+
+    if url.len() > 512 {
+        *out_len = 0;
+        return 0;
+    }
+
+    *out_len = url.len();
+    if out_buf.is_null() || out_cap < url.len() {
+        return if out_buf.is_null() { 0 } else { -2 };
+    }
+    std::ptr::copy_nonoverlapping(url.as_ptr(), out_buf, url.len());
+    0
+}
+
+// ============================================================================
+// 50. Roblox Browser Service & WebView Bridge Helpers
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_browser_has_control_byte(
+    data: *const u8,
+    len: usize,
+) -> bool {
+    if data.is_null() || len == 0 {
+        return false;
+    }
+    let slice = std::slice::from_raw_parts(data, len);
+    for &b in slice {
+        if b <= 0x1f || b == 0x7f {
+            return true;
+        }
+    }
+    false
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_browser_has_embedded_nul(
+    data: *const u8,
+    len: usize,
+) -> bool {
+    if data.is_null() || len == 0 {
+        return false;
+    }
+    let slice = std::slice::from_raw_parts(data, len);
+    slice.contains(&0)
+}
+
+fn starts_with_ignore_case(text: &[u8], prefix: &[u8]) -> bool {
+    if text.len() < prefix.len() {
+        return false;
+    }
+    for (a, b) in text[..prefix.len()].iter().zip(prefix.iter()) {
+        if a.to_ascii_lowercase() != b.to_ascii_lowercase() {
+            return false;
+        }
+    }
+    true
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_webview_is_login_challenge_url(
+    url: *const c_char,
+    len: usize,
+) -> bool {
+    if url.is_null() || len == 0 {
+        return false;
+    }
+    let slice = std::slice::from_raw_parts(url as *const u8, len);
+    let mut normalized = slice;
+
+    if starts_with_ignore_case(normalized, b"https://www.roblox.com/") {
+        normalized = &normalized[23..];
+    } else if starts_with_ignore_case(normalized, b"https://roblox.com/") {
+        normalized = &normalized[19..];
+    } else if starts_with_ignore_case(normalized, b"https://apis.roblox.com/") {
+        normalized = &normalized[24..];
+    } else if starts_with_ignore_case(normalized, b"https://arkose.roblox.com/") {
+        normalized = &normalized[26..];
+    } else if starts_with_ignore_case(normalized, b"www:") {
+        normalized = &normalized[4..];
+    } else if !normalized.is_empty() && normalized[0] == b'/' {
+        normalized = &normalized[1..];
+    }
+
+    const PREFIXES: &[&[u8]] = &[
+        b"captcha",
+        b"view-generic-challenge",
+        b"generic-challenge",
+        b"login/challenge",
+        b"challenge",
+        b"arkose",
+        b"login/twostepverification",
+        b"twostepverification",
+        b"login/two-step-verification",
+        b"two-step-verification",
+        b"reauthenticate",
+    ];
+
+    for &prefix in PREFIXES {
+        if starts_with_ignore_case(normalized, prefix) {
+            if normalized.len() == prefix.len()
+                || normalized[prefix.len()] == b'/'
+                || normalized[prefix.len()] == b'?'
+                || normalized[prefix.len()] == b'#'
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// ============================================================================
+// 51. Game Session Coordinator Helpers
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_game_session_state_name(state: i32) -> *const c_char {
+    match state {
+        0 => b"Created\0".as_ptr() as *const c_char,
+        1 => b"PrincipalReady\0".as_ptr() as *const c_char,
+        2 => b"JoinRequestQueued\0".as_ptr() as *const c_char,
+        3 => b"PreparingSurface\0".as_ptr() as *const c_char,
+        4 => b"SurfaceCreated\0".as_ptr() as *const c_char,
+        5 => b"SurfaceAvailable\0".as_ptr() as *const c_char,
+        6 => b"Starting\0".as_ptr() as *const c_char,
+        7 => b"Running\0".as_ptr() as *const c_char,
+        8 => b"UpdatingSurface\0".as_ptr() as *const c_char,
+        9 => b"Pausing\0".as_ptr() as *const c_char,
+        10 => b"Paused\0".as_ptr() as *const c_char,
+        11 => b"Resuming\0".as_ptr() as *const c_char,
+        12 => b"Leaving\0".as_ptr() as *const c_char,
+        13 => b"ReturnedToLuaApp\0".as_ptr() as *const c_char,
+        14 => b"Failure\0".as_ptr() as *const c_char,
+        15 => b"Stopping\0".as_ptr() as *const c_char,
+        16 => b"Stopped\0".as_ptr() as *const c_char,
+        _ => b"Unknown\0".as_ptr() as *const c_char,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_game_present_backend_name(backend: i32) -> *const c_char {
+    match backend {
+        1 => b"Vulkan\0".as_ptr() as *const c_char,
+        2 => b"OpenGlEs\0".as_ptr() as *const c_char,
+        _ => b"Unknown\0".as_ptr() as *const c_char,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_game_session_principal_kind_name(kind: i32) -> *const c_char {
+    match kind {
+        0 => b"LocalGuest\0".as_ptr() as *const c_char,
+        1 => b"Authenticated\0".as_ptr() as *const c_char,
+        _ => b"Unknown\0".as_ptr() as *const c_char,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_game_session_valid_principal(
+    generation: u64,
+    base_url_len: usize,
+    kind: i32,
+    principal_id_len: usize,
+) -> bool {
+    if generation == 0 || base_url_len == 0 {
+        return false;
+    }
+    if kind == 1 {
+        principal_id_len > 0
+    } else if kind == 0 {
+        principal_id_len == 0
+    } else {
+        false
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_game_session_valid_request(
+    request_id: u64,
+    place_id: i64,
+    launch_params_len: usize,
+) -> bool {
+    request_id != 0 && place_id >= 0 && launch_params_len > 0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_game_session_valid_surface(
+    generation: u64,
+    native_window: usize,
+    width: u32,
+    height: u32,
+) -> bool {
+    generation != 0 && native_window != 0 && width != 0 && height != 0
+}
+
+// ============================================================================
+// 52. WebRTC & FMOD Audio Bridge Helpers
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_fmod_is_valid_channel_count(channels: i32) -> bool {
+    channels == 1 || channels == 2 || channels == 6 || channels == 8
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_webrtc_calc_frame_bytes(
+    sample_rate_hz: u32,
+    duration_ms: u32,
+    channels: u32,
+) -> usize {
+    ((sample_rate_hz as u64 * duration_ms as u64 / 1000) as usize)
+        .saturating_mul(channels as usize)
+        .saturating_mul(2)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_audio_calc_pcm_s16le_peak(
+    data: *const u8,
+    size_bytes: usize,
+) -> i32 {
+    if data.is_null() || size_bytes < 2 {
+        return 0;
+    }
+    let slice = std::slice::from_raw_parts(data, size_bytes);
+    let mut peak = 0i32;
+    let mut i = 0;
+    while i + 1 < size_bytes {
+        let b0 = slice[i] as i32;
+        let b1 = slice[i + 1] as i32;
+        let mut word = b0 | (b1 << 8);
+        if word >= 32768 {
+            word -= 65536;
+        }
+        let abs_val = word.abs();
+        if abs_val > peak {
+            peak = abs_val;
+        }
+        i += 2;
+    }
+    peak
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_audio_spec_equals(
+    sr1: u32,
+    ch1: u32,
+    fmt1: i32,
+    sr2: u32,
+    ch2: u32,
+    fmt2: i32,
+) -> bool {
+    sr1 == sr2 && ch1 == ch2 && fmt1 == fmt2
+}
+
+// ============================================================================
+// 53. Update Coordinator & Download Preflight Helpers
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_update_host_matches(
+    host: *const c_char,
+    host_len: usize,
+    allowed: *const c_char,
+    allowed_len: usize,
+) -> bool {
+    if host.is_null() || allowed.is_null() || host_len == 0 || allowed_len == 0 {
+        return false;
+    }
+    let host_s = std::slice::from_raw_parts(host as *const u8, host_len);
+    let allowed_s = std::slice::from_raw_parts(allowed as *const u8, allowed_len);
+
+    if host_s.len() == allowed_s.len() {
+        return host_s.iter().zip(allowed_s.iter()).all(|(a, b)| a.to_ascii_lowercase() == b.to_ascii_lowercase());
+    }
+    if host_s.len() > allowed_s.len() {
+        let prefix_len = host_s.len() - allowed_s.len();
+        if host_s[prefix_len - 1] != b'.' {
+            return false;
+        }
+        return host_s[prefix_len..]
+            .iter()
+            .zip(allowed_s.iter())
+            .all(|(a, b)| a.to_ascii_lowercase() == b.to_ascii_lowercase());
+    }
+    false
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_update_is_redirect_status(status_code: i64) -> bool {
+    status_code == 301
+        || status_code == 302
+        || status_code == 303
+        || status_code == 307
+        || status_code == 308
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_update_is_retryable_status(status_code: i64) -> bool {
+    status_code == 408 || status_code == 425 || status_code == 429 || status_code >= 500
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_update_is_retryable_curl_code(code: i32) -> bool {
+    matches!(code, 7 | 6 | 5 | 28 | 18 | 56 | 55 | 52 | 35)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_update_plan_evaluate(
+    has_latest: bool,
+    latest_code: u64,
+    runnable: bool,
+    runnable_code: u64,
+    preferred_code: u64,
+    out_take_latest: *mut bool,
+    out_take_preferred: *mut bool,
+) -> i32 {
+    if out_take_latest.is_null() || out_take_preferred.is_null() {
+        return -1;
+    }
+    let take_latest = has_latest && (!runnable || latest_code > runnable_code);
+    let need_preferred = !runnable || preferred_code > runnable_code;
+    let take_preferred = need_preferred && (!take_latest || latest_code != preferred_code);
+    *out_take_latest = take_latest;
+    *out_take_preferred = take_preferred;
+    0
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -9481,6 +9991,150 @@ integrations:
         assert_eq!(mocktail_rust_audio_device_stable_guid(dev_name.as_ptr(), guid_buf.as_mut_ptr(), guid_buf.len()), 0);
         let guid = unsafe { CStr::from_ptr(guid_buf.as_ptr()).to_str().unwrap() };
         assert!(guid.starts_with("{") && guid.ends_with("}") && guid.len() == 38);
+    }
+
+    #[test]
+    fn test_discord_rpc_helpers() {
+        unsafe {
+            assert!(mocktail_rust_discord_has_join_target(12345, std::ptr::null(), 0));
+            assert!(!mocktail_rust_discord_has_join_target(0, std::ptr::null(), 0));
+            assert!(!mocktail_rust_discord_has_join_target(-5, std::ptr::null(), 0));
+
+            let valid_instance = CString::new("job-123-abc").unwrap();
+            assert!(mocktail_rust_discord_has_join_target(12345, valid_instance.as_ptr(), 11));
+            let invalid_ctrl = b"job\x01test";
+            assert!(!mocktail_rust_discord_has_join_target(12345, invalid_ctrl.as_ptr() as *const c_char, 8));
+
+            let sample = "Hello World UTF8 öçşğü";
+            let c_sample = CString::new(sample).unwrap();
+            let trunc = mocktail_rust_discord_truncate_utf8(c_sample.as_ptr(), sample.len(), 10);
+            assert!(trunc <= 10);
+
+            let tmpl = "Playing: {place_name}!";
+            let c_tmpl = CString::new(tmpl).unwrap();
+            let place = "Bloxburg";
+            let c_place = CString::new(place).unwrap();
+            let mut out = [0u8; 128];
+            let mut out_len = 0usize;
+            assert_eq!(mocktail_rust_discord_render_place_template(
+                c_tmpl.as_ptr(), tmpl.len(),
+                c_place.as_ptr(), place.len(),
+                out.as_mut_ptr(), out.len(), &mut out_len
+            ), 0);
+            let rendered = std::str::from_utf8(&out[..out_len]).unwrap();
+            assert_eq!(rendered, "Playing: Bloxburg!");
+
+            let mut url_buf = [0u8; 512];
+            let mut url_len = 0usize;
+            assert_eq!(mocktail_rust_discord_build_join_url(
+                9876, valid_instance.as_ptr(), 11,
+                url_buf.as_mut_ptr(), url_buf.len(), &mut url_len
+            ), 0);
+            let join_url = std::str::from_utf8(&url_buf[..url_len]).unwrap();
+            assert_eq!(join_url, "https://komaruworld.github.io/mocktail/join.html#placeId=9876&gameInstanceId=job-123-abc");
+        }
+    }
+
+    #[test]
+    fn test_browser_and_webview_helpers() {
+        unsafe {
+            let ctrl = b"abc\x07def";
+            assert!(mocktail_rust_browser_has_control_byte(ctrl.as_ptr(), ctrl.len()));
+            let normal = b"abc def 123";
+            assert!(!mocktail_rust_browser_has_control_byte(normal.as_ptr(), normal.len()));
+
+            let embedded_nul = b"abc\0def";
+            assert!(mocktail_rust_browser_has_embedded_nul(embedded_nul.as_ptr(), embedded_nul.len()));
+            assert!(!mocktail_rust_browser_has_embedded_nul(normal.as_ptr(), normal.len()));
+
+            let challenge1 = CString::new("https://www.roblox.com/login/challenge").unwrap();
+            assert!(mocktail_rust_webview_is_login_challenge_url(challenge1.as_ptr(), challenge1.as_bytes().len()));
+            let challenge2 = CString::new("https://apis.roblox.com/view-generic-challenge?test=1").unwrap();
+            assert!(mocktail_rust_webview_is_login_challenge_url(challenge2.as_ptr(), challenge2.as_bytes().len()));
+            let non_challenge = CString::new("https://www.roblox.com/games/12345").unwrap();
+            assert!(!mocktail_rust_webview_is_login_challenge_url(non_challenge.as_ptr(), non_challenge.as_bytes().len()));
+        }
+    }
+
+    #[test]
+    fn test_game_session_coordinator_helpers() {
+        unsafe {
+            let name_run = CStr::from_ptr(mocktail_rust_game_session_state_name(7)).to_str().unwrap();
+            assert_eq!(name_run, "Running");
+            let name_pause = CStr::from_ptr(mocktail_rust_game_session_state_name(10)).to_str().unwrap();
+            assert_eq!(name_pause, "Paused");
+
+            let backend_vk = CStr::from_ptr(mocktail_rust_game_present_backend_name(1)).to_str().unwrap();
+            assert_eq!(backend_vk, "Vulkan");
+
+            let kind_guest = CStr::from_ptr(mocktail_rust_game_session_principal_kind_name(0)).to_str().unwrap();
+            assert_eq!(kind_guest, "LocalGuest");
+            let kind_auth = CStr::from_ptr(mocktail_rust_game_session_principal_kind_name(1)).to_str().unwrap();
+            assert_eq!(kind_auth, "Authenticated");
+
+            assert!(mocktail_rust_game_session_valid_principal(1, 10, 0, 0));
+            assert!(!mocktail_rust_game_session_valid_principal(1, 10, 0, 5));
+            assert!(mocktail_rust_game_session_valid_principal(1, 10, 1, 5));
+            assert!(!mocktail_rust_game_session_valid_principal(0, 10, 1, 5));
+
+            assert!(mocktail_rust_game_session_valid_request(100, 12345, 10));
+            assert!(!mocktail_rust_game_session_valid_request(0, 12345, 10));
+
+            assert!(mocktail_rust_game_session_valid_surface(1, 0x1234, 1920, 1080));
+            assert!(!mocktail_rust_game_session_valid_surface(0, 0x1234, 1920, 1080));
+        }
+    }
+
+    #[test]
+    fn test_audio_and_webrtc_helpers() {
+        unsafe {
+            assert!(mocktail_rust_fmod_is_valid_channel_count(1));
+            assert!(mocktail_rust_fmod_is_valid_channel_count(2));
+            assert!(mocktail_rust_fmod_is_valid_channel_count(6));
+            assert!(mocktail_rust_fmod_is_valid_channel_count(8));
+            assert!(!mocktail_rust_fmod_is_valid_channel_count(3));
+            assert!(!mocktail_rust_fmod_is_valid_channel_count(0));
+
+            // 48000 Hz, 10 ms, 1 channel -> 480 samples * 2 bytes = 960 bytes
+            assert_eq!(mocktail_rust_webrtc_calc_frame_bytes(48000, 10, 1), 960);
+
+            let pcm = [0x00u8, 0x00, 0x00, 0x40]; // 0, 16384
+            assert_eq!(mocktail_rust_audio_calc_pcm_s16le_peak(pcm.as_ptr(), pcm.len()), 16384);
+
+            assert!(mocktail_rust_audio_spec_equals(48000, 2, 1, 48000, 2, 1));
+            assert!(!mocktail_rust_audio_spec_equals(48000, 2, 1, 44100, 2, 1));
+        }
+    }
+
+    #[test]
+    fn test_update_and_download_helpers() {
+        unsafe {
+            let host1 = CString::new("download.pureapk.com").unwrap();
+            let host2 = CString::new("pureapk.com.attacker.test").unwrap();
+            let allowed = CString::new("pureapk.com").unwrap();
+
+            assert!(mocktail_rust_update_host_matches(host1.as_ptr(), 20, allowed.as_ptr(), 11));
+            assert!(!mocktail_rust_update_host_matches(host2.as_ptr(), 25, allowed.as_ptr(), 11));
+
+            assert!(mocktail_rust_update_is_redirect_status(301));
+            assert!(mocktail_rust_update_is_redirect_status(302));
+            assert!(!mocktail_rust_update_is_redirect_status(200));
+
+            assert!(mocktail_rust_update_is_retryable_status(429));
+            assert!(mocktail_rust_update_is_retryable_status(503));
+            assert!(!mocktail_rust_update_is_retryable_status(404));
+
+            assert!(mocktail_rust_update_is_retryable_curl_code(7)); // CURLE_COULDNT_CONNECT
+            assert!(!mocktail_rust_update_is_retryable_curl_code(0));
+
+            let mut take_latest = false;
+            let mut take_preferred = false;
+            assert_eq!(mocktail_rust_update_plan_evaluate(
+                true, 200, true, 100, 150, &mut take_latest, &mut take_preferred
+            ), 0);
+            assert!(take_latest);
+            assert!(take_preferred);
+        }
     }
 
 }

@@ -1,4 +1,5 @@
 #include "update/update_coordinator.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <fcntl.h>
 #include <sys/file.h>
@@ -648,8 +649,16 @@ std::vector<UpdateCandidatePlan> PlanUpdateCandidates(
   std::vector<UpdateCandidatePlan> plans;
   const bool runnable = static_cast<bool>(current);
   const std::uint64_t runnable_code = runnable ? current.version_code : 0;
-  if (latest != nullptr && *latest &&
-      (!runnable || latest->version_code > runnable_code)) {
+  const bool has_latest = latest != nullptr && *latest;
+  const std::uint64_t latest_code = has_latest ? latest->version_code : 0;
+
+  bool take_latest = false;
+  bool take_preferred = false;
+  mocktail_rust_update_plan_evaluate(has_latest, latest_code, runnable,
+                                     runnable_code, preferred.version_code,
+                                     &take_latest, &take_preferred);
+
+  if (take_latest) {
     UpdateCandidatePlan plan;
     plan.identity.version_name = latest->version_name;
     plan.identity.version_code = latest->version_code;
@@ -667,15 +676,12 @@ std::vector<UpdateCandidatePlan> PlanUpdateCandidates(
   }
   // Without this step a rejected latest candidate leaves the user on whatever
   // ancient payload they had, fixable only by deleting the store by hand.
-  if (!runnable || preferred.version_code > runnable_code) {
-    if (plans.empty() ||
-        plans.front().identity.version_code != preferred.version_code) {
-      UpdateCandidatePlan plan;
-      plan.identity = ExactPayloadIdentity(preferred);
-      plan.exact_supported = true;
-      plan.origin = "supported catalog";
-      plans.push_back(std::move(plan));
-    }
+  if (take_preferred) {
+    UpdateCandidatePlan plan;
+    plan.identity = ExactPayloadIdentity(preferred);
+    plan.exact_supported = true;
+    plan.origin = "supported catalog";
+    plans.push_back(std::move(plan));
   }
   return plans;
 }

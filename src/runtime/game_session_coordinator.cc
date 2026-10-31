@@ -1,4 +1,5 @@
 #include "runtime/game_session_coordinator.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <utility>
 
@@ -15,24 +16,19 @@ Status FailedPrecondition(std::string message) {
 }
 
 bool ValidPrincipal(const GameSessionPrincipal& principal) {
-  if (principal.generation == 0 || principal.base_url.empty()) {
-    return false;
-  }
-  if (principal.kind == GameSessionPrincipalKind::kAuthenticated) {
-    return !principal.principal_id.empty();
-  }
-  return principal.kind == GameSessionPrincipalKind::kLocalGuest &&
-         principal.principal_id.empty();
+  return mocktail_rust_game_session_valid_principal(
+      principal.generation, principal.base_url.size(),
+      static_cast<int32_t>(principal.kind), principal.principal_id.size());
 }
 
 bool ValidRequest(const GameJoinRequest& request) {
-  return request.request_id != 0 && request.place_id >= 0 &&
-         !request.launch_parameters.empty();
+  return mocktail_rust_game_session_valid_request(
+      request.request_id, request.place_id, request.launch_parameters.size());
 }
 
 bool ValidSurface(const GameSurface& surface) {
-  return surface.generation != 0 && surface.native_window != 0 &&
-         surface.width != 0 && surface.height != 0;
+  return mocktail_rust_game_session_valid_surface(
+      surface.generation, surface.native_window, surface.width, surface.height);
 }
 
 }  // namespace
@@ -706,65 +702,15 @@ bool GameSessionCoordinator::SameSurface(const GameSurface& left,
 }
 
 const char* GameSessionStateName(GameSessionState state) {
-  switch (state) {
-    case GameSessionState::kCreated:
-      return "Created";
-    case GameSessionState::kPrincipalReady:
-      return "PrincipalReady";
-    case GameSessionState::kJoinRequestQueued:
-      return "JoinRequestQueued";
-    case GameSessionState::kPreparingSurface:
-      return "PreparingSurface";
-    case GameSessionState::kSurfaceCreated:
-      return "SurfaceCreated";
-    case GameSessionState::kSurfaceAvailable:
-      return "SurfaceAvailable";
-    case GameSessionState::kStarting:
-      return "Starting";
-    case GameSessionState::kRunning:
-      return "Running";
-    case GameSessionState::kUpdatingSurface:
-      return "UpdatingSurface";
-    case GameSessionState::kPausing:
-      return "Pausing";
-    case GameSessionState::kPaused:
-      return "Paused";
-    case GameSessionState::kResuming:
-      return "Resuming";
-    case GameSessionState::kLeaving:
-      return "Leaving";
-    case GameSessionState::kReturnedToLuaApp:
-      return "ReturnedToLuaApp";
-    case GameSessionState::kFailure:
-      return "Failure";
-    case GameSessionState::kStopping:
-      return "Stopping";
-    case GameSessionState::kStopped:
-      return "Stopped";
-  }
-  return "Unknown";
+  return mocktail_rust_game_session_state_name(static_cast<int32_t>(state));
 }
 
 const char* GamePresentBackendName(GamePresentBackend backend) {
-  switch (backend) {
-    case GamePresentBackend::kUnknown:
-      return "Unknown";
-    case GamePresentBackend::kVulkan:
-      return "Vulkan";
-    case GamePresentBackend::kOpenGlEs:
-      return "OpenGlEs";
-  }
-  return "Unknown";
+  return mocktail_rust_game_present_backend_name(static_cast<int32_t>(backend));
 }
 
 const char* GameSessionPrincipalKindName(GameSessionPrincipalKind kind) {
-  switch (kind) {
-    case GameSessionPrincipalKind::kLocalGuest:
-      return "LocalGuest";
-    case GameSessionPrincipalKind::kAuthenticated:
-      return "Authenticated";
-  }
-  return "Unknown";
+  return mocktail_rust_game_session_principal_kind_name(static_cast<int32_t>(kind));
 }
 
 }  // namespace runtime

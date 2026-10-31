@@ -1144,6 +1144,142 @@ int mocktail_rust_audio_is_valid_elf_header(
     const uint8_t* bytes,
     size_t len);
 
+// ============================================================================
+// 49. Discord RPC & Rich Presence Helpers
+// ============================================================================
+
+bool mocktail_rust_discord_has_join_target(
+    int64_t place_id,
+    const char* instance_id,
+    size_t instance_id_len);
+
+size_t mocktail_rust_discord_truncate_utf8(
+    const char* src,
+    size_t src_len,
+    size_t maximum);
+
+int mocktail_rust_discord_percent_encode(
+    const char* src,
+    size_t src_len,
+    uint8_t* out_buf,
+    size_t out_cap,
+    size_t* out_len);
+
+int mocktail_rust_discord_render_place_template(
+    const char* template_str,
+    size_t template_len,
+    const char* place_name,
+    size_t place_name_len,
+    uint8_t* out_buf,
+    size_t out_cap,
+    size_t* out_len);
+
+int mocktail_rust_discord_build_join_url(
+    int64_t place_id,
+    const char* instance_id,
+    size_t instance_id_len,
+    uint8_t* out_buf,
+    size_t out_cap,
+    size_t* out_len);
+
+// ============================================================================
+// 50. Roblox Browser Service & WebView Bridge Helpers
+// ============================================================================
+
+bool mocktail_rust_browser_has_control_byte(
+    const uint8_t* data,
+    size_t len);
+
+bool mocktail_rust_browser_has_embedded_nul(
+    const uint8_t* data,
+    size_t len);
+
+bool mocktail_rust_webview_is_login_challenge_url(
+    const char* url,
+    size_t len);
+
+// ============================================================================
+// 51. Game Session Coordinator Helpers
+// ============================================================================
+
+const char* mocktail_rust_game_session_state_name(
+    int32_t state);
+
+const char* mocktail_rust_game_present_backend_name(
+    int32_t backend);
+
+const char* mocktail_rust_game_session_principal_kind_name(
+    int32_t kind);
+
+bool mocktail_rust_game_session_valid_principal(
+    uint64_t generation,
+    size_t base_url_len,
+    int32_t kind,
+    size_t principal_id_len);
+
+bool mocktail_rust_game_session_valid_request(
+    uint64_t request_id,
+    int64_t place_id,
+    size_t launch_params_len);
+
+bool mocktail_rust_game_session_valid_surface(
+    uint64_t generation,
+    uintptr_t native_window,
+    uint32_t width,
+    uint32_t height);
+
+// ============================================================================
+// 52. WebRTC & FMOD Audio Bridge Helpers
+// ============================================================================
+
+bool mocktail_rust_fmod_is_valid_channel_count(
+    int32_t channels);
+
+size_t mocktail_rust_webrtc_calc_frame_bytes(
+    uint32_t sample_rate_hz,
+    uint32_t duration_ms,
+    uint32_t channels);
+
+int32_t mocktail_rust_audio_calc_pcm_s16le_peak(
+    const uint8_t* data,
+    size_t size_bytes);
+
+bool mocktail_rust_audio_spec_equals(
+    uint32_t sr1,
+    uint32_t ch1,
+    int32_t fmt1,
+    uint32_t sr2,
+    uint32_t ch2,
+    int32_t fmt2);
+
+// ============================================================================
+// 53. Update Coordinator & Download Preflight Helpers
+// ============================================================================
+
+bool mocktail_rust_update_host_matches(
+    const char* host,
+    size_t host_len,
+    const char* allowed,
+    size_t allowed_len);
+
+bool mocktail_rust_update_is_redirect_status(
+    int64_t status_code);
+
+bool mocktail_rust_update_is_retryable_status(
+    int64_t status_code);
+
+bool mocktail_rust_update_is_retryable_curl_code(
+    int32_t code);
+
+int mocktail_rust_update_plan_evaluate(
+    bool has_latest,
+    uint64_t latest_code,
+    bool runnable,
+    uint64_t runnable_code,
+    uint64_t preferred_code,
+    bool* out_take_latest,
+    bool* out_take_preferred);
+
 #ifdef __cplusplus
 }
 #endif

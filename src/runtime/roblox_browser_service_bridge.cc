@@ -1,4 +1,5 @@
 #include "runtime/roblox_browser_service_bridge.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <cstdio>
 #include <iterator>
@@ -35,16 +36,13 @@ Status FailedPrecondition(std::string message) {
 }
 
 bool HasControlByte(const std::string& value) {
-  for (const unsigned char byte : value) {
-    if (byte <= 0x1f || byte == 0x7f) {
-      return true;
-    }
-  }
-  return false;
+  return mocktail_rust_browser_has_control_byte(
+      reinterpret_cast<const uint8_t*>(value.data()), value.size());
 }
 
 bool HasEmbeddedNul(const std::string& value) {
-  return value.find('\0') != std::string::npos;
+  return mocktail_rust_browser_has_embedded_nul(
+      reinterpret_cast<const uint8_t*>(value.data()), value.size());
 }
 
 Status ParseOptionalString(const nlohmann::json& document, const char* key,

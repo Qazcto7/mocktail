@@ -69,14 +69,8 @@ struct DiscordFrame {
 };
 
 std::string TruncateUtf8(std::string value, std::size_t maximum) {
-  if (value.size() <= maximum) {
-    return value;
-  }
-  std::size_t boundary = maximum;
-  while (boundary != 0 &&
-         (static_cast<unsigned char>(value[boundary]) & 0xc0U) == 0x80U) {
-    --boundary;
-  }
+  const std::size_t boundary = mocktail_rust_discord_truncate_utf8(
+      value.data(), value.size(), maximum);
   value.resize(boundary);
   return value;
 }
@@ -86,42 +80,20 @@ std::string DumpJson(const Json& value) {
 }
 
 std::string RenderPlaceTemplate(std::string text, std::string_view place_name) {
-  constexpr std::string_view placeholder = "{place_name}";
-  std::size_t offset = 0;
-  while ((offset = text.find(placeholder, offset)) != std::string::npos) {
-    text.replace(offset, placeholder.size(), place_name);
-    offset += place_name.size();
+  uint8_t buffer[128];
+  std::size_t out_len = 0;
+  if (mocktail_rust_discord_render_place_template(
+          text.data(), text.size(), place_name.data(), place_name.size(),
+          buffer, sizeof(buffer), &out_len) == 0) {
+    return std::string(reinterpret_cast<const char*>(buffer), out_len);
   }
   return TruncateUtf8(std::move(text), 128);
 }
 
-std::string PercentEncode(std::string_view value) {
-  constexpr char hex[] = "0123456789ABCDEF";
-  std::string encoded;
-  encoded.reserve(value.size() * 3);
-  for (const unsigned char byte : value) {
-    if ((byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') ||
-        (byte >= '0' && byte <= '9') || byte == '-' || byte == '_' ||
-        byte == '.' || byte == '~') {
-      encoded.push_back(static_cast<char>(byte));
-    } else {
-      encoded.push_back('%');
-      encoded.push_back(hex[byte >> 4U]);
-      encoded.push_back(hex[byte & 0x0fU]);
-    }
-  }
-  return encoded;
-}
-
 bool HasDiscordJoinTarget(const RobloxExperienceLaunchRequest& request) {
-  return request.place_id > 0 &&
-         (request.game_instance_id.empty() ||
-          (request.game_instance_id.size() <= 128 &&
-           std::none_of(request.game_instance_id.begin(),
-                        request.game_instance_id.end(),
-                        [](unsigned char byte) {
-                          return byte < 0x20 || byte == 0x7f;
-                        })));
+  return mocktail_rust_discord_has_join_target(
+      request.place_id, request.game_instance_id.data(),
+      request.game_instance_id.size());
 }
 
 bool WriteAll(int descriptor, const void* bytes, std::size_t size) {
@@ -544,15 +516,16 @@ bool IsPublicDiscordJoin(const RobloxExperienceLaunchRequest& request) {
 }
 
 std::string BuildDiscordJoinUrl(const RobloxExperienceLaunchRequest& request) {
-  if (!HasDiscordJoinTarget(request)) {
-    return {};
+  uint8_t buffer[512];
+  std::size_t out_len = 0;
+  if (mocktail_rust_discord_build_join_url(
+          request.place_id, request.game_instance_id.data(),
+          request.game_instance_id.size(), buffer, sizeof(buffer),
+          &out_len) == 0 &&
+      out_len > 0) {
+    return std::string(reinterpret_cast<const char*>(buffer), out_len);
   }
-  std::string url =
-      std::string(kJoinPage) + "#placeId=" + std::to_string(request.place_id);
-  if (!request.game_instance_id.empty()) {
-    url += "&gameInstanceId=" + PercentEncode(request.game_instance_id);
-  }
-  return url.size() <= 512 ? std::move(url) : std::string();
+  return {};
 }
 
 DiscordRpcActivity BuildDiscordRpcActivity(

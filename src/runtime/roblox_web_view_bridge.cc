@@ -1,4 +1,5 @@
 #include "runtime/roblox_web_view_bridge.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <curl/curl.h>
 
@@ -39,62 +40,8 @@ constexpr char kConnectionPointerField[] = "a";
 constexpr std::size_t kMaximumPendingHostWindowEvents = 256;
 constexpr std::string_view kBrowserLoginUrl = "https://www.roblox.com/login";
 
-bool EqualsIgnoreCase(std::string_view a, std::string_view b) {
-  if (a.size() != b.size()) return false;
-  for (std::size_t i = 0; i < a.size(); ++i) {
-    if (std::tolower(static_cast<unsigned char>(a[i])) !=
-        std::tolower(static_cast<unsigned char>(b[i]))) {
-      return false;
-    }
-  }
-  return true;
-}
-
-bool StartsWithIgnoreCase(std::string_view text, std::string_view prefix) {
-  if (text.size() < prefix.size()) return false;
-  return EqualsIgnoreCase(text.substr(0, prefix.size()), prefix);
-}
-
 bool IsLoginChallengeUrl(std::string_view url) {
-  std::string_view normalized = url;
-  if (StartsWithIgnoreCase(normalized, "https://www.roblox.com/")) {
-    normalized.remove_prefix(23);
-  } else if (StartsWithIgnoreCase(normalized, "https://roblox.com/")) {
-    normalized.remove_prefix(19);
-  } else if (StartsWithIgnoreCase(normalized, "https://apis.roblox.com/")) {
-    normalized.remove_prefix(24);
-  } else if (StartsWithIgnoreCase(normalized, "https://arkose.roblox.com/")) {
-    normalized.remove_prefix(26);
-  } else if (StartsWithIgnoreCase(normalized, "www:")) {
-    normalized.remove_prefix(4);
-  } else if (!normalized.empty() && normalized.front() == '/') {
-    normalized.remove_prefix(1);
-  }
-
-  constexpr std::string_view kChallengePrefixes[] = {
-      "captcha",
-      "view-generic-challenge",
-      "generic-challenge",
-      "login/challenge",
-      "challenge",
-      "arkose",
-      "login/twostepverification",
-      "twostepverification",
-      "login/two-step-verification",
-      "two-step-verification",
-      "reauthenticate",
-  };
-
-  for (const std::string_view prefix : kChallengePrefixes) {
-    if (StartsWithIgnoreCase(normalized, prefix) &&
-        (normalized.size() == prefix.size() ||
-         normalized[prefix.size()] == '/' ||
-         normalized[prefix.size()] == '?' ||
-         normalized[prefix.size()] == '#')) {
-      return true;
-    }
-  }
-  return false;
+  return mocktail_rust_webview_is_login_challenge_url(url.data(), url.size());
 }
 
 Status Invalid(std::string message) {

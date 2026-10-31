@@ -1,4 +1,5 @@
 #include "mocktail/audio/fmod_java_audio_runtime.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -129,14 +130,13 @@ Status DefaultSinkFactory(void* /*factory_context*/, const PcmSpec& source_spec,
 }
 
 bool IsFmodChannelCount(int channels) {
-  // Mirrors AudioDevice.fetchChannelConfigFromCount() from the APK. Android
-  // rejects every other value before constructing AudioTrack.
-  return channels == 1 || channels == 2 || channels == 6 || channels == 8;
+  return mocktail_rust_fmod_is_valid_channel_count(channels);
 }
 
 bool SameSpec(const PcmSpec& left, const PcmSpec& right) {
-  return left.sample_rate_hz == right.sample_rate_hz &&
-         left.channels == right.channels && left.format == right.format;
+  return mocktail_rust_audio_spec_equals(
+      left.sample_rate_hz, left.channels, static_cast<int32_t>(left.format),
+      right.sample_rate_hz, right.channels, static_cast<int32_t>(right.format));
 }
 
 void ReleaseOwnedBuffer(void* context, const void* /*data*/,

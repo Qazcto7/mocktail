@@ -1,4 +1,5 @@
 #include "mocktail/audio/webrtc_jni_audio_bridge.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <algorithm>
 #include <atomic>
@@ -129,11 +130,7 @@ void OnCapturedAudio(void* opaque_session, std::size_t size_bytes) {
     }
     const auto* samples = static_cast<const unsigned char*>(
         session->capture->buffer_data());
-    int peak = 0;
-    for (std::size_t i = 0; i + 1 < size_bytes; i += 2) {
-      const int word = samples[i] | (static_cast<int>(samples[i + 1]) << 8);
-      peak = std::max(peak, std::abs(word >= 32768 ? word - 65536 : word));
-    }
+    const int peak = mocktail_rust_audio_calc_pcm_s16le_peak(samples, size_bytes);
     if (peak != 0 && session->audible_buffers.fetch_add(1) == 0) {
       std::cerr << "  [mocktail][audio] WebRTC microphone first nonzero PCM"
                 << " peak=" << peak << "/32768\n";
