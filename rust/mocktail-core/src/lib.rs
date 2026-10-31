@@ -694,8 +694,8 @@ pub extern "C" fn mocktail_rust_parse_status_memory(
         for line in text.lines() {
             if let Some(rest) = line.strip_prefix(field) {
                 let parts: Vec<&str> = rest.split_whitespace().collect();
-                if let Some(num_str) = parts.first() {
-                    if let Ok(kib) = num_str.parse::<u64>() {
+                if parts.len() == 2 && parts[1] == "kB" {
+                    if let Ok(kib) = parts[0].parse::<u64>() {
                         return kib.checked_mul(1024);
                     }
                 }
@@ -1122,6 +1122,42 @@ pub extern "C" fn mocktail_rust_parse_roblox_cookie(
         *out_buf.add(bytes.len()) = 0;
         *out_len = bytes.len();
     }
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_parse_webview_roblox_cookie(
+    raw_input: *const c_char,
+    in_len: usize,
+    out_buf: *mut c_char,
+    cap: usize,
+    out_len: *mut usize,
+) -> c_int {
+    if raw_input.is_null() || out_buf.is_null() || out_len.is_null() {
+        return -1;
+    }
+    *out_len = 0;
+    let prefix = b".ROBLOSECURITY=";
+    if in_len < prefix.len() {
+        return -1;
+    }
+    let slice = std::slice::from_raw_parts(raw_input as *const u8, in_len);
+    if !slice.starts_with(prefix) {
+        return -1;
+    }
+    let val = &slice[prefix.len()..];
+    if val.is_empty() || val.len() > 4096 {
+        return -1;
+    }
+    if !val.iter().all(|&b| is_valid_cookie_octet(b)) {
+        return -1;
+    }
+    if cap <= val.len() {
+        return -2;
+    }
+    std::ptr::copy_nonoverlapping(val.as_ptr() as *const c_char, out_buf, val.len());
+    *out_buf.add(val.len()) = 0;
+    *out_len = val.len();
     0
 }
 
@@ -2076,9 +2112,9 @@ pub extern "C" fn mocktail_rust_is_blocked_crash_host(host: *const c_char) -> c_
         if s.eq_ignore_ascii_case(suffix) {
             return 1;
         }
-        if s.len() > suffix.len() && s.ends_with(suffix) {
+        if s.len() > suffix.len() {
             let prefix_len = s.len() - suffix.len();
-            if s.as_bytes()[prefix_len - 1] == b'.' {
+            if s.as_bytes()[prefix_len - 1] == b'.' && s[prefix_len..].eq_ignore_ascii_case(suffix) {
                 return 1;
             }
         }
@@ -2790,7 +2826,7 @@ pub extern "C" fn mocktail_rust_parse_runtime_config_yaml(
     let parsed_val: serde_yaml::Value = match serde_yaml::from_slice(slice) {
         Ok(v) => v,
         Err(e) => {
-            set_error(&format!("YAML syntax error: {}", e));
+            set_error(&format!("runtime configuration contains invalid YAML: {}", e));
             return -3;
         }
     };
@@ -2977,13 +3013,28 @@ pub extern "C" fn mocktail_rust_parse_runtime_config_yaml(
 
     // Graphics section
     if let Some(backend) = values.get("graphics.backend") {
-        if !["direct-vulkan", "opengl", "system", "angle-vulkan"].contains(&backend.as_str()) {
+        if !["direct-vulkan", "vulkan", "native-vulkan", "opengl", "gles", "system", "angle-vulkan", "angle-swiftshader", "auto"].contains(&backend.as_str()) {
             set_error(&format!("graphics.backend is not supported: {}", backend));
             return -20;
         }
-        env.insert("MOCKTAIL_GRAPHICS_BACKEND".to_string(), serde_json::json!(backend));
+        let mapped_backend = if backend == "vulkan" || backend == "native-vulkan" {
+            "direct-vulkan"
+        } else if backend == "gles" {
+            "opengl"
+        } else {
+            backend.as_str()
+        };
+        env.insert("MOCKTAIL_GRAPHICS_BACKEND".to_string(), serde_json::json!(mapped_backend));
     }
     if let Some(fps) = values.get("graphics.frame_rate_limit") {
+        let mut mode = 0i32;
+        let mut fps_val = 0i32;
+        let c_fps = std::ffi::CString::new(fps.as_str()).unwrap_or_default();
+        mocktail_rust_frame_rate_parse(c_fps.as_ptr(), &mut mode, &mut fps_val);
+        if mode == 4 { // kInvalid
+            set_error(&format!("graphics.frame_rate_limit is not supported: {}", fps));
+            return -21;
+        }
         env.insert("MOCKTAIL_FRAME_RATE_LIMIT".to_string(), serde_json::json!(fps));
     }
     if let Some(vsync) = values.get("graphics.vsync") {
@@ -3132,14 +3183,28 @@ pub extern "C" fn mocktail_rust_parse_runtime_config_yaml(
     let proxy_scheme = values.get("network.proxy_scheme");
     let proxy_username = values.get("network.proxy_username");
     let proxy_password = values.get("network.proxy_password");
-    if proxy_host.is_some() != proxy_port.is_some() || (proxy_scheme.is_some() && proxy_host.is_none()) {
+    if proxy_host.is_some() != proxy_port.is_some()
+        || (proxy_scheme.is_some() && proxy_host.is_none())
+        || (proxy_username.is_some() && proxy_host.is_none())
+        || (proxy_password.is_some() && proxy_host.is_none()) {
         set_error("network.proxy_host and network.proxy_port must be configured together");
         return -36;
     }
     if let Some(host) = proxy_host {
-        let port = proxy_port.unwrap();
+        let port_str = proxy_port.unwrap();
+        let port_num = port_str.parse::<u32>().unwrap_or(0);
+        if host.contains("://") || host.contains('/') || port_num == 0 || port_num > 65535 {
+            set_error("network proxy must use a valid host without a scheme, a port from 1 to 65535, an HTTP or SOCKS5 scheme, and valid credentials");
+            return -38;
+        }
+        if let Some(scheme) = proxy_scheme {
+            if !["http", "https", "socks5"].contains(&scheme.as_str()) {
+                set_error("network proxy must use a valid host without a scheme, a port from 1 to 65535, an HTTP or SOCKS5 scheme, and valid credentials");
+                return -39;
+            }
+        }
         env.insert("MOCKTAIL_HTTP_PROXY_HOST".to_string(), serde_json::json!(host));
-        env.insert("MOCKTAIL_HTTP_PROXY_PORT".to_string(), serde_json::json!(port));
+        env.insert("MOCKTAIL_HTTP_PROXY_PORT".to_string(), serde_json::json!(port_str));
         env.insert("MOCKTAIL_HTTP_PROXY_SCHEME".to_string(), serde_json::json!(proxy_scheme.map(|s| s.as_str()).unwrap_or("http")));
         if let Some(u) = proxy_username {
             env.insert("MOCKTAIL_HTTP_PROXY_USERNAME".to_string(), serde_json::json!(u));
@@ -3873,6 +3938,11 @@ pub extern "C" fn mocktail_rust_fleasion_prepare_bundle(
     if std::fs::write(&tmp_path, out_bundle.as_bytes()).is_err() {
         set_error(&format!("cannot write generated Fleasion CA bundle: {}", dest_path.display()));
         return -9;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600));
     }
     if std::fs::rename(&tmp_path, dest_path).is_err() {
         let _ = std::fs::remove_file(&tmp_path);
@@ -8681,6 +8751,435 @@ pub unsafe extern "C" fn mocktail_rust_update_plan_evaluate(
 }
 
 // ============================================================================
+// 54. Memory Watchdog & Statm Helpers
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_statm_pages_to_bytes(pages: u64, page_size: u64) -> u64 {
+    pages.saturating_mul(page_size)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_parse_proc_statm(
+    statm_content: *const c_char,
+    len: usize,
+    out_resident_pages: *mut u64,
+) -> i32 {
+    if statm_content.is_null() || out_resident_pages.is_null() || len == 0 {
+        return -1;
+    }
+    let slice = std::slice::from_raw_parts(statm_content as *const u8, len);
+    let s = match std::str::from_utf8(slice) {
+        Ok(v) => v,
+        Err(_) => return -1,
+    };
+    let mut parts = s.split_whitespace();
+    let _size = match parts.next() {
+        Some(v) => v,
+        None => return -1,
+    };
+    let resident_str = match parts.next() {
+        Some(v) => v,
+        None => return -1,
+    };
+    match resident_str.parse::<u64>() {
+        Ok(v) => {
+            *out_resident_pages = v;
+            0
+        }
+        Err(_) => -1,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_memory_limit_exceeded(
+    resident_bytes: u64,
+    swap_bytes: u64,
+    limit_bytes: u64,
+) -> bool {
+    limit_bytes > 0 && resident_bytes.saturating_add(swap_bytes) >= limit_bytes
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_format_memory_limit_message(
+    used_bytes: u64,
+    limit_bytes: u64,
+    out_buf: *mut u8,
+    cap: usize,
+    out_len: *mut usize,
+) -> i32 {
+    if out_len.is_null() {
+        return -1;
+    }
+    const MB: u64 = 1024 * 1024;
+    let used_mb = used_bytes / MB;
+    let limit_mb = limit_bytes / MB;
+    let msg = format!(
+        "[memory] limit exceeded: RSS+swap={} MiB, limit={} MiB; terminating Mocktail with exit 137\n",
+        used_mb, limit_mb
+    );
+    let bytes = msg.as_bytes();
+    *out_len = bytes.len();
+    if out_buf.is_null() || cap < bytes.len() {
+        return if out_buf.is_null() { 0 } else { -2 };
+    }
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());
+    0
+}
+
+// ============================================================================
+// 55. Payload Update Preflight & Diagnostic Relay
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_trim_to_utf8_boundary(
+    data: *const u8,
+    len: usize,
+    max_bytes: usize,
+) -> usize {
+    if data.is_null() || len == 0 || max_bytes == 0 {
+        return 0;
+    }
+    if len <= max_bytes {
+        return len;
+    }
+    let slice = std::slice::from_raw_parts(data, len);
+    let mut size = max_bytes;
+    while size > 0 && (slice[size] & 0xC0) == 0x80 {
+        size -= 1;
+    }
+    size
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_parse_updater_stderr_line(
+    line: *const c_char,
+    len: usize,
+    out_buf: *mut u8,
+    cap: usize,
+    out_len: *mut usize,
+    out_is_failure: *mut bool,
+) -> i32 {
+    if line.is_null() || out_len.is_null() || out_is_failure.is_null() {
+        return -1;
+    }
+    *out_len = 0;
+    *out_is_failure = false;
+    if len == 0 {
+        return 0;
+    }
+    let slice = std::slice::from_raw_parts(line as *const u8, len);
+    let prefix = b"[native-updater] ";
+    let warning_prefix = b"warning: ";
+
+    if slice.len() > prefix.len() && slice.starts_with(prefix) {
+        let detail = &slice[prefix.len()..];
+        if !detail.starts_with(warning_prefix) {
+            *out_is_failure = true;
+            let trim_len = mocktail_rust_trim_to_utf8_boundary(detail.as_ptr(), detail.len(), 400);
+            *out_len = trim_len;
+            if !out_buf.is_null() && cap >= trim_len {
+                std::ptr::copy_nonoverlapping(detail.as_ptr(), out_buf, trim_len);
+            }
+            return 0;
+        }
+    }
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_is_env_entry(
+    entry: *const c_char,
+    entry_len: usize,
+    name: *const c_char,
+    name_len: usize,
+) -> bool {
+    if entry.is_null() || name.is_null() || entry_len <= name_len {
+        return false;
+    }
+    let entry_s = std::slice::from_raw_parts(entry as *const u8, entry_len);
+    let name_s = std::slice::from_raw_parts(name as *const u8, name_len);
+    entry_s[name_len] == b'=' && &entry_s[..name_len] == name_s
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_format_preflight_failure(
+    status_or_signal: i32,
+    is_signal: bool,
+    last_line: *const c_char,
+    last_len: usize,
+    out_buf: *mut u8,
+    cap: usize,
+    out_len: *mut usize,
+) -> i32 {
+    if out_len.is_null() {
+        return -1;
+    }
+    let msg = if !last_line.is_null() && last_len > 0 {
+        let s = std::slice::from_raw_parts(last_line as *const u8, last_len);
+        let trimmed = std::str::from_utf8(s).unwrap_or("").trim();
+        trimmed.to_string()
+    } else if is_signal {
+        format!("Updater process killed by signal {}", status_or_signal)
+    } else {
+        format!("Updater process exited with status {}", status_or_signal)
+    };
+    let bytes = msg.as_bytes();
+    let write_len = mocktail_rust_trim_to_utf8_boundary(bytes.as_ptr(), bytes.len(), 400);
+    *out_len = write_len;
+    if out_buf.is_null() || cap < write_len {
+        return if out_buf.is_null() { 0 } else { -2 };
+    }
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, write_len);
+    0
+}
+
+// ============================================================================
+// 56. Desktop App Policy & Layout Normalization
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_normalize_desktop_layout(
+    policy_json: *const c_char,
+    p_len: usize,
+    forced_theme: *const c_char,
+    t_len: usize,
+    out_buf: *mut u8,
+    cap: usize,
+    out_len: *mut usize,
+) -> i32 {
+    if policy_json.is_null() || out_len.is_null() || p_len == 0 {
+        return -1;
+    }
+    let slice = std::slice::from_raw_parts(policy_json as *const u8, p_len);
+    let mut map: serde_json::Map<String, serde_json::Value> = match serde_json::from_slice(slice) {
+        Ok(serde_json::Value::Object(m)) => m,
+        _ => return -1,
+    };
+
+    map.insert("PlatformGroup".to_string(), serde_json::Value::String("Desktop".to_string()));
+    map.insert("UseGridHomePage".to_string(), serde_json::Value::Bool(true));
+    map.insert("UseGridPageLayout".to_string(), serde_json::Value::Bool(true));
+    map.insert("SystemBarPlacement".to_string(), serde_json::Value::String("Left".to_string()));
+    map.insert("ShouldSystemBarUsuallyBePresent".to_string(), serde_json::Value::Bool(true));
+    map.insert(
+        "DevicePreferencesPersistentPresenceVariant".to_string(),
+        serde_json::Value::String("windows".to_string()),
+    );
+    map.insert("ShowUncheckedBadge".to_string(), serde_json::Value::Bool(false));
+
+    let theme = if !forced_theme.is_null() && t_len > 0 {
+        let t_slice = std::slice::from_raw_parts(forced_theme as *const u8, t_len);
+        std::str::from_utf8(t_slice).unwrap_or("").to_string()
+    } else {
+        String::new()
+    };
+    map.insert("ForceTheme".to_string(), serde_json::Value::String(theme));
+
+    let serialized = match serde_json::to_string(&serde_json::Value::Object(map)) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let bytes = serialized.as_bytes();
+    *out_len = bytes.len();
+    if out_buf.is_null() || cap < bytes.len() {
+        return if out_buf.is_null() { 0 } else { -2 };
+    }
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_merge_desktop_app_policy_settings(
+    policy_json: *const c_char,
+    p_len: usize,
+    base_json: *const c_char,
+    b_len: usize,
+    out_buf: *mut u8,
+    cap: usize,
+    out_len: *mut usize,
+) -> i32 {
+    if policy_json.is_null() || out_len.is_null() || p_len == 0 {
+        return -1;
+    }
+    let p_slice = std::slice::from_raw_parts(policy_json as *const u8, p_len);
+    let p_str = match std::str::from_utf8(p_slice) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    match serde_json::from_str::<serde_json::Value>(p_str) {
+        Ok(serde_json::Value::Object(_)) => {}
+        _ => return -1,
+    };
+
+    let mut overrides: serde_json::Map<String, serde_json::Value> = if !base_json.is_null() && b_len > 0 {
+        let b_slice = std::slice::from_raw_parts(base_json as *const u8, b_len);
+        match serde_json::from_slice(b_slice) {
+            Ok(serde_json::Value::Object(m)) => m,
+            _ => return -2,
+        }
+    } else {
+        serde_json::Map::new()
+    };
+
+    let override_key = "FStringAppConfigurationOverrideAppPolicy";
+    if let Some(existing) = overrides.get(override_key) {
+        if let Some(existing_str) = existing.as_str() {
+            if existing_str != p_str {
+                return -3; // Conflict
+            }
+        } else {
+            return -3; // Not a string
+        }
+    }
+
+    overrides.insert(override_key.to_string(), serde_json::Value::String(p_str.to_string()));
+    overrides.entry("FFlagLuaAppChartsAppPage".to_string()).or_insert_with(|| serde_json::Value::String("False".to_string()));
+
+    let serialized = match serde_json::to_string(&serde_json::Value::Object(overrides)) {
+        Ok(s) => s,
+        Err(_) => return -4,
+    };
+    let bytes = serialized.as_bytes();
+    *out_len = bytes.len();
+    if out_buf.is_null() || cap < bytes.len() {
+        return if out_buf.is_null() { 0 } else { -5 };
+    }
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());
+    0
+}
+
+// ============================================================================
+// 57. Browser Tracker Service & Cookie Helpers
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_browser_tracker_is_valid_id(
+    value: *const c_char,
+    len: usize,
+) -> bool {
+    if value.is_null() || len == 0 || len > 20 {
+        return false;
+    }
+    let slice = std::slice::from_raw_parts(value as *const u8, len);
+    if slice[0] == b'0' {
+        return false;
+    }
+    match std::str::from_utf8(slice) {
+        Ok(s) => match s.parse::<u64>() {
+            Ok(n) => n != 0,
+            Err(_) => false,
+        },
+        Err(_) => false,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_browser_tracker_extract_cookie(
+    cookies: *const c_char,
+    c_len: usize,
+    name: *const c_char,
+    n_len: usize,
+    out_buf: *mut u8,
+    cap: usize,
+    out_len: *mut usize,
+) -> i32 {
+    if cookies.is_null() || name.is_null() || out_len.is_null() || n_len == 0 {
+        return -1;
+    }
+    *out_len = 0;
+    if c_len == 0 {
+        return 1; // not found
+    }
+    let c_slice = std::slice::from_raw_parts(cookies as *const u8, c_len);
+    let n_slice = std::slice::from_raw_parts(name as *const u8, n_len);
+    let cookies_str = match std::str::from_utf8(c_slice) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let name_str = match std::str::from_utf8(n_slice) {
+        Ok(s) => s.trim(),
+        Err(_) => return -1,
+    };
+
+    for part in cookies_str.split(&[';', '\r', '\n'][..]) {
+        let part_trimmed = part.trim();
+        if let Some((k, v)) = part_trimmed.split_once('=') {
+            if k.trim() == name_str {
+                let val_trimmed = v.trim();
+                let v_bytes = val_trimmed.as_bytes();
+                *out_len = v_bytes.len();
+                if out_buf.is_null() || cap < v_bytes.len() {
+                    return if out_buf.is_null() { 0 } else { -2 };
+                }
+                std::ptr::copy_nonoverlapping(v_bytes.as_ptr(), out_buf, v_bytes.len());
+                return 0;
+            }
+        }
+    }
+    1 // not found
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_browser_tracker_has_cookie(
+    cookies: *const c_char,
+    c_len: usize,
+    name: *const c_char,
+    n_len: usize,
+) -> bool {
+    let mut dummy_len = 0usize;
+    mocktail_rust_browser_tracker_extract_cookie(
+        cookies,
+        c_len,
+        name,
+        n_len,
+        std::ptr::null_mut(),
+        0,
+        &mut dummy_len,
+    ) == 0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_browser_tracker_from_headers(
+    headers: *const c_char,
+    h_len: usize,
+    out_buf: *mut u8,
+    cap: usize,
+    out_len: *mut usize,
+) -> i32 {
+    if headers.is_null() || out_len.is_null() || h_len == 0 {
+        return -1;
+    }
+    *out_len = 0;
+    let h_slice = std::slice::from_raw_parts(headers as *const u8, h_len);
+    let headers_str = match std::str::from_utf8(h_slice) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let cookie_name = b"RBXEventTrackerV2";
+
+    for line in headers_str.lines() {
+        let trimmed = line.trim();
+        if trimmed.len() >= 11 && trimmed[..11].eq_ignore_ascii_case("set-cookie:") {
+            let rest = &trimmed[11..];
+            let rc = mocktail_rust_browser_tracker_extract_cookie(
+                rest.as_ptr() as *const c_char,
+                rest.len(),
+                cookie_name.as_ptr() as *const c_char,
+                cookie_name.len(),
+                out_buf,
+                cap,
+                out_len,
+            );
+            if rc == 0 {
+                return 0;
+            }
+        }
+    }
+    1 // not found
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -10134,6 +10633,121 @@ integrations:
             ), 0);
             assert!(take_latest);
             assert!(take_preferred);
+        }
+    }
+
+    #[test]
+    fn test_memory_and_statm_helpers() {
+        unsafe {
+            assert_eq!(mocktail_rust_statm_pages_to_bytes(100, 4096), 409600);
+            let statm = CString::new("1000 250 50 10 0 200 0\n").unwrap();
+            let mut resident = 0u64;
+            assert_eq!(mocktail_rust_parse_proc_statm(statm.as_ptr(), statm.as_bytes().len(), &mut resident), 0);
+            assert_eq!(resident, 250);
+
+            assert!(mocktail_rust_memory_limit_exceeded(500, 100, 550));
+            assert!(!mocktail_rust_memory_limit_exceeded(500, 100, 700));
+
+            let mut buf = [0u8; 256];
+            let mut len = 0usize;
+            assert_eq!(mocktail_rust_format_memory_limit_message(1024 * 1024 * 512, 1024 * 1024 * 1024, buf.as_mut_ptr(), buf.len(), &mut len), 0);
+            let msg = std::str::from_utf8(&buf[..len]).unwrap();
+            assert!(msg.contains("RSS+swap=512 MiB"));
+            assert!(msg.contains("limit=1024 MiB"));
+        }
+    }
+
+    #[test]
+    fn test_preflight_and_diagnostic_helpers() {
+        unsafe {
+            let data = "hello world \u{1F600}".as_bytes();
+            let trim = mocktail_rust_trim_to_utf8_boundary(data.as_ptr(), data.len(), data.len() - 2);
+            assert_eq!(trim, 12); // Cuts at the emoji boundary
+
+            let line = CString::new("[native-updater] signature verification failed\n").unwrap();
+            let mut out = [0u8; 128];
+            let mut out_len = 0usize;
+            let mut is_failure = false;
+            assert_eq!(mocktail_rust_parse_updater_stderr_line(line.as_ptr(), line.as_bytes().len(), out.as_mut_ptr(), out.len(), &mut out_len, &mut is_failure), 0);
+            assert!(is_failure);
+            let parsed_detail = std::str::from_utf8(&out[..out_len]).unwrap();
+            assert_eq!(parsed_detail, "signature verification failed\n");
+
+            let env_str = CString::new("MOCKTAIL_DEBUG=1").unwrap();
+            let name_str = CString::new("MOCKTAIL_DEBUG").unwrap();
+            assert!(mocktail_rust_is_env_entry(env_str.as_ptr(), env_str.as_bytes().len(), name_str.as_ptr(), name_str.as_bytes().len()));
+
+            let mut fail_buf = [0u8; 256];
+            let mut fail_len = 0usize;
+            assert_eq!(mocktail_rust_format_preflight_failure(137, false, std::ptr::null(), 0, fail_buf.as_mut_ptr(), fail_buf.len(), &mut fail_len), 0);
+            let formatted = std::str::from_utf8(&fail_buf[..fail_len]).unwrap();
+            assert_eq!(formatted, "Updater process exited with status 137");
+        }
+    }
+
+    #[test]
+    fn test_desktop_app_policy_helpers() {
+        unsafe {
+            let base_policy = CString::new(r#"{"PlatformGroup":"Mobile"}"#).unwrap();
+            let theme = CString::new("dark").unwrap();
+            let mut out = [0u8; 512];
+            let mut out_len = 0usize;
+            assert_eq!(mocktail_rust_normalize_desktop_layout(
+                base_policy.as_ptr(), base_policy.as_bytes().len(),
+                theme.as_ptr(), theme.as_bytes().len(),
+                out.as_mut_ptr(), out.len(), &mut out_len
+            ), 0);
+            let norm = std::str::from_utf8(&out[..out_len]).unwrap();
+            assert!(norm.contains(r#""PlatformGroup":"Desktop""#));
+            assert!(norm.contains(r#""ForceTheme":"dark""#));
+
+            let base_settings = CString::new(r#"{"FFlagExisting":"True"}"#).unwrap();
+            let mut merged = [0u8; 512];
+            let mut merged_len = 0usize;
+            assert_eq!(mocktail_rust_merge_desktop_app_policy_settings(
+                norm.as_ptr() as *const c_char, norm.len(),
+                base_settings.as_ptr(), base_settings.as_bytes().len(),
+                merged.as_mut_ptr(), merged.len(), &mut merged_len
+            ), 0);
+            let merged_str = std::str::from_utf8(&merged[..merged_len]).unwrap();
+            assert!(merged_str.contains("FStringAppConfigurationOverrideAppPolicy"));
+            assert!(merged_str.contains(r#""FFlagLuaAppChartsAppPage":"False""#));
+        }
+    }
+
+    #[test]
+    fn test_browser_tracker_and_cookie_helpers() {
+        unsafe {
+            let valid_id = CString::new("123456789012345678").unwrap();
+            let zero_id = CString::new("012345").unwrap();
+            assert!(mocktail_rust_browser_tracker_is_valid_id(valid_id.as_ptr(), valid_id.as_bytes().len()));
+            assert!(!mocktail_rust_browser_tracker_is_valid_id(zero_id.as_ptr(), zero_id.as_bytes().len()));
+
+            let cookie_header = CString::new("a=1; RBXEventTrackerV2=browser_id:987654321; c=3").unwrap();
+            let name = CString::new("RBXEventTrackerV2").unwrap();
+            let mut cookie_val = [0u8; 64];
+            let mut cookie_len = 0usize;
+            assert_eq!(mocktail_rust_browser_tracker_extract_cookie(
+                cookie_header.as_ptr(), cookie_header.as_bytes().len(),
+                name.as_ptr(), name.as_bytes().len(),
+                cookie_val.as_mut_ptr(), cookie_val.len(), &mut cookie_len
+            ), 0);
+            let extracted = std::str::from_utf8(&cookie_val[..cookie_len]).unwrap();
+            assert_eq!(extracted, "browser_id:987654321");
+            assert!(mocktail_rust_browser_tracker_has_cookie(
+                cookie_header.as_ptr(), cookie_header.as_bytes().len(),
+                name.as_ptr(), name.as_bytes().len()
+            ));
+
+            let headers = CString::new("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nSet-Cookie: RBXEventTrackerV2=from_header_token; Path=/\r\n\r\n").unwrap();
+            let mut hdr_cookie = [0u8; 64];
+            let mut hdr_len = 0usize;
+            assert_eq!(mocktail_rust_browser_tracker_from_headers(
+                headers.as_ptr(), headers.as_bytes().len(),
+                hdr_cookie.as_mut_ptr(), hdr_cookie.len(), &mut hdr_len
+            ), 0);
+            let hdr_extracted = std::str::from_utf8(&hdr_cookie[..hdr_len]).unwrap();
+            assert_eq!(hdr_extracted, "from_header_token");
         }
     }
 

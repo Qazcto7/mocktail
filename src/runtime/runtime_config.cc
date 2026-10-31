@@ -363,7 +363,7 @@ RuntimeConfig RuntimeConfig::FromEnvironment(const Environment& environment) {
   }
   bool discord_booleans_valid = true;
   config.discord_rpc_.enabled = ReadBoolean(
-      environment, "MOCKTAIL_DISCORD_RPC_ENABLED", true,
+      environment, "MOCKTAIL_DISCORD_RPC_ENABLED", false,
       &discord_booleans_valid);
   config.discord_rpc_.show_place_name = ReadBoolean(
       environment, "MOCKTAIL_DISCORD_RPC_SHOW_PLACE_NAME", true,

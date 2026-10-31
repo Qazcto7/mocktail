@@ -18,7 +18,6 @@ namespace mocktail {
 namespace runtime {
 namespace {
 
-constexpr std::uint64_t kBytesPerMebibyte = 1024U * 1024U;
 constexpr int kWatchdogPollMilliseconds = 100;
 
 void WriteAllBestEffort(int descriptor, std::string_view bytes) {
@@ -125,23 +124,17 @@ void MemoryLimitWatchdog::Run() {
       0, static_cast<long>(kWatchdogPollMilliseconds) * 1000L * 1000L};
   while (!stop_requested_.load(std::memory_order_acquire)) {
     const ProcessMemoryUsage usage = ReadCurrentProcessMemory();
-    if (usage.valid && usage.committed_bytes() >= limit_bytes_) {
-      const std::uint64_t used_mb =
-          usage.committed_bytes() / kBytesPerMebibyte;
-      const std::uint64_t limit_mb = limit_bytes_ / kBytesPerMebibyte;
-      std::array<char, 256> message{};
-      const int length = std::snprintf(
-          message.data(), message.size(),
-          "[memory] limit exceeded: RSS+swap=%llu MiB, limit=%llu MiB; "
-          "terminating Mocktail with exit 137\n",
-          static_cast<unsigned long long>(used_mb),
-          static_cast<unsigned long long>(limit_mb));
-      if (length > 0) {
-        const std::size_t write_size =
-            std::min(static_cast<std::size_t>(length), message.size() - 1U);
+    if (usage.valid && mocktail_rust_memory_limit_exceeded(
+                           usage.resident_bytes, usage.swap_bytes, limit_bytes_)) {
+      std::array<uint8_t, 256> message{};
+      std::size_t out_len = 0;
+      if (mocktail_rust_format_memory_limit_message(
+              usage.committed_bytes(), limit_bytes_, message.data(),
+              message.size(), &out_len) == 0 && out_len > 0) {
         WriteAllBestEffort(
             STDERR_FILENO,
-            std::string_view(message.data(), write_size));
+            std::string_view(reinterpret_cast<const char*>(message.data()),
+                             out_len));
       }
       std::_Exit(137);
     }

@@ -213,6 +213,13 @@ int mocktail_rust_parse_roblox_cookie(
     size_t out_cap,
     size_t* out_len);
 
+int mocktail_rust_parse_webview_roblox_cookie(
+    const char* raw_input,
+    size_t in_len,
+    char* out_buf,
+    size_t cap,
+    size_t* out_len);
+
 // ============================================================================
 // 10. Roblox MessageBus JSON & Permissions Bridge
 // ============================================================================
@@ -1279,6 +1286,115 @@ int mocktail_rust_update_plan_evaluate(
     uint64_t preferred_code,
     bool* out_take_latest,
     bool* out_take_preferred);
+
+// ============================================================================
+// 54. Memory Watchdog & Statm Helpers
+// ============================================================================
+
+uint64_t mocktail_rust_statm_pages_to_bytes(
+    uint64_t pages,
+    uint64_t page_size);
+
+int32_t mocktail_rust_parse_proc_statm(
+    const char* statm_content,
+    size_t len,
+    uint64_t* out_resident_pages);
+
+bool mocktail_rust_memory_limit_exceeded(
+    uint64_t resident_bytes,
+    uint64_t swap_bytes,
+    uint64_t limit_bytes);
+
+int32_t mocktail_rust_format_memory_limit_message(
+    uint64_t used_bytes,
+    uint64_t limit_bytes,
+    uint8_t* out_buf,
+    size_t cap,
+    size_t* out_len);
+
+// ============================================================================
+// 55. Payload Update Preflight & Diagnostic Relay
+// ============================================================================
+
+size_t mocktail_rust_trim_to_utf8_boundary(
+    const uint8_t* data,
+    size_t len,
+    size_t max_bytes);
+
+int32_t mocktail_rust_parse_updater_stderr_line(
+    const char* line,
+    size_t len,
+    uint8_t* out_buf,
+    size_t cap,
+    size_t* out_len,
+    bool* out_is_failure);
+
+bool mocktail_rust_is_env_entry(
+    const char* entry,
+    size_t entry_len,
+    const char* name,
+    size_t name_len);
+
+int32_t mocktail_rust_format_preflight_failure(
+    int32_t status_or_signal,
+    bool is_signal,
+    const char* last_line,
+    size_t last_len,
+    uint8_t* out_buf,
+    size_t cap,
+    size_t* out_len);
+
+// ============================================================================
+// 56. Desktop App Policy & Layout Normalization
+// ============================================================================
+
+int32_t mocktail_rust_normalize_desktop_layout(
+    const char* policy_json,
+    size_t p_len,
+    const char* forced_theme,
+    size_t t_len,
+    uint8_t* out_buf,
+    size_t cap,
+    size_t* out_len);
+
+int32_t mocktail_rust_merge_desktop_app_policy_settings(
+    const char* policy_json,
+    size_t p_len,
+    const char* base_json,
+    size_t b_len,
+    uint8_t* out_buf,
+    size_t cap,
+    size_t* out_len);
+
+// ============================================================================
+// 57. Browser Tracker Service & Cookie Helpers
+// ============================================================================
+
+bool mocktail_rust_browser_tracker_is_valid_id(
+    const char* value,
+    size_t len);
+
+int32_t mocktail_rust_browser_tracker_extract_cookie(
+    const char* cookies,
+    size_t c_len,
+    const char* name,
+    size_t n_len,
+    uint8_t* out_buf,
+    size_t cap,
+    size_t* out_len);
+
+bool mocktail_rust_browser_tracker_has_cookie(
+    const char* cookies,
+    size_t c_len,
+    const char* name,
+    size_t n_len);
+
+int32_t mocktail_rust_browser_tracker_from_headers(
+    const char* headers,
+    size_t h_len,
+    uint8_t* out_buf,
+    size_t cap,
+    size_t* out_len);
 
 #ifdef __cplusplus
 }

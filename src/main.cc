@@ -669,17 +669,15 @@ int main(int argc, char* argv[]) {
         mocktail::runtime::RunPayloadUpdatePreflight(environment, paths);
     if (!update_preflight) {
       std::cerr << "[FATAL] " << update_preflight.error;
-      if (!update_preflight.details.empty()) {
-        // Without this the dialog only ever said "could not update or verify",
-        // which is indistinguishable between a provider outage, a rejected
-        // signature, and a full disk.
-        std::cerr << ": " << update_preflight.details;
-        failure_dialog.SetMessage(
-            "Mocktail could not update or verify the Roblox installation.\n\n" +
-            update_preflight.details + "\n\nSession log: " +
-            (paths.logs_root() / "sessions").string());
-      }
-      std::cerr << '\n';
+      const std::string diagnostic_msg =
+          !update_preflight.details.empty()
+              ? update_preflight.details
+              : update_preflight.error;
+      std::cerr << ": " << diagnostic_msg << '\n';
+      failure_dialog.SetMessage(
+          "Mocktail could not update or verify the Roblox installation.\n\n" +
+          diagnostic_msg + "\n\nSession log: " +
+          (paths.logs_root() / "sessions").string());
       return EXIT_FAILURE;
     }
     failure_dialog.SetMessage(

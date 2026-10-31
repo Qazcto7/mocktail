@@ -39,6 +39,10 @@ Response Answer(JNIEnv* env, jstring message, std::size_t method,
   const std::string owned(bytes, static_cast<std::size_t>(size));
   env->ReleaseStringUTFChars(message, bytes);
 
+  const auto request = nlohmann::json::parse(owned, nullptr, false);
+  if (!request.is_object())
+    return rejected;
+
   if (support) {
     if (mocktail_rust_validate_json_depth(owned.c_str(), 8) != 1) return rejected;
     return {{{"permissions", {kMicrophone, kLocalNetwork}}}, 0, "supported"};
@@ -58,8 +62,7 @@ Response Answer(JNIEnv* env, jstring message, std::size_t method,
   }
 
   if (upsell) {
-    const auto request = nlohmann::json::parse(owned, nullptr, false);
-    const auto features = request.is_object() ? request.find("permissions") : request.end();
+    const auto features = request.find("permissions");
     return {{{"upsellStatus", "HIDE"},
              {"hiddenUpsellPermissions", features != request.end() ? *features : nlohmann::json::array()}},
             0,

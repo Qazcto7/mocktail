@@ -84,11 +84,31 @@ bool UnsetEnvironmentValue(const char* name, std::string* error) {
 RuntimeConfigLoadResult LoadRuntimeConfig(
     const Environment& environment, const std::filesystem::path& config_file) {
   RuntimeConfigLoadResult result;
-  std::error_code filesystem_error;
-  if (!std::filesystem::exists(config_file, filesystem_error) ||
-      filesystem_error) {
+  constexpr std::size_t kMaximumRuntimeConfigBytes = 1024U * 1024U;
+  struct stat metadata = {};
+  if (lstat(config_file.c_str(), &metadata) != 0) {
+    if (errno != ENOENT) {
+      result.error =
+          "cannot open runtime configuration file: " + config_file.string();
+      return result;
+    }
     result.file_loaded = false;
   } else {
+    if (S_ISLNK(metadata.st_mode)) {
+      result.error =
+          "cannot open runtime configuration file: refusing symlink";
+      return result;
+    }
+    if (!S_ISREG(metadata.st_mode)) {
+      result.error =
+          "cannot open runtime configuration file: not a regular file";
+      return result;
+    }
+    if (metadata.st_size > static_cast<off_t>(kMaximumRuntimeConfigBytes)) {
+      result.error = "runtime configuration file must be no larger than 1 MiB";
+      return result;
+    }
+
     std::ifstream file(config_file, std::ios::binary);
     if (!file) {
       result.error =

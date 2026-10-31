@@ -1,5 +1,6 @@
 #include "runtime/payload_update_preflight.h"
 
+#include "mocktail/mocktail_rust.h"
 #include "runtime/helper_environment.h"
 
 #include <fcntl.h>
@@ -214,8 +215,8 @@ class UpdateProgressMonitor final {
 };
 
 bool IsEnvironmentEntry(std::string_view entry, std::string_view name) {
-  return entry.size() > name.size() && entry[name.size()] == '=' &&
-         entry.substr(0, name.size()) == name;
+  return mocktail_rust_is_env_entry(
+      entry.data(), entry.size(), name.data(), name.size());
 }
 
 bool IsOverriddenEnvironmentEntry(
@@ -255,6 +256,7 @@ class UpdaterStderrRelay final {
   int write_descriptor() const { return descriptors_[1]; }
   void CloseWrite() { CloseDescriptor(&descriptors_[1]); }
   const std::string& failure() const { return failure_; }
+  const std::string& last_line() const { return last_line_; }
 
   // Must run before waitpid: a child that fills the pipe blocks until it is
   // drained, and waiting first would deadlock the launcher.
@@ -287,9 +289,6 @@ class UpdaterStderrRelay final {
   }
 
  private:
-  // An Adwaita alert dialog stays readable well below the packet limit.
-  static constexpr std::size_t kMaximumFailureBytes = 400;
-
   static void CloseDescriptor(int* descriptor) {
     if (*descriptor >= 0) {
       close(*descriptor);
@@ -312,36 +311,34 @@ class UpdaterStderrRelay final {
     }
   }
 
-  // A message cut mid-codepoint fails UTF-8 validation in the dialog helper
-  // and would be replaced by the generic text.
-  static std::string_view TrimToCharacterBoundary(std::string_view text) {
-    if (text.size() <= kMaximumFailureBytes) {
-      return text;
-    }
-    std::size_t size = kMaximumFailureBytes;
-    while (size > 0 &&
-           (static_cast<unsigned char>(text[size]) & 0xC0U) == 0x80U) {
-      --size;
-    }
-    return text.substr(0, size);
-  }
-
   void RecordLine(std::string_view line) {
-    constexpr std::string_view kPrefix = "[native-updater] ";
-    constexpr std::string_view kWarningPrefix = "warning: ";
-    if (line.size() <= kPrefix.size() ||
-        line.substr(0, kPrefix.size()) != kPrefix) {
+    if (line.empty()) {
       return;
     }
-    const std::string_view detail = line.substr(kPrefix.size());
-    if (detail.substr(0, kWarningPrefix.size()) == kWarningPrefix) {
-      return;
+    std::string_view trimmed = line;
+    while (!trimmed.empty() && (trimmed.back() == '\r' ||
+                                trimmed.back() == '\n' ||
+                                trimmed.back() == ' ')) {
+      trimmed.remove_suffix(1);
     }
-    failure_.assign(TrimToCharacterBoundary(detail));
+    if (!trimmed.empty()) {
+      last_line_.assign(trimmed);
+    }
+
+    std::array<uint8_t, 512> buf{};
+    std::size_t out_len = 0;
+    bool is_failure = false;
+    mocktail_rust_parse_updater_stderr_line(
+        line.data(), line.size(), buf.data(), buf.size(), &out_len,
+        &is_failure);
+    if (is_failure && out_len > 0) {
+      failure_.assign(reinterpret_cast<const char*>(buf.data()), out_len);
+    }
   }
 
   int descriptors_[2] = {-1, -1};
   std::string failure_;
+  std::string last_line_;
 };
 
 std::vector<std::string> ChildEnvironment(const RuntimePaths& paths,
@@ -463,6 +460,21 @@ PayloadUpdatePreflightResult RunPayloadUpdatePreflight(
     result.error = force_run_latest ? "forced latest Roblox run failed"
                                      : "Roblox update preflight failed";
     result.details = stderr_relay.failure();
+    if (result.details.empty()) {
+      std::array<uint8_t, 512> buf{};
+      std::size_t out_len = 0;
+      const bool is_sig = WIFSIGNALED(child_status);
+      const int code =
+          is_sig ? WTERMSIG(child_status) : WEXITSTATUS(child_status);
+      const std::string& last = stderr_relay.last_line();
+      mocktail_rust_format_preflight_failure(code, is_sig, last.data(),
+                                             last.size(), buf.data(),
+                                             buf.size(), &out_len);
+      if (out_len > 0) {
+        result.details.assign(reinterpret_cast<const char*>(buf.data()),
+                              out_len);
+      }
+    }
   }
   return result;
 }

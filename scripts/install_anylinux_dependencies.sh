@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 set -Eeuo pipefail
+export LC_ALL=C
 
 AnyLinuxDependencyDie() {
   printf '[anylinux-dependencies] error: %s\n' "$*" >&2

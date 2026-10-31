@@ -603,14 +603,14 @@ TEST(OpenSlQueueTest, GetStatePollsWhilePlaybackReleasesBuffers) {
   std::atomic<int> polls{0};
   std::atomic<int> poll_failures{0};
   std::thread poller([&] {
-    while (!stop_polling.load(std::memory_order_relaxed)) {
+    do {
       opensl_abi::AndroidSimpleBufferQueueState queue_state{};
       if ((*queue)->GetState(queue, &queue_state) !=
           opensl_abi::kResultSuccess) {
         poll_failures.fetch_add(1, std::memory_order_relaxed);
       }
       polls.fetch_add(1, std::memory_order_relaxed);
-    }
+    } while (!stop_polling.load(std::memory_order_relaxed));
   });
 
   const std::vector<std::int16_t> samples(32 * 2, 321);

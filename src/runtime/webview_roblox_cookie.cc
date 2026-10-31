@@ -45,11 +45,11 @@ WebViewRobloxCookieResult PrepareWebViewRobloxCookie(
     return {};
   }
   const std::string_view header = credential.view();
-  std::string null_terminated_header(header);
   std::string extracted(kMaximumWebViewRobloxCookieValueBytes + 1, '\0');
   size_t extracted_len = 0;
-  const int status = mocktail_rust_parse_roblox_cookie(
-      null_terminated_header.c_str(),
+  const int status = mocktail_rust_parse_webview_roblox_cookie(
+      header.data(),
+      header.size(),
       extracted.data(),
       extracted.size(),
       &extracted_len);

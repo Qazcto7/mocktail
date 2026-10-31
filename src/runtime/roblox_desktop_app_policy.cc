@@ -1,5 +1,7 @@
 #include "runtime/roblox_desktop_app_policy.h"
 
+#include "mocktail/mocktail_rust.h"
+
 #define JSON_NOEXCEPTION 1
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -182,14 +184,19 @@ bool HasSuffix(std::string_view value, std::string_view suffix) {
              0;
 }
 
-void NormalizeDesktopLayout(nlohmann::json* policy) {
-  (*policy)["PlatformGroup"] = "Desktop";
-  (*policy)["UseGridHomePage"] = true;
-  (*policy)["UseGridPageLayout"] = true;
-  (*policy)["SystemBarPlacement"] = "Left";
-  (*policy)["ShouldSystemBarUsuallyBePresent"] = true;
-  (*policy)["DevicePreferencesPersistentPresenceVariant"] = "windows";
-  (*policy)["ShowUncheckedBadge"] = false;
+void NormalizeDesktopLayout(nlohmann::json* policy,
+                            std::string_view forced_theme = "") {
+  const std::string dumped = policy->dump();
+  std::vector<uint8_t> out(dumped.size() + 512);
+  std::size_t out_len = 0;
+  if (mocktail_rust_normalize_desktop_layout(
+          dumped.data(), dumped.size(), forced_theme.data(),
+          forced_theme.size(), out.data(), out.size(), &out_len) == 0 &&
+      out_len > 0) {
+    *policy = nlohmann::json::parse(
+        std::string_view(reinterpret_cast<const char*>(out.data()), out_len),
+        nullptr, false, true);
+  }
 }
 
 bool DecodePolicy(const nlohmann::json& encoded, nlohmann::json* policy) {
@@ -330,38 +337,43 @@ bool MergeDesktopAppPolicyClientSettingsOverride(std::string_view policy_json,
     }
     return false;
   }
-  const nlohmann::json policy =
-      nlohmann::json::parse(policy_json, nullptr, false, true);
-  if (policy.is_discarded() || !policy.is_object()) {
+  std::vector<uint8_t> out(policy_json.size() + base_json.size() + 512);
+  std::size_t out_len = 0;
+  int rc = mocktail_rust_merge_desktop_app_policy_settings(
+      policy_json.data(), policy_json.size(), base_json.data(),
+      base_json.size(), out.data(), out.size(), &out_len);
+  if (rc == -5) {
+    out.resize(out_len + 128);
+    rc = mocktail_rust_merge_desktop_app_policy_settings(
+        policy_json.data(), policy_json.size(), base_json.data(),
+        base_json.size(), out.data(), out.size(), &out_len);
+  }
+  if (rc == -1) {
     if (error != nullptr) {
       *error = "desktop app-policy override must be a JSON object";
     }
     return false;
   }
-  nlohmann::json overrides = nlohmann::json::parse(
-      base_json.empty() ? "{}" : base_json, nullptr, false, true);
-  if (overrides.is_discarded() || !overrides.is_object()) {
+  if (rc == -2) {
     if (error != nullptr) {
       *error = "client-settings overrides must be a JSON object";
     }
     return false;
   }
-  const auto existing = overrides.find(kDesktopAppPolicyOverride);
-  if (existing != overrides.end() &&
-      (!existing->is_string() ||
-       existing->get_ref<const std::string&>() != policy_json)) {
+  if (rc == -3) {
     if (error != nullptr) {
       *error = "desktop app-policy conflicts with " +
                std::string(kDesktopAppPolicyOverride);
     }
     return false;
   }
-  overrides[std::string(kDesktopAppPolicyOverride)] = policy_json;
-  // The SDUI Charts page in 2.736/2.738 can pass a table to TextColor3 and
-  // leave the whole LuaApp blank. Default to the working legacy page while
-  // preserving explicit user overrides for testing newer UI patches.
-  overrides.emplace("FFlagLuaAppChartsAppPage", "False");
-  *merged_json = overrides.dump();
+  if (rc != 0) {
+    if (error != nullptr) {
+      *error = "failed to merge desktop app-policy client settings";
+    }
+    return false;
+  }
+  merged_json->assign(reinterpret_cast<const char*>(out.data()), out_len);
   return true;
 }
 

@@ -27,12 +27,7 @@ constexpr std::size_t kMaximumCookieBytes = 64 * 1024;
 constexpr std::string_view kTrackerCookieName = "RBXEventTrackerV2";
 
 bool IsValidId(const std::string& value) {
-  if (value.empty() || value.size() > 20 || value.front() == '0') return false;
-  std::uint64_t parsed = 0;
-  const auto conversion =
-      std::from_chars(value.data(), value.data() + value.size(), parsed);
-  return conversion.ec == std::errc() &&
-         conversion.ptr == value.data() + value.size() && parsed != 0;
+  return mocktail_rust_browser_tracker_is_valid_id(value.data(), value.size());
 }
 
 std::string SuggestedId() {
@@ -93,55 +88,22 @@ bool ReadSmallFile(const std::filesystem::path& path, std::string* contents,
   return true;
 }
 
-std::string_view Trim(std::string_view value) {
-  while (!value.empty() && (value.front() == ' ' || value.front() == '\t'))
-    value.remove_prefix(1);
-  while (!value.empty() && (value.back() == ' ' || value.back() == '\t' ||
-                            value.back() == '\r' || value.back() == '\n'))
-    value.remove_suffix(1);
-  return value;
-}
-
 std::string ExtractCookieValue(std::string_view cookies,
                                std::string_view name) {
-  size_t begin = 0;
-  while (begin < cookies.size()) {
-    while (begin < cookies.size() &&
-           (cookies[begin] == ';' || cookies[begin] == '\r' ||
-            cookies[begin] == '\n' || cookies[begin] == ' '))
-      ++begin;
-    size_t end = cookies.find_first_of(";\r\n", begin);
-    if (end == std::string_view::npos) end = cookies.size();
-    const std::string_view segment = Trim(cookies.substr(begin, end - begin));
-    const size_t equals = segment.find('=');
-    if (equals != std::string_view::npos &&
-        Trim(segment.substr(0, equals)) == name) {
-      return std::string(Trim(segment.substr(equals + 1)));
-    }
-    begin = end + (end < cookies.size());
+  std::array<uint8_t, 256> buf{};
+  std::size_t out_len = 0;
+  if (mocktail_rust_browser_tracker_extract_cookie(
+          cookies.data(), cookies.size(), name.data(), name.size(), buf.data(),
+          buf.size(), &out_len) == 0 &&
+      out_len > 0) {
+    return std::string(reinterpret_cast<const char*>(buf.data()), out_len);
   }
   return {};
 }
 
 bool HasCookie(std::string_view cookies, std::string_view name) {
-  size_t begin = 0;
-  while (begin < cookies.size()) {
-    while (begin < cookies.size() &&
-           (cookies[begin] == ';' || cookies[begin] == '\r' ||
-            cookies[begin] == '\n' || cookies[begin] == ' ')) {
-      ++begin;
-    }
-    size_t end = cookies.find_first_of(";\r\n", begin);
-    if (end == std::string_view::npos) end = cookies.size();
-    const std::string_view segment = Trim(cookies.substr(begin, end - begin));
-    const size_t equals = segment.find('=');
-    if (equals != std::string_view::npos &&
-        Trim(segment.substr(0, equals)) == name) {
-      return true;
-    }
-    begin = end + (end < cookies.size());
-  }
-  return false;
+  return mocktail_rust_browser_tracker_has_cookie(
+      cookies.data(), cookies.size(), name.data(), name.size());
 }
 
 std::string BrowserIdFromTracker(std::string_view tracker) {
@@ -155,16 +117,18 @@ std::string BrowserIdFromTracker(std::string_view tracker) {
 }
 
 std::string TrackerFromResponse(const HttpResponse& response) {
+  std::string headers_blob;
   for (const std::string& header : response.headers) {
-    constexpr std::string_view prefix = "set-cookie:";
-    if (header.size() < prefix.size()) continue;
-    std::string lowered = header.substr(0, prefix.size());
-    for (char& ch : lowered) ch = static_cast<char>(std::tolower(ch));
-    if (lowered != prefix) continue;
-    const std::string value =
-        ExtractCookieValue(Trim(std::string_view(header).substr(prefix.size())),
-                           kTrackerCookieName);
-    if (!value.empty()) return value;
+    headers_blob.append(header);
+    headers_blob.push_back('\n');
+  }
+  std::array<uint8_t, 256> buf{};
+  std::size_t out_len = 0;
+  if (mocktail_rust_browser_tracker_from_headers(
+          headers_blob.data(), headers_blob.size(), buf.data(), buf.size(),
+          &out_len) == 0 &&
+      out_len > 0) {
+    return std::string(reinterpret_cast<const char*>(buf.data()), out_len);
   }
   return {};
 }
