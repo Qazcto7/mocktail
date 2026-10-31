@@ -1,4 +1,5 @@
 #include "runtime/performance_policy.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <sched.h>
 
@@ -74,35 +75,23 @@ bool ParsePhysicsWorkerMode(std::string_view value, PhysicsWorkerMode* mode) {
   if (mode == nullptr) {
     return false;
   }
-  if (value.empty() || value == "auto") {
-    *mode = PhysicsWorkerMode::kAuto;
-    return true;
+  int32_t out_mode = 0;
+  if (!mocktail_rust_performance_parse_physics_worker_mode(
+          value.data(), value.size(), &out_mode)) {
+    return false;
   }
-  if (value == "latency") {
-    *mode = PhysicsWorkerMode::kLatency;
-    return true;
-  }
-  if (value == "throughput") {
-    *mode = PhysicsWorkerMode::kThroughput;
-    return true;
-  }
-  return false;
+  *mode = static_cast<PhysicsWorkerMode>(out_mode);
+  return true;
 }
 
 std::string_view PhysicsWorkerModeName(PhysicsWorkerMode mode) {
-  switch (mode) {
-    case PhysicsWorkerMode::kAuto:
-      return "auto";
-    case PhysicsWorkerMode::kLatency:
-      return "latency";
-    case PhysicsWorkerMode::kThroughput:
-      return "throughput";
-  }
-  return "auto";
+  return mocktail_rust_performance_physics_worker_mode_name(
+      static_cast<int32_t>(mode));
 }
 
 int CalculateThroughputWorkerCount(int available_physical_cores) {
-  return std::max(1, available_physical_cores);
+  return mocktail_rust_performance_calculate_throughput_worker_count(
+      available_physical_cores);
 }
 
 PerformancePolicy ParsePerformancePolicy(
@@ -354,22 +343,23 @@ bool MergeRuntimeClientSettingsOverrides(const FrameRatePolicy& frame_rate,
 }
 
 bool MergeAudioDeviceMenuClientSettingsOverrides(std::string_view base_json,
-                                                 std::string *merged_json,
-                                                 std::string *error) {
-  if (merged_json == nullptr)
-    return false;
-  auto overrides = nlohmann::json::parse(base_json.empty() ? "{}" : base_json,
-                                         nullptr, false, true);
-  if (overrides.is_discarded() || !overrides.is_object()) {
-    if (error)
-      *error = "audio device menu overrides must be a JSON object";
+                                                 std::string* merged_json,
+                                                 std::string* error) {
+  if (merged_json == nullptr) {
     return false;
   }
-  // Use the profiled FMOD count/info/select interface for device enumeration.
-  // RemoteAudioDeviceSync instead uses the unbridged device-list virtuals.
-  overrides["FFlagDebugUseWebRtcAudioDevices"] = "False";
-  overrides["FFlagRemoteAudioDeviceSync"] = "False";
-  *merged_json = overrides.dump();
+  std::string buf(base_json.size() + 256, '\0');
+  size_t out_len = 0;
+  const int rc = mocktail_rust_audio_device_menu_merge_overrides(
+      base_json.data(), base_json.size(), buf.data(), buf.size(), &out_len);
+  if (rc != 0) {
+    if (error != nullptr) {
+      *error = "audio device menu overrides must be a JSON object";
+    }
+    return false;
+  }
+  buf.resize(out_len);
+  *merged_json = std::move(buf);
   return true;
 }
 
@@ -377,25 +367,25 @@ bool MergeAudioCaptureClientSettingsOverrides(bool microphone_enabled,
                                               std::string_view base_json,
                                               std::string* merged_json,
                                               std::string* error) {
+  (void)microphone_enabled;
   if (merged_json == nullptr) {
     if (error != nullptr) {
       *error = "audio capture client-settings output is required";
     }
     return false;
   }
-  nlohmann::json overrides = nlohmann::json::parse(
-      base_json.empty() ? "{}" : base_json, nullptr, false, true);
-  if (overrides.is_discarded() || !overrides.is_object()) {
+  std::string buf(base_json.size() + 256, '\0');
+  size_t out_len = 0;
+  const int rc = mocktail_rust_audio_capture_merge_overrides(
+      base_json.data(), base_json.size(), buf.data(), buf.size(), &out_len);
+  if (rc != 0) {
     if (error != nullptr) {
       *error = "audio capture client-settings input must be a JSON object";
     }
     return false;
   }
-  // PermissionsProtocol now owns authorization. Keep the test bypass off even
-  // when a caller supplied it, so disabled host capture remains denied.
-  (void)microphone_enabled;
-  overrides["DFFlagVoiceChatSkipPermissionCheckForTests"] = "False";
-  *merged_json = overrides.dump();
+  buf.resize(out_len);
+  *merged_json = std::move(buf);
   return true;
 }
 

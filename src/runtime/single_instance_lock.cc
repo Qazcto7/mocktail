@@ -99,11 +99,6 @@ std::string ErrnoMessage(std::string_view operation,
          std::strerror(error_number);
 }
 
-bool IsPositiveDecimal(std::string_view value) {
-  const std::string s(value);
-  return mocktail_rust_is_positive_decimal(s.c_str()) == 1;
-}
-
 }  // namespace
 
 std::string CurrentExecutableInstanceKey() {
@@ -168,37 +163,44 @@ SingleInstanceLock SingleInstanceLock::AcquireForLaunch(
   if (!canary.has_value() || canary->empty() || *canary == "0") {
     return AcquireForCurrentUser();
   }
-  const auto reject = [](std::string error) {
-    return SingleInstanceLock(-1, Status::kError, {}, std::move(error));
+
+  const std::string skip_update =
+      environment.GetOr("MOCKTAIL_SKIP_UPDATE_CHECK", "0");
+  const std::string auto_exit_ms =
+      environment.GetOr("MOCKTAIL_AUTO_EXIT_AFTER_PRESENT_MS", "");
+  const std::string data_root = paths.data_root().lexically_normal().string();
+  const std::string cache_root = paths.cache_root().lexically_normal().string();
+  const std::string state_root = paths.state_root().lexically_normal().string();
+
+  const MocktailRustCanaryPathsInput input{
+      canary->data(),
+      canary->size(),
+      environment.HasNonEmpty("MOCKTAIL_DATA_ROOT"),
+      environment.HasNonEmpty("MOCKTAIL_CACHE_ROOT"),
+      environment.HasNonEmpty("MOCKTAIL_STATE_ROOT"),
+      environment.HasNonEmpty("ROBLOX_LIB_PATH"),
+      environment.HasNonEmpty("MOCKTAIL_ASSET_PATH"),
+      skip_update.data(),
+      skip_update.size(),
+      auto_exit_ms.data(),
+      auto_exit_ms.size(),
+      data_root.data(),
+      data_root.size(),
+      cache_root.data(),
+      cache_root.size(),
+      state_root.data(),
+      state_root.size(),
   };
-  if (*canary != "1" ||
-      !environment.HasNonEmpty("MOCKTAIL_DATA_ROOT") ||
-      !environment.HasNonEmpty("MOCKTAIL_CACHE_ROOT") ||
-      !environment.HasNonEmpty("MOCKTAIL_STATE_ROOT") ||
-      !environment.HasNonEmpty("ROBLOX_LIB_PATH") ||
-      !environment.HasNonEmpty("MOCKTAIL_ASSET_PATH") ||
-      environment.GetOr("MOCKTAIL_SKIP_UPDATE_CHECK", "0") != "1" ||
-      !IsPositiveDecimal(
-          environment.GetOr("MOCKTAIL_AUTO_EXIT_AFTER_PRESENT_MS", ""))) {
-    return reject("isolated canary requires explicit payload, XDG roots, "
-                  "update bypass, and a bounded present timer");
+
+  std::array<char, 256> error_buf{};
+  const int32_t rc =
+      mocktail_rust_single_instance_validate_isolated_canary(
+          &input, error_buf.data(), error_buf.size());
+  if (rc != 0) {
+    return SingleInstanceLock(-1, Status::kError, {}, error_buf.data());
   }
 
-  const std::filesystem::path data_root = paths.data_root().lexically_normal();
-  const std::filesystem::path cache_root =
-      paths.cache_root().lexically_normal();
-  const std::filesystem::path state_root =
-      paths.state_root().lexically_normal();
-  if (!data_root.is_absolute() || !cache_root.is_absolute() ||
-      !state_root.is_absolute() || data_root == cache_root ||
-      data_root == state_root || cache_root == state_root ||
-      data_root.parent_path() != cache_root.parent_path() ||
-      data_root.parent_path() != state_root.parent_path()) {
-    return reject(
-        "isolated canary data, cache, and state roots must be distinct "
-        "absolute siblings");
-  }
-  return Acquire(state_root / "instance.lock");
+  return Acquire(paths.state_root().lexically_normal() / "instance.lock");
 }
 
 SingleInstanceLock SingleInstanceLock::Acquire(

@@ -1,4 +1,5 @@
 #include "runtime/game_mode.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <dlfcn.h>
 #if defined(__GLIBC__)
@@ -62,51 +63,21 @@ bool ParseGameModePolicy(std::string_view value, GameModePolicy* policy) {
   if (policy == nullptr) {
     return false;
   }
-  if (value == "auto") {
-    *policy = GameModePolicy::kAuto;
-    return true;
+  int32_t out_policy = 0;
+  if (!mocktail_rust_game_mode_parse_policy(value.data(), value.size(),
+                                            &out_policy)) {
+    return false;
   }
-  if (value == "on" || value == "1" || value == "true") {
-    *policy = GameModePolicy::kOn;
-    return true;
-  }
-  if (value == "off" || value == "0" || value == "false") {
-    *policy = GameModePolicy::kOff;
-    return true;
-  }
-  return false;
+  *policy = static_cast<GameModePolicy>(out_policy);
+  return true;
 }
 
 const char* GameModePolicyName(GameModePolicy policy) {
-  switch (policy) {
-    case GameModePolicy::kAuto:
-      return "auto";
-    case GameModePolicy::kOn:
-      return "on";
-    case GameModePolicy::kOff:
-      return "off";
-  }
-  return "invalid";
+  return mocktail_rust_game_mode_policy_name(static_cast<int32_t>(policy));
 }
 
 const char* GameModeSessionStateName(GameModeSessionState state) {
-  switch (state) {
-    case GameModeSessionState::kDisabled:
-      return "disabled";
-    case GameModeSessionState::kUnavailable:
-      return "unavailable";
-    case GameModeSessionState::kRequestFailed:
-      return "request-failed";
-    case GameModeSessionState::kAlreadyActive:
-      return "already-active";
-    case GameModeSessionState::kActive:
-      return "active";
-    case GameModeSessionState::kStopped:
-      return "stopped";
-    case GameModeSessionState::kStopFailed:
-      return "stop-failed";
-  }
-  return "invalid";
+  return mocktail_rust_game_mode_session_state_name(static_cast<int32_t>(state));
 }
 
 GameModeSession::~GameModeSession() { (void)Stop(); }

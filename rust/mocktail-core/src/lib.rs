@@ -10338,6 +10338,326 @@ pub unsafe extern "C" fn mocktail_rust_candidate_approval_build_receipt(
 }
 
 // ============================================================================
+// 64. GameMode & Physics Worker Policies (Parsing, States & Worker Counts)
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_game_mode_parse_policy(
+    value: *const c_char,
+    val_len: usize,
+    out_policy: *mut i32,
+) -> bool {
+    if out_policy.is_null() {
+        return false;
+    }
+    let s = match c_to_str(value, val_len) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    if s == "auto" {
+        *out_policy = 0; // kAuto
+        true
+    } else if s == "on" || s == "1" || s == "true" {
+        *out_policy = 1; // kOn
+        true
+    } else if s == "off" || s == "0" || s == "false" {
+        *out_policy = 2; // kOff
+        true
+    } else {
+        false
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_game_mode_policy_name(policy: i32) -> *const c_char {
+    match policy {
+        0 => b"auto\0".as_ptr() as *const c_char,
+        1 => b"on\0".as_ptr() as *const c_char,
+        2 => b"off\0".as_ptr() as *const c_char,
+        _ => b"invalid\0".as_ptr() as *const c_char,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_game_mode_session_state_name(state: i32) -> *const c_char {
+    match state {
+        0 => b"disabled\0".as_ptr() as *const c_char,
+        1 => b"unavailable\0".as_ptr() as *const c_char,
+        2 => b"request-failed\0".as_ptr() as *const c_char,
+        3 => b"already-active\0".as_ptr() as *const c_char,
+        4 => b"active\0".as_ptr() as *const c_char,
+        5 => b"stopped\0".as_ptr() as *const c_char,
+        6 => b"stop-failed\0".as_ptr() as *const c_char,
+        _ => b"invalid\0".as_ptr() as *const c_char,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_performance_parse_physics_worker_mode(
+    value: *const c_char,
+    val_len: usize,
+    out_mode: *mut i32,
+) -> bool {
+    if out_mode.is_null() {
+        return false;
+    }
+    let s = match c_to_str(value, val_len) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    if s.is_empty() || s == "auto" {
+        *out_mode = 0; // kAuto
+        true
+    } else if s == "latency" {
+        *out_mode = 1; // kLatency
+        true
+    } else if s == "throughput" {
+        *out_mode = 2; // kThroughput
+        true
+    } else {
+        false
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_performance_physics_worker_mode_name(mode: i32) -> *const c_char {
+    match mode {
+        0 => b"auto\0".as_ptr() as *const c_char,
+        1 => b"latency\0".as_ptr() as *const c_char,
+        2 => b"throughput\0".as_ptr() as *const c_char,
+        _ => b"auto\0".as_ptr() as *const c_char,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_performance_calculate_throughput_worker_count(
+    available_physical_cores: i32,
+) -> i32 {
+    std::cmp::max(1, available_physical_cores)
+}
+
+// ============================================================================
+// 65. Single Instance Lock Isolated Canary & Sibling Path Gate
+// ============================================================================
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct MocktailRustCanaryPathsInput {
+    pub canary_value: *const c_char,
+    pub canary_len: usize,
+    pub has_data_root: bool,
+    pub has_cache_root: bool,
+    pub has_state_root: bool,
+    pub has_roblox_lib: bool,
+    pub has_asset_path: bool,
+    pub skip_update_value: *const c_char,
+    pub skip_update_len: usize,
+    pub auto_exit_ms_value: *const c_char,
+    pub auto_exit_ms_len: usize,
+    pub data_root: *const c_char,
+    pub data_root_len: usize,
+    pub cache_root: *const c_char,
+    pub cache_root_len: usize,
+    pub state_root: *const c_char,
+    pub state_root_len: usize,
+}
+
+fn is_positive_decimal_str(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    let mut has_non_zero = false;
+    for &b in s.as_bytes() {
+        if !b.is_ascii_digit() {
+            return false;
+        }
+        if b != b'0' {
+            has_non_zero = true;
+        }
+    }
+    has_non_zero
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_single_instance_validate_isolated_canary(
+    input: *const MocktailRustCanaryPathsInput,
+    out_error: *mut c_char,
+    error_cap: usize,
+) -> i32 {
+    if input.is_null() {
+        return -1;
+    }
+    let inp = &*input;
+    let canary = match c_to_str(inp.canary_value, inp.canary_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let skip_update = match c_to_str(inp.skip_update_value, inp.skip_update_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let auto_exit_ms = match c_to_str(inp.auto_exit_ms_value, inp.auto_exit_ms_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let data_root = match c_to_str(inp.data_root, inp.data_root_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let cache_root = match c_to_str(inp.cache_root, inp.cache_root_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let state_root = match c_to_str(inp.state_root, inp.state_root_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    if canary != "1"
+        || !inp.has_data_root
+        || !inp.has_cache_root
+        || !inp.has_state_root
+        || !inp.has_roblox_lib
+        || !inp.has_asset_path
+        || skip_update != "1"
+        || !is_positive_decimal_str(auto_exit_ms)
+    {
+        write_err_msg(
+            out_error,
+            error_cap,
+            "isolated canary requires explicit payload, XDG roots, update bypass, and a bounded present timer",
+        );
+        return 1;
+    }
+
+    let p_data = std::path::Path::new(data_root);
+    let p_cache = std::path::Path::new(cache_root);
+    let p_state = std::path::Path::new(state_root);
+
+    let is_valid_siblings = p_data.is_absolute()
+        && p_cache.is_absolute()
+        && p_state.is_absolute()
+        && p_data != p_cache
+        && p_data != p_state
+        && p_cache != p_state
+        && p_data.parent().is_some()
+        && p_data.parent() == p_cache.parent()
+        && p_data.parent() == p_state.parent();
+
+    if !is_valid_siblings {
+        write_err_msg(
+            out_error,
+            error_cap,
+            "isolated canary data, cache, and state roots must be distinct absolute siblings",
+        );
+        return 2;
+    }
+
+    0
+}
+
+// ============================================================================
+// 66. Audio & HttpClient Overrides Policy Engine
+// ============================================================================
+
+unsafe fn merge_settings_map(
+    base_json: *const c_char,
+    base_len: usize,
+    mut overrides: Vec<(&str, &str)>,
+    out_json: *mut c_char,
+    cap: usize,
+    out_len: *mut usize,
+) -> i32 {
+    if out_json.is_null() || cap == 0 {
+        return -1;
+    }
+    if !out_len.is_null() {
+        *out_len = 0;
+    }
+
+    let base_slice = if !base_json.is_null() && base_len > 0 {
+        std::slice::from_raw_parts(base_json as *const u8, base_len)
+    } else {
+        b"{}"
+    };
+
+    let mut doc: serde_json::Value = match serde_json::from_slice(base_slice) {
+        Ok(v) => v,
+        Err(_) => return -2,
+    };
+
+    let map = match doc.as_object_mut() {
+        Some(m) => m,
+        None => return -2,
+    };
+
+    for (k, v) in overrides.drain(..) {
+        map.insert(k.to_string(), serde_json::Value::String(v.to_string()));
+    }
+
+    let json_str = match serde_json::to_string(&doc) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    let bytes = json_str.as_bytes();
+    if bytes.len() >= cap {
+        return -3;
+    }
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_json as *mut u8, bytes.len());
+    *out_json.add(bytes.len()) = 0;
+    if !out_len.is_null() {
+        *out_len = bytes.len();
+    }
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_http_client_merge_settings_overrides(
+    base_json: *const c_char,
+    base_len: usize,
+    out_json: *mut c_char,
+    cap: usize,
+    out_len: *mut usize,
+) -> i32 {
+    let overrides = vec![
+        ("FFlagUseRuntimeMutexRvHttpClient", "False"),
+        ("DFFlagHttpClientSkipRetryForStreamingRequests", "True"),
+        ("FFlagLuaAppDefaultHttpRetry", "False"),
+    ];
+    merge_settings_map(base_json, base_len, overrides, out_json, cap, out_len)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_audio_device_menu_merge_overrides(
+    base_json: *const c_char,
+    base_len: usize,
+    out_json: *mut c_char,
+    cap: usize,
+    out_len: *mut usize,
+) -> i32 {
+    let overrides = vec![
+        ("FFlagDebugUseWebRtcAudioDevices", "False"),
+        ("FFlagRemoteAudioDeviceSync", "False"),
+    ];
+    merge_settings_map(base_json, base_len, overrides, out_json, cap, out_len)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_audio_capture_merge_overrides(
+    base_json: *const c_char,
+    base_len: usize,
+    out_json: *mut c_char,
+    cap: usize,
+    out_len: *mut usize,
+) -> i32 {
+    let overrides = vec![
+        ("DFFlagVoiceChatSkipPermissionCheckForTests", "False"),
+    ];
+    merge_settings_map(base_json, base_len, overrides, out_json, cap, out_len)
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -12283,6 +12603,118 @@ integrations:
             assert!(rcpt_json.contains(r#""status": "approved""#));
             assert!(rcpt_json.contains(r#""canary_attestation_sha256": ["#));
             assert!(rcpt_json.ends_with('\n'));
+        }
+    }
+
+    #[test]
+    fn test_game_mode_and_physics_policies() {
+        unsafe {
+            let mut policy = -1;
+            let a = CString::new("auto").unwrap();
+            assert!(mocktail_rust_game_mode_parse_policy(a.as_ptr(), a.as_bytes().len(), &mut policy));
+            assert_eq!(policy, 0);
+
+            let on = CString::new("on").unwrap();
+            assert!(mocktail_rust_game_mode_parse_policy(on.as_ptr(), on.as_bytes().len(), &mut policy));
+            assert_eq!(policy, 1);
+
+            let off = CString::new("false").unwrap();
+            assert!(mocktail_rust_game_mode_parse_policy(off.as_ptr(), off.as_bytes().len(), &mut policy));
+            assert_eq!(policy, 2);
+
+            let inv = CString::new("invalid_val").unwrap();
+            assert!(!mocktail_rust_game_mode_parse_policy(inv.as_ptr(), inv.as_bytes().len(), &mut policy));
+
+            assert_eq!(CStr::from_ptr(mocktail_rust_game_mode_policy_name(0)).to_str().unwrap(), "auto");
+            assert_eq!(CStr::from_ptr(mocktail_rust_game_mode_policy_name(1)).to_str().unwrap(), "on");
+            assert_eq!(CStr::from_ptr(mocktail_rust_game_mode_policy_name(2)).to_str().unwrap(), "off");
+            assert_eq!(CStr::from_ptr(mocktail_rust_game_mode_policy_name(99)).to_str().unwrap(), "invalid");
+
+            assert_eq!(CStr::from_ptr(mocktail_rust_game_mode_session_state_name(0)).to_str().unwrap(), "disabled");
+            assert_eq!(CStr::from_ptr(mocktail_rust_game_mode_session_state_name(4)).to_str().unwrap(), "active");
+            assert_eq!(CStr::from_ptr(mocktail_rust_game_mode_session_state_name(99)).to_str().unwrap(), "invalid");
+
+            let mut mode = -1;
+            let lat = CString::new("latency").unwrap();
+            assert!(mocktail_rust_performance_parse_physics_worker_mode(lat.as_ptr(), lat.as_bytes().len(), &mut mode));
+            assert_eq!(mode, 1);
+
+            let tp = CString::new("throughput").unwrap();
+            assert!(mocktail_rust_performance_parse_physics_worker_mode(tp.as_ptr(), tp.as_bytes().len(), &mut mode));
+            assert_eq!(mode, 2);
+
+            assert_eq!(CStr::from_ptr(mocktail_rust_performance_physics_worker_mode_name(1)).to_str().unwrap(), "latency");
+            assert_eq!(mocktail_rust_performance_calculate_throughput_worker_count(8), 8);
+            assert_eq!(mocktail_rust_performance_calculate_throughput_worker_count(0), 1);
+        }
+    }
+
+    #[test]
+    fn test_single_instance_canary_validation() {
+        unsafe {
+            let can = CString::new("1").unwrap();
+            let skip = CString::new("1").unwrap();
+            let timer = CString::new("5000").unwrap();
+            let data = CString::new("/tmp/test/data").unwrap();
+            let cache = CString::new("/tmp/test/cache").unwrap();
+            let state = CString::new("/tmp/test/state").unwrap();
+
+            let inp = MocktailRustCanaryPathsInput {
+                canary_value: can.as_ptr(), canary_len: can.as_bytes().len(),
+                has_data_root: true, has_cache_root: true, has_state_root: true,
+                has_roblox_lib: true, has_asset_path: true,
+                skip_update_value: skip.as_ptr(), skip_update_len: skip.as_bytes().len(),
+                auto_exit_ms_value: timer.as_ptr(), auto_exit_ms_len: timer.as_bytes().len(),
+                data_root: data.as_ptr(), data_root_len: data.as_bytes().len(),
+                cache_root: cache.as_ptr(), cache_root_len: cache.as_bytes().len(),
+                state_root: state.as_ptr(), state_root_len: state.as_bytes().len(),
+            };
+
+            let mut err = [0 as c_char; 256];
+            assert_eq!(mocktail_rust_single_instance_validate_isolated_canary(&inp, err.as_mut_ptr(), err.len()), 0);
+
+            // Missing variable
+            let mut bad_inp = inp;
+            bad_inp.has_roblox_lib = false;
+            assert_eq!(mocktail_rust_single_instance_validate_isolated_canary(&bad_inp, err.as_mut_ptr(), err.len()), 1);
+
+            // Non-sibling paths (different parent)
+            let bad_state = CString::new("/other/test/state").unwrap();
+            bad_inp.has_roblox_lib = true;
+            bad_inp.state_root = bad_state.as_ptr();
+            bad_inp.state_root_len = bad_state.as_bytes().len();
+            assert_eq!(mocktail_rust_single_instance_validate_isolated_canary(&bad_inp, err.as_mut_ptr(), err.len()), 2);
+        }
+    }
+
+    #[test]
+    fn test_settings_overrides_engine() {
+        unsafe {
+            let base = CString::new(r#"{"ExistingKey":"123"}"#).unwrap();
+            let mut out = [0 as c_char; 1024];
+            let mut len = 0usize;
+
+            assert_eq!(mocktail_rust_http_client_merge_settings_overrides(
+                base.as_ptr(), base.as_bytes().len(),
+                out.as_mut_ptr(), out.len(), &mut len
+            ), 0);
+            let s1 = CStr::from_ptr(out.as_ptr()).to_str().unwrap();
+            assert!(s1.contains(r#""ExistingKey":"123""#));
+            assert!(s1.contains(r#""FFlagUseRuntimeMutexRvHttpClient":"False""#));
+
+            assert_eq!(mocktail_rust_audio_device_menu_merge_overrides(
+                base.as_ptr(), base.as_bytes().len(),
+                out.as_mut_ptr(), out.len(), &mut len
+            ), 0);
+            let s2 = CStr::from_ptr(out.as_ptr()).to_str().unwrap();
+            assert!(s2.contains(r#""FFlagDebugUseWebRtcAudioDevices":"False""#));
+
+            assert_eq!(mocktail_rust_audio_capture_merge_overrides(
+                base.as_ptr(), base.as_bytes().len(),
+                out.as_mut_ptr(), out.len(), &mut len
+            ), 0);
+            let s3 = CStr::from_ptr(out.as_ptr()).to_str().unwrap();
+            assert!(s3.contains(r#""DFFlagVoiceChatSkipPermissionCheckForTests":"False""#));
         }
     }
 

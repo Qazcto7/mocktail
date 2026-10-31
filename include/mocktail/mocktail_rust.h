@@ -1670,6 +1670,83 @@ int32_t mocktail_rust_candidate_approval_build_receipt(
     size_t cap,
     size_t* out_len);
 
+// ============================================================================
+// 64. GameMode & Physics Worker Policies (Parsing, States & Worker Counts)
+// ============================================================================
+
+bool mocktail_rust_game_mode_parse_policy(
+    const char* value,
+    size_t val_len,
+    int32_t* out_policy);
+
+const char* mocktail_rust_game_mode_policy_name(int32_t policy);
+
+const char* mocktail_rust_game_mode_session_state_name(int32_t state);
+
+bool mocktail_rust_performance_parse_physics_worker_mode(
+    const char* value,
+    size_t val_len,
+    int32_t* out_mode);
+
+const char* mocktail_rust_performance_physics_worker_mode_name(int32_t mode);
+
+int32_t mocktail_rust_performance_calculate_throughput_worker_count(
+    int32_t available_physical_cores);
+
+// ============================================================================
+// 65. Single Instance Lock Isolated Canary & Sibling Path Gate
+// ============================================================================
+
+typedef struct MocktailRustCanaryPathsInput {
+  const char* canary_value;
+  size_t canary_len;
+  bool has_data_root;
+  bool has_cache_root;
+  bool has_state_root;
+  bool has_roblox_lib;
+  bool has_asset_path;
+  const char* skip_update_value;
+  size_t skip_update_len;
+  const char* auto_exit_ms_value;
+  size_t auto_exit_ms_len;
+  const char* data_root;
+  size_t data_root_len;
+  const char* cache_root;
+  size_t cache_root_len;
+  const char* state_root;
+  size_t state_root_len;
+} MocktailRustCanaryPathsInput;
+
+int32_t mocktail_rust_single_instance_validate_isolated_canary(
+    const MocktailRustCanaryPathsInput* input,
+    char* out_error,
+    size_t error_cap);
+
+// ============================================================================
+// 66. Audio & HttpClient Overrides Policy Engine
+// ============================================================================
+
+int32_t mocktail_rust_http_client_merge_settings_overrides(
+    const char* base_json,
+    size_t base_len,
+    char* out_json,
+    size_t cap,
+    size_t* out_len);
+
+int32_t mocktail_rust_audio_device_menu_merge_overrides(
+    const char* base_json,
+    size_t base_len,
+    char* out_json,
+    size_t cap,
+    size_t* out_len);
+
+int32_t mocktail_rust_audio_capture_merge_overrides(
+    const char* base_json,
+    size_t base_len,
+    char* out_json,
+    size_t cap,
+    size_t* out_len);
+
 #ifdef __cplusplus
 }
 #endif
