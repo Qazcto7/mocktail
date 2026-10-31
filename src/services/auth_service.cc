@@ -1,151 +1,57 @@
 #include "services/auth_service.h"
+#include "mocktail/mocktail_rust.h"
 
 #define JSON_NOEXCEPTION 1
-#include <cctype>
+#include <array>
 #include <cstdint>
 #include <limits>
-#include <nlohmann/json.hpp>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace mocktail {
 namespace services {
 namespace {
 
-constexpr std::string_view kCookieName = ".ROBLOSECURITY";
 constexpr std::string_view kAuthenticatedUserUrl =
     "https://users.roblox.com/v1/users/authenticated";
 
-bool IsCookieDelimiter(char ch) {
-  return ch == ';' || ch == '\r' || ch == '\n' || ch == '\t';
-}
-
 struct ExtractedCookie {
   bool present = false;
-  std::string_view value;
+  std::string value;
 };
 
-std::string_view TrimAsciiWhitespace(std::string_view value) {
-  while (!value.empty() &&
-         std::isspace(static_cast<unsigned char>(value.front()))) {
-    value.remove_prefix(1);
+ExtractedCookie ExtractCookie(std::string_view header) {
+  std::string buf(header.size() + 1, '\0');
+  size_t out_len = 0;
+  bool present = false;
+  if (mocktail_rust_auth_extract_cookie(
+          header.data(), header.size(), &present,
+          buf.data(), buf.size(), &out_len) == 0 &&
+      present) {
+    buf.resize(out_len);
+    return {true, std::move(buf)};
   }
-  while (!value.empty() &&
-         std::isspace(static_cast<unsigned char>(value.back()))) {
-    value.remove_suffix(1);
-  }
-  return value;
+  return {present, {}};
 }
 
 bool IsSafeCookieValue(std::string_view value) {
-  if (value.empty()) {
-    return false;
-  }
-  for (const unsigned char character : value) {
-    // Roblox security cookies are ASCII cookie-octets. Reject whitespace,
-    // controls and non-ASCII bytes instead of placing them in an HTTP header.
-    if (character <= 0x20 || character >= 0x7f || character == ';') {
-      return false;
-    }
-  }
-  return true;
-}
-
-ExtractedCookie ExtractCookie(std::string_view header) {
-  if (header.rfind("_|", 0) == 0) {
-    size_t end = 0;
-    while (end < header.size() && !IsCookieDelimiter(header[end])) {
-      ++end;
-    }
-    return {true, TrimAsciiWhitespace(header.substr(0, end))};
-  }
-
-  size_t segment_begin = 0;
-  while (segment_begin < header.size()) {
-    while (segment_begin < header.size() &&
-           (IsCookieDelimiter(header[segment_begin]) ||
-            std::isspace(static_cast<unsigned char>(header[segment_begin])))) {
-      ++segment_begin;
-    }
-    size_t segment_end = segment_begin;
-    while (segment_end < header.size() &&
-           !IsCookieDelimiter(header[segment_end])) {
-      ++segment_end;
-    }
-
-    const std::string_view segment = TrimAsciiWhitespace(
-        header.substr(segment_begin, segment_end - segment_begin));
-    const size_t equals = segment.find('=');
-    const std::string_view name = TrimAsciiWhitespace(segment.substr(
-        0, equals == std::string_view::npos ? segment.size() : equals));
-    if (name == kCookieName) {
-      if (equals == std::string_view::npos) {
-        return {true, {}};
-      }
-      return {true, TrimAsciiWhitespace(segment.substr(equals + 1))};
-    }
-    segment_begin = segment_end + (segment_end < header.size() ? 1 : 0);
-  }
-  return {};
-}
-
-bool IsRoblosecuritySegment(std::string_view segment) {
-  segment = TrimAsciiWhitespace(segment);
-  const size_t equals = segment.find('=');
-  const std::string_view name = TrimAsciiWhitespace(segment.substr(
-      0, equals == std::string_view::npos ? segment.size() : equals));
-  return name == kCookieName;
-}
-
-bool ParsePositiveUserId(const nlohmann::json& value, int64_t* user_id) {
-  if (value.is_number_unsigned()) {
-    const uint64_t unsigned_id = value.get<uint64_t>();
-    if (unsigned_id == 0 ||
-        unsigned_id >
-            static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
-      return false;
-    }
-    *user_id = static_cast<int64_t>(unsigned_id);
-    return true;
-  }
-  if (!value.is_number_integer()) {
-    return false;
-  }
-  const int64_t signed_id = value.get<int64_t>();
-  if (signed_id <= 0) {
-    return false;
-  }
-  *user_id = signed_id;
-  return true;
+  return mocktail_rust_auth_is_safe_cookie_value(value.data(), value.size());
 }
 
 bool ParseIdentity(const std::string& body, AuthIdentity* identity) {
-  const nlohmann::json document = nlohmann::json::parse(body, nullptr, false);
-  if (document.is_discarded() || !document.is_object()) {
-    return false;
-  }
-
-  const auto id = document.find("id");
-  const auto name = document.find("name");
-  const auto display_name = document.find("displayName");
-  if (id == document.end() || name == document.end() ||
-      display_name == document.end() || !name->is_string() ||
-      !display_name->is_string()) {
-    return false;
-  }
-
   int64_t user_id = -1;
-  if (!ParsePositiveUserId(*id, &user_id)) {
+  std::array<char, 256> name_buf{};
+  std::array<char, 256> display_buf{};
+  if (mocktail_rust_auth_parse_identity(
+          body.data(), body.size(), &user_id,
+          name_buf.data(), name_buf.size(),
+          display_buf.data(), display_buf.size()) != 0) {
     return false;
   }
-  const std::string& username = name->get_ref<const std::string&>();
-  if (username.empty()) {
-    return false;
-  }
-
   identity->user_id = user_id;
-  identity->username = username;
-  identity->display_name = display_name->get_ref<const std::string&>();
+  identity->username = name_buf.data();
+  identity->display_name = display_buf.data();
   return true;
 }
 
@@ -157,7 +63,7 @@ bool AuthService::HasRoblosecurityCookie(const std::string& cookie_header) {
 
 std::string AuthService::ExtractRoblosecurityValue(
     std::string_view cookie_header) {
-  return std::string(ExtractCookie(cookie_header).value);
+  return ExtractCookie(cookie_header).value;
 }
 
 bool AuthService::RedactRejectedRoblosecurity(std::string_view cookie_header,
@@ -170,51 +76,17 @@ bool AuthService::RedactRejectedRoblosecurity(std::string_view cookie_header,
   if (rejected_value.empty()) {
     return false;
   }
-  const ExtractedCookie effective = ExtractCookie(cookie_header);
-  if (!effective.present || effective.value != rejected_value) {
+  std::string out_buf(cookie_header.size() + 1, '\0');
+  size_t out_len = 0;
+  if (mocktail_rust_auth_redact_rejected(
+          cookie_header.data(), cookie_header.size(),
+          rejected_value.data(), rejected_value.size(),
+          out_buf.data(), out_buf.size(), &out_len) != 0) {
     return false;
   }
-
-  redacted_header->assign(cookie_header);
-  bool redacted = false;
-  size_t segment_begin = 0;
-
-  // A raw security value is accepted as the first file segment for backwards
-  // compatibility. Redact it before processing any named segments that may
-  // follow on later delimiter-separated lines.
-  if (cookie_header.rfind("_|", 0) == 0) {
-    size_t segment_end = 0;
-    while (segment_end < cookie_header.size() &&
-           !IsCookieDelimiter(cookie_header[segment_end])) {
-      ++segment_end;
-    }
-    std::fill(redacted_header->begin(), redacted_header->begin() + segment_end,
-              ' ');
-    segment_begin = segment_end;
-    if (segment_begin < cookie_header.size()) {
-      ++segment_begin;
-    }
-    redacted = true;
-  }
-
-  while (segment_begin < cookie_header.size()) {
-    size_t segment_end = segment_begin;
-    while (segment_end < cookie_header.size() &&
-           !IsCookieDelimiter(cookie_header[segment_end])) {
-      ++segment_end;
-    }
-    const size_t next_segment =
-        segment_end + (segment_end < cookie_header.size() ? 1 : 0);
-    const std::string_view segment =
-        cookie_header.substr(segment_begin, segment_end - segment_begin);
-    if (IsRoblosecuritySegment(segment)) {
-      std::fill(redacted_header->begin() + segment_begin,
-                redacted_header->begin() + segment_end, ' ');
-      redacted = true;
-    }
-    segment_begin = next_segment;
-  }
-  return redacted;
+  out_buf.resize(out_len);
+  *redacted_header = std::move(out_buf);
+  return true;
 }
 
 AuthSession AuthService::ResolveSession(std::string_view cookie_header,

@@ -1396,6 +1396,120 @@ int32_t mocktail_rust_browser_tracker_from_headers(
     size_t cap,
     size_t* out_len);
 
+// ============================================================================
+// 58. Auth Service & Credential Processing
+// ============================================================================
+
+int32_t mocktail_rust_auth_extract_cookie(
+    const char* header,
+    size_t header_len,
+    bool* out_present,
+    char* out_buf,
+    size_t cap,
+    size_t* out_len);
+
+bool mocktail_rust_auth_is_safe_cookie_value(
+    const char* value,
+    size_t len);
+
+int32_t mocktail_rust_auth_redact_rejected(
+    const char* header,
+    size_t header_len,
+    const char* rejected_val,
+    size_t rejected_len,
+    char* out_buf,
+    size_t cap,
+    size_t* out_len);
+
+int32_t mocktail_rust_auth_parse_identity(
+    const char* body,
+    size_t body_len,
+    int64_t* out_user_id,
+    char* out_name_buf,
+    size_t name_cap,
+    char* out_display_name_buf,
+    size_t display_cap);
+
+// ============================================================================
+// 59. Cookie Redaction Ranges
+// ============================================================================
+
+typedef struct MocktailRustCookieRedactionRange {
+  size_t begin;
+  size_t end;
+  size_t marker;
+} MocktailRustCookieRedactionRange;
+
+int32_t mocktail_rust_auth_find_redaction_ranges(
+    const char* orig,
+    size_t orig_len,
+    const char* red,
+    size_t red_len,
+    MocktailRustCookieRedactionRange* out_ranges,
+    size_t max_ranges,
+    size_t* out_count);
+
+// ============================================================================
+// 60. Capability Requirements & Input Flags Evaluator
+// ============================================================================
+
+typedef struct MocktailRustCapabilityInputSymbolsPresence {
+  bool has_gamepad_axis_event;
+  bool has_gamepad_button_event;
+  bool has_gamepad_connect_event_with_gamepad_type;
+  bool has_gamepad_disconnect_event;
+  bool has_get_main_window_is_mouse_locked_center;
+  bool has_pass_accelerometer_change;
+  bool has_pass_gravity_change;
+  bool has_pass_gyroscope_change;
+  bool has_pass_input;
+  bool has_pass_long_press_gesture;
+  bool has_pass_mouse_button;
+  bool has_pass_mouse_move;
+  bool has_pass_mouse_pan;
+  bool has_pass_mouse_pinch;
+  bool has_pass_mouse_wheel;
+  bool has_pass_key_event;
+  bool has_sync_textbox_text_and_cursor_position2;
+  bool has_get_text_box_info;
+  bool has_pass_text;
+  bool has_return_pressed_from_on_screen_keyboard;
+  bool has_release_focus;
+  bool has_pass_pan_gesture_multitouch;
+  bool has_pass_pan_gesture_with_velocity;
+  bool has_pass_pinch_gesture;
+  bool has_pass_rotate_gesture;
+  bool has_pass_swipe_gesture;
+  bool has_pass_tap_gesture;
+  bool has_set_accelerometer_enabled;
+  bool has_set_gamepad_supported_key_with_gamepad_type;
+  bool has_set_gamepad_supported_motion_with_gamepad_type;
+  bool has_set_gyroscope_enabled;
+  bool has_set_tv_remote_supported_key;
+  bool has_tv_remote_button_event;
+  bool has_tv_remote_connect_event;
+  bool has_tv_remote_disconnect_event;
+  bool has_update_screen_orientation;
+} MocktailRustCapabilityInputSymbolsPresence;
+
+typedef struct MocktailRustCapabilityInputFlags {
+  int32_t gamepad_api;
+  bool has_gamepad_events;
+  bool has_mouse;
+  bool has_touch;
+  bool has_hardware_keyboard;
+  bool has_text_input;
+  bool has_gestures;
+  bool has_sensors;
+  bool has_tv_remote;
+  bool has_screen_orientation;
+  bool clear_partial_gamepad;
+} MocktailRustCapabilityInputFlags;
+
+void mocktail_rust_capability_eval_input_flags(
+    const MocktailRustCapabilityInputSymbolsPresence* in_presence,
+    MocktailRustCapabilityInputFlags* out_flags);
+
 #ifdef __cplusplus
 }
 #endif

@@ -9180,6 +9180,455 @@ pub unsafe extern "C" fn mocktail_rust_browser_tracker_from_headers(
 }
 
 // ============================================================================
+// 58. Auth Service & Credential Processing
+// ============================================================================
+
+#[inline]
+fn is_auth_cookie_delimiter(b: u8) -> bool {
+    b == b';' || b == b'\r' || b == b'\n' || b == b'\t'
+}
+
+#[inline]
+fn trim_ascii_whitespace(slice: &[u8]) -> &[u8] {
+    let mut start = 0;
+    while start < slice.len() && slice[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    let mut end = slice.len();
+    while end > start && slice[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    &slice[start..end]
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_auth_extract_cookie(
+    header: *const c_char,
+    header_len: usize,
+    out_present: *mut bool,
+    out_buf: *mut c_char,
+    cap: usize,
+    out_len: *mut usize,
+) -> c_int {
+    if out_present.is_null() {
+        return -1;
+    }
+    *out_present = false;
+    if !out_len.is_null() {
+        *out_len = 0;
+    }
+    if header.is_null() || header_len == 0 {
+        return 0;
+    }
+    let slice = std::slice::from_raw_parts(header as *const u8, header_len);
+    if slice.starts_with(b"_|") {
+        let mut end = 0;
+        while end < slice.len() && !is_auth_cookie_delimiter(slice[end]) {
+            end += 1;
+        }
+        let val = trim_ascii_whitespace(&slice[..end]);
+        *out_present = true;
+        if !out_buf.is_null() && !out_len.is_null() {
+            if cap <= val.len() {
+                return -2;
+            }
+            if !val.is_empty() {
+                std::ptr::copy_nonoverlapping(val.as_ptr() as *const c_char, out_buf, val.len());
+            }
+            *out_buf.add(val.len()) = 0;
+            *out_len = val.len();
+        }
+        return 0;
+    }
+
+    let mut segment_begin = 0;
+    while segment_begin < slice.len() {
+        while segment_begin < slice.len() && (is_auth_cookie_delimiter(slice[segment_begin]) || slice[segment_begin].is_ascii_whitespace()) {
+            segment_begin += 1;
+        }
+        let mut segment_end = segment_begin;
+        while segment_end < slice.len() && !is_auth_cookie_delimiter(slice[segment_end]) {
+            segment_end += 1;
+        }
+        let segment = trim_ascii_whitespace(&slice[segment_begin..segment_end]);
+        let equals_pos = segment.iter().position(|&b| b == b'=');
+        let name = match equals_pos {
+            Some(pos) => trim_ascii_whitespace(&segment[..pos]),
+            None => trim_ascii_whitespace(segment),
+        };
+        if name == b".ROBLOSECURITY" {
+            *out_present = true;
+            let val = match equals_pos {
+                Some(pos) => trim_ascii_whitespace(&segment[pos + 1..]),
+                None => &[][..],
+            };
+            if !out_buf.is_null() && !out_len.is_null() {
+                if cap <= val.len() {
+                    return -2;
+                }
+                if !val.is_empty() {
+                    std::ptr::copy_nonoverlapping(val.as_ptr() as *const c_char, out_buf, val.len());
+                }
+                *out_buf.add(val.len()) = 0;
+                *out_len = val.len();
+            }
+            return 0;
+        }
+        segment_begin = segment_end + if segment_end < slice.len() { 1 } else { 0 };
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_auth_is_safe_cookie_value(
+    value: *const c_char,
+    len: usize,
+) -> bool {
+    if value.is_null() || len == 0 {
+        return false;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(value as *const u8, len) };
+    slice.iter().all(|&b| b > 0x20 && b < 0x7f && b != b';')
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_auth_redact_rejected(
+    header: *const c_char,
+    header_len: usize,
+    rejected_val: *const c_char,
+    rejected_len: usize,
+    out_buf: *mut c_char,
+    cap: usize,
+    out_len: *mut usize,
+) -> c_int {
+    if header.is_null() || rejected_val.is_null() || out_buf.is_null() || out_len.is_null() {
+        return -1;
+    }
+    *out_len = 0;
+    if rejected_len == 0 || cap <= header_len {
+        return -1;
+    }
+    let mut effective_present = false;
+    let mut effective_buf = vec![0 as c_char; header_len + 1];
+    let mut effective_len = 0usize;
+    let rc = mocktail_rust_auth_extract_cookie(
+        header, header_len, &mut effective_present,
+        effective_buf.as_mut_ptr(), effective_buf.len(), &mut effective_len,
+    );
+    if rc != 0 || !effective_present {
+        return -1;
+    }
+    let rejected_slice = std::slice::from_raw_parts(rejected_val as *const u8, rejected_len);
+    let effective_slice = std::slice::from_raw_parts(effective_buf.as_ptr() as *const u8, effective_len);
+    if effective_slice != rejected_slice {
+        return -1;
+    }
+
+    std::ptr::copy_nonoverlapping(header, out_buf, header_len);
+    *out_buf.add(header_len) = 0;
+    let out_slice = std::slice::from_raw_parts_mut(out_buf as *mut u8, header_len);
+
+    let mut segment_begin = 0;
+    let mut redacted = false;
+
+    if out_slice.starts_with(b"_|") {
+        let mut segment_end = 0;
+        while segment_end < out_slice.len() && !is_auth_cookie_delimiter(out_slice[segment_end]) {
+            segment_end += 1;
+        }
+        for b in &mut out_slice[0..segment_end] {
+            *b = b' ';
+        }
+        segment_begin = segment_end + if segment_end < out_slice.len() { 1 } else { 0 };
+        redacted = true;
+    }
+
+    while segment_begin < out_slice.len() {
+        let mut segment_end = segment_begin;
+        while segment_end < out_slice.len() && !is_auth_cookie_delimiter(out_slice[segment_end]) {
+            segment_end += 1;
+        }
+        let seg = trim_ascii_whitespace(&out_slice[segment_begin..segment_end]);
+        let equals_pos = seg.iter().position(|&b| b == b'=');
+        let name = match equals_pos {
+            Some(pos) => trim_ascii_whitespace(&seg[..pos]),
+            None => trim_ascii_whitespace(seg),
+        };
+        if name == b".ROBLOSECURITY" {
+            for b in &mut out_slice[segment_begin..segment_end] {
+                *b = b' ';
+            }
+            redacted = true;
+        }
+        segment_begin = segment_end + if segment_end < out_slice.len() { 1 } else { 0 };
+    }
+
+    if !redacted {
+        return -1;
+    }
+    *out_len = header_len;
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_auth_parse_identity(
+    body: *const c_char,
+    body_len: usize,
+    out_user_id: *mut i64,
+    out_name_buf: *mut c_char,
+    name_cap: usize,
+    out_display_name_buf: *mut c_char,
+    display_cap: usize,
+) -> c_int {
+    if body.is_null() || body_len == 0 || out_user_id.is_null() || out_name_buf.is_null() || out_display_name_buf.is_null() {
+        return -1;
+    }
+    *out_user_id = -1;
+    let slice = std::slice::from_raw_parts(body as *const u8, body_len);
+    let val: serde_json::Value = match serde_json::from_slice(slice) {
+        Ok(v) => v,
+        Err(_) => return -2,
+    };
+    let obj = match val.as_object() {
+        Some(o) => o,
+        None => return -3,
+    };
+    let id_val = match obj.get("id") {
+        Some(v) => v,
+        None => return -4,
+    };
+    let user_id = if let Some(n) = id_val.as_number() {
+        if let Some(u) = n.as_u64() {
+            if u == 0 || u > i64::MAX as u64 {
+                return -5;
+            }
+            u as i64
+        } else if let Some(s) = n.as_i64() {
+            if s <= 0 {
+                return -6;
+            }
+            s
+        } else {
+            return -7;
+        }
+    } else {
+        return -8;
+    };
+
+    let name = match obj.get("name").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s,
+        _ => return -9,
+    };
+    let display_name = match obj.get("displayName").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        _ => return -10,
+    };
+
+    if name.len() >= name_cap || display_name.len() >= display_cap {
+        return -11;
+    }
+    std::ptr::copy_nonoverlapping(name.as_ptr() as *const c_char, out_name_buf, name.len());
+    *out_name_buf.add(name.len()) = 0;
+
+    std::ptr::copy_nonoverlapping(display_name.as_ptr() as *const c_char, out_display_name_buf, display_name.len());
+    *out_display_name_buf.add(display_name.len()) = 0;
+
+    *out_user_id = user_id;
+    0
+}
+
+// ============================================================================
+// 59. Cookie Redaction Ranges
+// ============================================================================
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MocktailRustCookieRedactionRange {
+    pub begin: usize,
+    pub end: usize,
+    pub marker: usize,
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_auth_find_redaction_ranges(
+    orig: *const c_char,
+    orig_len: usize,
+    red: *const c_char,
+    red_len: usize,
+    out_ranges: *mut MocktailRustCookieRedactionRange,
+    max_ranges: usize,
+    out_count: *mut usize,
+) -> c_int {
+    if orig.is_null() || red.is_null() || out_ranges.is_null() || out_count.is_null() {
+        return -1;
+    }
+    *out_count = 0;
+    if orig_len != red_len {
+        return -1;
+    }
+    let orig_slice = std::slice::from_raw_parts(orig as *const u8, orig_len);
+    let red_slice = std::slice::from_raw_parts(red as *const u8, red_len);
+
+    let mut segment_begin = 0;
+    let mut count = 0;
+    while segment_begin < orig_len {
+        let mut segment_end = segment_begin;
+        while segment_end < orig_len && !is_auth_cookie_delimiter(orig_slice[segment_end]) {
+            segment_end += 1;
+        }
+        if orig_slice[segment_begin..segment_end] != red_slice[segment_begin..segment_end] {
+            let mut marker = segment_begin;
+            while marker < segment_end && orig_slice[marker] == red_slice[marker] {
+                marker += 1;
+            }
+            if marker == segment_end {
+                *out_count = 0;
+                return -2;
+            }
+            if count < max_ranges {
+                *out_ranges.add(count) = MocktailRustCookieRedactionRange {
+                    begin: segment_begin,
+                    end: segment_end,
+                    marker,
+                };
+                count += 1;
+            }
+        }
+        segment_begin = segment_end + if segment_end < orig_len { 1 } else { 0 };
+    }
+    *out_count = count;
+    0
+}
+
+// ============================================================================
+// 60. Capability Requirements & Input Flags Evaluator
+// ============================================================================
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MocktailRustCapabilityInputSymbolsPresence {
+    pub has_gamepad_axis_event: bool,
+    pub has_gamepad_button_event: bool,
+    pub has_gamepad_connect_event_with_gamepad_type: bool,
+    pub has_gamepad_disconnect_event: bool,
+    pub has_get_main_window_is_mouse_locked_center: bool,
+    pub has_pass_accelerometer_change: bool,
+    pub has_pass_gravity_change: bool,
+    pub has_pass_gyroscope_change: bool,
+    pub has_pass_input: bool,
+    pub has_pass_long_press_gesture: bool,
+    pub has_pass_mouse_button: bool,
+    pub has_pass_mouse_move: bool,
+    pub has_pass_mouse_pan: bool,
+    pub has_pass_mouse_pinch: bool,
+    pub has_pass_mouse_wheel: bool,
+    pub has_pass_key_event: bool,
+    pub has_sync_textbox_text_and_cursor_position2: bool,
+    pub has_get_text_box_info: bool,
+    pub has_pass_text: bool,
+    pub has_return_pressed_from_on_screen_keyboard: bool,
+    pub has_release_focus: bool,
+    pub has_pass_pan_gesture_multitouch: bool,
+    pub has_pass_pan_gesture_with_velocity: bool,
+    pub has_pass_pinch_gesture: bool,
+    pub has_pass_rotate_gesture: bool,
+    pub has_pass_swipe_gesture: bool,
+    pub has_pass_tap_gesture: bool,
+    pub has_set_accelerometer_enabled: bool,
+    pub has_set_gamepad_supported_key_with_gamepad_type: bool,
+    pub has_set_gamepad_supported_motion_with_gamepad_type: bool,
+    pub has_set_gyroscope_enabled: bool,
+    pub has_set_tv_remote_supported_key: bool,
+    pub has_tv_remote_button_event: bool,
+    pub has_tv_remote_connect_event: bool,
+    pub has_tv_remote_disconnect_event: bool,
+    pub has_update_screen_orientation: bool,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MocktailRustCapabilityInputFlags {
+    pub gamepad_api: i32,
+    pub has_gamepad_events: bool,
+    pub has_mouse: bool,
+    pub has_touch: bool,
+    pub has_hardware_keyboard: bool,
+    pub has_text_input: bool,
+    pub has_gestures: bool,
+    pub has_sensors: bool,
+    pub has_tv_remote: bool,
+    pub has_screen_orientation: bool,
+    pub clear_partial_gamepad: bool,
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_capability_eval_input_flags(
+    in_presence: *const MocktailRustCapabilityInputSymbolsPresence,
+    out_flags: *mut MocktailRustCapabilityInputFlags,
+) {
+    if in_presence.is_null() || out_flags.is_null() {
+        return;
+    }
+    let p = &*in_presence;
+    let has_modern_gamepad_api = p.has_gamepad_connect_event_with_gamepad_type
+        && p.has_set_gamepad_supported_key_with_gamepad_type
+        && p.has_set_gamepad_supported_motion_with_gamepad_type;
+
+    let mut flags = MocktailRustCapabilityInputFlags::default();
+
+    if has_modern_gamepad_api {
+        flags.gamepad_api = 1; // kWithGamepadType
+        flags.clear_partial_gamepad = false;
+    } else {
+        flags.gamepad_api = 0; // kUnsupported
+        flags.clear_partial_gamepad = true;
+    }
+
+    flags.has_gamepad_events = has_modern_gamepad_api
+        && p.has_gamepad_axis_event
+        && p.has_gamepad_button_event
+        && p.has_gamepad_disconnect_event;
+
+    flags.has_mouse = p.has_get_main_window_is_mouse_locked_center
+        && p.has_pass_mouse_button
+        && p.has_pass_mouse_move
+        && p.has_pass_mouse_pan
+        && p.has_pass_mouse_pinch
+        && p.has_pass_mouse_wheel;
+
+    flags.has_touch = p.has_pass_input;
+    flags.has_hardware_keyboard = p.has_pass_key_event;
+    flags.has_text_input = p.has_sync_textbox_text_and_cursor_position2
+        && p.has_get_text_box_info
+        && p.has_pass_text
+        && p.has_return_pressed_from_on_screen_keyboard
+        && p.has_release_focus;
+
+    flags.has_gestures = p.has_pass_long_press_gesture
+        && p.has_pass_pan_gesture_multitouch
+        && p.has_pass_pan_gesture_with_velocity
+        && p.has_pass_pinch_gesture
+        && p.has_pass_rotate_gesture
+        && p.has_pass_swipe_gesture
+        && p.has_pass_tap_gesture;
+
+    flags.has_sensors = p.has_pass_accelerometer_change
+        && p.has_pass_gravity_change
+        && p.has_pass_gyroscope_change
+        && p.has_set_accelerometer_enabled
+        && p.has_set_gyroscope_enabled;
+
+    flags.has_tv_remote = p.has_set_tv_remote_supported_key
+        && p.has_tv_remote_button_event
+        && p.has_tv_remote_connect_event
+        && p.has_tv_remote_disconnect_event;
+
+    flags.has_screen_orientation = p.has_update_screen_orientation;
+
+    *out_flags = flags;
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -10749,6 +11198,109 @@ integrations:
             let hdr_extracted = std::str::from_utf8(&hdr_cookie[..hdr_len]).unwrap();
             assert_eq!(hdr_extracted, "from_header_token");
         }
+    }
+
+    #[test]
+    fn test_auth_service_helpers() {
+        unsafe {
+            let cookie_header = CString::new("Other=1; .ROBLOSECURITY = _|valid-token ; Tail=2").unwrap();
+            let mut present = false;
+            let mut buf = [0 as c_char; 64];
+            let mut len = 0usize;
+            assert_eq!(mocktail_rust_auth_extract_cookie(
+                cookie_header.as_ptr(), cookie_header.as_bytes().len(),
+                &mut present, buf.as_mut_ptr(), buf.len(), &mut len
+            ), 0);
+            assert!(present);
+            let extracted = CStr::from_ptr(buf.as_ptr()).to_str().unwrap();
+            assert_eq!(extracted, "_|valid-token");
+
+            let raw_cookie = CString::new("_|raw-token; other=3").unwrap();
+            assert_eq!(mocktail_rust_auth_extract_cookie(
+                raw_cookie.as_ptr(), raw_cookie.as_bytes().len(),
+                &mut present, buf.as_mut_ptr(), buf.len(), &mut len
+            ), 0);
+            assert!(present);
+            let raw_extracted = CStr::from_ptr(buf.as_ptr()).to_str().unwrap();
+            assert_eq!(raw_extracted, "_|raw-token");
+
+            assert!(mocktail_rust_auth_is_safe_cookie_value(b"_|valid-token\0".as_ptr() as *const c_char, 13));
+            assert!(!mocktail_rust_auth_is_safe_cookie_value(b"_|with space\0".as_ptr() as *const c_char, 12));
+            assert!(!mocktail_rust_auth_is_safe_cookie_value(b"_|with;semi\0".as_ptr() as *const c_char, 11));
+
+            let to_redact = CString::new("Other=1\n.ROBLOSECURITY=_|bad-token\nTail=2").unwrap();
+            let bad_val = CString::new("_|bad-token").unwrap();
+            let mut red_buf = [0 as c_char; 128];
+            let mut red_len = 0usize;
+            assert_eq!(mocktail_rust_auth_redact_rejected(
+                to_redact.as_ptr(), to_redact.as_bytes().len(),
+                bad_val.as_ptr(), bad_val.as_bytes().len(),
+                red_buf.as_mut_ptr(), red_buf.len(), &mut red_len
+            ), 0);
+            let redacted_str = CStr::from_ptr(red_buf.as_ptr()).to_str().unwrap();
+            assert!(redacted_str.starts_with("Other=1\n   "));
+            assert!(redacted_str.ends_with("\nTail=2"));
+
+            let identity_json = CString::new(r#"{"id":123456789,"name":"TestUser","displayName":"Display Name"}"#).unwrap();
+            let mut user_id = 0i64;
+            let mut name_buf = [0 as c_char; 32];
+            let mut disp_buf = [0 as c_char; 32];
+            assert_eq!(mocktail_rust_auth_parse_identity(
+                identity_json.as_ptr(), identity_json.as_bytes().len(),
+                &mut user_id, name_buf.as_mut_ptr(), name_buf.len(),
+                disp_buf.as_mut_ptr(), disp_buf.len()
+            ), 0);
+            assert_eq!(user_id, 123456789);
+            assert_eq!(CStr::from_ptr(name_buf.as_ptr()).to_str().unwrap(), "TestUser");
+            assert_eq!(CStr::from_ptr(disp_buf.as_ptr()).to_str().unwrap(), "Display Name");
+        }
+    }
+
+    #[test]
+    fn test_auth_redaction_ranges() {
+        unsafe {
+            let orig = CString::new("a=1\nb=2\nc=3").unwrap();
+            let red = CString::new("a=1\n   \nc=3").unwrap();
+            let mut ranges = [MocktailRustCookieRedactionRange { begin: 0, end: 0, marker: 0 }; 8];
+            let mut count = 0usize;
+            assert_eq!(mocktail_rust_auth_find_redaction_ranges(
+                orig.as_ptr(), orig.as_bytes().len(),
+                red.as_ptr(), red.as_bytes().len(),
+                ranges.as_mut_ptr(), ranges.len(), &mut count
+            ), 0);
+            assert_eq!(count, 1);
+            assert_eq!(ranges[0].begin, 4);
+            assert_eq!(ranges[0].end, 7);
+            assert_eq!(ranges[0].marker, 4);
+        }
+    }
+
+    #[test]
+    fn test_capability_input_flags() {
+        let mut presence = MocktailRustCapabilityInputSymbolsPresence::default();
+        presence.has_gamepad_connect_event_with_gamepad_type = true;
+        presence.has_set_gamepad_supported_key_with_gamepad_type = true;
+        presence.has_set_gamepad_supported_motion_with_gamepad_type = true;
+        presence.has_gamepad_axis_event = true;
+        presence.has_gamepad_button_event = true;
+        presence.has_gamepad_disconnect_event = true;
+
+        let mut flags = MocktailRustCapabilityInputFlags::default();
+        unsafe {
+            mocktail_rust_capability_eval_input_flags(&presence, &mut flags);
+        }
+        assert_eq!(flags.gamepad_api, 1);
+        assert!(!flags.clear_partial_gamepad);
+        assert!(flags.has_gamepad_events);
+
+        // Incomplete gamepad modern api
+        presence.has_set_gamepad_supported_motion_with_gamepad_type = false;
+        unsafe {
+            mocktail_rust_capability_eval_input_flags(&presence, &mut flags);
+        }
+        assert_eq!(flags.gamepad_api, 0);
+        assert!(flags.clear_partial_gamepad);
+        assert!(!flags.has_gamepad_events);
     }
 
 }

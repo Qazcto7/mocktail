@@ -1,4 +1,5 @@
 #include "runtime/roblox_capability_resolver.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <utility>
 
@@ -244,49 +245,64 @@ void ResolveInputSymbols(const RobloxSymbolLookup& lookup,
           "Java_com_roblox_engine_jni_NativeInputInterface_"
           "nativeUpdateScreenOrientation");
 
-  const bool has_modern_gamepad_api =
-      AllPresent(symbols->gamepad_connect_event_with_gamepad_type,
-                 symbols->set_gamepad_supported_key_with_gamepad_type,
-                 symbols->set_gamepad_supported_motion_with_gamepad_type);
-  if (has_modern_gamepad_api) {
-    flags->gamepad_api = RobloxGamepadApi::kWithGamepadType;
-  } else {
-    // A partial modern registration API is not safe to use and must never
-    // trigger a fallback to the removed non-WithGamepadType or PTF exports.
+  MocktailRustCapabilityInputSymbolsPresence presence{};
+  presence.has_gamepad_axis_event = symbols->gamepad_axis_event != nullptr;
+  presence.has_gamepad_button_event = symbols->gamepad_button_event != nullptr;
+  presence.has_gamepad_connect_event_with_gamepad_type = symbols->gamepad_connect_event_with_gamepad_type != nullptr;
+  presence.has_gamepad_disconnect_event = symbols->gamepad_disconnect_event != nullptr;
+  presence.has_get_main_window_is_mouse_locked_center = symbols->get_main_window_is_mouse_locked_center != nullptr;
+  presence.has_pass_accelerometer_change = symbols->pass_accelerometer_change != nullptr;
+  presence.has_pass_gravity_change = symbols->pass_gravity_change != nullptr;
+  presence.has_pass_gyroscope_change = symbols->pass_gyroscope_change != nullptr;
+  presence.has_pass_input = symbols->pass_input != nullptr;
+  presence.has_pass_long_press_gesture = symbols->pass_long_press_gesture != nullptr;
+  presence.has_pass_mouse_button = symbols->pass_mouse_button != nullptr;
+  presence.has_pass_mouse_move = symbols->pass_mouse_move != nullptr;
+  presence.has_pass_mouse_pan = symbols->pass_mouse_pan != nullptr;
+  presence.has_pass_mouse_pinch = symbols->pass_mouse_pinch != nullptr;
+  presence.has_pass_mouse_wheel = symbols->pass_mouse_wheel != nullptr;
+  presence.has_pass_key_event = symbols->pass_key_event != nullptr;
+  presence.has_sync_textbox_text_and_cursor_position2 = symbols->sync_textbox_text_and_cursor_position2 != nullptr;
+  presence.has_get_text_box_info = symbols->get_text_box_info != nullptr;
+  presence.has_pass_text = symbols->pass_text != nullptr;
+  presence.has_return_pressed_from_on_screen_keyboard = symbols->return_pressed_from_on_screen_keyboard != nullptr;
+  presence.has_release_focus = symbols->release_focus != nullptr;
+  presence.has_pass_pan_gesture_multitouch = symbols->pass_pan_gesture_multitouch != nullptr;
+  presence.has_pass_pan_gesture_with_velocity = symbols->pass_pan_gesture_with_velocity != nullptr;
+  presence.has_pass_pinch_gesture = symbols->pass_pinch_gesture != nullptr;
+  presence.has_pass_rotate_gesture = symbols->pass_rotate_gesture != nullptr;
+  presence.has_pass_swipe_gesture = symbols->pass_swipe_gesture != nullptr;
+  presence.has_pass_tap_gesture = symbols->pass_tap_gesture != nullptr;
+  presence.has_set_accelerometer_enabled = symbols->set_accelerometer_enabled != nullptr;
+  presence.has_set_gamepad_supported_key_with_gamepad_type = symbols->set_gamepad_supported_key_with_gamepad_type != nullptr;
+  presence.has_set_gamepad_supported_motion_with_gamepad_type = symbols->set_gamepad_supported_motion_with_gamepad_type != nullptr;
+  presence.has_set_gyroscope_enabled = symbols->set_gyroscope_enabled != nullptr;
+  presence.has_set_tv_remote_supported_key = symbols->set_tv_remote_supported_key != nullptr;
+  presence.has_tv_remote_button_event = symbols->tv_remote_button_event != nullptr;
+  presence.has_tv_remote_connect_event = symbols->tv_remote_connect_event != nullptr;
+  presence.has_tv_remote_disconnect_event = symbols->tv_remote_disconnect_event != nullptr;
+  presence.has_update_screen_orientation = symbols->update_screen_orientation != nullptr;
+
+  MocktailRustCapabilityInputFlags rust_flags{};
+  mocktail_rust_capability_eval_input_flags(&presence, &rust_flags);
+
+  flags->gamepad_api = rust_flags.gamepad_api == 1
+                           ? RobloxGamepadApi::kWithGamepadType
+                           : RobloxGamepadApi::kUnsupported;
+  if (rust_flags.clear_partial_gamepad) {
     symbols->gamepad_connect_event_with_gamepad_type = nullptr;
     symbols->set_gamepad_supported_key_with_gamepad_type = nullptr;
     symbols->set_gamepad_supported_motion_with_gamepad_type = nullptr;
-    flags->gamepad_api = RobloxGamepadApi::kUnsupported;
   }
-
-  flags->has_gamepad_events =
-      has_modern_gamepad_api &&
-      AllPresent(symbols->gamepad_axis_event, symbols->gamepad_button_event,
-                 symbols->gamepad_disconnect_event);
-  flags->has_mouse =
-      AllPresent(symbols->get_main_window_is_mouse_locked_center,
-                 symbols->pass_mouse_button, symbols->pass_mouse_move,
-                 symbols->pass_mouse_pan, symbols->pass_mouse_pinch,
-                 symbols->pass_mouse_wheel);
-  flags->has_touch = symbols->pass_input != nullptr;
-  flags->has_hardware_keyboard = symbols->pass_key_event != nullptr;
-  flags->has_text_input = AllPresent(
-      symbols->sync_textbox_text_and_cursor_position2,
-      symbols->get_text_box_info, symbols->pass_text,
-      symbols->return_pressed_from_on_screen_keyboard, symbols->release_focus);
-  flags->has_gestures = AllPresent(
-      symbols->pass_long_press_gesture, symbols->pass_pan_gesture_multitouch,
-      symbols->pass_pan_gesture_with_velocity, symbols->pass_pinch_gesture,
-      symbols->pass_rotate_gesture, symbols->pass_swipe_gesture,
-      symbols->pass_tap_gesture);
-  flags->has_sensors = AllPresent(
-      symbols->pass_accelerometer_change, symbols->pass_gravity_change,
-      symbols->pass_gyroscope_change, symbols->set_accelerometer_enabled,
-      symbols->set_gyroscope_enabled);
-  flags->has_tv_remote = AllPresent(
-      symbols->set_tv_remote_supported_key, symbols->tv_remote_button_event,
-      symbols->tv_remote_connect_event, symbols->tv_remote_disconnect_event);
-  flags->has_screen_orientation = symbols->update_screen_orientation != nullptr;
+  flags->has_gamepad_events = rust_flags.has_gamepad_events;
+  flags->has_mouse = rust_flags.has_mouse;
+  flags->has_touch = rust_flags.has_touch;
+  flags->has_hardware_keyboard = rust_flags.has_hardware_keyboard;
+  flags->has_text_input = rust_flags.has_text_input;
+  flags->has_gestures = rust_flags.has_gestures;
+  flags->has_sensors = rust_flags.has_sensors;
+  flags->has_tv_remote = rust_flags.has_tv_remote;
+  flags->has_screen_orientation = rust_flags.has_screen_orientation;
 }
 
 }  // namespace

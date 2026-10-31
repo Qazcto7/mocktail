@@ -509,11 +509,6 @@ bool IsAutomaticallyRecoverableSource(CookieSource source) {
          source == CookieSource::kSecretStore;
 }
 
-bool IsCookieFileDelimiter(char character) {
-  return character == ';' || character == '\r' || character == '\n' ||
-         character == '\t';
-}
-
 struct CookieRedactionRange {
   size_t begin = 0;
   size_t end = 0;
@@ -522,30 +517,21 @@ struct CookieRedactionRange {
 
 std::vector<CookieRedactionRange> FindCookieRedactionRanges(
     std::string_view original, std::string_view redacted) {
-  std::vector<CookieRedactionRange> ranges;
   if (original.size() != redacted.size()) {
-    return ranges;
+    return {};
   }
-  size_t segment_begin = 0;
-  while (segment_begin < original.size()) {
-    size_t segment_end = segment_begin;
-    while (segment_end < original.size() &&
-           !IsCookieFileDelimiter(original[segment_end])) {
-      ++segment_end;
-    }
-    const size_t length = segment_end - segment_begin;
-    if (original.substr(segment_begin, length) !=
-        redacted.substr(segment_begin, length)) {
-      size_t marker = segment_begin;
-      while (marker < segment_end && original[marker] == redacted[marker]) {
-        ++marker;
-      }
-      if (marker == segment_end) {
-        return {};
-      }
-      ranges.push_back({segment_begin, segment_end, marker});
-    }
-    segment_begin = segment_end + (segment_end < original.size() ? 1 : 0);
+  std::vector<MocktailRustCookieRedactionRange> rust_ranges(original.size() / 2 + 1);
+  size_t out_count = 0;
+  if (mocktail_rust_auth_find_redaction_ranges(
+          original.data(), original.size(),
+          redacted.data(), redacted.size(),
+          rust_ranges.data(), rust_ranges.size(), &out_count) != 0) {
+    return {};
+  }
+  std::vector<CookieRedactionRange> ranges;
+  ranges.reserve(out_count);
+  for (size_t i = 0; i < out_count; ++i) {
+    ranges.push_back({rust_ranges[i].begin, rust_ranges[i].end, rust_ranges[i].marker});
   }
   return ranges;
 }
