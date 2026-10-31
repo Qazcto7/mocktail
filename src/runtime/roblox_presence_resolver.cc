@@ -100,6 +100,7 @@ Status ResolveFollowUserPlace(int64_t user_id, const std::string& auth_cookie,
   curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
   curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
   curl_easy_setopt(curl, CURLOPT_SSL_EC_CURVES, "X25519:P-256:P-384");
+  curl_easy_setopt(curl, CURLOPT_DOH_URL, "https://1.1.1.1/dns-query");
   curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
 
   const CURLcode result = curl_easy_perform(curl);

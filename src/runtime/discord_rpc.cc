@@ -402,6 +402,7 @@ std::optional<Json> GetRobloxJson(std::string url) {
   curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 3500L);
   curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mocktail/0.1");
   curl_easy_setopt(curl, CURLOPT_SSL_EC_CURVES, "X25519:P-256:P-384");
+  curl_easy_setopt(curl, CURLOPT_DOH_URL, "https://1.1.1.1/dns-query");
   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteHttpResponse);
   curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
   std::string proxy_url;

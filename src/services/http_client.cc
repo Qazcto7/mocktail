@@ -1,6 +1,11 @@
 #include "services/http_client.h"
 
+#include <arpa/inet.h>
 #include <curl/curl.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include <array>
 #include <cstdlib>
@@ -18,6 +23,31 @@ CURLcode g_curl_init_result = CURLE_FAILED_INIT;
 
 void InitialiseCurl() {
   g_curl_init_result = curl_global_init(CURL_GLOBAL_DEFAULT);
+}
+
+bool IsLocalPortListening(uint16_t port) {
+  int fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+  if (fd < 0) return false;
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(port);
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  int res = connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+  bool available = (res == 0);
+  if (res < 0 && errno == EINPROGRESS) {
+    pollfd pfd{};
+    pfd.fd = fd;
+    pfd.events = POLLOUT;
+    if (poll(&pfd, 1, 30) > 0 && (pfd.revents & POLLOUT)) {
+      int err = 0;
+      socklen_t len = sizeof(err);
+      if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) == 0 && err == 0) {
+        available = true;
+      }
+    }
+  }
+  close(fd);
+  return available;
 }
 
 struct ResponseWriter {
@@ -115,6 +145,7 @@ HttpResponse PerformRequest(const HttpRequest& request,
   curl_easy_setopt(handle, CURLOPT_USERAGENT, "Mocktail/0.1");
   curl_easy_setopt(handle, CURLOPT_ERRORBUFFER, error_buffer.data());
   curl_easy_setopt(handle, CURLOPT_SSL_EC_CURVES, "X25519:P-256:P-384");
+  curl_easy_setopt(handle, CURLOPT_DOH_URL, "https://1.1.1.1/dns-query");
   curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, WriteResponse);
   curl_easy_setopt(handle, CURLOPT_WRITEDATA, &writer);
   curl_easy_setopt(handle, CURLOPT_HEADERFUNCTION, WriteHeader);
@@ -124,6 +155,7 @@ HttpResponse PerformRequest(const HttpRequest& request,
   }
   std::string proxy_url;
   const auto proxy = runtime::ReadNetworkProxy(runtime::ProcessEnvironment());
+  bool using_proxy = false;
   if (proxy.has_value()) {
     proxy_url = runtime::BuildNetworkProxyUrl(*proxy);
     curl_easy_setopt(handle, CURLOPT_PROXY, proxy_url.c_str());
@@ -131,15 +163,37 @@ HttpResponse PerformRequest(const HttpRequest& request,
       curl_easy_setopt(handle, CURLOPT_PROXYUSERNAME, proxy->username.c_str());
       curl_easy_setopt(handle, CURLOPT_PROXYPASSWORD, proxy->password.c_str());
     }
-    // A configured application proxy must not be bypassed by an inherited
-    // NO_PROXY entry, including '*' from a desktop launcher.
     curl_easy_setopt(handle, CURLOPT_NOPROXY, "");
+    using_proxy = true;
+  } else if (IsLocalPortListening(1080)) {
+    curl_easy_setopt(handle, CURLOPT_PROXY, "socks5://127.0.0.1:1080");
+    curl_easy_setopt(handle, CURLOPT_NOPROXY, "");
+    using_proxy = true;
   }
   if (headers != nullptr) {
     curl_easy_setopt(handle, CURLOPT_HTTPHEADER, headers);
   }
 
-  const CURLcode result = curl_easy_perform(handle);
+  CURLcode result = curl_easy_perform(handle);
+  if (result != CURLE_OK) {
+    if (using_proxy) {
+      // If the proxy failed, retry directly with DoH
+      response.body.clear();
+      response.headers.clear();
+      error_buffer.fill('\0');
+      writer.limit_exceeded = false;
+      curl_easy_setopt(handle, CURLOPT_PROXY, "");
+      result = curl_easy_perform(handle);
+    } else if (IsLocalPortListening(1080)) {
+      // If direct connection failed, retry via local SOCKS proxy
+      response.body.clear();
+      response.headers.clear();
+      error_buffer.fill('\0');
+      writer.limit_exceeded = false;
+      curl_easy_setopt(handle, CURLOPT_PROXY, "socks5://127.0.0.1:1080");
+      result = curl_easy_perform(handle);
+    }
+  }
   if (result == CURLE_OK) {
     curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &response.status_code);
     response.transport_ok = true;
