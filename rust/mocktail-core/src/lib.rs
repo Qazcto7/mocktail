@@ -7717,27 +7717,29 @@ pub extern "C" fn mocktail_rust_text_layout(
         unsafe { *out_utf16_units = utf16_units as i32 };
     }
 
-    let mut boundaries = Vec::new();
-    boundaries.push(0);
+    let mut count: usize = 1;
+    let mut last_offset: usize = 0;
+    if !out_boundaries.is_null() && boundaries_cap > 0 {
+        unsafe { *out_boundaries = 0 };
+    }
     for (offset, _) in slice.grapheme_indices(true) {
         if offset > 0 {
-            boundaries.push(offset);
+            if !out_boundaries.is_null() && count < boundaries_cap {
+                unsafe { *out_boundaries.add(count) = offset };
+            }
+            count += 1;
+            last_offset = offset;
         }
     }
-    if boundaries.last() != Some(&slice.len()) {
-        boundaries.push(slice.len());
+    if slice.len() > last_offset {
+        if !out_boundaries.is_null() && count < boundaries_cap {
+            unsafe { *out_boundaries.add(count) = slice.len() };
+        }
+        count += 1;
     }
 
     if !out_boundary_count.is_null() {
-        unsafe { *out_boundary_count = boundaries.len() };
-    }
-
-    if !out_boundaries.is_null() && boundaries_cap > 0 {
-        let to_copy = std::cmp::min(boundaries.len(), boundaries_cap);
-        unsafe {
-            let dst = slice::from_raw_parts_mut(out_boundaries, to_copy);
-            dst.copy_from_slice(&boundaries[..to_copy]);
-        }
+        unsafe { *out_boundary_count = count };
     }
 
     1 /* valid */

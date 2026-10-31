@@ -145,12 +145,6 @@ WindowResizeReadinessSnapshot WindowResizeReadinessGate::Snapshot() const {
   return snapshot_;
 }
 
-Status WindowResizeReadinessGate::FailLocked(std::string reason) {
-  snapshot_.state = WindowResizeReadinessState::kFailed;
-  snapshot_.failure_reason = std::move(reason);
-  return FailedPrecondition(snapshot_.failure_reason);
-}
-
 const char* WindowResizeReadinessStateName(WindowResizeReadinessState state) {
   return mocktail_rust_window_resize_state_name(static_cast<uint32_t>(state));
 }

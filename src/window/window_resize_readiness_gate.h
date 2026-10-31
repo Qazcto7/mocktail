@@ -64,8 +64,6 @@ class WindowResizeReadinessGate final {
   WindowResizeReadinessSnapshot Snapshot() const;
 
  private:
-  Status FailLocked(std::string reason);
-
   mutable std::mutex mutex_;
   WindowResizeReadinessSnapshot snapshot_;
 };
