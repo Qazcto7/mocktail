@@ -247,39 +247,45 @@ std::filesystem::path ExecutablePath() {
   return path.data();
 }
 
-bool IsWithin(const std::filesystem::path& child,
-              const std::filesystem::path& parent) {
-  const auto relative = child.lexically_relative(parent);
-  return !relative.empty() && !relative.is_absolute() &&
-         *relative.begin() != "..";
-}
-
 std::string DisplayPath(const std::filesystem::path& path,
                         const RuntimePaths& paths) {
-  if (path.empty()) return "unknown";
-  if (IsWithin(path, paths.home())) {
-    return (std::filesystem::path("~") / path.lexically_relative(paths.home()))
-        .string();
+  const std::string path_str = path.string();
+  const std::string home_str = paths.home().string();
+  std::array<char, 4096> buf{};
+  size_t out_len = 0;
+  if (mocktail_rust_session_log_display_path(
+          path_str.data(), path_str.size(), home_str.data(), home_str.size(),
+          buf.data(), buf.size(), &out_len) == 0) {
+    return std::string(buf.data(), out_len);
   }
-  return path.string();
+  return path.empty() ? "unknown" : path.string();
 }
 
 std::string PackageKind(const Environment& environment,
                         const std::filesystem::path& executable) {
-  if (environment.HasNonEmpty("FLATPAK_ID")) return "flatpak";
-  if (environment.HasNonEmpty("APPIMAGE")) return "appimage";
-  if (environment.HasNonEmpty("APPDIR")) return "portable";
-  const std::string path = executable.string();
-  if (path.rfind("/usr/", 0) == 0 || path.rfind("/opt/", 0) == 0 ||
-      path.rfind("/app/", 0) == 0) {
-    return "system-install";
+  const std::string path_str = executable.string();
+  std::array<char, 64> buf{};
+  size_t out_len = 0;
+  if (mocktail_rust_session_log_package_kind(
+          environment.HasNonEmpty("FLATPAK_ID"),
+          environment.HasNonEmpty("APPIMAGE"),
+          environment.HasNonEmpty("APPDIR"),
+          path_str.data(), path_str.size(),
+          buf.data(), buf.size(), &out_len) == 0) {
+    return std::string(buf.data(), out_len);
   }
   return "local-build";
 }
 
 std::string DisplayServer(const Environment& environment) {
-  if (environment.HasNonEmpty("WAYLAND_DISPLAY")) return "wayland";
-  if (environment.HasNonEmpty("DISPLAY")) return "x11";
+  std::array<char, 32> buf{};
+  size_t out_len = 0;
+  if (mocktail_rust_session_log_display_server(
+          environment.HasNonEmpty("WAYLAND_DISPLAY"),
+          environment.HasNonEmpty("DISPLAY"),
+          buf.data(), buf.size(), &out_len) == 0) {
+    return std::string(buf.data(), out_len);
+  }
   return "none";
 }
 
@@ -411,14 +417,8 @@ std::string PciVendorFallback(std::string_view vendor_id) {
 }
 
 bool DeviceNodeName(std::string_view name, std::string_view prefix) {
-  if (name.size() <= prefix.size() || name.substr(0, prefix.size()) != prefix) {
-    return false;
-  }
-  return std::all_of(
-      name.begin() + static_cast<std::ptrdiff_t>(prefix.size()), name.end(),
-      [](char character) {
-        return std::isdigit(static_cast<unsigned char>(character)) != 0;
-      });
+  return mocktail_rust_session_log_device_node_name(
+      name.data(), name.size(), prefix.data(), prefix.size());
 }
 
 struct GraphicsHardware {

@@ -1510,6 +1510,166 @@ void mocktail_rust_capability_eval_input_flags(
     const MocktailRustCapabilityInputSymbolsPresence* in_presence,
     MocktailRustCapabilityInputFlags* out_flags);
 
+// ============================================================================
+// 61. Session Log Environment, Hardware & Path Normalization
+// ============================================================================
+
+int32_t mocktail_rust_session_log_display_path(
+    const char* path,
+    size_t path_len,
+    const char* home,
+    size_t home_len,
+    char* out_buf,
+    size_t cap,
+    size_t* out_len);
+
+int32_t mocktail_rust_session_log_package_kind(
+    bool has_flatpak_id,
+    bool has_appimage,
+    bool has_appdir,
+    const char* exec_path,
+    size_t exec_len,
+    char* out_buf,
+    size_t cap,
+    size_t* out_len);
+
+int32_t mocktail_rust_session_log_display_server(
+    bool has_wayland_display,
+    bool has_display,
+    char* out_buf,
+    size_t cap,
+    size_t* out_len);
+
+bool mocktail_rust_session_log_device_node_name(
+    const char* name,
+    size_t name_len,
+    const char* prefix,
+    size_t prefix_len);
+
+// ============================================================================
+// 62. Candidate Approval Serialization & Evidence Fingerprinting
+// ============================================================================
+
+typedef struct MocktailRustPayloadFingerprintInput {
+  const char* payload_id;
+  size_t payload_id_len;
+  const char* metadata_sha256;
+  size_t metadata_sha256_len;
+  const char* library_sha256;
+  size_t library_sha256_len;
+  const char* base_apk_sha256;
+  size_t base_apk_sha256_len;
+  const char* guest_abi;
+  size_t guest_abi_len;
+  const char* split_apk_sha256;
+  size_t split_apk_sha256_len;
+  const char* asset_tree_sha256;
+  size_t asset_tree_sha256_len;
+} MocktailRustPayloadFingerprintInput;
+
+int32_t mocktail_rust_candidate_approval_fingerprint(
+    const MocktailRustPayloadFingerprintInput* input,
+    char* out_sha256,
+    size_t cap);
+
+int32_t mocktail_rust_candidate_approval_generation(
+    const char* runtime_build_id,
+    size_t r_len,
+    const char* fingerprint,
+    size_t f_len,
+    const char* profile_sha256,
+    size_t p_len,
+    const char* compatibility_sha256,
+    size_t c_len,
+    const char* canary_1_sha256,
+    size_t c1_len,
+    const char* canary_2_sha256,
+    size_t c2_len,
+    char* out_generation_40,
+    size_t cap);
+
+int32_t mocktail_rust_candidate_approval_validate_binding(
+    const char* profile_json,
+    size_t p_len,
+    const char* compatibility_json,
+    size_t c_len,
+    const char* payload_id,
+    size_t payload_id_len,
+    const char* elf_build_id,
+    size_t elf_len,
+    const char* library_sha256,
+    size_t lib_len,
+    const char* version_name,
+    size_t ver_name_len,
+    uint64_t version_code,
+    char* out_err,
+    size_t err_cap);
+
+// ============================================================================
+// 63. Candidate Approval Attestation & Receipt Generator
+// ============================================================================
+
+typedef struct MocktailRustCanaryAttestationInput {
+  size_t run;
+  const char* run_id;
+  size_t run_id_len;
+  const char* payload_id;
+  size_t payload_id_len;
+  const char* payload_fingerprint;
+  size_t payload_fingerprint_len;
+  const char* profile_sha256;
+  size_t profile_sha256_len;
+  const char* compatibility_manifest_sha256;
+  size_t compatibility_manifest_sha256_len;
+  const char* runtime_sha256;
+  size_t runtime_sha256_len;
+  const char* runtime_build_id;
+  size_t runtime_build_id_len;
+  const char* log_sha256;
+  size_t log_sha256_len;
+} MocktailRustCanaryAttestationInput;
+
+int32_t mocktail_rust_candidate_approval_build_attestation(
+    const MocktailRustCanaryAttestationInput* input,
+    char* out_json,
+    size_t cap,
+    size_t* out_len);
+
+typedef struct MocktailRustApprovalReceiptInput {
+  const char* payload_id;
+  size_t payload_id_len;
+  const char* generation;
+  size_t generation_len;
+  const char* payload_path;
+  size_t payload_path_len;
+  const char* elf_build_id;
+  size_t elf_build_id_len;
+  const char* library_sha256;
+  size_t library_sha256_len;
+  const char* payload_fingerprint;
+  size_t payload_fingerprint_len;
+  const char* profile_sha256;
+  size_t profile_sha256_len;
+  const char* compatibility_manifest_sha256;
+  size_t compatibility_manifest_sha256_len;
+  const char* runtime_sha256;
+  size_t runtime_sha256_len;
+  const char* runtime_build_id;
+  size_t runtime_build_id_len;
+  const char* canary_1_sha256;
+  size_t canary_1_sha256_len;
+  const char* canary_2_sha256;
+  size_t canary_2_sha256_len;
+  const char* approved_at_utc;
+  size_t approved_at_utc_len;
+} MocktailRustApprovalReceiptInput;
+
+int32_t mocktail_rust_candidate_approval_build_receipt(
+    const MocktailRustApprovalReceiptInput* input,
+    char* out_json,
+    size_t cap,
+    size_t* out_len);
+
 #ifdef __cplusplus
 }
 #endif

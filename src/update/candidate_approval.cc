@@ -202,37 +202,27 @@ bool ValidateRelativeApprovalPath(const std::filesystem::path& root,
   return true;
 }
 
-bool ValidateProfileBinding(const Json& profile, const Json& compatibility,
+bool ValidateProfileBinding(std::string_view profile_bytes,
+                            std::string_view compatibility_bytes,
                             const PayloadIntegrityResult& payload,
                             std::string* error) {
-  if (profile.value("schema_version", 0) != 1 ||
-      profile.value("payload_id", "") != payload.payload_id ||
-      profile.value("payload_path", "") != "payloads/" + payload.payload_id ||
-      profile.value("elf_build_id", "") != payload.metadata.build_id ||
-      profile.value("payload_sha256", "") != payload.metadata.library_sha256 ||
-      !profile.contains("profile") || !profile["profile"].is_object() ||
-      profile["profile"].value("elf_build_id", "") !=
-          payload.metadata.build_id ||
-      !profile.contains("reference") || !profile["reference"].is_object() ||
-      !compatibility.is_object() ||
-      compatibility.value("schema_version", 0) != 1 ||
-      !compatibility.contains("profiles") ||
-      !compatibility["profiles"].is_array() ||
-      compatibility["profiles"].size() != 1) {
-    *error = "derived approval profile is not bound to exact payload bytes";
-    return false;
-  }
-  const Json& entry = compatibility["profiles"][0];
-  if (!entry.is_object() ||
-      entry.value("version_name", "") != payload.metadata.version_name ||
-      entry.value("version_code", 0ULL) != payload.metadata.version_code ||
-      entry.value("elf_build_id", "") != payload.metadata.build_id ||
-      entry.value("status", "") != "experimental" ||
-      !entry.value("default_allowed", false) ||
-      entry.value("allow_legacy_binary_patches", true) ||
-      !entry.value("allow_host_abi_bridges", false) ||
-      !entry.value("allow_host_constructor_replay", false)) {
-    *error = "candidate compatibility manifest is not exact probation metadata";
+  std::array<char, 256> err_buf{};
+  const int32_t rc = mocktail_rust_candidate_approval_validate_binding(
+      profile_bytes.data(), profile_bytes.size(),
+      compatibility_bytes.data(), compatibility_bytes.size(),
+      payload.payload_id.data(), payload.payload_id.size(),
+      payload.metadata.build_id.data(), payload.metadata.build_id.size(),
+      payload.metadata.library_sha256.data(),
+      payload.metadata.library_sha256.size(),
+      payload.metadata.version_name.data(),
+      payload.metadata.version_name.size(), payload.metadata.version_code,
+      err_buf.data(), err_buf.size());
+  if (rc != 0) {
+    if (error != nullptr) {
+      *error = err_buf.data()[0] != '\0'
+                   ? err_buf.data()
+                   : "derived approval profile is not bound to exact payload bytes";
+    }
     return false;
   }
   return true;
@@ -250,22 +240,32 @@ std::string PayloadRuntimeFingerprint(
   const std::string metadata =
       HashRegularFile(payload_directory / "roblox_payload.json", error);
   if (!error->empty()) return {};
-  std::string evidence;
-  evidence.append("payload_id=").append(payload.payload_id).append("\n");
-  evidence.append("metadata=").append(metadata).append("\n");
-  evidence.append("libroblox=")
-      .append(payload.metadata.library_sha256)
-      .append("\n");
-  evidence.append("base_apk=")
-      .append(payload.metadata.base_apk_sha256)
-      .append("\n");
-  evidence.append(std::string(compat::kGuestAbi) + "_split=")
-      .append(payload.metadata.split_apk_sha256)
-      .append("\n");
-  evidence.append("assets=")
-      .append(payload.metadata.asset_tree_sha256)
-      .append("\n");
-  return HashText(evidence, error);
+
+  const std::string guest_abi(compat::kGuestAbi);
+  const MocktailRustPayloadFingerprintInput input{
+      payload.payload_id.data(),
+      payload.payload_id.size(),
+      metadata.data(),
+      metadata.size(),
+      payload.metadata.library_sha256.data(),
+      payload.metadata.library_sha256.size(),
+      payload.metadata.base_apk_sha256.data(),
+      payload.metadata.base_apk_sha256.size(),
+      guest_abi.data(),
+      guest_abi.size(),
+      payload.metadata.split_apk_sha256.data(),
+      payload.metadata.split_apk_sha256.size(),
+      payload.metadata.asset_tree_sha256.data(),
+      payload.metadata.asset_tree_sha256.size(),
+  };
+
+  std::array<char, 65> out_sha{};
+  if (mocktail_rust_candidate_approval_fingerprint(&input, out_sha.data(),
+                                                  out_sha.size()) != 0) {
+    *error = "cannot fingerprint an invalid payload";
+    return {};
+  }
+  return std::string(out_sha.data(), 64);
 }
 
 CandidateApprovalResult CreateCandidateApproval(
@@ -288,10 +288,7 @@ CandidateApprovalResult CreateCandidateApproval(
   std::string compatibility_bytes =
       ReadRegular(options.compatibility_manifest, false, &result.error);
   if (!result.error.empty()) return result;
-  const auto profile_json = ParseJson(profile_bytes, &result.error);
-  const auto compatibility_json = ParseJson(compatibility_bytes, &result.error);
-  if (!profile_json.has_value() || !compatibility_json.has_value() ||
-      !ValidateProfileBinding(*profile_json, *compatibility_json, payload,
+  if (!ValidateProfileBinding(profile_bytes, compatibility_bytes, payload,
                               &result.error)) {
     return result;
   }
@@ -323,40 +320,51 @@ CandidateApprovalResult CreateCandidateApproval(
     const std::string run_id = payload.payload_id + "-" + std::to_string(run) +
                                "-" + std::to_string(epoch) + "-" +
                                std::to_string(getpid());
-    const Json attestation = {
-        {"schema_version", 1},
-        {"status", "passed"},
-        {"canary_tier", "C"},
-        {"run", run},
-        {"run_id", run_id},
-        {"payload_id", payload.payload_id},
-        {"payload_fingerprint", fingerprint},
-        {"profile_sha256", profile_sha256},
-        {"compatibility_manifest_sha256", compatibility_sha256},
-        {"runtime_sha256", runtime_sha256},
-        {"runtime_build_id", runtime_build_id.build_id},
-        {"readiness_log_sha256", log_sha256},
+    const MocktailRustCanaryAttestationInput attestation_input{
+        run,
+        run_id.data(),
+        run_id.size(),
+        payload.payload_id.data(),
+        payload.payload_id.size(),
+        fingerprint.data(),
+        fingerprint.size(),
+        profile_sha256.data(),
+        profile_sha256.size(),
+        compatibility_sha256.data(),
+        compatibility_sha256.size(),
+        runtime_sha256.data(),
+        runtime_sha256.size(),
+        runtime_build_id.build_id.data(),
+        runtime_build_id.build_id.size(),
+        log_sha256.data(),
+        log_sha256.size(),
     };
-    attestations[index] = attestation.dump(2) + "\n";
+    std::string attestation_json(4096, '\0');
+    size_t attestation_len = 0;
+    if (mocktail_rust_candidate_approval_build_attestation(
+            &attestation_input, attestation_json.data(),
+            attestation_json.size(), &attestation_len) != 0) {
+      result.error = "cannot serialize canary attestation";
+      return result;
+    }
+    attestation_json.resize(attestation_len);
+    attestations[index] = std::move(attestation_json);
     attestation_hashes[index] = HashText(attestations[index], &result.error);
     if (!result.error.empty()) return result;
   }
-  std::string generation_evidence;
-  generation_evidence.append("runtime_build_id=")
-      .append(runtime_build_id.build_id)
-      .append("\n");
-  generation_evidence.append("payload=").append(fingerprint).append("\n");
-  generation_evidence.append("profile=").append(profile_sha256).append("\n");
-  generation_evidence.append("compatibility=")
-      .append(compatibility_sha256)
-      .append("\n");
-  generation_evidence.append("canary_1=")
-      .append(attestation_hashes[0])
-      .append("\n");
-  generation_evidence.append("canary_2=")
-      .append(attestation_hashes[1])
-      .append("\n");
-  result.generation = HashText(generation_evidence, 40, &result.error);
+  std::array<char, 41> generation_buf{};
+  if (mocktail_rust_candidate_approval_generation(
+          runtime_build_id.build_id.data(), runtime_build_id.build_id.size(),
+          fingerprint.data(), fingerprint.size(),
+          profile_sha256.data(), profile_sha256.size(),
+          compatibility_sha256.data(), compatibility_sha256.size(),
+          attestation_hashes[0].data(), attestation_hashes[0].size(),
+          attestation_hashes[1].data(), attestation_hashes[1].size(),
+          generation_buf.data(), generation_buf.size()) != 0) {
+    result.error = "cannot derive candidate approval generation";
+    return result;
+  }
+  result.generation = std::string(generation_buf.data(), 40);
   if (!result.error.empty()) return result;
   const std::string stem = payload.payload_id + "-" + result.generation;
   result.profile = options.store_root / "host_abi_profiles" / (stem + ".json");
@@ -383,27 +391,46 @@ CandidateApprovalResult CreateCandidateApproval(
     result.error = "cannot canonicalize approved payload library";
     return result;
   }
-  const Json receipt = {
-      {"schema_version", 1},
-      {"status", "approved"},
-      {"payload_id", payload.payload_id},
-      {"generation", result.generation},
-      {"payload_path", canonical_library.string()},
-      {"elf_build_id", payload.metadata.build_id},
-      {"payload_sha256", payload.metadata.library_sha256},
-      {"payload_fingerprint", fingerprint},
-      {"profile_sha256", profile_sha256},
-      {"compatibility_manifest_sha256", compatibility_sha256},
-      {"canary_runtime_sha256", runtime_sha256},
-      {"runtime_sha256", runtime_sha256},
-      {"runtime_build_id", runtime_build_id.build_id},
-      {"canary_tier", "C"},
-      {"successful_runs", 2},
-      {"canary_attestation_sha256",
-       Json::array({attestation_hashes[0], attestation_hashes[1]})},
-      {"approved_at", UtcTimestamp()},
+  const std::string approved_at = UtcTimestamp();
+  const std::string canonical_str = canonical_library.string();
+  const MocktailRustApprovalReceiptInput receipt_input{
+      payload.payload_id.data(),
+      payload.payload_id.size(),
+      result.generation.data(),
+      result.generation.size(),
+      canonical_str.data(),
+      canonical_str.size(),
+      payload.metadata.build_id.data(),
+      payload.metadata.build_id.size(),
+      payload.metadata.library_sha256.data(),
+      payload.metadata.library_sha256.size(),
+      fingerprint.data(),
+      fingerprint.size(),
+      profile_sha256.data(),
+      profile_sha256.size(),
+      compatibility_sha256.data(),
+      compatibility_sha256.size(),
+      runtime_sha256.data(),
+      runtime_sha256.size(),
+      runtime_build_id.build_id.data(),
+      runtime_build_id.build_id.size(),
+      attestation_hashes[0].data(),
+      attestation_hashes[0].size(),
+      attestation_hashes[1].data(),
+      attestation_hashes[1].size(),
+      approved_at.data(),
+      approved_at.size(),
   };
-  if (!WriteExclusive(result.receipt, receipt.dump(2) + "\n", 0444,
+  std::string receipt_json(4096, '\0');
+  size_t receipt_len = 0;
+  if (mocktail_rust_candidate_approval_build_receipt(
+          &receipt_input, receipt_json.data(), receipt_json.size(),
+          &receipt_len) != 0) {
+    result.error = "cannot serialize candidate approval receipt";
+    return result;
+  }
+  receipt_json.resize(receipt_len);
+  if (!WriteExclusive(result.receipt, receipt_json, 0444,
                       &result.error)) {
     return result;
   }
@@ -451,11 +478,9 @@ bool ValidateCandidateApproval(const std::filesystem::path& store_root,
       ReadRegular(approval->compatibility_manifest, true, error);
   if (!error->empty()) return false;
   const auto receipt = ParseJson(receipt_bytes, error);
-  const auto profile = ParseJson(profile_bytes, error);
-  const auto compatibility = ParseJson(compatibility_bytes, error);
-  if (!receipt.has_value() || !profile.has_value() ||
-      !compatibility.has_value() ||
-      !ValidateProfileBinding(*profile, *compatibility, payload, error)) {
+  if (!error->empty() || !receipt.has_value() ||
+      !ValidateProfileBinding(profile_bytes, compatibility_bytes, payload,
+                              error)) {
     return false;
   }
   const std::string fingerprint = PayloadRuntimeFingerprint(
@@ -536,24 +561,16 @@ bool ValidateCandidateApproval(const std::filesystem::path& store_root,
     *error = "approval canaries do not have distinct run identities";
     return false;
   }
-  std::string generation_evidence;
-  generation_evidence.append("runtime_build_id=")
-      .append(runtime_build_id)
-      .append("\n");
-  generation_evidence.append("payload=").append(fingerprint).append("\n");
-  generation_evidence.append("profile=").append(profile_sha256).append("\n");
-  generation_evidence.append("compatibility=")
-      .append(compatibility_sha256)
-      .append("\n");
-  generation_evidence.append("canary_1=")
-      .append(attestation_hashes[0])
-      .append("\n");
-  generation_evidence.append("canary_2=")
-      .append(attestation_hashes[1])
-      .append("\n");
-  const std::string computed_generation =
-      HashText(generation_evidence, 40, error);
-  if (!error->empty() || computed_generation != *generation) {
+  std::array<char, 41> computed_generation{};
+  if (mocktail_rust_candidate_approval_generation(
+          runtime_build_id.data(), runtime_build_id.size(),
+          fingerprint.data(), fingerprint.size(),
+          profile_sha256.data(), profile_sha256.size(),
+          compatibility_sha256.data(), compatibility_sha256.size(),
+          attestation_hashes[0].data(), attestation_hashes[0].size(),
+          attestation_hashes[1].data(), attestation_hashes[1].size(),
+          computed_generation.data(), computed_generation.size()) != 0 ||
+      std::string_view(computed_generation.data(), 40) != *generation) {
     if (error->empty()) *error = "approval evidence generation does not match";
     return false;
   }

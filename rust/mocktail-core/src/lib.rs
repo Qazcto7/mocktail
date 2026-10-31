@@ -9629,6 +9629,715 @@ pub unsafe extern "C" fn mocktail_rust_capability_eval_input_flags(
 }
 
 // ============================================================================
+// 61. Session Log Environment, Hardware & Path Normalization
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_session_log_display_path(
+    path: *const c_char,
+    path_len: usize,
+    home: *const c_char,
+    home_len: usize,
+    out_buf: *mut c_char,
+    cap: usize,
+    out_len: *mut usize,
+) -> i32 {
+    if out_buf.is_null() || cap == 0 {
+        return -1;
+    }
+    if !out_len.is_null() {
+        *out_len = 0;
+    }
+    if path.is_null() || path_len == 0 {
+        let default_val = b"unknown";
+        if default_val.len() >= cap {
+            return -1;
+        }
+        std::ptr::copy_nonoverlapping(default_val.as_ptr(), out_buf as *mut u8, default_val.len());
+        *out_buf.add(default_val.len()) = 0;
+        if !out_len.is_null() {
+            *out_len = default_val.len();
+        }
+        return 0;
+    }
+
+    let path_slice = std::slice::from_raw_parts(path as *const u8, path_len);
+    let path_str = match std::str::from_utf8(path_slice) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    let p = std::path::Path::new(path_str);
+    let result = if !home.is_null() && home_len > 0 {
+        let home_slice = std::slice::from_raw_parts(home as *const u8, home_len);
+        if let Ok(home_str) = std::str::from_utf8(home_slice) {
+            let h = std::path::Path::new(home_str);
+            if let Ok(rel) = p.strip_prefix(h) {
+                if rel.as_os_str().is_empty() {
+                    "~/.".to_string()
+                } else {
+                    format!("~/{}", rel.display())
+                }
+            } else {
+                path_str.to_string()
+            }
+        } else {
+            path_str.to_string()
+        }
+    } else {
+        path_str.to_string()
+    };
+
+    let res_bytes = result.as_bytes();
+    if res_bytes.len() >= cap {
+        return -1;
+    }
+    std::ptr::copy_nonoverlapping(res_bytes.as_ptr(), out_buf as *mut u8, res_bytes.len());
+    *out_buf.add(res_bytes.len()) = 0;
+    if !out_len.is_null() {
+        *out_len = res_bytes.len();
+    }
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_session_log_package_kind(
+    has_flatpak_id: bool,
+    has_appimage: bool,
+    has_appdir: bool,
+    exec_path: *const c_char,
+    exec_len: usize,
+    out_buf: *mut c_char,
+    cap: usize,
+    out_len: *mut usize,
+) -> i32 {
+    if out_buf.is_null() || cap == 0 {
+        return -1;
+    }
+    if !out_len.is_null() {
+        *out_len = 0;
+    }
+
+    let kind: &str = if has_flatpak_id {
+        "flatpak"
+    } else if has_appimage {
+        "appimage"
+    } else if has_appdir {
+        "portable"
+    } else {
+        let p = if !exec_path.is_null() && exec_len > 0 {
+            std::str::from_utf8(std::slice::from_raw_parts(exec_path as *const u8, exec_len)).unwrap_or("")
+        } else {
+            ""
+        };
+        if p.starts_with("/usr/") || p.starts_with("/opt/") || p.starts_with("/app/") {
+            "system-install"
+        } else {
+            "local-build"
+        }
+    };
+
+    let k_bytes = kind.as_bytes();
+    if k_bytes.len() >= cap {
+        return -1;
+    }
+    std::ptr::copy_nonoverlapping(k_bytes.as_ptr(), out_buf as *mut u8, k_bytes.len());
+    *out_buf.add(k_bytes.len()) = 0;
+    if !out_len.is_null() {
+        *out_len = k_bytes.len();
+    }
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_session_log_display_server(
+    has_wayland_display: bool,
+    has_display: bool,
+    out_buf: *mut c_char,
+    cap: usize,
+    out_len: *mut usize,
+) -> i32 {
+    if out_buf.is_null() || cap == 0 {
+        return -1;
+    }
+    if !out_len.is_null() {
+        *out_len = 0;
+    }
+
+    let server: &str = if has_wayland_display {
+        "wayland"
+    } else if has_display {
+        "x11"
+    } else {
+        "none"
+    };
+
+    let s_bytes = server.as_bytes();
+    if s_bytes.len() >= cap {
+        return -1;
+    }
+    std::ptr::copy_nonoverlapping(s_bytes.as_ptr(), out_buf as *mut u8, s_bytes.len());
+    *out_buf.add(s_bytes.len()) = 0;
+    if !out_len.is_null() {
+        *out_len = s_bytes.len();
+    }
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_session_log_device_node_name(
+    name: *const c_char,
+    name_len: usize,
+    prefix: *const c_char,
+    prefix_len: usize,
+) -> bool {
+    if name.is_null() || prefix.is_null() || name_len <= prefix_len {
+        return false;
+    }
+    let name_slice = std::slice::from_raw_parts(name as *const u8, name_len);
+    let prefix_slice = std::slice::from_raw_parts(prefix as *const u8, prefix_len);
+    if &name_slice[..prefix_len] != prefix_slice {
+        return false;
+    }
+    name_slice[prefix_len..].iter().all(|&b| b.is_ascii_digit())
+}
+
+// ============================================================================
+// 62. Candidate Approval Serialization & Evidence Fingerprinting
+// ============================================================================
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct MocktailRustPayloadFingerprintInput {
+    pub payload_id: *const c_char,
+    pub payload_id_len: usize,
+    pub metadata_sha256: *const c_char,
+    pub metadata_sha256_len: usize,
+    pub library_sha256: *const c_char,
+    pub library_sha256_len: usize,
+    pub base_apk_sha256: *const c_char,
+    pub base_apk_sha256_len: usize,
+    pub guest_abi: *const c_char,
+    pub guest_abi_len: usize,
+    pub split_apk_sha256: *const c_char,
+    pub split_apk_sha256_len: usize,
+    pub asset_tree_sha256: *const c_char,
+    pub asset_tree_sha256_len: usize,
+}
+
+unsafe fn c_to_str<'a>(ptr: *const c_char, len: usize) -> Result<&'a str, ()> {
+    if ptr.is_null() {
+        if len == 0 {
+            Ok("")
+        } else {
+            Err(())
+        }
+    } else {
+        std::str::from_utf8(std::slice::from_raw_parts(ptr as *const u8, len)).map_err(|_| ())
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_candidate_approval_fingerprint(
+    input: *const MocktailRustPayloadFingerprintInput,
+    out_sha256: *mut c_char,
+    cap: usize,
+) -> i32 {
+    if input.is_null() || out_sha256.is_null() || cap < 65 {
+        return -1;
+    }
+    let inp = &*input;
+    let payload_id = match c_to_str(inp.payload_id, inp.payload_id_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    if payload_id.is_empty() {
+        return -2;
+    }
+    let metadata_sha256 = match c_to_str(inp.metadata_sha256, inp.metadata_sha256_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let library_sha256 = match c_to_str(inp.library_sha256, inp.library_sha256_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let base_apk_sha256 = match c_to_str(inp.base_apk_sha256, inp.base_apk_sha256_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let guest_abi = match c_to_str(inp.guest_abi, inp.guest_abi_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let split_apk_sha256 = match c_to_str(inp.split_apk_sha256, inp.split_apk_sha256_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let asset_tree_sha256 = match c_to_str(inp.asset_tree_sha256, inp.asset_tree_sha256_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    let mut evidence = String::with_capacity(512);
+    evidence.push_str("payload_id=");
+    evidence.push_str(payload_id);
+    evidence.push('\n');
+    evidence.push_str("metadata=");
+    evidence.push_str(metadata_sha256);
+    evidence.push('\n');
+    evidence.push_str("libroblox=");
+    evidence.push_str(library_sha256);
+    evidence.push('\n');
+    evidence.push_str("base_apk=");
+    evidence.push_str(base_apk_sha256);
+    evidence.push('\n');
+    evidence.push_str(guest_abi);
+    evidence.push_str("_split=");
+    evidence.push_str(split_apk_sha256);
+    evidence.push('\n');
+    evidence.push_str("assets=");
+    evidence.push_str(asset_tree_sha256);
+    evidence.push('\n');
+
+    let digest = Sha256::digest(evidence.as_bytes());
+    let hex_str = hex::encode(digest);
+    std::ptr::copy_nonoverlapping(hex_str.as_ptr(), out_sha256 as *mut u8, 64);
+    *out_sha256.add(64) = 0;
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_candidate_approval_generation(
+    runtime_build_id: *const c_char,
+    r_len: usize,
+    fingerprint: *const c_char,
+    f_len: usize,
+    profile_sha256: *const c_char,
+    p_len: usize,
+    compatibility_sha256: *const c_char,
+    c_len: usize,
+    canary_1_sha256: *const c_char,
+    c1_len: usize,
+    canary_2_sha256: *const c_char,
+    c2_len: usize,
+    out_generation_40: *mut c_char,
+    cap: usize,
+) -> i32 {
+    if out_generation_40.is_null() || cap < 41 {
+        return -1;
+    }
+    let rbid = match c_to_str(runtime_build_id, r_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let fp = match c_to_str(fingerprint, f_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let prof = match c_to_str(profile_sha256, p_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let compat = match c_to_str(compatibility_sha256, c_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let c1 = match c_to_str(canary_1_sha256, c1_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let c2 = match c_to_str(canary_2_sha256, c2_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    let mut evidence = String::with_capacity(512);
+    evidence.push_str("runtime_build_id=");
+    evidence.push_str(rbid);
+    evidence.push('\n');
+    evidence.push_str("payload=");
+    evidence.push_str(fp);
+    evidence.push('\n');
+    evidence.push_str("profile=");
+    evidence.push_str(prof);
+    evidence.push('\n');
+    evidence.push_str("compatibility=");
+    evidence.push_str(compat);
+    evidence.push('\n');
+    evidence.push_str("canary_1=");
+    evidence.push_str(c1);
+    evidence.push('\n');
+    evidence.push_str("canary_2=");
+    evidence.push_str(c2);
+    evidence.push('\n');
+
+    let digest = Sha256::digest(evidence.as_bytes());
+    let hex_str = hex::encode(digest);
+    std::ptr::copy_nonoverlapping(hex_str.as_ptr(), out_generation_40 as *mut u8, 40);
+    *out_generation_40.add(40) = 0;
+    0
+}
+
+unsafe fn write_err_msg(out_err: *mut c_char, err_cap: usize, msg: &str) {
+    if !out_err.is_null() && err_cap > 0 {
+        let bytes = msg.as_bytes();
+        let to_copy = bytes.len().min(err_cap - 1);
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_err as *mut u8, to_copy);
+        *out_err.add(to_copy) = 0;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_candidate_approval_validate_binding(
+    profile_json: *const c_char,
+    p_len: usize,
+    compatibility_json: *const c_char,
+    c_len: usize,
+    payload_id: *const c_char,
+    payload_id_len: usize,
+    elf_build_id: *const c_char,
+    elf_len: usize,
+    library_sha256: *const c_char,
+    lib_len: usize,
+    version_name: *const c_char,
+    ver_name_len: usize,
+    version_code: u64,
+    out_err: *mut c_char,
+    err_cap: usize,
+) -> i32 {
+    let payload_id_str = match c_to_str(payload_id, payload_id_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let elf_build_id_str = match c_to_str(elf_build_id, elf_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let lib_sha_str = match c_to_str(library_sha256, lib_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let ver_name_str = match c_to_str(version_name, ver_name_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    let p_slice = if !profile_json.is_null() && p_len > 0 {
+        std::slice::from_raw_parts(profile_json as *const u8, p_len)
+    } else {
+        write_err_msg(out_err, err_cap, "derived approval profile is not bound to exact payload bytes");
+        return 1;
+    };
+
+    let c_slice = if !compatibility_json.is_null() && c_len > 0 {
+        std::slice::from_raw_parts(compatibility_json as *const u8, c_len)
+    } else {
+        write_err_msg(out_err, err_cap, "derived approval profile is not bound to exact payload bytes");
+        return 1;
+    };
+
+    let profile: serde_json::Value = match serde_json::from_slice(p_slice) {
+        Ok(v) => v,
+        Err(_) => {
+            write_err_msg(out_err, err_cap, "derived approval profile is not bound to exact payload bytes");
+            return 1;
+        }
+    };
+
+    let compatibility: serde_json::Value = match serde_json::from_slice(c_slice) {
+        Ok(v) => v,
+        Err(_) => {
+            write_err_msg(out_err, err_cap, "derived approval profile is not bound to exact payload bytes");
+            return 1;
+        }
+    };
+
+    let expected_payload_path = format!("payloads/{}", payload_id_str);
+
+    let profile_valid = profile.is_object()
+        && profile.get("schema_version").and_then(|v| v.as_i64()) == Some(1)
+        && profile.get("payload_id").and_then(|v| v.as_str()) == Some(payload_id_str)
+        && profile.get("payload_path").and_then(|v| v.as_str()) == Some(&expected_payload_path)
+        && profile.get("elf_build_id").and_then(|v| v.as_str()) == Some(elf_build_id_str)
+        && profile.get("payload_sha256").and_then(|v| v.as_str()) == Some(lib_sha_str)
+        && profile.get("profile").map_or(false, |v| v.is_object())
+        && profile.get("profile").and_then(|p| p.get("elf_build_id")).and_then(|v| v.as_str()) == Some(elf_build_id_str)
+        && profile.get("reference").map_or(false, |v| v.is_object())
+        && compatibility.is_object()
+        && compatibility.get("schema_version").and_then(|v| v.as_i64()) == Some(1)
+        && compatibility.get("profiles").and_then(|v| v.as_array()).map_or(false, |arr| arr.len() == 1);
+
+    if !profile_valid {
+        write_err_msg(out_err, err_cap, "derived approval profile is not bound to exact payload bytes");
+        return 1;
+    }
+
+    let profiles = compatibility.get("profiles").unwrap().as_array().unwrap();
+    let entry = &profiles[0];
+
+    let entry_valid = entry.is_object()
+        && entry.get("version_name").and_then(|v| v.as_str()) == Some(ver_name_str)
+        && entry.get("version_code").and_then(|v| v.as_u64()) == Some(version_code)
+        && entry.get("elf_build_id").and_then(|v| v.as_str()) == Some(elf_build_id_str)
+        && entry.get("status").and_then(|v| v.as_str()) == Some("experimental")
+        && entry.get("default_allowed").and_then(|v| v.as_bool()) == Some(true)
+        && entry.get("allow_legacy_binary_patches").map_or(true, |v| v.as_bool().unwrap_or(true)) == false
+        && entry.get("allow_host_abi_bridges").and_then(|v| v.as_bool()) == Some(true)
+        && entry.get("allow_host_constructor_replay").and_then(|v| v.as_bool()) == Some(true);
+
+    if !entry_valid {
+        write_err_msg(out_err, err_cap, "candidate compatibility manifest is not exact probation metadata");
+        return 1;
+    }
+
+    0
+}
+
+// ============================================================================
+// 63. Candidate Approval Attestation & Receipt Generator
+// ============================================================================
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct MocktailRustCanaryAttestationInput {
+    pub run: usize,
+    pub run_id: *const c_char,
+    pub run_id_len: usize,
+    pub payload_id: *const c_char,
+    pub payload_id_len: usize,
+    pub payload_fingerprint: *const c_char,
+    pub payload_fingerprint_len: usize,
+    pub profile_sha256: *const c_char,
+    pub profile_sha256_len: usize,
+    pub compatibility_manifest_sha256: *const c_char,
+    pub compatibility_manifest_sha256_len: usize,
+    pub runtime_sha256: *const c_char,
+    pub runtime_sha256_len: usize,
+    pub runtime_build_id: *const c_char,
+    pub runtime_build_id_len: usize,
+    pub log_sha256: *const c_char,
+    pub log_sha256_len: usize,
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_candidate_approval_build_attestation(
+    input: *const MocktailRustCanaryAttestationInput,
+    out_json: *mut c_char,
+    cap: usize,
+    out_len: *mut usize,
+) -> i32 {
+    if input.is_null() || out_json.is_null() || cap == 0 {
+        return -1;
+    }
+    if !out_len.is_null() {
+        *out_len = 0;
+    }
+    let inp = &*input;
+    let run_id = match c_to_str(inp.run_id, inp.run_id_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let payload_id = match c_to_str(inp.payload_id, inp.payload_id_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let payload_fingerprint = match c_to_str(inp.payload_fingerprint, inp.payload_fingerprint_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let profile_sha256 = match c_to_str(inp.profile_sha256, inp.profile_sha256_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let compatibility_manifest_sha256 = match c_to_str(inp.compatibility_manifest_sha256, inp.compatibility_manifest_sha256_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let runtime_sha256 = match c_to_str(inp.runtime_sha256, inp.runtime_sha256_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let runtime_build_id = match c_to_str(inp.runtime_build_id, inp.runtime_build_id_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let log_sha256 = match c_to_str(inp.log_sha256, inp.log_sha256_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    let mut map = std::collections::BTreeMap::new();
+    map.insert("canary_tier", serde_json::Value::String("C".into()));
+    map.insert("compatibility_manifest_sha256", serde_json::Value::String(compatibility_manifest_sha256.into()));
+    map.insert("payload_fingerprint", serde_json::Value::String(payload_fingerprint.into()));
+    map.insert("payload_id", serde_json::Value::String(payload_id.into()));
+    map.insert("profile_sha256", serde_json::Value::String(profile_sha256.into()));
+    map.insert("readiness_log_sha256", serde_json::Value::String(log_sha256.into()));
+    map.insert("run", serde_json::Value::Number(serde_json::Number::from(inp.run)));
+    map.insert("run_id", serde_json::Value::String(run_id.into()));
+    map.insert("runtime_build_id", serde_json::Value::String(runtime_build_id.into()));
+    map.insert("runtime_sha256", serde_json::Value::String(runtime_sha256.into()));
+    map.insert("schema_version", serde_json::Value::Number(serde_json::Number::from(1)));
+    map.insert("status", serde_json::Value::String("passed".into()));
+
+    let mut json_str = match serde_json::to_string_pretty(&map) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    json_str.push('\n');
+
+    let bytes = json_str.as_bytes();
+    if bytes.len() >= cap {
+        return -1;
+    }
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_json as *mut u8, bytes.len());
+    *out_json.add(bytes.len()) = 0;
+    if !out_len.is_null() {
+        *out_len = bytes.len();
+    }
+    0
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct MocktailRustApprovalReceiptInput {
+    pub payload_id: *const c_char,
+    pub payload_id_len: usize,
+    pub generation: *const c_char,
+    pub generation_len: usize,
+    pub payload_path: *const c_char,
+    pub payload_path_len: usize,
+    pub elf_build_id: *const c_char,
+    pub elf_build_id_len: usize,
+    pub library_sha256: *const c_char,
+    pub library_sha256_len: usize,
+    pub payload_fingerprint: *const c_char,
+    pub payload_fingerprint_len: usize,
+    pub profile_sha256: *const c_char,
+    pub profile_sha256_len: usize,
+    pub compatibility_manifest_sha256: *const c_char,
+    pub compatibility_manifest_sha256_len: usize,
+    pub runtime_sha256: *const c_char,
+    pub runtime_sha256_len: usize,
+    pub runtime_build_id: *const c_char,
+    pub runtime_build_id_len: usize,
+    pub canary_1_sha256: *const c_char,
+    pub canary_1_sha256_len: usize,
+    pub canary_2_sha256: *const c_char,
+    pub canary_2_sha256_len: usize,
+    pub approved_at_utc: *const c_char,
+    pub approved_at_utc_len: usize,
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_candidate_approval_build_receipt(
+    input: *const MocktailRustApprovalReceiptInput,
+    out_json: *mut c_char,
+    cap: usize,
+    out_len: *mut usize,
+) -> i32 {
+    if input.is_null() || out_json.is_null() || cap == 0 {
+        return -1;
+    }
+    if !out_len.is_null() {
+        *out_len = 0;
+    }
+    let inp = &*input;
+    let payload_id = match c_to_str(inp.payload_id, inp.payload_id_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let generation = match c_to_str(inp.generation, inp.generation_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let payload_path = match c_to_str(inp.payload_path, inp.payload_path_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let elf_build_id = match c_to_str(inp.elf_build_id, inp.elf_build_id_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let library_sha256 = match c_to_str(inp.library_sha256, inp.library_sha256_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let payload_fingerprint = match c_to_str(inp.payload_fingerprint, inp.payload_fingerprint_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let profile_sha256 = match c_to_str(inp.profile_sha256, inp.profile_sha256_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let compatibility_manifest_sha256 = match c_to_str(inp.compatibility_manifest_sha256, inp.compatibility_manifest_sha256_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let runtime_sha256 = match c_to_str(inp.runtime_sha256, inp.runtime_sha256_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let runtime_build_id = match c_to_str(inp.runtime_build_id, inp.runtime_build_id_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let canary_1 = match c_to_str(inp.canary_1_sha256, inp.canary_1_sha256_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let canary_2 = match c_to_str(inp.canary_2_sha256, inp.canary_2_sha256_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let approved_at = match c_to_str(inp.approved_at_utc, inp.approved_at_utc_len) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    let mut map = std::collections::BTreeMap::new();
+    map.insert("approved_at", serde_json::Value::String(approved_at.into()));
+    map.insert("canary_attestation_sha256", serde_json::Value::Array(vec![
+        serde_json::Value::String(canary_1.into()),
+        serde_json::Value::String(canary_2.into()),
+    ]));
+    map.insert("canary_runtime_sha256", serde_json::Value::String(runtime_sha256.into()));
+    map.insert("canary_tier", serde_json::Value::String("C".into()));
+    map.insert("compatibility_manifest_sha256", serde_json::Value::String(compatibility_manifest_sha256.into()));
+    map.insert("elf_build_id", serde_json::Value::String(elf_build_id.into()));
+    map.insert("generation", serde_json::Value::String(generation.into()));
+    map.insert("payload_fingerprint", serde_json::Value::String(payload_fingerprint.into()));
+    map.insert("payload_id", serde_json::Value::String(payload_id.into()));
+    map.insert("payload_path", serde_json::Value::String(payload_path.into()));
+    map.insert("payload_sha256", serde_json::Value::String(library_sha256.into()));
+    map.insert("profile_sha256", serde_json::Value::String(profile_sha256.into()));
+    map.insert("runtime_build_id", serde_json::Value::String(runtime_build_id.into()));
+    map.insert("runtime_sha256", serde_json::Value::String(runtime_sha256.into()));
+    map.insert("schema_version", serde_json::Value::Number(serde_json::Number::from(1)));
+    map.insert("status", serde_json::Value::String("approved".into()));
+    map.insert("successful_runs", serde_json::Value::Number(serde_json::Number::from(2)));
+
+    let mut json_str = match serde_json::to_string_pretty(&map) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    json_str.push('\n');
+
+    let bytes = json_str.as_bytes();
+    if bytes.len() >= cap {
+        return -1;
+    }
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_json as *mut u8, bytes.len());
+    *out_json.add(bytes.len()) = 0;
+    if !out_len.is_null() {
+        *out_len = bytes.len();
+    }
+    0
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -11301,6 +12010,280 @@ integrations:
         assert_eq!(flags.gamepad_api, 0);
         assert!(flags.clear_partial_gamepad);
         assert!(!flags.has_gamepad_events);
+    }
+
+    #[test]
+    fn test_session_log_helpers() {
+        unsafe {
+            // Display path
+            let mut out = [0 as c_char; 128];
+            let mut len = 0usize;
+
+            let path_empty = CString::new("").unwrap();
+            let home = CString::new("/home/user").unwrap();
+            assert_eq!(mocktail_rust_session_log_display_path(
+                path_empty.as_ptr(), 0,
+                home.as_ptr(), home.as_bytes().len(),
+                out.as_mut_ptr(), out.len(), &mut len
+            ), 0);
+            assert_eq!(CStr::from_ptr(out.as_ptr()).to_str().unwrap(), "unknown");
+
+            let path_inside = CString::new("/home/user/logs/session.log").unwrap();
+            assert_eq!(mocktail_rust_session_log_display_path(
+                path_inside.as_ptr(), path_inside.as_bytes().len(),
+                home.as_ptr(), home.as_bytes().len(),
+                out.as_mut_ptr(), out.len(), &mut len
+            ), 0);
+            assert_eq!(CStr::from_ptr(out.as_ptr()).to_str().unwrap(), "~/logs/session.log");
+
+            let path_home = CString::new("/home/user").unwrap();
+            assert_eq!(mocktail_rust_session_log_display_path(
+                path_home.as_ptr(), path_home.as_bytes().len(),
+                home.as_ptr(), home.as_bytes().len(),
+                out.as_mut_ptr(), out.len(), &mut len
+            ), 0);
+            assert_eq!(CStr::from_ptr(out.as_ptr()).to_str().unwrap(), "~/.");
+
+            let path_outside = CString::new("/usr/bin/mocktail").unwrap();
+            assert_eq!(mocktail_rust_session_log_display_path(
+                path_outside.as_ptr(), path_outside.as_bytes().len(),
+                home.as_ptr(), home.as_bytes().len(),
+                out.as_mut_ptr(), out.len(), &mut len
+            ), 0);
+            assert_eq!(CStr::from_ptr(out.as_ptr()).to_str().unwrap(), "/usr/bin/mocktail");
+
+            // Package kind
+            assert_eq!(mocktail_rust_session_log_package_kind(
+                true, false, false, std::ptr::null(), 0,
+                out.as_mut_ptr(), out.len(), &mut len
+            ), 0);
+            assert_eq!(CStr::from_ptr(out.as_ptr()).to_str().unwrap(), "flatpak");
+
+            assert_eq!(mocktail_rust_session_log_package_kind(
+                false, true, false, std::ptr::null(), 0,
+                out.as_mut_ptr(), out.len(), &mut len
+            ), 0);
+            assert_eq!(CStr::from_ptr(out.as_ptr()).to_str().unwrap(), "appimage");
+
+            assert_eq!(mocktail_rust_session_log_package_kind(
+                false, false, true, std::ptr::null(), 0,
+                out.as_mut_ptr(), out.len(), &mut len
+            ), 0);
+            assert_eq!(CStr::from_ptr(out.as_ptr()).to_str().unwrap(), "portable");
+
+            let sys_path = CString::new("/usr/bin/mocktail").unwrap();
+            assert_eq!(mocktail_rust_session_log_package_kind(
+                false, false, false, sys_path.as_ptr(), sys_path.as_bytes().len(),
+                out.as_mut_ptr(), out.len(), &mut len
+            ), 0);
+            assert_eq!(CStr::from_ptr(out.as_ptr()).to_str().unwrap(), "system-install");
+
+            let build_path = CString::new("/home/user/mocktail/build/mocktail").unwrap();
+            assert_eq!(mocktail_rust_session_log_package_kind(
+                false, false, false, build_path.as_ptr(), build_path.as_bytes().len(),
+                out.as_mut_ptr(), out.len(), &mut len
+            ), 0);
+            assert_eq!(CStr::from_ptr(out.as_ptr()).to_str().unwrap(), "local-build");
+
+            // Display server
+            assert_eq!(mocktail_rust_session_log_display_server(
+                true, false, out.as_mut_ptr(), out.len(), &mut len
+            ), 0);
+            assert_eq!(CStr::from_ptr(out.as_ptr()).to_str().unwrap(), "wayland");
+
+            assert_eq!(mocktail_rust_session_log_display_server(
+                false, true, out.as_mut_ptr(), out.len(), &mut len
+            ), 0);
+            assert_eq!(CStr::from_ptr(out.as_ptr()).to_str().unwrap(), "x11");
+
+            assert_eq!(mocktail_rust_session_log_display_server(
+                false, false, out.as_mut_ptr(), out.len(), &mut len
+            ), 0);
+            assert_eq!(CStr::from_ptr(out.as_ptr()).to_str().unwrap(), "none");
+
+            // Device node name
+            assert!(mocktail_rust_session_log_device_node_name(
+                b"renderD128\0".as_ptr() as *const c_char, 10,
+                b"renderD\0".as_ptr() as *const c_char, 7
+            ));
+            assert!(!mocktail_rust_session_log_device_node_name(
+                b"renderD\0".as_ptr() as *const c_char, 7,
+                b"renderD\0".as_ptr() as *const c_char, 7
+            ));
+            assert!(!mocktail_rust_session_log_device_node_name(
+                b"renderDabc\0".as_ptr() as *const c_char, 10,
+                b"renderD\0".as_ptr() as *const c_char, 7
+            ));
+            assert!(mocktail_rust_session_log_device_node_name(
+                b"card0\0".as_ptr() as *const c_char, 5,
+                b"card\0".as_ptr() as *const c_char, 4
+            ));
+        }
+    }
+
+    #[test]
+    fn test_candidate_approval_fingerprint_and_generation() {
+        unsafe {
+            let pid = CString::new("pay123").unwrap();
+            let meta = CString::new("meta_sha").unwrap();
+            let lib = CString::new("lib_sha").unwrap();
+            let base = CString::new("base_sha").unwrap();
+            let abi = CString::new("x86_64").unwrap();
+            let split = CString::new("split_sha").unwrap();
+            let assets = CString::new("assets_sha").unwrap();
+
+            let input = MocktailRustPayloadFingerprintInput {
+                payload_id: pid.as_ptr(), payload_id_len: pid.as_bytes().len(),
+                metadata_sha256: meta.as_ptr(), metadata_sha256_len: meta.as_bytes().len(),
+                library_sha256: lib.as_ptr(), library_sha256_len: lib.as_bytes().len(),
+                base_apk_sha256: base.as_ptr(), base_apk_sha256_len: base.as_bytes().len(),
+                guest_abi: abi.as_ptr(), guest_abi_len: abi.as_bytes().len(),
+                split_apk_sha256: split.as_ptr(), split_apk_sha256_len: split.as_bytes().len(),
+                asset_tree_sha256: assets.as_ptr(), asset_tree_sha256_len: assets.as_bytes().len(),
+            };
+
+            let mut fp_buf = [0 as c_char; 65];
+            assert_eq!(mocktail_rust_candidate_approval_fingerprint(&input, fp_buf.as_mut_ptr(), fp_buf.len()), 0);
+            let fp_str = CStr::from_ptr(fp_buf.as_ptr()).to_str().unwrap();
+            assert_eq!(fp_str.len(), 64);
+
+            let rbid = CString::new("1686400865ae0e408cd7bd67de7a439625c6fd13").unwrap();
+            let prof = CString::new("profile_sha").unwrap();
+            let compat = CString::new("compat_sha").unwrap();
+            let c1 = CString::new("c1_sha").unwrap();
+            let c2 = CString::new("c2_sha").unwrap();
+
+            let mut gen_buf = [0 as c_char; 41];
+            assert_eq!(mocktail_rust_candidate_approval_generation(
+                rbid.as_ptr(), rbid.as_bytes().len(),
+                fp_buf.as_ptr(), fp_str.len(),
+                prof.as_ptr(), prof.as_bytes().len(),
+                compat.as_ptr(), compat.as_bytes().len(),
+                c1.as_ptr(), c1.as_bytes().len(),
+                c2.as_ptr(), c2.as_bytes().len(),
+                gen_buf.as_mut_ptr(), gen_buf.len()
+            ), 0);
+            let gen_str = CStr::from_ptr(gen_buf.as_ptr()).to_str().unwrap();
+            assert_eq!(gen_str.len(), 40);
+        }
+    }
+
+    #[test]
+    fn test_candidate_approval_validate_binding() {
+        unsafe {
+            let pid = "2814-test";
+            let bid = "1686400865ae0e408cd7bd67de7a439625c6fd13";
+            let lib_sha = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
+            let ver_name = "2.732.1043";
+            let ver_code = 2814u64;
+
+            let prof_json = format!(
+                r#"{{"schema_version":1,"payload_id":"{pid}","payload_path":"payloads/{pid}","elf_build_id":"{bid}","payload_sha256":"{lib_sha}","profile":{{"elf_build_id":"{bid}"}},"reference":{{}}}}"#
+            );
+            let compat_json = format!(
+                r#"{{"schema_version":1,"profiles":[{{"version_name":"{ver_name}","version_code":{ver_code},"elf_build_id":"{bid}","status":"experimental","default_allowed":true,"allow_legacy_binary_patches":false,"allow_host_abi_bridges":true,"allow_host_constructor_replay":true}}]}}"#
+            );
+
+            let p_c = CString::new(prof_json).unwrap();
+            let c_c = CString::new(compat_json).unwrap();
+            let pid_c = CString::new(pid).unwrap();
+            let bid_c = CString::new(bid).unwrap();
+            let lib_c = CString::new(lib_sha).unwrap();
+            let ver_c = CString::new(ver_name).unwrap();
+
+            let mut err_buf = [0 as c_char; 256];
+            assert_eq!(mocktail_rust_candidate_approval_validate_binding(
+                p_c.as_ptr(), p_c.as_bytes().len(),
+                c_c.as_ptr(), c_c.as_bytes().len(),
+                pid_c.as_ptr(), pid_c.as_bytes().len(),
+                bid_c.as_ptr(), bid_c.as_bytes().len(),
+                lib_c.as_ptr(), lib_c.as_bytes().len(),
+                ver_c.as_ptr(), ver_c.as_bytes().len(),
+                ver_code,
+                err_buf.as_mut_ptr(), err_buf.len()
+            ), 0);
+
+            // Mismatched build id
+            let bad_bid = CString::new("0000000000000000000000000000000000000000").unwrap();
+            assert_eq!(mocktail_rust_candidate_approval_validate_binding(
+                p_c.as_ptr(), p_c.as_bytes().len(),
+                c_c.as_ptr(), c_c.as_bytes().len(),
+                pid_c.as_ptr(), pid_c.as_bytes().len(),
+                bad_bid.as_ptr(), bad_bid.as_bytes().len(),
+                lib_c.as_ptr(), lib_c.as_bytes().len(),
+                ver_c.as_ptr(), ver_c.as_bytes().len(),
+                ver_code,
+                err_buf.as_mut_ptr(), err_buf.len()
+            ), 1);
+            let err_str = CStr::from_ptr(err_buf.as_ptr()).to_str().unwrap();
+            assert_eq!(err_str, "derived approval profile is not bound to exact payload bytes");
+        }
+    }
+
+    #[test]
+    fn test_candidate_approval_attestation_and_receipt() {
+        unsafe {
+            let run_id = CString::new("run-123").unwrap();
+            let pid = CString::new("pay-456").unwrap();
+            let fp = CString::new("fp-789").unwrap();
+            let prof = CString::new("prof-sha").unwrap();
+            let compat = CString::new("compat-sha").unwrap();
+            let rsha = CString::new("run-sha").unwrap();
+            let rbid = CString::new("run-bid").unwrap();
+            let lsha = CString::new("log-sha").unwrap();
+
+            let att_in = MocktailRustCanaryAttestationInput {
+                run: 1,
+                run_id: run_id.as_ptr(), run_id_len: run_id.as_bytes().len(),
+                payload_id: pid.as_ptr(), payload_id_len: pid.as_bytes().len(),
+                payload_fingerprint: fp.as_ptr(), payload_fingerprint_len: fp.as_bytes().len(),
+                profile_sha256: prof.as_ptr(), profile_sha256_len: prof.as_bytes().len(),
+                compatibility_manifest_sha256: compat.as_ptr(), compatibility_manifest_sha256_len: compat.as_bytes().len(),
+                runtime_sha256: rsha.as_ptr(), runtime_sha256_len: rsha.as_bytes().len(),
+                runtime_build_id: rbid.as_ptr(), runtime_build_id_len: rbid.as_bytes().len(),
+                log_sha256: lsha.as_ptr(), log_sha256_len: lsha.as_bytes().len(),
+            };
+
+            let mut json_buf = [0 as c_char; 1024];
+            let mut out_len = 0usize;
+            assert_eq!(mocktail_rust_candidate_approval_build_attestation(
+                &att_in, json_buf.as_mut_ptr(), json_buf.len(), &mut out_len
+            ), 0);
+            let att_json = CStr::from_ptr(json_buf.as_ptr()).to_str().unwrap();
+            assert!(att_json.contains(r#""canary_tier": "C""#));
+            assert!(att_json.contains(r#""readiness_log_sha256": "log-sha""#));
+            assert!(att_json.ends_with('\n'));
+
+            let gen = CString::new("gen-abc").unwrap();
+            let ppath = CString::new("/path/to/lib").unwrap();
+            let c1 = CString::new("canary1-hash").unwrap();
+            let c2 = CString::new("canary2-hash").unwrap();
+            let app_at = CString::new("2026-10-31T12:00:00Z").unwrap();
+
+            let rcpt_in = MocktailRustApprovalReceiptInput {
+                payload_id: pid.as_ptr(), payload_id_len: pid.as_bytes().len(),
+                generation: gen.as_ptr(), generation_len: gen.as_bytes().len(),
+                payload_path: ppath.as_ptr(), payload_path_len: ppath.as_bytes().len(),
+                elf_build_id: rbid.as_ptr(), elf_build_id_len: rbid.as_bytes().len(),
+                library_sha256: prof.as_ptr(), library_sha256_len: prof.as_bytes().len(),
+                payload_fingerprint: fp.as_ptr(), payload_fingerprint_len: fp.as_bytes().len(),
+                profile_sha256: prof.as_ptr(), profile_sha256_len: prof.as_bytes().len(),
+                compatibility_manifest_sha256: compat.as_ptr(), compatibility_manifest_sha256_len: compat.as_bytes().len(),
+                runtime_sha256: rsha.as_ptr(), runtime_sha256_len: rsha.as_bytes().len(),
+                runtime_build_id: rbid.as_ptr(), runtime_build_id_len: rbid.as_bytes().len(),
+                canary_1_sha256: c1.as_ptr(), canary_1_sha256_len: c1.as_bytes().len(),
+                canary_2_sha256: c2.as_ptr(), canary_2_sha256_len: c2.as_bytes().len(),
+                approved_at_utc: app_at.as_ptr(), approved_at_utc_len: app_at.as_bytes().len(),
+            };
+
+            assert_eq!(mocktail_rust_candidate_approval_build_receipt(
+                &rcpt_in, json_buf.as_mut_ptr(), json_buf.len(), &mut out_len
+            ), 0);
+            let rcpt_json = CStr::from_ptr(json_buf.as_ptr()).to_str().unwrap();
+            assert!(rcpt_json.contains(r#""status": "approved""#));
+            assert!(rcpt_json.contains(r#""canary_attestation_sha256": ["#));
+            assert!(rcpt_json.ends_with('\n'));
+        }
     }
 
 }
