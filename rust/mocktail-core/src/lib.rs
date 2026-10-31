@@ -11396,6 +11396,1424 @@ pub extern "C" fn mocktail_rust_free_c_string(ptr: *mut c_char) {
 }
 
 // ============================================================================
+// 74. Display Refresh Capabilities Engine
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_normalize_display_refresh_capabilities(
+    current_hz: f32,
+    supported_hz: *const f32,
+    count: usize,
+    out_hz: *mut f32,
+    out_cap: usize,
+    out_count: *mut usize,
+) -> i32 {
+    if !current_hz.is_finite() || current_hz <= 0.0 {
+        if !out_count.is_null() {
+            unsafe { *out_count = 0 };
+        }
+        return 0;
+    }
+
+    let mut list = Vec::new();
+    if !supported_hz.is_null() && count > 0 {
+        let slice = unsafe { std::slice::from_raw_parts(supported_hz, count) };
+        for &rate in slice {
+            if rate.is_finite() && rate > 0.0 {
+                list.push(rate);
+            }
+        }
+    }
+    list.push(current_hz);
+    list.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    const DUPLICATE_TOLERANCE_HZ: f32 = 0.01;
+    let mut deduplicated: Vec<f32> = Vec::new();
+    for rate in list {
+        if deduplicated.is_empty()
+            || (deduplicated.last().unwrap() - rate).abs() > DUPLICATE_TOLERANCE_HZ
+        {
+            deduplicated.push(rate);
+        }
+    }
+
+    if !out_count.is_null() {
+        unsafe { *out_count = deduplicated.len() };
+    }
+    if !out_hz.is_null() && out_cap > 0 {
+        let copy_len = std::cmp::min(deduplicated.len(), out_cap);
+        unsafe {
+            std::ptr::copy_nonoverlapping(deduplicated.as_ptr(), out_hz, copy_len);
+        }
+    }
+    0
+}
+
+// ============================================================================
+// 75. Platform Application Metadata & Identity
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_platform_metadata_identity(
+    name_buf: *mut c_char,
+    name_cap: usize,
+    id_buf: *mut c_char,
+    id_cap: usize,
+    type_buf: *mut c_char,
+    type_cap: usize,
+) -> i32 {
+    copy_to_c_buffer("Mocktail", name_buf, name_cap);
+    copy_to_c_buffer("space.bigrat.mocktail", id_buf, id_cap);
+    copy_to_c_buffer("game", type_buf, type_cap);
+    0
+}
+
+// ============================================================================
+// 76. SDL Window Icon PNG Header Verifier
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_validate_window_icon_png_header(
+    data: *const u8,
+    size: usize,
+    out_width: *mut u32,
+    out_height: *mut u32,
+) -> i32 {
+    const PNG_MAGIC: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    if data.is_null() || size < 24 {
+        return -1;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(data, size) };
+    if &slice[0..8] != PNG_MAGIC {
+        return -2;
+    }
+    if &slice[12..16] != b"IHDR" {
+        return -3;
+    }
+    let width = u32::from_be_bytes([slice[16], slice[17], slice[18], slice[19]]);
+    let height = u32::from_be_bytes([slice[20], slice[21], slice[22], slice[23]]);
+    if width == 0 || height == 0 {
+        return -4;
+    }
+    if !out_width.is_null() {
+        unsafe { *out_width = width };
+    }
+    if !out_height.is_null() {
+        unsafe { *out_height = height };
+    }
+    0
+}
+
+// ============================================================================
+// 77. Supported Launch Policy Defaults Table
+// ============================================================================
+
+const INTERACTIVE_DEFAULTS: &[(&str, &str)] = &[
+    ("MOCKTAIL_ALLOW_NO_COOKIE_LUA_APP", "1"),
+    ("MOCKTAIL_VALIDATE_ROBLOX_COOKIE", "0"),
+    ("MOCKTAIL_ENGINE_DETACH", "0"),
+    ("MOCKTAIL_CALL_REAL_APP_BRIDGE_INIT", "1"),
+    ("MOCKTAIL_CALL_REAL_APP_BRIDGE_INIT_THREAD", "0"),
+    ("MOCKTAIL_SKIP_LIBROBLOX_CTORS", "0"),
+    ("MOCKTAIL_HOST_JNI_SINGLETON_SEED", "0"),
+    ("MOCKTAIL_INIT_CLIENT_SETTINGS", "1"),
+    ("MOCKTAIL_HEADLESS", "0"),
+    ("MOCKTAIL_STARTUP_THREAD_TIMEOUT_MS", "120000"),
+    ("MOCKTAIL_CALL_REAL_APP_BRIDGE_START", "1"),
+    ("MOCKTAIL_STEP_START_APP_WITH_PARAMS", "1"),
+    ("MOCKTAIL_UPDATE_SURFACE_APP_AFTER_START_APP", "1"),
+    ("MOCKTAIL_CALL_REAL_APP_BRIDGE_UPDATE_SURFACE", "1"),
+    ("MOCKTAIL_START_LUA_APP_DM", "1"),
+    ("MOCKTAIL_STEP_START_LUA_APP_DM", "1"),
+    ("MOCKTAIL_POST_CLIENT_SETTINGS", "1"),
+    ("MOCKTAIL_STEP_POST_CLIENT_SETTINGS", "1"),
+    ("MOCKTAIL_FETCH_CLIENT_SETTINGS", "1"),
+    ("MOCKTAIL_START_LUA_APP_DM_AFTER_START_APP", "0"),
+    ("MOCKTAIL_START_LUA_APP_DM_INLINE", "1"),
+    ("MOCKTAIL_START_LUA_APP_DM_DELAY_MS", "0"),
+    ("MOCKTAIL_START_GAME_WITH_PARAM", "0"),
+    ("MOCKTAIL_RESUME_GAME_WITH_PLATFORM_PARAMS_AFTER_START_GAME", "0"),
+    ("MOCKTAIL_SEND_APP_READY", "0"),
+    ("MOCKTAIL_SEND_GAME_LOADED", "0"),
+    ("MOCKTAIL_MAIN_THREAD_MESSAGE_PUMP", "1"),
+    ("MOCKTAIL_AUTO_EXIT_AFTER_PRESENT_MS", "0"),
+];
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_supported_launch_defaults_count(interactive: i32) -> usize {
+    if interactive != 0 {
+        INTERACTIVE_DEFAULTS.len()
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_supported_launch_default_entry(
+    interactive: i32,
+    index: usize,
+    key_buf: *mut c_char,
+    key_cap: usize,
+    val_buf: *mut c_char,
+    val_cap: usize,
+) -> i32 {
+    let list = if interactive != 0 {
+        INTERACTIVE_DEFAULTS
+    } else {
+        return -1;
+    };
+    if index >= list.len() {
+        return -2;
+    }
+    let (k, v) = list[index];
+    copy_to_c_buffer(k, key_buf, key_cap);
+    copy_to_c_buffer(v, val_buf, val_cap);
+    0
+}
+
+// ============================================================================
+// 78. Platform Profile Revision Generator & Android Path Normalizer
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_build_platform_profile_revision(
+    device_profile: *const c_char,
+    touch: i32,
+    mouse: i32,
+    keyboard: i32,
+    out_buf: *mut c_char,
+    out_cap: usize,
+) -> i32 {
+    let prof = if !device_profile.is_null() {
+        unsafe { CStr::from_ptr(device_profile) }.to_str().unwrap_or("")
+    } else {
+        ""
+    };
+    let rev = format!(
+        "device-v1-{}-t{}-m{}-k{}",
+        prof,
+        if touch != 0 { "1" } else { "0" },
+        if mouse != 0 { "1" } else { "0" },
+        if keyboard != 0 { "1" } else { "0" }
+    );
+    copy_to_c_buffer(&rev, out_buf, out_cap);
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_translate_android_files_path(
+    configured: *const c_char,
+    data_root: *const c_char,
+    out_buf: *mut c_char,
+    out_cap: usize,
+) -> i32 {
+    if configured.is_null() || data_root.is_null() {
+        return -1;
+    }
+    let conf = unsafe { CStr::from_ptr(configured) }.to_str().unwrap_or("");
+    let root = unsafe { CStr::from_ptr(data_root) }.to_str().unwrap_or("");
+
+    for prefix in &["/data/user/0/com.roblox.client", "/data/data/com.roblox.client"] {
+        if conf == *prefix {
+            copy_to_c_buffer(root, out_buf, out_cap);
+            return 0;
+        }
+        if conf.starts_with(prefix) && conf.as_bytes().get(prefix.len()) == Some(&b'/') {
+            let rel = &conf[prefix.len() + 1..];
+            let joined = std::path::Path::new(root).join(rel);
+            copy_to_c_buffer(&joined.to_string_lossy(), out_buf, out_cap);
+            return 0;
+        }
+    }
+    let p = std::path::Path::new(conf);
+    if p.is_absolute() {
+        copy_to_c_buffer(conf, out_buf, out_cap);
+        return 0;
+    }
+    -2
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_has_path_prefix(
+    path: *const c_char,
+    prefix: *const c_char,
+) -> i32 {
+    if path.is_null() || prefix.is_null() {
+        return 0;
+    }
+    let p_str = unsafe { CStr::from_ptr(path) }.to_str().unwrap_or("");
+    let pref_str = unsafe { CStr::from_ptr(prefix) }.to_str().unwrap_or("");
+    let p = std::path::Path::new(p_str);
+    let pref = std::path::Path::new(pref_str);
+    if p.starts_with(pref) {
+        1
+    } else {
+        0
+    }
+}
+
+// ============================================================================
+// 79. Platform Cache Migration Fingerprint Validator
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_validate_platform_cache_fingerprint(
+    json_str: *const c_char,
+    json_len: usize,
+    revision_buf: *mut c_char,
+    revision_cap: usize,
+) -> i32 {
+    if json_str.is_null() || json_len == 0 {
+        return -1;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(json_str as *const u8, json_len) };
+    let s = match std::str::from_utf8(slice) {
+        Ok(v) => v,
+        Err(_) => return -2,
+    };
+    let val: serde_json::Value = match serde_json::from_str(s) {
+        Ok(v) => v,
+        Err(_) => return -3,
+    };
+    if let serde_json::Value::Object(map) = val {
+        if map.get("schema_version").and_then(|v| v.as_i64()) != Some(1) {
+            return -4;
+        }
+        if let Some(rev) = map.get("profile_revision").and_then(|v| v.as_str()) {
+            copy_to_c_buffer(rev, revision_buf, revision_cap);
+            return 0;
+        }
+    }
+    -5
+}
+
+// ============================================================================
+// 80. Roblox Browser Service Command Parser
+// ============================================================================
+
+#[repr(C)]
+pub struct MocktailRustBrowserServiceOpenCommand {
+    pub url: [c_char; 1024],
+    pub title: [c_char; 512],
+    pub has_title: i32,
+    pub visible: i32,
+    pub modal: i32,
+    pub back_navigation_disabled: i32,
+    pub show_domain_as_title: i32,
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_parse_browser_service_command(
+    json_str: *const c_char,
+    json_len: usize,
+    out_command_type: *mut i32,
+    out_cmd: *mut MocktailRustBrowserServiceOpenCommand,
+    err_buf: *mut c_char,
+    err_cap: usize,
+) -> i32 {
+    const MAX_PAYLOAD: usize = 64 * 1024;
+    if json_str.is_null() || json_len == 0 || json_len > MAX_PAYLOAD {
+        copy_error(err_buf, err_cap, "BrowserService command JSON size is invalid");
+        return -1;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(json_str as *const u8, json_len) };
+    let s = match std::str::from_utf8(slice) {
+        Ok(v) => v,
+        Err(_) => {
+            copy_error(err_buf, err_cap, "BrowserService command payload is not a JSON object");
+            return -2;
+        }
+    };
+    let val: serde_json::Value = match serde_json::from_str(s) {
+        Ok(serde_json::Value::Object(m)) => serde_json::Value::Object(m),
+        _ => {
+            copy_error(err_buf, err_cap, "BrowserService command payload is not a JSON object");
+            return -2;
+        }
+    };
+    let obj = val.as_object().unwrap();
+    let cmd = match obj.get("command").and_then(|v| v.as_str()) {
+        Some(c) => c,
+        None => {
+            copy_error(err_buf, err_cap, "BrowserService command requires a string command");
+            return -3;
+        }
+    };
+
+    if cmd == "open" {
+        if !out_command_type.is_null() {
+            unsafe { *out_command_type = 1 };
+        }
+        let url = match obj.get("url").and_then(|v| v.as_str()) {
+            Some(u) => u,
+            None => {
+                copy_error(err_buf, err_cap, "BrowserService open command requires a string url");
+                return -4;
+            }
+        };
+        if url.is_empty() || url.len() > 1024 || url.bytes().any(|b| b < 0x20 || b == 0x7f) {
+            copy_error(err_buf, err_cap, "BrowserService open URL is invalid");
+            return -5;
+        }
+        let title_str = if let Some(t_val) = obj.get("title") {
+            match t_val.as_str() {
+                Some(t) => {
+                    if t.len() > 512 || t.bytes().any(|b| b < 0x20 || b == 0x7f) {
+                        copy_error(err_buf, err_cap, "BrowserService command field title is invalid");
+                        return -5;
+                    }
+                    t
+                }
+                None => {
+                    copy_error(err_buf, err_cap, "BrowserService command field title must be a string");
+                    return -5;
+                }
+            }
+        } else {
+            ""
+        };
+
+        let visible_val = if let Some(v) = obj.get("visible") {
+            match v.as_bool() {
+                Some(b) => b,
+                None => {
+                    copy_error(err_buf, err_cap, "BrowserService command field visible must be a boolean");
+                    return -5;
+                }
+            }
+        } else {
+            true
+        };
+
+        let modal_val = if let Some(v) = obj.get("modal") {
+            match v.as_bool() {
+                Some(b) => b,
+                None => {
+                    copy_error(err_buf, err_cap, "BrowserService command field modal must be a boolean");
+                    return -5;
+                }
+            }
+        } else {
+            false
+        };
+
+        let back_val = if let Some(v) = obj.get("backNavigationDisabled") {
+            match v.as_bool() {
+                Some(b) => b,
+                None => {
+                    copy_error(err_buf, err_cap, "BrowserService command field backNavigationDisabled must be a boolean");
+                    return -5;
+                }
+            }
+        } else {
+            false
+        };
+
+        let domain_val = if let Some(v) = obj.get("showDomainAsTitle") {
+            match v.as_bool() {
+                Some(b) => b,
+                None => {
+                    copy_error(err_buf, err_cap, "BrowserService command field showDomainAsTitle must be a boolean");
+                    return -5;
+                }
+            }
+        } else {
+            false
+        };
+
+        if !out_cmd.is_null() {
+            unsafe {
+                let cmd_ref = &mut *out_cmd;
+                copy_to_c_buffer(url, cmd_ref.url.as_mut_ptr(), cmd_ref.url.len());
+                copy_to_c_buffer(title_str, cmd_ref.title.as_mut_ptr(), cmd_ref.title.len());
+                cmd_ref.has_title = if obj.contains_key("title") { 1 } else { 0 };
+                cmd_ref.visible = if visible_val { 1 } else { 0 };
+                cmd_ref.modal = if modal_val { 1 } else { 0 };
+                cmd_ref.back_navigation_disabled = if back_val { 1 } else { 0 };
+                cmd_ref.show_domain_as_title = if domain_val { 1 } else { 0 };
+            }
+        }
+        return 0;
+    } else if cmd == "config" {
+        if !out_command_type.is_null() {
+            unsafe { *out_command_type = 2 };
+        }
+        return 0;
+    }
+
+    copy_error(err_buf, err_cap, "BrowserService command is unsupported");
+    -6
+}
+
+// ============================================================================
+// 81. Roblox Text Display State & UTF-16 Cursor Engine
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_utf8_byte_for_utf16_cursor(
+    text: *const c_char,
+    size: usize,
+    requested_utf16: i32,
+    out_codepoints: *mut usize,
+) -> usize {
+    if text.is_null() || size == 0 {
+        if !out_codepoints.is_null() {
+            unsafe { *out_codepoints = 0 };
+        }
+        return 0;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(text as *const u8, size) };
+    let s = match std::str::from_utf8(slice) {
+        Ok(v) => v,
+        Err(_) => {
+            if !out_codepoints.is_null() {
+                unsafe { *out_codepoints = 0 };
+            }
+            return 0;
+        }
+    };
+    let target = if requested_utf16 > 0 { requested_utf16 as usize } else { 0 };
+    let mut utf16_count = 0;
+    let mut byte_count = 0;
+    let mut codepoint_count = 0;
+
+    for ch in s.chars() {
+        let u16_len = ch.len_utf16();
+        if utf16_count + u16_len > target {
+            break;
+        }
+        utf16_count += u16_len;
+        byte_count += ch.len_utf8();
+        codepoint_count += 1;
+    }
+
+    if !out_codepoints.is_null() {
+        unsafe { *out_codepoints = codepoint_count };
+    }
+    byte_count
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_text_geometry_intersects_viewport(
+    area_x: i32,
+    area_y: i32,
+    area_w: i32,
+    area_h: i32,
+    vp_w: i32,
+    vp_h: i32,
+) -> i32 {
+    if vp_w <= 0 || vp_h <= 0 || area_w <= 0 || area_h <= 0 {
+        return 0;
+    }
+    let right = (area_x as i64) + (area_w as i64);
+    let bottom = (area_y as i64) + (area_h as i64);
+    if right > 0 && bottom > 0 && area_x < vp_w && area_y < vp_h {
+        1
+    } else {
+        0
+    }
+}
+
+// ============================================================================
+// 82. Roblox Fullscreen Machine Code Setter Contract Verifier
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_validate_fullscreen_setter_contract(
+    code: *const u8,
+    size: usize,
+) -> i32 {
+    const K_SETTER_CONTRACT_BYTES: usize = 96;
+    if code.is_null() || size < K_SETTER_CONTRACT_BYTES {
+        return 0;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(code, size) };
+    const PROLOGUE: [u8; 4] = [0x55, 0x48, 0x89, 0xe5];
+    const CAPTURE_BOOL: [u8; 2] = [0x89, 0xf3];
+    const CMP_LEGACY: [u8; 6] = [0x38, 0x98, 0x59, 0x01, 0x00, 0x00];
+    const MOV_LEGACY: [u8; 6] = [0x88, 0x98, 0x59, 0x01, 0x00, 0x00];
+    const CMP_CURRENT: [u8; 6] = [0x38, 0x98, 0x61, 0x01, 0x00, 0x00];
+    const MOV_CURRENT: [u8; 6] = [0x88, 0x98, 0x61, 0x01, 0x00, 0x00];
+
+    fn contains_sub(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    if !slice.starts_with(&PROLOGUE) {
+        return 0;
+    }
+    let cap_slice = &slice[..std::cmp::min(size, 24)];
+    if !contains_sub(cap_slice, &CAPTURE_BOOL) {
+        return 0;
+    }
+    let has_legacy = contains_sub(slice, &CMP_LEGACY) && contains_sub(slice, &MOV_LEGACY);
+    let has_curr = contains_sub(slice, &CMP_CURRENT) && contains_sub(slice, &MOV_CURRENT);
+    if has_legacy || has_curr {
+        1
+    } else {
+        0
+    }
+}
+
+// ============================================================================
+// 83. Window Pointer Capture Evaluation Engine
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_pointer_capture_evaluate(
+    focused: i32,
+    query_ok: i32,
+    locked_center: i32,
+    right_button_held: i32,
+    text_input_active: i32,
+    out_capture_requested: *mut i32,
+    out_cursor_visible: *mut i32,
+) -> i32 {
+    if focused == 0 {
+        if !out_capture_requested.is_null() {
+            unsafe { *out_capture_requested = 0 };
+        }
+        if !out_cursor_visible.is_null() {
+            unsafe { *out_cursor_visible = 1 };
+        }
+        return 0;
+    }
+    let client_active = query_ok != 0;
+    let native_capture_active = client_active && (locked_center != 0);
+    let right_drag_active = right_button_held != 0;
+    let capture_requested = native_capture_active || (right_drag_active && text_input_active == 0);
+    let cursor_visible = !client_active && !capture_requested;
+
+    if !out_capture_requested.is_null() {
+        unsafe { *out_capture_requested = if capture_requested { 1 } else { 0 } };
+    }
+    if !out_cursor_visible.is_null() {
+        unsafe { *out_cursor_visible = if cursor_visible { 1 } else { 0 } };
+    }
+    0
+}
+
+// ============================================================================
+// 84. Window Text Input Type Mapper & Area Clamper
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_map_roblox_text_input_type(input_type: i32) -> i32 {
+    match input_type {
+        2 | 4 | 8 => 2, // Number
+        3 => 3,         // Email
+        5 | 9 | 10 => 4,// Password
+        6 => 5,         // Username
+        _ => 1,         // Text
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_clamp_text_input_area(
+    x: *mut i32,
+    y: *mut i32,
+    w: *mut i32,
+    h: *mut i32,
+    cursor: *mut i32,
+) {
+    unsafe {
+        if !w.is_null() && *w <= 0 {
+            *w = 1;
+        }
+        if !h.is_null() && *h <= 0 {
+            *h = 1;
+        }
+        if !x.is_null() && *x < 0 {
+            *x = 0;
+        }
+        if !y.is_null() && *y < 0 {
+            *y = 0;
+        }
+        if !cursor.is_null() && *cursor < 0 {
+            *cursor = 0;
+        }
+    }
+}
+
+// ============================================================================
+// 85. Bionic Sysconf Parameter Lookup
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_bionic_sysconf_translate_name(
+    bionic_name: i32,
+    out_standard_sc: *mut i32,
+    out_fixed_value: *mut i64,
+) -> i32 {
+    match bionic_name {
+        0x0006 => {
+            if !out_fixed_value.is_null() {
+                unsafe { *out_fixed_value = 100 };
+            }
+            1 // Fixed value
+        }
+        0x0000 | 0x0005 | 0x000b | 0x0026 | 0x0027 | 0x0028 | 0x0060 | 0x0061 | 0x0062 | 0x0063 => {
+            if !out_standard_sc.is_null() {
+                unsafe { *out_standard_sc = bionic_name };
+            }
+            0 // Standard sysconf
+        }
+        _ => -1, // Invalid
+    }
+}
+
+// ============================================================================
+// 86. Build Profile Parser & Hex RVA Reader
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_normalize_build_id(
+    build_id: *const c_char,
+    out_buf: *mut c_char,
+    out_cap: usize,
+) -> i32 {
+    if build_id.is_null() {
+        return -1;
+    }
+    let s = unsafe { CStr::from_ptr(build_id) }.to_str().unwrap_or("");
+    let lower = s.to_ascii_lowercase();
+    copy_to_c_buffer(&lower, out_buf, out_cap);
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_parse_status_string(status: *const c_char) -> i32 {
+    if status.is_null() {
+        return -1;
+    }
+    let s = unsafe { CStr::from_ptr(status) }.to_str().unwrap_or("");
+    match s {
+        "supported" => 0,
+        "experimental" => 1,
+        "legacy-researched" => 2,
+        "unverified" => 3,
+        _ => -1,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_parse_hex_rva(
+    hex_str: *const c_char,
+    out_rva: *mut usize,
+) -> i32 {
+    if hex_str.is_null() {
+        return -1;
+    }
+    let s = unsafe { CStr::from_ptr(hex_str) }.to_str().unwrap_or("").trim();
+    if !s.starts_with("0x") && !s.starts_with("0X") {
+        return -2;
+    }
+    let hex_part = &s[2..];
+    if hex_part.is_empty() {
+        return -3;
+    }
+    match usize::from_str_radix(hex_part, 16) {
+        Ok(val) => {
+            if val == 0 {
+                return -4;
+            }
+            if !out_rva.is_null() {
+                unsafe { *out_rva = val };
+            }
+            0
+        }
+        Err(_) => -5,
+    }
+}
+
+// ============================================================================
+// 87. ELF Build ID Hex Validator
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_is_valid_build_id(
+    build_id: *const c_char,
+    len: usize,
+) -> i32 {
+    if build_id.is_null() || len < 8 || len > 128 || len % 2 != 0 {
+        return 0;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(build_id as *const u8, len) };
+    if slice.iter().all(|&b| b.is_ascii_hexdigit()) {
+        1
+    } else {
+        0
+    }
+}
+
+// ============================================================================
+// 88. HTTP Client Spin Guard Rate Limiter
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_http_spin_limiter_observe(
+    inout_op_count: *mut u64,
+    inout_checkpoint_ns: *mut u64,
+    now_ns: u64,
+    batch_size: u64,
+    batch_interval_ns: u64,
+) -> u64 {
+    if inout_op_count.is_null() || inout_checkpoint_ns.is_null() {
+        return 0;
+    }
+    let op_count = unsafe { &mut *inout_op_count };
+    let checkpoint = unsafe { &mut *inout_checkpoint_ns };
+
+    *op_count += 1;
+    if *op_count < batch_size {
+        return 0;
+    }
+    *op_count = 0;
+
+    if now_ns == 0 || *checkpoint == 0 || now_ns < *checkpoint {
+        *checkpoint = now_ns;
+        return 0;
+    }
+    let elapsed = now_ns - *checkpoint;
+    if elapsed >= batch_interval_ns {
+        *checkpoint = now_ns;
+        return 0;
+    }
+    let pause_ns = batch_interval_ns - elapsed;
+    *checkpoint = now_ns + pause_ns;
+    pause_ns
+}
+
+// ============================================================================
+// 89. Owned Pthread Wait Status Name
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_owned_pthread_status_name(
+    status: i32,
+    out_buf: *mut c_char,
+    out_cap: usize,
+) -> i32 {
+    let name = match status {
+        0 => "Joined",
+        1 => "TimedOut",
+        2 => "PlatformError",
+        _ => "Unknown",
+    };
+    copy_to_c_buffer(name, out_buf, out_cap);
+    0
+}
+
+// ============================================================================
+// 90. Failure Dialog Protocol & Environment Evaluator
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_failure_dialogs_enabled(
+    disabled_by_env: i32,
+    is_canary: i32,
+    is_headless: i32,
+    has_display: i32,
+    has_wayland: i32,
+) -> i32 {
+    if disabled_by_env != 0 || is_canary != 0 || is_headless != 0 {
+        return 0;
+    }
+    if has_display != 0 || has_wayland != 0 {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_failure_dialog_format_packet(
+    packet_type: c_char,
+    message: *const c_char,
+    max_bytes: usize,
+    out_buf: *mut c_char,
+    out_cap: usize,
+    out_len: *mut usize,
+) -> i32 {
+    let msg = if !message.is_null() {
+        unsafe { CStr::from_ptr(message) }.to_str().unwrap_or("")
+    } else {
+        ""
+    };
+    let clamped_msg = if msg.len() > max_bytes {
+        &msg[..max_bytes]
+    } else {
+        msg
+    };
+    let total_len = 1 + clamped_msg.len();
+    if !out_len.is_null() {
+        unsafe { *out_len = total_len };
+    }
+    if !out_buf.is_null() && out_cap >= total_len {
+        unsafe {
+            *out_buf = packet_type;
+            std::ptr::copy_nonoverlapping(
+                clamped_msg.as_ptr() as *const c_char,
+                out_buf.add(1),
+                clamped_msg.len(),
+            );
+        }
+        return 0;
+    }
+    -1
+}
+
+// ============================================================================
+// 91. APK Provider Failure Aggregator
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_apk_provider_append_failure(
+    existing: *const c_char,
+    provider_name: *const c_char,
+    failure_msg: *const c_char,
+    out_buf: *mut c_char,
+    out_cap: usize,
+    out_len: *mut usize,
+) -> i32 {
+    let ex = if !existing.is_null() {
+        unsafe { CStr::from_ptr(existing) }.to_str().unwrap_or("")
+    } else {
+        ""
+    };
+    let prov = if !provider_name.is_null() {
+        unsafe { CStr::from_ptr(provider_name) }.to_str().unwrap_or("")
+    } else {
+        "unknown"
+    };
+    let fail = if !failure_msg.is_null() {
+        unsafe { CStr::from_ptr(failure_msg) }.to_str().unwrap_or("")
+    } else {
+        ""
+    };
+
+    let result = if ex.is_empty() {
+        format!("{}: {}", prov, fail)
+    } else {
+        format!("{}; {}: {}", ex, prov, fail)
+    };
+
+    if !out_len.is_null() {
+        unsafe { *out_len = result.len() };
+    }
+    copy_to_c_buffer(&result, out_buf, out_cap);
+    0
+}
+
+// ============================================================================
+// 92. Update Configuration YAML Parser
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_parse_update_config_yaml(
+    yaml_str: *const c_char,
+    yaml_len: usize,
+    out_auto: *mut i32,
+    out_launch_after: *mut i32,
+    source_buf: *mut c_char,
+    source_cap: usize,
+    err_buf: *mut c_char,
+    err_cap: usize,
+) -> i32 {
+    if yaml_str.is_null() || yaml_len == 0 {
+        copy_error(err_buf, err_cap, "cannot parse update configuration");
+        return -1;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(yaml_str as *const u8, yaml_len) };
+    let s = match std::str::from_utf8(slice) {
+        Ok(v) => v,
+        Err(_) => {
+            copy_error(err_buf, err_cap, "cannot parse update configuration");
+            return -2;
+        }
+    };
+    let val: serde_yaml::Value = match serde_yaml::from_str(s) {
+        Ok(v) => v,
+        Err(_) => {
+            copy_error(err_buf, err_cap, "cannot parse update configuration");
+            return -3;
+        }
+    };
+    let map = match val.as_mapping() {
+        Some(m) => m,
+        None => {
+            copy_error(err_buf, err_cap, "configuration root must be a mapping");
+            return -4;
+        }
+    };
+
+    if let Some(ver) = map.get(&serde_yaml::Value::String("version".to_string())) {
+        let ver_str = match ver {
+            serde_yaml::Value::String(s) => s.as_str(),
+            serde_yaml::Value::Number(n) => {
+                if n.as_i64() == Some(1) { "1" } else { "invalid" }
+            }
+            _ => "invalid",
+        };
+        if ver_str != "1" {
+            copy_error(err_buf, err_cap, "only configuration version 1 is supported");
+            return -5;
+        }
+    }
+
+    let updates = match map.get(&serde_yaml::Value::String("updates".to_string())).and_then(|v| v.as_mapping()) {
+        Some(u) => u,
+        None => {
+            copy_error(err_buf, err_cap, "updates must be a mapping");
+            return -6;
+        }
+    };
+
+    let mut auto_val = true;
+    let mut launch_val = true;
+    let mut source_val = "auto".to_string();
+
+    for (k, v) in updates {
+        let key_str = match k.as_str() {
+            Some(s) => s,
+            None => {
+                copy_error(err_buf, err_cap, "updates contains an empty or duplicate key");
+                return -7;
+            }
+        };
+        match key_str {
+            "automatic" => {
+                match v.as_bool() {
+                    Some(b) => auto_val = b,
+                    None => {
+                        copy_error(err_buf, err_cap, "updates.automatic must be true or false");
+                        return -8;
+                    }
+                }
+            }
+            "launch_after_update" => {
+                match v.as_bool() {
+                    Some(b) => launch_val = b,
+                    None => {
+                        copy_error(err_buf, err_cap, "updates.launch_after_update must be true or false");
+                        return -9;
+                    }
+                }
+            }
+            "source" => {
+                match v.as_str() {
+                    Some(s) if s == "auto" || s == "apk-pure" => {
+                        source_val = s.to_string();
+                    }
+                    _ => {
+                        copy_error(err_buf, err_cap, "updates.source must be auto or apk-pure in the native updater");
+                        return -10;
+                    }
+                }
+            }
+            "testing_latest_only" => {
+                // Deprecated, ignored
+            }
+            _ => {
+                let err_msg = format!("unknown updates key: {}", key_str);
+                copy_error(err_buf, err_cap, &err_msg);
+                return -11;
+            }
+        }
+    }
+
+    if !out_auto.is_null() {
+        unsafe { *out_auto = if auto_val { 1 } else { 0 } };
+    }
+    if !out_launch_after.is_null() {
+        unsafe { *out_launch_after = if launch_val { 1 } else { 0 } };
+    }
+    copy_to_c_buffer(&source_val, source_buf, source_cap);
+    0
+}
+
+// ============================================================================
+// 93. Unsafe Latest Environment Filter & Builder
+// ============================================================================
+
+const OVERRIDDEN_ENV_VARS: &[&str] = &[
+    "ROBLOX_LIB_PATH",
+    "MOCKTAIL_ASSET_ROOT",
+    "MOCKTAIL_ASSET_PATH",
+    "MOCKTAIL_COMPATIBILITY_MANIFEST",
+    "MOCKTAIL_HOST_ABI_PROFILE_FILE",
+    "MOCKTAIL_HOST_ABI_CANARY",
+    "MOCKTAIL_ALLOW_CANDIDATE_HOST_ABI",
+    "MOCKTAIL_HOST_ABI_APPROVAL_RECEIPT",
+    "MOCKTAIL_SKIP_UPDATE_CHECK",
+    "MOCKTAIL_UNSAFE_LATEST",
+];
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_is_overridden_environment_var(entry: *const c_char) -> i32 {
+    if entry.is_null() {
+        return 0;
+    }
+    let s = unsafe { CStr::from_ptr(entry) }.to_str().unwrap_or("");
+    for &var in OVERRIDDEN_ENV_VARS {
+        if s.starts_with(var) && s.as_bytes().get(var.len()) == Some(&b'=') {
+            return 1;
+        }
+    }
+    0
+}
+
+// ============================================================================
+// 94. Canary Readiness Backend & Audio Log Validator
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_canary_backend_parse(
+    name: *const c_char,
+    out_backend: *mut i32,
+) -> i32 {
+    let s = if !name.is_null() {
+        unsafe { CStr::from_ptr(name) }.to_str().unwrap_or("")
+    } else {
+        ""
+    };
+    let val = match s {
+        "" | "vulkan" | "native-vulkan" | "direct-vulkan" => 0,
+        "gles" | "opengl" => 1,
+        "auto" | "system" => 2,
+        "angle-vulkan" => 3,
+        "angle-swiftshader" => 4,
+        _ => return -1,
+    };
+    if !out_backend.is_null() {
+        unsafe { *out_backend = val };
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_canary_backend_name(
+    backend: i32,
+    out_buf: *mut c_char,
+    out_cap: usize,
+) -> i32 {
+    let name = match backend {
+        0 => "direct-vulkan",
+        1 => "opengl",
+        2 => "system",
+        3 => "angle-vulkan",
+        4 => "angle-swiftshader",
+        _ => "direct-vulkan",
+    };
+    copy_to_c_buffer(name, out_buf, out_cap);
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_validate_canary_audio_log(
+    log_text: *const c_char,
+    log_len: usize,
+    err_buf: *mut c_char,
+    err_cap: usize,
+) -> i32 {
+    if log_text.is_null() || log_len == 0 {
+        return 0;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(log_text as *const u8, log_len) };
+    let log = String::from_utf8_lossy(slice);
+
+    fn has_positive_number_after(text: &str, marker: &str) -> bool {
+        let mut pos = 0;
+        while let Some(found) = text[pos..].find(marker) {
+            let start = pos + found + marker.len();
+            let digits: String = text[start..].chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(num) = digits.parse::<u64>() {
+                if num > 0 {
+                    return true;
+                }
+            }
+            pos = start;
+        }
+        false
+    }
+
+    let opensl = has_positive_number_after(&log, "[mocktail][audio] OpenSL playback activity: submitted_buffers=");
+    let fmod = has_positive_number_after(&log, "[mocktail][audio] fmod_java first_submission submitted_buffers=");
+
+    if log.contains("[mocktail][audio] fmod_java init_failed")
+        || log.contains("[mocktail][audio] fmod_java write_failed")
+        || log.contains("[mocktail][audio] fmod_java close_failed")
+    {
+        copy_error(err_buf, err_cap, "graphics canary observed an FMOD audio failure");
+        return -1;
+    }
+    if opensl
+        && (!has_positive_number_after(&log, "[mocktail][audio] OpenSL playback evidence: consumed_buffers=")
+            || !log.contains("[mocktail][audio] OpenSL player shutdown: submitted=")
+            || !log.contains("clean=true"))
+    {
+        copy_error(err_buf, err_cap, "graphics canary submitted OpenSL audio without clean consumption");
+        return -2;
+    }
+    if fmod
+        && (!has_positive_number_after(&log, "consumed_buffers=")
+            || !log.contains("[mocktail][audio] fmod_java shutdown submitted_buffers=")
+            || !log.contains("pending_buffers=0"))
+    {
+        copy_error(err_buf, err_cap, "graphics canary submitted FMOD audio without clean consumption");
+        return -3;
+    }
+
+    0
+}
+
+// ============================================================================
+// 95. Game Session State Machine & Transition Evaluator
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_game_session_can_transition(
+    current_state: i32,
+    target_state: i32,
+) -> i32 {
+    if current_state == target_state {
+        return 1;
+    }
+    if current_state == 7 {
+        return 0; // Terminal stopped
+    }
+    if target_state == 6 || target_state == 7 {
+        return 1;
+    }
+    match (current_state, target_state) {
+        (0, 1) => 1,
+        (1, 2) => 1,
+        (2, 3) => 1,
+        (3, 4) => 1,
+        (4, 5) => 1,
+        _ => 0,
+    }
+}
+
+// ============================================================================
+// 96. Capability Resolver Flags Evaluator
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_evaluate_startup_flags(
+    has_surface_app: i32,
+    has_message_pump: i32,
+    has_start_game: i32,
+    has_surface_game: i32,
+    out_flags: *mut i32,
+) {
+    if !out_flags.is_null() {
+        let mut flags = 0;
+        if has_surface_app != 0 { flags |= 1 << 0; }
+        if has_message_pump != 0 { flags |= 1 << 1; }
+        if has_start_game != 0 { flags |= 1 << 2; }
+        if has_surface_game != 0 { flags |= 1 << 3; }
+        unsafe { *out_flags = flags };
+    }
+}
+
+// ============================================================================
+// 97. Roblox App Lifecycle Status Name Engine
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_app_lifecycle_status_name(
+    status: i32,
+    out_buf: *mut c_char,
+    out_cap: usize,
+) -> i32 {
+    let name = match status {
+        0 => "Uninitialized",
+        1 => "Ready",
+        2 => "MissingRequiredSymbols",
+        _ => "Unknown",
+    };
+    copy_to_c_buffer(name, out_buf, out_cap);
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_app_shutdown_status_name(
+    status: i32,
+    out_buf: *mut c_char,
+    out_cap: usize,
+) -> i32 {
+    let name = match status {
+        0 => "Completed",
+        1 => "AlreadyStopped",
+        2 => "ShutdownInProgress",
+        3 => "MissingRequiredSymbols",
+        4 => "InvalidJniState",
+        5 => "ReasonAllocationFailed",
+        6 => "OperationTimedOut",
+        _ => "Unknown",
+    };
+    copy_to_c_buffer(name, out_buf, out_cap);
+    0
+}
+
+// ============================================================================
+// 98. Fresh Start Game Params String Encoder
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_utf8_to_utf16_surrogates(
+    utf8_str: *const c_char,
+    utf8_len: usize,
+    out_utf16: *mut u16,
+    out_cap: usize,
+    out_len: *mut usize,
+) -> i32 {
+    const MAX_FIELD_BYTES: usize = 16 * 1024;
+    if utf8_str.is_null() || utf8_len > MAX_FIELD_BYTES {
+        return -1;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(utf8_str as *const u8, utf8_len) };
+    let s = match std::str::from_utf8(slice) {
+        Ok(v) => v,
+        Err(_) => return -2,
+    };
+    let utf16_vec: Vec<u16> = s.encode_utf16().collect();
+    if !out_len.is_null() {
+        unsafe { *out_len = utf16_vec.len() };
+    }
+    if !out_utf16.is_null() && out_cap >= utf16_vec.len() {
+        unsafe {
+            std::ptr::copy_nonoverlapping(utf16_vec.as_ptr(), out_utf16, utf16_vec.len());
+        }
+        return 0;
+    }
+    if out_cap < utf16_vec.len() {
+        return -3;
+    }
+    0
+}
+
+// ============================================================================
+// 99. Roblox Permissions Answer Formatter
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_format_permissions_reply(
+    method: usize,
+    mic_enabled: i32,
+    request_json: *const c_char,
+    out_body: *mut c_char,
+    body_cap: usize,
+    body_len: *mut usize,
+    out_code: *mut i32,
+    out_outcome: *mut c_char,
+    outcome_cap: usize,
+) -> i32 {
+    const K_MICROPHONE: &str = "MICROPHONE_ACCESS";
+    const K_LOCAL_NETWORK: &str = "LOCAL_NETWORK";
+    let support = method == 0;
+    let upsell = method >= 3;
+
+    let (body, code, outcome) = if support {
+        if mocktail_rust_validate_json_depth(request_json, 8) == 0 {
+            return -1;
+        }
+        (
+            format!(r#"{{"permissions":["{}","{}"]}}"#, K_MICROPHONE, K_LOCAL_NETWORK),
+            0,
+            "supported".to_string(),
+        )
+    } else if upsell {
+        let mut missing_buf = [0 as c_char; 4096];
+        let mut has_missing = 0;
+        let rc = mocktail_rust_check_permission_request(request_json, mic_enabled, &mut has_missing, missing_buf.as_mut_ptr(), missing_buf.len());
+        if rc != 0 {
+            return -1;
+        }
+        let hidden = if !request_json.is_null() {
+            let req_str = unsafe { CStr::from_ptr(request_json) }.to_str().unwrap_or("{}");
+            let v: serde_json::Value = serde_json::from_str(req_str).unwrap_or(serde_json::Value::Null);
+            v.get("permissions").cloned().unwrap_or(serde_json::json!([]))
+        } else {
+            serde_json::json!([])
+        };
+        (
+            format!(r#"{{"hiddenUpsellPermissions":{},"upsellStatus":"HIDE"}}"#, hidden),
+            0,
+            "HIDE".to_string(),
+        )
+    } else {
+        let mut missing_buf = vec![0 as c_char; 64 * 1024];
+        let mut has_missing = 0;
+        let rc = mocktail_rust_check_permission_request(request_json, mic_enabled, &mut has_missing, missing_buf.as_mut_ptr(), missing_buf.len());
+        if rc != 0 {
+            return -1;
+        }
+        let missing_str = unsafe { CStr::from_ptr(missing_buf.as_ptr()) }.to_str().unwrap_or("[]");
+        let outcome_str = if has_missing == 0 { "AUTHORIZED" } else { "DENIED" };
+        (
+            format!(r#"{{"missingPermissions":{},"status":"{}"}}"#, missing_str, outcome_str),
+            0,
+            outcome_str.to_string(),
+        )
+    };
+
+    if !out_code.is_null() {
+        unsafe { *out_code = code };
+    }
+    copy_to_c_buffer(&outcome, out_outcome, outcome_cap);
+    if !body_len.is_null() {
+        unsafe { *body_len = body.len() };
+    }
+    copy_to_c_buffer(&body, out_body, body_cap);
+    0
+}
+
+// ============================================================================
+// 100. Client Settings Source Naming & Default URL Builder
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_client_settings_source_name(
+    source: i32,
+    out_buf: *mut c_char,
+    out_cap: usize,
+) -> i32 {
+    let name = match source {
+        0 => "explicit JSON",
+        1 => "explicit file",
+        2 => "bundled file",
+        3 => "safe defaults",
+        4 => "download",
+        5 => "cache",
+        6 => "empty defaults",
+        _ => "unknown",
+    };
+    copy_to_c_buffer(name, out_buf, out_cap);
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_client_settings_build_url(
+    app_name: *const c_char,
+    out_buf: *mut c_char,
+    out_cap: usize,
+) -> i32 {
+    let app = if !app_name.is_null() {
+        unsafe { CStr::from_ptr(app_name) }.to_str().unwrap_or("")
+    } else {
+        ""
+    };
+    let url = format!(
+        "https://clientsettingscdn.roblox.com/v2/settings/application/{}",
+        app
+    );
+    copy_to_c_buffer(&url, out_buf, out_cap);
+    0
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -13712,6 +15130,392 @@ integrations:
         assert_eq!(mocktail_rust_present_mode_prefer_min_image_count(1 /* Vsync */, 2, 2, 8), 3);
         std::env::remove_var("MOCKTAIL_SWAPCHAIN_IMAGES");
         assert_eq!(mocktail_rust_present_mode_prefer_min_image_count(3 /* Fifo */, 2, 2, 8), 2);
+    }
+
+    #[test]
+    fn test_section74_display_refresh_capabilities() {
+        let supp = [60.0f32, 144.0, 60.001, -1.0, f32::NAN, 120.0];
+        let mut out = [0.0f32; 8];
+        let mut count = 0usize;
+        let rc = mocktail_rust_normalize_display_refresh_capabilities(
+            60.0,
+            supp.as_ptr(),
+            supp.len(),
+            out.as_mut_ptr(),
+            out.len(),
+            &mut count,
+        );
+        assert_eq!(rc, 0);
+        assert_eq!(count, 3); // 60.0 (merged with 60.001), 120.0, 144.0
+        assert_eq!(out[0], 60.0);
+        assert_eq!(out[1], 120.0);
+        assert_eq!(out[2], 144.0);
+    }
+
+    #[test]
+    fn test_section75_platform_metadata_identity() {
+        let mut name = [0 as c_char; 32];
+        let mut id = [0 as c_char; 64];
+        let mut ty = [0 as c_char; 32];
+        assert_eq!(
+            mocktail_rust_platform_metadata_identity(
+                name.as_mut_ptr(),
+                name.len(),
+                id.as_mut_ptr(),
+                id.len(),
+                ty.as_mut_ptr(),
+                ty.len()
+            ),
+            0
+        );
+        assert_eq!(unsafe { CStr::from_ptr(name.as_ptr()).to_str().unwrap() }, "Mocktail");
+        assert_eq!(unsafe { CStr::from_ptr(id.as_ptr()).to_str().unwrap() }, "space.bigrat.mocktail");
+        assert_eq!(unsafe { CStr::from_ptr(ty.as_ptr()).to_str().unwrap() }, "game");
+    }
+
+    #[test]
+    fn test_section76_window_icon_png_header() {
+        let mut png = vec![
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // magic
+            0x00, 0x00, 0x00, 0x0D,                         // IHDR len
+            b'I', b'H', b'D', b'R',
+            0x00, 0x00, 0x01, 0x00, // width 256
+            0x00, 0x00, 0x01, 0x00, // height 256
+            0x08, 0x06, 0x00, 0x00, 0x00,
+        ];
+        let mut w = 0u32;
+        let mut h = 0u32;
+        assert_eq!(mocktail_rust_validate_window_icon_png_header(png.as_ptr(), png.len(), &mut w, &mut h), 0);
+        assert_eq!(w, 256);
+        assert_eq!(h, 256);
+
+        png[0] = 0;
+        assert_eq!(mocktail_rust_validate_window_icon_png_header(png.as_ptr(), png.len(), &mut w, &mut h), -2);
+    }
+
+    #[test]
+    fn test_section77_supported_launch_defaults() {
+        let cnt = mocktail_rust_supported_launch_defaults_count(1);
+        assert_eq!(cnt, 28);
+        assert_eq!(mocktail_rust_supported_launch_defaults_count(0), 0);
+
+        let mut key = [0 as c_char; 64];
+        let mut val = [0 as c_char; 64];
+        assert_eq!(
+            mocktail_rust_supported_launch_default_entry(1, 0, key.as_mut_ptr(), key.len(), val.as_mut_ptr(), val.len()),
+            0
+        );
+        assert_eq!(unsafe { CStr::from_ptr(key.as_ptr()).to_str().unwrap() }, "MOCKTAIL_ALLOW_NO_COOKIE_LUA_APP");
+        assert_eq!(unsafe { CStr::from_ptr(val.as_ptr()).to_str().unwrap() }, "1");
+    }
+
+    #[test]
+    fn test_section78_platform_profile_and_paths() {
+        let prof = CString::new("desktop").unwrap();
+        let mut rev = [0 as c_char; 64];
+        assert_eq!(
+            mocktail_rust_build_platform_profile_revision(prof.as_ptr(), 1, 0, 1, rev.as_mut_ptr(), rev.len()),
+            0
+        );
+        assert_eq!(unsafe { CStr::from_ptr(rev.as_ptr()).to_str().unwrap() }, "device-v1-desktop-t1-m0-k1");
+
+        let conf = CString::new("/data/user/0/com.roblox.client/files").unwrap();
+        let root = CString::new("/home/user/.mocktail/data").unwrap();
+        let mut out = [0 as c_char; 256];
+        assert_eq!(
+            mocktail_rust_translate_android_files_path(conf.as_ptr(), root.as_ptr(), out.as_mut_ptr(), out.len()),
+            0
+        );
+        assert_eq!(unsafe { CStr::from_ptr(out.as_ptr()).to_str().unwrap() }, "/home/user/.mocktail/data/files");
+    }
+
+    #[test]
+    fn test_section79_platform_cache_fingerprint() {
+        let json = CString::new(r#"{"schema_version":1,"profile_revision":"rev-123"}"#).unwrap();
+        let mut rev = [0 as c_char; 64];
+        assert_eq!(
+            mocktail_rust_validate_platform_cache_fingerprint(json.as_ptr(), json.as_bytes().len(), rev.as_mut_ptr(), rev.len()),
+            0
+        );
+        assert_eq!(unsafe { CStr::from_ptr(rev.as_ptr()).to_str().unwrap() }, "rev-123");
+    }
+
+    #[test]
+    fn test_section80_browser_service_command() {
+        let json = CString::new(r#"{"command":"open","url":"https://roblox.com/home","title":"Home","visible":true}"#).unwrap();
+        let mut cmd_type = 0i32;
+        let mut cmd = MocktailRustBrowserServiceOpenCommand {
+            url: [0; 1024],
+            title: [0; 512],
+            has_title: 0,
+            visible: 0,
+            modal: 0,
+            back_navigation_disabled: 0,
+            show_domain_as_title: 0,
+        };
+        let mut err = [0 as c_char; 256];
+        let rc = mocktail_rust_parse_browser_service_command(
+            json.as_ptr(),
+            json.as_bytes().len(),
+            &mut cmd_type,
+            &mut cmd,
+            err.as_mut_ptr(),
+            err.len(),
+        );
+        assert_eq!(rc, 0);
+        assert_eq!(cmd_type, 1);
+        assert_eq!(unsafe { CStr::from_ptr(cmd.url.as_ptr()).to_str().unwrap() }, "https://roblox.com/home");
+        assert_eq!(unsafe { CStr::from_ptr(cmd.title.as_ptr()).to_str().unwrap() }, "Home");
+        assert_eq!(cmd.visible, 1);
+    }
+
+    #[test]
+    fn test_section81_text_display_state() {
+        let text = CString::new("Hello 🌍!").unwrap();
+        let mut cp = 0usize;
+        let bytes = mocktail_rust_utf8_byte_for_utf16_cursor(text.as_ptr(), text.as_bytes().len(), 6, &mut cp);
+        assert_eq!(bytes, 6); // "Hello "
+        assert_eq!(cp, 6);
+
+        assert_eq!(mocktail_rust_text_geometry_intersects_viewport(10, 10, 100, 50, 800, 600), 1);
+        assert_eq!(mocktail_rust_text_geometry_intersects_viewport(900, 10, 100, 50, 800, 600), 0);
+    }
+
+    #[test]
+    fn test_section82_fullscreen_setter_contract() {
+        let mut code = vec![0u8; 120];
+        code[0..4].copy_from_slice(&[0x55, 0x48, 0x89, 0xe5]);
+        code[4..6].copy_from_slice(&[0x89, 0xf3]);
+        code[20..26].copy_from_slice(&[0x38, 0x98, 0x61, 0x01, 0x00, 0x00]);
+        code[30..36].copy_from_slice(&[0x88, 0x98, 0x61, 0x01, 0x00, 0x00]);
+        assert_eq!(mocktail_rust_validate_fullscreen_setter_contract(code.as_ptr(), code.len()), 1);
+
+        code[0] = 0;
+        assert_eq!(mocktail_rust_validate_fullscreen_setter_contract(code.as_ptr(), code.len()), 0);
+    }
+
+    #[test]
+    fn test_section83_pointer_capture_evaluate() {
+        let mut cap = 0i32;
+        let mut vis = 0i32;
+        mocktail_rust_pointer_capture_evaluate(1, 1, 1, 0, 0, &mut cap, &mut vis);
+        assert_eq!(cap, 1);
+        assert_eq!(vis, 0);
+
+        mocktail_rust_pointer_capture_evaluate(0, 1, 1, 0, 0, &mut cap, &mut vis);
+        assert_eq!(cap, 0);
+        assert_eq!(vis, 1);
+    }
+
+    #[test]
+    fn test_section84_text_input_type_mapper() {
+        assert_eq!(mocktail_rust_map_roblox_text_input_type(2), 2); // Number
+        assert_eq!(mocktail_rust_map_roblox_text_input_type(3), 3); // Email
+        assert_eq!(mocktail_rust_map_roblox_text_input_type(5), 4); // Password
+        assert_eq!(mocktail_rust_map_roblox_text_input_type(6), 5); // Username
+        assert_eq!(mocktail_rust_map_roblox_text_input_type(0), 1); // Text
+    }
+
+    #[test]
+    fn test_section85_bionic_sysconf() {
+        let mut std_sc = 0i32;
+        let mut fix = 0i64;
+        assert_eq!(mocktail_rust_bionic_sysconf_translate_name(0x0006, &mut std_sc, &mut fix), 1);
+        assert_eq!(fix, 100);
+
+        assert_eq!(mocktail_rust_bionic_sysconf_translate_name(0x0027, &mut std_sc, &mut fix), 0);
+        assert_eq!(std_sc, 0x0027);
+    }
+
+    #[test]
+    fn test_section86_build_profile() {
+        let id = CString::new("ABCD12EF").unwrap();
+        let mut out = [0 as c_char; 32];
+        assert_eq!(mocktail_rust_normalize_build_id(id.as_ptr(), out.as_mut_ptr(), out.len()), 0);
+        assert_eq!(unsafe { CStr::from_ptr(out.as_ptr()).to_str().unwrap() }, "abcd12ef");
+
+        let st = CString::new("supported").unwrap();
+        assert_eq!(mocktail_rust_parse_status_string(st.as_ptr()), 0);
+
+        let rva_str = CString::new("0x1234abcd").unwrap();
+        let mut rva = 0usize;
+        assert_eq!(mocktail_rust_parse_hex_rva(rva_str.as_ptr(), &mut rva), 0);
+        assert_eq!(rva, 0x1234abcd);
+    }
+
+    #[test]
+    fn test_section87_elf_build_id() {
+        let valid = CString::new("0123456789abcdef").unwrap();
+        assert_eq!(mocktail_rust_is_valid_build_id(valid.as_ptr(), valid.as_bytes().len()), 1);
+
+        let odd = CString::new("123").unwrap();
+        assert_eq!(mocktail_rust_is_valid_build_id(odd.as_ptr(), odd.as_bytes().len()), 0);
+    }
+
+    #[test]
+    fn test_section88_http_client_spin_limiter() {
+        let mut count = 63u64;
+        let mut cp = 1000u64;
+        let pause = mocktail_rust_http_spin_limiter_observe(&mut count, &mut cp, 1000 + 500, 64, 1000);
+        assert_eq!(pause, 500);
+    }
+
+    #[test]
+    fn test_section89_owned_pthread_status_name() {
+        let mut buf = [0 as c_char; 32];
+        mocktail_rust_owned_pthread_status_name(0, buf.as_mut_ptr(), buf.len());
+        assert_eq!(unsafe { CStr::from_ptr(buf.as_ptr()).to_str().unwrap() }, "Joined");
+    }
+
+    #[test]
+    fn test_section90_failure_dialog() {
+        assert_eq!(mocktail_rust_failure_dialogs_enabled(0, 0, 0, 1, 0), 1);
+        assert_eq!(mocktail_rust_failure_dialogs_enabled(1, 0, 0, 1, 0), 0);
+
+        let msg = CString::new("error occurred").unwrap();
+        let mut pkt = [0 as c_char; 64];
+        let mut len = 0usize;
+        assert_eq!(
+            mocktail_rust_failure_dialog_format_packet(b'M' as c_char, msg.as_ptr(), 2048, pkt.as_mut_ptr(), pkt.len(), &mut len),
+            0
+        );
+        assert_eq!(len, 15);
+        assert_eq!(pkt[0], b'M' as c_char);
+    }
+
+    #[test]
+    fn test_section91_apk_provider_append_failure() {
+        let ex = CString::new("prov1: err1").unwrap();
+        let p2 = CString::new("prov2").unwrap();
+        let e2 = CString::new("err2").unwrap();
+        let mut out = [0 as c_char; 128];
+        let mut len = 0usize;
+        assert_eq!(
+            mocktail_rust_apk_provider_append_failure(ex.as_ptr(), p2.as_ptr(), e2.as_ptr(), out.as_mut_ptr(), out.len(), &mut len),
+            0
+        );
+        let s = unsafe { CStr::from_ptr(out.as_ptr()).to_str().unwrap() };
+        assert_eq!(s, "prov1: err1; prov2: err2");
+    }
+
+    #[test]
+    fn test_section92_update_config_yaml() {
+        let yaml = CString::new("version: 1\nupdates:\n  automatic: true\n  launch_after_update: false\n  source: auto\n").unwrap();
+        let mut auto = 0i32;
+        let mut launch = 0i32;
+        let mut src = [0 as c_char; 32];
+        let mut err = [0 as c_char; 128];
+        assert_eq!(
+            mocktail_rust_parse_update_config_yaml(
+                yaml.as_ptr(),
+                yaml.as_bytes().len(),
+                &mut auto,
+                &mut launch,
+                src.as_mut_ptr(),
+                src.len(),
+                err.as_mut_ptr(),
+                err.len(),
+            ),
+            0
+        );
+        assert_eq!(auto, 1);
+        assert_eq!(launch, 0);
+        assert_eq!(unsafe { CStr::from_ptr(src.as_ptr()).to_str().unwrap() }, "auto");
+    }
+
+    #[test]
+    fn test_section93_unsafe_latest_overrides() {
+        let e1 = CString::new("ROBLOX_LIB_PATH=/path").unwrap();
+        assert_eq!(mocktail_rust_is_overridden_environment_var(e1.as_ptr()), 1);
+
+        let e2 = CString::new("PATH=/usr/bin").unwrap();
+        assert_eq!(mocktail_rust_is_overridden_environment_var(e2.as_ptr()), 0);
+    }
+
+    #[test]
+    fn test_section94_canary_backend_and_audio() {
+        let mut b = 0i32;
+        let s = CString::new("angle-vulkan").unwrap();
+        assert_eq!(mocktail_rust_canary_backend_parse(s.as_ptr(), &mut b), 0);
+        assert_eq!(b, 3);
+
+        let mut buf = [0 as c_char; 32];
+        mocktail_rust_canary_backend_name(3, buf.as_mut_ptr(), buf.len());
+        assert_eq!(unsafe { CStr::from_ptr(buf.as_ptr()).to_str().unwrap() }, "angle-vulkan");
+
+        let log = CString::new("[mocktail][audio] OpenSL playback activity: submitted_buffers=10\n[mocktail][audio] OpenSL playback evidence: consumed_buffers=10\n[mocktail][audio] OpenSL player shutdown: submitted=10 clean=true\n").unwrap();
+        let mut err = [0 as c_char; 128];
+        assert_eq!(mocktail_rust_validate_canary_audio_log(log.as_ptr(), log.as_bytes().len(), err.as_mut_ptr(), err.len()), 0);
+    }
+
+    #[test]
+    fn test_section95_game_session() {
+        let ptr = mocktail_rust_game_session_state_name(1);
+        assert_eq!(unsafe { CStr::from_ptr(ptr).to_str().unwrap() }, "PrincipalReady");
+
+        assert_eq!(mocktail_rust_game_session_can_transition(0, 1), 1);
+        assert_eq!(mocktail_rust_game_session_can_transition(0, 5), 0);
+        assert_eq!(mocktail_rust_game_session_can_transition(3, 7), 1);
+    }
+
+    #[test]
+    fn test_section96_capability_flags() {
+        let mut flags = 0i32;
+        mocktail_rust_evaluate_startup_flags(1, 0, 1, 0, &mut flags);
+        assert_eq!(flags, (1 << 0) | (1 << 2));
+    }
+
+    #[test]
+    fn test_section97_app_lifecycle_names() {
+        let mut buf = [0 as c_char; 32];
+        mocktail_rust_app_lifecycle_status_name(1, buf.as_mut_ptr(), buf.len());
+        assert_eq!(unsafe { CStr::from_ptr(buf.as_ptr()).to_str().unwrap() }, "Ready");
+
+        mocktail_rust_app_shutdown_status_name(1, buf.as_mut_ptr(), buf.len());
+        assert_eq!(unsafe { CStr::from_ptr(buf.as_ptr()).to_str().unwrap() }, "AlreadyStopped");
+    }
+
+    #[test]
+    fn test_section98_fresh_game_params_utf16() {
+        let s = CString::new("Hello 🌟").unwrap();
+        let mut out = [0u16; 32];
+        let mut len = 0usize;
+        assert_eq!(
+            mocktail_rust_utf8_to_utf16_surrogates(s.as_ptr(), s.as_bytes().len(), out.as_mut_ptr(), out.len(), &mut len),
+            0
+        );
+        assert_eq!(len, 8); // "Hello " (6) + star surrogate pair (2)
+    }
+
+    #[test]
+    fn test_section99_permissions_reply() {
+        let req = CString::new("{}").unwrap();
+        let mut body = [0 as c_char; 256];
+        let mut len = 0usize;
+        let mut code = 0i32;
+        let mut outcome = [0 as c_char; 32];
+        assert_eq!(
+            mocktail_rust_format_permissions_reply(0, 1, req.as_ptr(), body.as_mut_ptr(), body.len(), &mut len, &mut code, outcome.as_mut_ptr(), outcome.len()),
+            0
+        );
+        let b = unsafe { CStr::from_ptr(body.as_ptr()).to_str().unwrap() };
+        assert!(b.contains("MICROPHONE_ACCESS"));
+        assert_eq!(unsafe { CStr::from_ptr(outcome.as_ptr()).to_str().unwrap() }, "supported");
+    }
+
+    #[test]
+    fn test_section100_client_settings() {
+        let mut buf = [0 as c_char; 32];
+        mocktail_rust_client_settings_source_name(0, buf.as_mut_ptr(), buf.len());
+        assert_eq!(unsafe { CStr::from_ptr(buf.as_ptr()).to_str().unwrap() }, "explicit JSON");
+
+        let app = CString::new("RobloxStudio").unwrap();
+        let mut url_buf = [0 as c_char; 128];
+        mocktail_rust_client_settings_build_url(app.as_ptr(), url_buf.as_mut_ptr(), url_buf.len());
+        assert_eq!(
+            unsafe { CStr::from_ptr(url_buf.as_ptr()).to_str().unwrap() },
+            "https://clientsettingscdn.roblox.com/v2/settings/application/RobloxStudio"
+        );
     }
 
 }

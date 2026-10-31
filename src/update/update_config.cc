@@ -3,39 +3,18 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <yaml.h>
 
 #include <array>
 #include <cerrno>
 #include <cstdint>
 #include <string>
-#include <unordered_set>
+
+#include "mocktail/mocktail_rust.h"
 
 namespace mocktail::update {
 namespace {
 
 constexpr std::size_t kMaximumConfigBytes = 1024U * 1024U;
-
-std::string Scalar(const yaml_node_t* node) {
-  if (node == nullptr || node->type != YAML_SCALAR_NODE) {
-    return {};
-  }
-  return std::string(reinterpret_cast<const char*>(node->data.scalar.value),
-                     node->data.scalar.length);
-}
-
-bool ParseBoolean(const yaml_node_t* node, bool* value) {
-  const std::string text = Scalar(node);
-  if (text == "true") {
-    *value = true;
-    return true;
-  }
-  if (text == "false") {
-    *value = false;
-    return true;
-  }
-  return false;
-}
 
 bool ReadFile(const std::filesystem::path& path, std::string* contents,
               bool* loaded, std::string* error) {
@@ -89,98 +68,24 @@ UpdateConfigResult LoadUpdateConfig(const std::filesystem::path& path) {
     return result;
   }
 
-  yaml_parser_t parser;
-  yaml_document_t document;
-  if (!yaml_parser_initialize(&parser)) {
-    result.error = "cannot initialise YAML parser";
+  int32_t auto_val = 1;
+  int32_t launch_val = 1;
+  char source_buf[64]{};
+  char err_buf[256]{};
+  if (mocktail_rust_parse_update_config_yaml(
+          contents.data(), contents.size(), &auto_val, &launch_val,
+          source_buf, sizeof(source_buf), err_buf, sizeof(err_buf)) != 0) {
+    result.error =
+        err_buf[0] != '\0' ? err_buf : "cannot parse update configuration";
     return result;
   }
-  yaml_parser_set_input_string(
-      &parser, reinterpret_cast<const unsigned char*>(contents.data()),
-      contents.size());
-  const bool parsed = yaml_parser_load(&parser, &document) != 0;
-  yaml_parser_delete(&parser);
-  if (!parsed) {
-    result.error = "cannot parse update configuration";
-    return result;
+  result.config.automatic = auto_val != 0;
+  result.config.launch_after_update = launch_val != 0;
+  result.config.source = source_buf;
+  if (contents.find("testing_latest_only") != std::string::npos) {
+    result.warnings.emplace_back(
+        "updates.testing_latest_only is no longer supported and is ignored");
   }
-
-  const yaml_node_t* root = yaml_document_get_root_node(&document);
-  if (root == nullptr || root->type != YAML_MAPPING_NODE) {
-    yaml_document_delete(&document);
-    result.error = "configuration root must be a mapping";
-    return result;
-  }
-  const yaml_node_t* updates = nullptr;
-  for (yaml_node_pair_t* pair = root->data.mapping.pairs.start;
-       pair != root->data.mapping.pairs.top; ++pair) {
-    const std::string key =
-        Scalar(yaml_document_get_node(&document, pair->key));
-    if (key == "version") {
-      const std::string version =
-          Scalar(yaml_document_get_node(&document, pair->value));
-      if (version != "1") {
-        result.error = "only configuration version 1 is supported";
-        break;
-      }
-    } else if (key == "updates") {
-      updates = yaml_document_get_node(&document, pair->value);
-    }
-  }
-  if (!result.error.empty() || updates == nullptr) {
-    yaml_document_delete(&document);
-    return result;
-  }
-  if (updates->type != YAML_MAPPING_NODE) {
-    yaml_document_delete(&document);
-    result.error = "updates must be a mapping";
-    return result;
-  }
-
-  std::unordered_set<std::string> keys;
-  for (yaml_node_pair_t* pair = updates->data.mapping.pairs.start;
-       pair != updates->data.mapping.pairs.top; ++pair) {
-    const std::string key =
-        Scalar(yaml_document_get_node(&document, pair->key));
-    const yaml_node_t* value = yaml_document_get_node(&document, pair->value);
-    if (key.empty() || !keys.insert(key).second) {
-      result.error = "updates contains an empty or duplicate key";
-      break;
-    }
-    if (key == "automatic") {
-      if (!ParseBoolean(value, &result.config.automatic)) {
-        result.error = "updates.automatic must be true or false";
-        break;
-      }
-    } else if (key == "testing_latest_only") {
-      bool ignored = false;
-      if (!ParseBoolean(value, &ignored)) {
-        result.error = "updates.testing_latest_only must be true or false";
-        break;
-      }
-      result.warnings.emplace_back(
-          "updates.testing_latest_only is no longer supported and is ignored");
-    } else if (key == "launch_after_update") {
-      if (!ParseBoolean(value, &result.config.launch_after_update)) {
-        result.error = "updates.launch_after_update must be true or false";
-        break;
-      }
-    } else if (key == "source") {
-      result.config.source = Scalar(value);
-      // `apk-pure` predates the fallback chain and still selects it, so an
-      // existing configuration file keeps working unchanged.
-      if (result.config.source != "apk-pure" &&
-          result.config.source != "auto") {
-        result.error =
-            "updates.source must be auto or apk-pure in the native updater";
-        break;
-      }
-    } else {
-      result.error = "unknown updates key: " + key;
-      break;
-    }
-  }
-  yaml_document_delete(&document);
   return result;
 }
 

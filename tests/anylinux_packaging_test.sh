@@ -15,10 +15,18 @@ mkdir -p -- "${TEMP_DIR}/fixtures"
 
 # Compile the real adapter loader and updater canary. The fake runtime
 # deliberately has no Android adapters next to its relocated executable.
+RUST_LIB=""
+if [[ -f "${ROOT}/build/cargo-target/release/libmocktail_core.a" ]]; then
+  RUST_LIB="${ROOT}/build/cargo-target/release/libmocktail_core.a"
+elif [[ -f "${ROOT}/rust/mocktail-core/target/release/libmocktail_core.a" ]]; then
+  RUST_LIB="${ROOT}/rust/mocktail-core/target/release/libmocktail_core.a"
+fi
+
 "${CXX}" -std=c++17 -I"${ROOT}/include" -x c++ - \
   "${ROOT}/src/graphics/bionic_egl_bridge.cc" \
   "${ROOT}/src/runtime/supported_launch_policy.cc" \
-  "${ROOT}/src/update/readiness_canary.cc" -ldl -pthread \
+  "${ROOT}/src/update/readiness_canary.cc" \
+  ${RUST_LIB:+-x none "${RUST_LIB}"} -ldl -pthread \
   -o "${TEMP_DIR}/fixtures/mocktail" <<'EOF'
 #include <cstdlib>
 #include <filesystem>

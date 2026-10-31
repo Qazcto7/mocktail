@@ -19,6 +19,7 @@
 
 #include "runtime/environment.h"
 #include "runtime/runtime_paths.h"
+#include "mocktail/mocktail_rust.h"
 
 namespace mocktail {
 namespace runtime {
@@ -61,33 +62,18 @@ struct JsonReadResult {
 
 bool HasPathPrefix(const std::filesystem::path& path,
                    const std::filesystem::path& prefix) {
-  auto path_component = path.begin();
-  auto prefix_component = prefix.begin();
-  while (prefix_component != prefix.end()) {
-    if (path_component == path.end() || *path_component != *prefix_component) {
-      return false;
-    }
-    ++path_component;
-    ++prefix_component;
-  }
-  return true;
+  return mocktail_rust_has_path_prefix(path.c_str(), prefix.c_str()) == 1;
 }
 
 std::optional<std::filesystem::path> TranslateAndroidFilesPath(
     std::string_view configured, const std::filesystem::path& data_root) {
-  for (const std::string_view prefix :
-       {kAndroidDataPrefix, kLegacyAndroidDataPrefix}) {
-    if (configured == prefix) {
-      return data_root;
-    }
-    if (configured.size() > prefix.size() &&
-        configured.compare(0, prefix.size(), prefix) == 0 &&
-        configured[prefix.size()] == '/') {
-      return data_root / std::string(configured.substr(prefix.size() + 1));
-    }
+  std::string conf_str(configured);
+  char out_buf[4096];
+  if (mocktail_rust_translate_android_files_path(
+          conf_str.c_str(), data_root.c_str(), out_buf, sizeof(out_buf)) == 0) {
+    return std::filesystem::path(out_buf);
   }
-  const std::filesystem::path host_path(configured);
-  return host_path.is_absolute() ? std::optional(host_path) : std::nullopt;
+  return std::nullopt;
 }
 
 bool WriteAll(int descriptor, std::string_view bytes) {
@@ -215,14 +201,13 @@ bool AtomicWriteJson(const std::filesystem::path& path,
 }
 
 std::string FingerprintRevision(const nlohmann::json& fingerprint) {
-  const auto schema = fingerprint.find("schema_version");
-  const auto revision = fingerprint.find("profile_revision");
-  if (schema == fingerprint.end() || !schema->is_number_integer() ||
-      schema->get<int>() != kFingerprintSchemaVersion ||
-      revision == fingerprint.end() || !revision->is_string()) {
-    return {};
+  const std::string json_str = fingerprint.dump();
+  char rev_buf[128];
+  if (mocktail_rust_validate_platform_cache_fingerprint(
+          json_str.c_str(), json_str.size(), rev_buf, sizeof(rev_buf)) == 0) {
+    return std::string(rev_buf);
   }
-  return revision->get<std::string>();
+  return {};
 }
 
 }  // namespace
@@ -230,9 +215,14 @@ std::string FingerprintRevision(const nlohmann::json& fingerprint) {
 std::string BuildPlatformProfileRevision(std::string_view device_profile,
                                          bool touch_enabled, bool mouse_enabled,
                                          bool keyboard_enabled) {
-  return "device-v1-" + std::string(device_profile) +
-         (touch_enabled ? "-t1" : "-t0") + (mouse_enabled ? "-m1" : "-m0") +
-         (keyboard_enabled ? "-k1" : "-k0");
+  const std::string dev_str(device_profile);
+  char out_buf[128];
+  if (mocktail_rust_build_platform_profile_revision(
+          dev_str.c_str(), touch_enabled ? 1 : 0, mouse_enabled ? 1 : 0,
+          keyboard_enabled ? 1 : 0, out_buf, sizeof(out_buf)) == 0) {
+    return std::string(out_buf);
+  }
+  return {};
 }
 
 PlatformCacheMigrationResult MigratePlatformProfileCaches(

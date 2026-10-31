@@ -1,4 +1,5 @@
 #include "window/window_pointer_capture_owner.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <SDL3/SDL_mouse.h>
 #include <SDL3/SDL_video.h>
@@ -93,18 +94,13 @@ bool WindowPointerCaptureOwner::Pump(bool text_input_active) {
   if (wait_for_native_unlock_after_right_drag_ && !native_lock_active) {
     wait_for_native_unlock_after_right_drag_ = false;
   }
-  const bool client_active = query_ok;
-  const bool native_capture_active = client_active && native_lock_active;
-  const bool right_drag_active = right_button_held_;
-  // Roblox can keep Shift Lock active while chat has text focus. Honor that
-  // native lock so camera motion stays relative and cannot leave the window.
-  // Text editing only suppresses the host's fallback RMB camera capture.
-  const bool capture_requested =
-      native_capture_active || (right_drag_active && !text_input_active);
-  // When capture is released, Roblox still draws its own cursor.
-  // Show the system pointer only when the native client cannot provide one.
-  const bool cursor_visible = !client_active && !capture_requested;
-  return Apply(capture_requested, cursor_visible);
+  int32_t capture_requested = 0;
+  int32_t cursor_visible = 0;
+  mocktail_rust_pointer_capture_evaluate(
+      focused_ ? 1 : 0, query_ok ? 1 : 0, locked_center ? 1 : 0,
+      right_button_held_ ? 1 : 0, text_input_active ? 1 : 0,
+      &capture_requested, &cursor_visible);
+  return Apply(capture_requested != 0, cursor_visible != 0);
 }
 
 bool WindowPointerCaptureOwner::OnRightButton(bool pressed,

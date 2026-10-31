@@ -6,6 +6,8 @@
 #include <cerrno>
 #include <cstring>
 
+#include "mocktail/mocktail_rust.h"
+
 namespace mocktail {
 namespace compat {
 namespace {
@@ -66,25 +68,12 @@ void SleepForNs(std::uint64_t pause_ns) {
 }  // namespace
 
 std::uint64_t HttpClientSpinRateLimiter::Observe(std::uint64_t now_ns) {
-  ++operation_count_;
-  if (operation_count_ < kHttpClientSpinBatchSize) {
-    return 0;
-  }
-  operation_count_ = 0;
-
-  if (now_ns == 0 || checkpoint_ns_ == 0 || now_ns < checkpoint_ns_) {
-    checkpoint_ns_ = now_ns;
-    return 0;
-  }
-  const std::uint64_t elapsed_ns = now_ns - checkpoint_ns_;
-  if (elapsed_ns >= kHttpClientSpinBatchIntervalNs) {
-    checkpoint_ns_ = now_ns;
-    return 0;
-  }
-  const std::uint64_t pause_ns =
-      kHttpClientSpinBatchIntervalNs - elapsed_ns;
-  checkpoint_ns_ = now_ns + pause_ns;
-  return pause_ns;
+  uint64_t op_count = operation_count_;
+  const uint64_t pause = mocktail_rust_http_spin_limiter_observe(
+      &op_count, &checkpoint_ns_, now_ns,
+      kHttpClientSpinBatchSize, kHttpClientSpinBatchIntervalNs);
+  operation_count_ = static_cast<uint32_t>(op_count);
+  return pause;
 }
 
 void ApplyHttpClientSpinGuard() {

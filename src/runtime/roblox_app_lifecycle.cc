@@ -2,6 +2,8 @@
 
 #include <utility>
 
+#include "mocktail/mocktail_rust.h"
+
 namespace mocktail {
 namespace runtime {
 namespace {
@@ -116,33 +118,17 @@ bool RobloxAppLifecycle::stopped() const {
 
 const char *RobloxAppLifecycleResolutionStatusName(
     RobloxAppLifecycleResolutionStatus status) {
-  switch (status) {
-  case RobloxAppLifecycleResolutionStatus::kReady:
-    return "Ready";
-  case RobloxAppLifecycleResolutionStatus::kInvalidLookup:
-    return "InvalidLookup";
-  case RobloxAppLifecycleResolutionStatus::kMissingRequiredSymbols:
-    return "MissingRequiredSymbols";
-  }
-  return "Unknown";
+  thread_local char buf[32];
+  mocktail_rust_app_lifecycle_status_name(
+      static_cast<int32_t>(status), buf, sizeof(buf));
+  return buf;
 }
 
 const char *RobloxAppShutdownStatusName(RobloxAppShutdownStatus status) {
-  switch (status) {
-  case RobloxAppShutdownStatus::kStopped:
-    return "Stopped";
-  case RobloxAppShutdownStatus::kAlreadyStopped:
-    return "AlreadyStopped";
-  case RobloxAppShutdownStatus::kShutdownInProgress:
-    return "ShutdownInProgress";
-  case RobloxAppShutdownStatus::kMissingRequiredSymbols:
-    return "MissingRequiredSymbols";
-  case RobloxAppShutdownStatus::kInvalidJniState:
-    return "InvalidJniState";
-  case RobloxAppShutdownStatus::kReasonAllocationFailed:
-    return "ReasonAllocationFailed";
-  }
-  return "Unknown";
+  thread_local char buf[32];
+  mocktail_rust_app_shutdown_status_name(
+      static_cast<int32_t>(status), buf, sizeof(buf));
+  return buf;
 }
 
 } // namespace runtime

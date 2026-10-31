@@ -20,6 +20,8 @@
 #include <utility>
 #include <vector>
 
+#include "mocktail/mocktail_rust.h"
+
 extern char** environ;
 
 namespace mocktail::update {
@@ -118,33 +120,12 @@ bool HasPositiveNumberAfter(std::string_view log, std::string_view marker) {
 }
 
 bool ValidateAudio(std::string_view log, std::string* error) {
-  const bool opensl = HasPositiveNumberAfter(
-      log, "[mocktail][audio] OpenSL playback activity: submitted_buffers=");
-  const bool fmod = HasPositiveNumberAfter(
-      log, "[mocktail][audio] fmod_java first_submission submitted_buffers=");
-  if (log.find("[mocktail][audio] fmod_java init_failed") != log.npos ||
-      log.find("[mocktail][audio] fmod_java write_failed") != log.npos ||
-      log.find("[mocktail][audio] fmod_java close_failed") != log.npos) {
-    *error = "graphics canary observed an FMOD audio failure";
-    return false;
-  }
-  if (opensl &&
-      (!HasPositiveNumberAfter(
-           log,
-           "[mocktail][audio] OpenSL playback evidence: consumed_buffers=") ||
-       log.find("[mocktail][audio] OpenSL player shutdown: submitted=") ==
-           log.npos ||
-       log.find("clean=true") == log.npos)) {
-    *error =
-        "graphics canary submitted OpenSL audio without clean consumption";
-    return false;
-  }
-  if (fmod &&
-      (!HasPositiveNumberAfter(log, "consumed_buffers=") ||
-       log.find("[mocktail][audio] fmod_java shutdown submitted_buffers=") ==
-           log.npos ||
-       log.find("pending_buffers=0") == log.npos)) {
-    *error = "graphics canary submitted FMOD audio without clean consumption";
+  char err_buf[256]{};
+  if (mocktail_rust_validate_canary_audio_log(
+          log.data(), log.size(), err_buf, sizeof(err_buf)) != 0) {
+    if (error != nullptr) {
+      *error = err_buf;
+    }
     return false;
   }
   return true;
@@ -171,25 +152,10 @@ std::string_view CanaryGraphicsBackendName(CanaryGraphicsBackend backend) {
 bool ParseCanaryGraphicsBackend(std::string_view name,
                                 CanaryGraphicsBackend* backend) {
   if (backend == nullptr) return false;
-  if (name.empty() || name == "vulkan" || name == "native-vulkan" ||
-      name == "direct-vulkan") {
-    *backend = CanaryGraphicsBackend::kDirectVulkan;
-    return true;
-  }
-  if (name == "gles" || name == "opengl") {
-    *backend = CanaryGraphicsBackend::kOpenGlEs;
-    return true;
-  }
-  if (name == "auto" || name == "system") {
-    *backend = CanaryGraphicsBackend::kSystemEgl;
-    return true;
-  }
-  if (name == "angle-vulkan") {
-    *backend = CanaryGraphicsBackend::kAngleVulkan;
-    return true;
-  }
-  if (name == "angle-swiftshader") {
-    *backend = CanaryGraphicsBackend::kAngleSwiftShader;
+  const std::string name_str(name);
+  int32_t parsed_backend = 0;
+  if (mocktail_rust_canary_backend_parse(name_str.c_str(), &parsed_backend) == 0) {
+    *backend = static_cast<CanaryGraphicsBackend>(parsed_backend);
     return true;
   }
   return false;

@@ -182,7 +182,7 @@ std::string ClientSettingsService::SafeDefaultsJson() {
 
 std::string ClientSettingsService::DefaultUrl(const std::string& application) {
   char buf[512] = {};
-  if (mocktail_rust_client_settings_default_url(application.c_str(), buf, sizeof(buf)) == 0) {
+  if (mocktail_rust_client_settings_build_url(application.c_str(), buf, sizeof(buf)) == 0) {
     return std::string(buf);
   }
   return "https://clientsettingscdn.roblox.com/v2/settings/application/" + application;
@@ -193,23 +193,10 @@ bool ClientSettingsService::IsValidJson(const std::string& content) {
 }
 
 const char* ClientSettingsSourceName(ClientSettingsSource source) {
-  switch (source) {
-    case ClientSettingsSource::kExplicitJson:
-      return "explicit JSON";
-    case ClientSettingsSource::kExplicitFile:
-      return "explicit file";
-    case ClientSettingsSource::kBundledFile:
-      return "bundled file";
-    case ClientSettingsSource::kSafeDefaults:
-      return "safe defaults";
-    case ClientSettingsSource::kDownloaded:
-      return "download";
-    case ClientSettingsSource::kCache:
-      return "cache";
-    case ClientSettingsSource::kEmptyDefaults:
-      return "empty defaults";
-  }
-  return "unknown";
+  thread_local char buf[32];
+  mocktail_rust_client_settings_source_name(
+      static_cast<int32_t>(source), buf, sizeof(buf));
+  return buf;
 }
 
 }  // namespace services

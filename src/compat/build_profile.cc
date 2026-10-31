@@ -1,6 +1,7 @@
 #include "compat/build_profile.h"
 
 #include "compat/elf_build_id.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <nlohmann/json.hpp>
 
@@ -25,26 +26,19 @@ ProfileLookupResult Failure(std::string error) {
 }
 
 std::string NormalizeBuildId(std::string_view build_id) {
-  std::string normalized(build_id);
-  std::transform(normalized.begin(), normalized.end(), normalized.begin(),
-                 [](unsigned char character) {
-                   return static_cast<char>(std::tolower(character));
-                 });
-  return normalized;
+  const std::string input(build_id);
+  char out[128];
+  if (mocktail_rust_normalize_build_id(input.c_str(), out, sizeof(out)) == 0) {
+    return std::string(out);
+  }
+  return input;
 }
 
 std::optional<BuildStatus> ParseStatus(std::string_view status) {
-  if (status == "supported") {
-    return BuildStatus::kSupported;
-  }
-  if (status == "experimental") {
-    return BuildStatus::kExperimental;
-  }
-  if (status == "legacy-researched") {
-    return BuildStatus::kLegacyResearched;
-  }
-  if (status == "unverified") {
-    return BuildStatus::kUnverified;
+  const std::string s(status);
+  const int32_t val = mocktail_rust_parse_status_string(s.c_str());
+  if (val >= 0) {
+    return static_cast<BuildStatus>(val);
   }
   return std::nullopt;
 }
@@ -68,21 +62,12 @@ bool ParseOptionalRva(const Json& object, const char* name,
     return false;
   }
   const std::string& encoded = field->get_ref<const std::string&>();
-  if (encoded.size() <= 2 || encoded[0] != '0' ||
-      (encoded[1] != 'x' && encoded[1] != 'X')) {
-    return false;
+  uintptr_t parsed_rva = 0;
+  if (mocktail_rust_parse_hex_rva(encoded.c_str(), &parsed_rva) == 0) {
+    *rva = parsed_rva;
+    return true;
   }
-  std::uint64_t parsed = 0;
-  const char* begin = encoded.data() + 2;
-  const char* end = encoded.data() + encoded.size();
-  const std::from_chars_result result =
-      std::from_chars(begin, end, parsed, 16);
-  if (result.ec != std::errc() || result.ptr != end || parsed == 0 ||
-      parsed > std::numeric_limits<std::uintptr_t>::max()) {
-    return false;
-  }
-  *rva = static_cast<std::uintptr_t>(parsed);
-  return true;
+  return false;
 }
 
 bool ParseOptionalFmodOutputDeviceBridge(

@@ -3,6 +3,7 @@
 #endif
 
 #include "runtime/owned_pthread.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <signal.h>
 
@@ -110,15 +111,10 @@ int OwnedPthread::Signal(int signal_number) const {
 }
 
 const char* OwnedPthreadWaitStatusName(OwnedPthreadWaitStatus status) {
-  switch (status) {
-    case OwnedPthreadWaitStatus::kJoined:
-      return "Joined";
-    case OwnedPthreadWaitStatus::kTimedOut:
-      return "TimedOut";
-    case OwnedPthreadWaitStatus::kPlatformError:
-      return "PlatformError";
-  }
-  return "Unknown";
+  thread_local char buffer[32];
+  mocktail_rust_owned_pthread_status_name(
+      static_cast<int32_t>(status), buffer, sizeof(buffer));
+  return buffer;
 }
 
 }  // namespace runtime

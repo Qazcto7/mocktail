@@ -81,7 +81,7 @@ target_include_directories(mocktail_platform_sdl PUBLIC
 target_include_directories(mocktail_platform_sdl PRIVATE
   ${MOCKTAIL_PLATFORM_GENERATED_INCLUDE_DIR}
 )
-target_link_libraries(mocktail_platform_sdl PUBLIC SDL3::SDL3)
+target_link_libraries(mocktail_platform_sdl PUBLIC SDL3::SDL3 mocktail_core_rust)
 target_compile_features(mocktail_platform_sdl PUBLIC cxx_std_17)
 target_compile_definitions(mocktail_platform_sdl PRIVATE
   MOCKTAIL_PROJECT_VERSION="${PROJECT_VERSION}"

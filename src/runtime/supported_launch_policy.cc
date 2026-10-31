@@ -1,3 +1,4 @@
+#include "mocktail/mocktail_rust.h"
 #include "runtime/supported_launch_policy.h"
 
 #include <unistd.h>
@@ -120,39 +121,16 @@ bool ApplySupportedLaunchPolicy(bool interactive, std::string* error) {
     return true;
   }
 
-  const std::vector<std::pair<const char*, std::string>> defaults = {
-      {"MOCKTAIL_ALLOW_NO_COOKIE_LUA_APP", "1"},
-      {"MOCKTAIL_VALIDATE_ROBLOX_COOKIE", "0"},
-      {"MOCKTAIL_ENGINE_DETACH", "0"},
-      {"MOCKTAIL_CALL_REAL_APP_BRIDGE_INIT", "1"},
-      {"MOCKTAIL_CALL_REAL_APP_BRIDGE_INIT_THREAD", "0"},
-      {"MOCKTAIL_SKIP_LIBROBLOX_CTORS", "0"},
-      {"MOCKTAIL_HOST_JNI_SINGLETON_SEED", "0"},
-      {"MOCKTAIL_INIT_CLIENT_SETTINGS", "1"},
-      {"MOCKTAIL_HEADLESS", "0"},
-      {"MOCKTAIL_STARTUP_THREAD_TIMEOUT_MS", "120000"},
-      {"MOCKTAIL_CALL_REAL_APP_BRIDGE_START", "1"},
-      {"MOCKTAIL_STEP_START_APP_WITH_PARAMS", "1"},
-      {"MOCKTAIL_UPDATE_SURFACE_APP_AFTER_START_APP", "1"},
-      {"MOCKTAIL_CALL_REAL_APP_BRIDGE_UPDATE_SURFACE", "1"},
-      {"MOCKTAIL_START_LUA_APP_DM", "1"},
-      {"MOCKTAIL_STEP_START_LUA_APP_DM", "1"},
-      {"MOCKTAIL_POST_CLIENT_SETTINGS", "1"},
-      {"MOCKTAIL_STEP_POST_CLIENT_SETTINGS", "1"},
-      {"MOCKTAIL_FETCH_CLIENT_SETTINGS", "1"},
-      {"MOCKTAIL_START_LUA_APP_DM_AFTER_START_APP", "0"},
-      {"MOCKTAIL_START_LUA_APP_DM_INLINE", "1"},
-      {"MOCKTAIL_START_LUA_APP_DM_DELAY_MS", "0"},
-      {"MOCKTAIL_START_GAME_WITH_PARAM", "0"},
-      {"MOCKTAIL_RESUME_GAME_WITH_PLATFORM_PARAMS_AFTER_START_GAME", "0"},
-      {"MOCKTAIL_SEND_APP_READY", "0"},
-      {"MOCKTAIL_SEND_GAME_LOADED", "0"},
-      {"MOCKTAIL_MAIN_THREAD_MESSAGE_PUMP", "1"},
-      {"MOCKTAIL_AUTO_EXIT_AFTER_PRESENT_MS", "0"},
-  };
-  for (const auto& [name, value] : defaults) {
-    if (!SetDefault(name, value, error)) {
-      return false;
+  const size_t defaults_count =
+      mocktail_rust_supported_launch_defaults_count(interactive ? 1 : 0);
+  for (size_t i = 0; i < defaults_count; ++i) {
+    char key[128];
+    char val[128];
+    if (mocktail_rust_supported_launch_default_entry(
+            interactive ? 1 : 0, i, key, sizeof(key), val, sizeof(val)) == 0) {
+      if (!SetDefault(key, val, error)) {
+        return false;
+      }
     }
   }
   return true;

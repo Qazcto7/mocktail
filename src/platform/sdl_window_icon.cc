@@ -5,6 +5,7 @@
 #include <string>
 #include <utility>
 
+#include "mocktail/mocktail_rust.h"
 #include "mocktail/platform/sdl_window_icon_data.h"
 
 namespace mocktail {
@@ -25,6 +26,16 @@ Status ApplySdlWindowIcon(SDL_Window* window) {
   if (window == nullptr) {
     return Status::Error(StatusCode::kInvalidArgument,
                          "SDL window must not be null");
+  }
+
+  uint32_t icon_w = 0;
+  uint32_t icon_h = 0;
+  if (mocktail_rust_validate_window_icon_png_header(
+          internal::kMocktailWindowIconPng,
+          internal::kMocktailWindowIconPngSize,
+          &icon_w, &icon_h) != 0) {
+    return Status::Error(StatusCode::kPlatformError,
+                         "Embedded window icon PNG header is invalid");
   }
 
   SDL_IOStream* stream = SDL_IOFromConstMem(

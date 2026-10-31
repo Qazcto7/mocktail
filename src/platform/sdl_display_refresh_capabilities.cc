@@ -2,42 +2,26 @@
 
 #include <SDL3/SDL.h>
 
-#include <algorithm>
-#include <cmath>
 #include <utility>
+#include <vector>
+
+#include "mocktail/mocktail_rust.h"
 
 namespace mocktail {
 namespace platform {
-namespace {
-
-constexpr float kDuplicateToleranceHz = 0.01f;
-
-bool IsUsableRate(float rate_hz) {
-  return std::isfinite(rate_hz) && rate_hz > 0.0f;
-}
-
-} // namespace
 
 DisplayRefreshCapabilities
 NormalizeDisplayRefreshCapabilities(float current_hz,
                                     std::vector<float> supported_hz) {
   DisplayRefreshCapabilities result;
-  if (!IsUsableRate(current_hz)) {
-    return result;
-  }
-  result.current_hz = current_hz;
-  supported_hz.erase(
-      std::remove_if(supported_hz.begin(), supported_hz.end(),
-                     [](float rate_hz) { return !IsUsableRate(rate_hz); }),
-      supported_hz.end());
-  supported_hz.push_back(current_hz);
-  std::sort(supported_hz.begin(), supported_hz.end());
-  for (const float rate_hz : supported_hz) {
-    if (result.supported_hz.empty() ||
-        std::fabs(result.supported_hz.back() - rate_hz) >
-            kDuplicateToleranceHz) {
-      result.supported_hz.push_back(rate_hz);
-    }
+  std::vector<float> out(supported_hz.size() + 1);
+  size_t count = 0;
+  if (mocktail_rust_normalize_display_refresh_capabilities(
+          current_hz, supported_hz.data(), supported_hz.size(),
+          out.data(), out.size(), &count) == 0 && count > 0) {
+    result.current_hz = current_hz;
+    out.resize(count);
+    result.supported_hz = std::move(out);
   }
   return result;
 }

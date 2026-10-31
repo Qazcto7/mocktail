@@ -23,19 +23,7 @@ BuildIdResult Failure(std::string error) {
 }  // namespace
 
 bool IsValidBuildId(std::string_view build_id) noexcept {
-  if (build_id.size() < 8 || build_id.size() > 128 ||
-      build_id.size() % 2 != 0) {
-    return false;
-  }
-  for (const char character : build_id) {
-    const bool digit = character >= '0' && character <= '9';
-    const bool lowercase = character >= 'a' && character <= 'f';
-    const bool uppercase = character >= 'A' && character <= 'F';
-    if (!digit && !lowercase && !uppercase) {
-      return false;
-    }
-  }
-  return true;
+  return mocktail_rust_is_valid_build_id(build_id.data(), build_id.size()) == 1;
 }
 
 BuildIdResult ReadElfBuildId(const std::string& path) {

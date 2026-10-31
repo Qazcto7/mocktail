@@ -7,6 +7,8 @@
 #include <utility>
 #include <vector>
 
+#include "mocktail/mocktail_rust.h"
+
 namespace mocktail {
 namespace runtime {
 namespace {
@@ -51,31 +53,18 @@ jstring NewJavaString(JNIEnv* env, const std::string& utf8) {
   if (env == nullptr || utf8.size() > kMaximumLaunchFieldBytes) {
     return nullptr;
   }
-  std::vector<jchar> utf16;
-  utf16.reserve(utf8.size());
-  std::size_t offset = 0;
-  while (offset < utf8.size()) {
-    utf8proc_int32_t codepoint = 0;
-    const utf8proc_ssize_t count = utf8proc_iterate(
-        reinterpret_cast<const utf8proc_uint8_t*>(utf8.data() + offset),
-        static_cast<utf8proc_ssize_t>(utf8.size() - offset), &codepoint);
-    if (count <= 0 || codepoint < 0 || codepoint > 0x10ffff) {
-      return nullptr;
-    }
-    if (codepoint <= 0xffff) {
-      utf16.push_back(static_cast<jchar>(codepoint));
-    } else {
-      codepoint -= 0x10000;
-      utf16.push_back(static_cast<jchar>(0xd800 + (codepoint >> 10)));
-      utf16.push_back(static_cast<jchar>(0xdc00 + (codepoint & 0x3ff)));
-    }
-    offset += static_cast<std::size_t>(count);
+  std::vector<jchar> utf16(utf8.size() * 2 + 1);
+  size_t out_len = 0;
+  if (mocktail_rust_utf8_to_utf16_surrogates(
+          utf8.data(), utf8.size(), reinterpret_cast<uint16_t*>(utf16.data()),
+          utf16.size(), &out_len) != 0) {
+    return nullptr;
   }
-  if (utf16.size() >
+  if (out_len >
       static_cast<std::size_t>(std::numeric_limits<jsize>::max())) {
     return nullptr;
   }
-  return env->NewString(utf16.data(), static_cast<jsize>(utf16.size()));
+  return env->NewString(utf16.data(), static_cast<jsize>(out_len));
 }
 
 Status SetObject(JNIEnv* env, jobject object, jclass clazz, const char* name,

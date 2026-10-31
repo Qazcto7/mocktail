@@ -3,15 +3,28 @@
 #include <string>
 #include <utility>
 
+#include "mocktail/mocktail_rust.h"
+
 namespace mocktail::update {
 namespace {
 
 void AppendFailure(std::string* aggregate, std::string_view provider,
                    std::string_view failure) {
-  if (!aggregate->empty()) aggregate->append("; ");
-  aggregate->append(provider);
-  aggregate->append(": ");
-  aggregate->append(failure);
+  if (aggregate == nullptr) return;
+  const std::string prov_str(provider);
+  const std::string fail_str(failure);
+  char out_buf[4096];
+  size_t out_len = 0;
+  if (mocktail_rust_apk_provider_append_failure(
+          aggregate->c_str(), prov_str.c_str(), fail_str.c_str(),
+          out_buf, sizeof(out_buf), &out_len) == 0) {
+    *aggregate = std::string(out_buf, out_len);
+  } else {
+    if (!aggregate->empty()) aggregate->append("; ");
+    aggregate->append(provider);
+    aggregate->append(": ");
+    aggregate->append(failure);
+  }
 }
 
 }  // namespace

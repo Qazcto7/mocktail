@@ -556,6 +556,8 @@ GameSessionUpdateResult GameSessionCoordinator::StartIfReadyLocked(
 
 GameSessionUpdateResult GameSessionCoordinator::ApplyLocked(
     GameSessionState state, std::string message) {
+  (void)mocktail_rust_game_session_can_transition(
+      static_cast<int32_t>(state_), static_cast<int32_t>(state));
   state_ = state;
   ++revision_;
   return {GameSessionUpdateStatus::kApplied, state_, Status::Ok(),

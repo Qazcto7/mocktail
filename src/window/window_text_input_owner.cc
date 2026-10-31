@@ -10,6 +10,7 @@
 #include <cmath>
 #include <utility>
 
+#include "mocktail/mocktail_rust.h"
 #include "mocktail/platform/platform_runtime.h"
 
 namespace mocktail {
@@ -20,24 +21,8 @@ namespace {
 constexpr TextInputArea kSafeDefaultArea{0, 0, 1, 1, 0};
 
 SDL_TextInputType MapRobloxTextInputType(int input_type) {
-  // Mirrors the APK RbxKeyboard mapping without passing Android bitmasks into
-  // SDL. Unknown/new values remain ordinary text and therefore fail safely.
-  switch (input_type) {
-    case 2:
-    case 4:  // SDL has no phone type; numeric is the closest host contract.
-    case 8:
-      return SDL_TEXTINPUT_TYPE_NUMBER;
-    case 3:
-      return SDL_TEXTINPUT_TYPE_TEXT_EMAIL;
-    case 5:
-    case 9:
-    case 10:
-      return SDL_TEXTINPUT_TYPE_TEXT_PASSWORD_HIDDEN;
-    case 6:
-      return SDL_TEXTINPUT_TYPE_TEXT_USERNAME;
-    default:
-      return SDL_TEXTINPUT_TYPE_TEXT;
-  }
+  return static_cast<SDL_TextInputType>(
+      mocktail_rust_map_roblox_text_input_type(input_type));
 }
 
 }  // namespace

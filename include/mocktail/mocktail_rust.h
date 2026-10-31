@@ -1866,6 +1866,355 @@ int32_t mocktail_rust_translate_android_vulkan_instance_extensions(
 
 void mocktail_rust_free_c_string(char* ptr);
 
+// ============================================================================
+// 74. Display Refresh Capabilities Engine
+// ============================================================================
+
+int32_t mocktail_rust_normalize_display_refresh_capabilities(
+    float current_hz,
+    const float* supported_hz,
+    size_t count,
+    float* out_hz,
+    size_t out_cap,
+    size_t* out_count);
+
+// ============================================================================
+// 75. Platform Application Metadata & Identity
+// ============================================================================
+
+int32_t mocktail_rust_platform_metadata_identity(
+    char* name_buf,
+    size_t name_cap,
+    char* id_buf,
+    size_t id_cap,
+    char* type_buf,
+    size_t type_cap);
+
+// ============================================================================
+// 76. SDL Window Icon PNG Header Verifier
+// ============================================================================
+
+int32_t mocktail_rust_validate_window_icon_png_header(
+    const uint8_t* data,
+    size_t size,
+    uint32_t* out_width,
+    uint32_t* out_height);
+
+// ============================================================================
+// 77. Supported Launch Policy Defaults Table
+// ============================================================================
+
+size_t mocktail_rust_supported_launch_defaults_count(int32_t interactive);
+
+int32_t mocktail_rust_supported_launch_default_entry(
+    int32_t interactive,
+    size_t index,
+    char* key_buf,
+    size_t key_cap,
+    char* val_buf,
+    size_t val_cap);
+
+// ============================================================================
+// 78. Platform Profile Revision Generator & Android Path Normalizer
+// ============================================================================
+
+int32_t mocktail_rust_build_platform_profile_revision(
+    const char* device_profile,
+    int32_t touch,
+    int32_t mouse,
+    int32_t keyboard,
+    char* out_buf,
+    size_t out_cap);
+
+int32_t mocktail_rust_translate_android_files_path(
+    const char* configured,
+    const char* data_root,
+    char* out_buf,
+    size_t out_cap);
+
+int32_t mocktail_rust_has_path_prefix(
+    const char* path,
+    const char* prefix);
+
+// ============================================================================
+// 79. Platform Cache Migration Fingerprint Validator
+// ============================================================================
+
+int32_t mocktail_rust_validate_platform_cache_fingerprint(
+    const char* json_str,
+    size_t json_len,
+    char* revision_buf,
+    size_t revision_cap);
+
+// ============================================================================
+// 80. Roblox Browser Service Command Parser
+// ============================================================================
+
+typedef struct MocktailRustBrowserServiceOpenCommand {
+    char url[1024];
+    char title[512];
+    int32_t has_title;
+    int32_t visible;
+    int32_t modal;
+    int32_t back_navigation_disabled;
+    int32_t show_domain_as_title;
+} MocktailRustBrowserServiceOpenCommand;
+
+int32_t mocktail_rust_parse_browser_service_command(
+    const char* json_str,
+    size_t json_len,
+    int32_t* out_command_type,
+    MocktailRustBrowserServiceOpenCommand* out_cmd,
+    char* err_buf,
+    size_t err_cap);
+
+// ============================================================================
+// 81. Roblox Text Display State & UTF-16 Cursor Engine
+// ============================================================================
+
+size_t mocktail_rust_utf8_byte_for_utf16_cursor(
+    const char* text,
+    size_t size,
+    int32_t requested_utf16,
+    size_t* out_codepoints);
+
+int32_t mocktail_rust_text_geometry_intersects_viewport(
+    int32_t area_x,
+    int32_t area_y,
+    int32_t area_w,
+    int32_t area_h,
+    int32_t vp_w,
+    int32_t vp_h);
+
+// ============================================================================
+// 82. Roblox Fullscreen Machine Code Setter Contract Verifier
+// ============================================================================
+
+int32_t mocktail_rust_validate_fullscreen_setter_contract(
+    const uint8_t* code,
+    size_t size);
+
+// ============================================================================
+// 83. Window Pointer Capture Evaluation Engine
+// ============================================================================
+
+int32_t mocktail_rust_pointer_capture_evaluate(
+    int32_t focused,
+    int32_t query_ok,
+    int32_t locked_center,
+    int32_t right_button_held,
+    int32_t text_input_active,
+    int32_t* out_capture_requested,
+    int32_t* out_cursor_visible);
+
+// ============================================================================
+// 84. Window Text Input Type Mapper & Area Clamper
+// ============================================================================
+
+int32_t mocktail_rust_map_roblox_text_input_type(int32_t input_type);
+
+void mocktail_rust_clamp_text_input_area(
+    int32_t* x,
+    int32_t* y,
+    int32_t* w,
+    int32_t* h,
+    int32_t* cursor);
+
+// ============================================================================
+// 85. Bionic Sysconf Parameter Lookup
+// ============================================================================
+
+int32_t mocktail_rust_bionic_sysconf_translate_name(
+    int32_t bionic_name,
+    int32_t* out_standard_sc,
+    int64_t* out_fixed_value);
+
+// ============================================================================
+// 86. Build Profile Parser & Hex RVA Reader
+// ============================================================================
+
+int32_t mocktail_rust_normalize_build_id(
+    const char* build_id,
+    char* out_buf,
+    size_t out_cap);
+
+int32_t mocktail_rust_parse_status_string(const char* status);
+
+int32_t mocktail_rust_parse_hex_rva(
+    const char* hex_str,
+    uintptr_t* out_rva);
+
+// ============================================================================
+// 87. ELF Build ID Hex Validator
+// ============================================================================
+
+int32_t mocktail_rust_is_valid_build_id(
+    const char* build_id,
+    size_t len);
+
+// ============================================================================
+// 88. HTTP Client Spin Guard Rate Limiter
+// ============================================================================
+
+uint64_t mocktail_rust_http_spin_limiter_observe(
+    uint64_t* inout_op_count,
+    uint64_t* inout_checkpoint_ns,
+    uint64_t now_ns,
+    uint64_t batch_size,
+    uint64_t batch_interval_ns);
+
+// ============================================================================
+// 89. Owned Pthread Wait Status Name
+// ============================================================================
+
+int32_t mocktail_rust_owned_pthread_status_name(
+    int32_t status,
+    char* out_buf,
+    size_t out_cap);
+
+// ============================================================================
+// 90. Failure Dialog Protocol & Environment Evaluator
+// ============================================================================
+
+int32_t mocktail_rust_failure_dialogs_enabled(
+    int32_t disabled_by_env,
+    int32_t is_canary,
+    int32_t is_headless,
+    int32_t has_display,
+    int32_t has_wayland);
+
+int32_t mocktail_rust_failure_dialog_format_packet(
+    char packet_type,
+    const char* message,
+    size_t max_bytes,
+    char* out_buf,
+    size_t out_cap,
+    size_t* out_len);
+
+// ============================================================================
+// 91. APK Provider Failure Aggregator
+// ============================================================================
+
+int32_t mocktail_rust_apk_provider_append_failure(
+    const char* existing,
+    const char* provider_name,
+    const char* failure_msg,
+    char* out_buf,
+    size_t out_cap,
+    size_t* out_len);
+
+// ============================================================================
+// 92. Update Configuration YAML Parser
+// ============================================================================
+
+int32_t mocktail_rust_parse_update_config_yaml(
+    const char* yaml_str,
+    size_t yaml_len,
+    int32_t* out_auto,
+    int32_t* out_launch_after,
+    char* source_buf,
+    size_t source_cap,
+    char* err_buf,
+    size_t err_cap);
+
+// ============================================================================
+// 93. Unsafe Latest Environment Filter & Builder
+// ============================================================================
+
+int32_t mocktail_rust_is_overridden_environment_var(const char* entry);
+
+// ============================================================================
+// 94. Canary Readiness Backend & Audio Log Validator
+// ============================================================================
+
+int32_t mocktail_rust_canary_backend_parse(
+    const char* name,
+    int32_t* out_backend);
+
+int32_t mocktail_rust_canary_backend_name(
+    int32_t backend,
+    char* out_buf,
+    size_t out_cap);
+
+int32_t mocktail_rust_validate_canary_audio_log(
+    const char* log_text,
+    size_t log_len,
+    char* err_buf,
+    size_t err_cap);
+
+// ============================================================================
+// 95. Game Session State Machine & Transition Evaluator
+// ============================================================================
+
+int32_t mocktail_rust_game_session_can_transition(
+    int32_t current_state,
+    int32_t target_state);
+
+// ============================================================================
+// 96. Capability Resolver Flags Evaluator
+// ============================================================================
+
+void mocktail_rust_evaluate_startup_flags(
+    int32_t has_surface_app,
+    int32_t has_message_pump,
+    int32_t has_start_game,
+    int32_t has_surface_game,
+    int32_t* out_flags);
+
+// ============================================================================
+// 97. Roblox App Lifecycle Status Name Engine
+// ============================================================================
+
+int32_t mocktail_rust_app_lifecycle_status_name(
+    int32_t status,
+    char* out_buf,
+    size_t out_cap);
+
+int32_t mocktail_rust_app_shutdown_status_name(
+    int32_t status,
+    char* out_buf,
+    size_t out_cap);
+
+// ============================================================================
+// 98. Fresh Start Game Params String Encoder
+// ============================================================================
+
+int32_t mocktail_rust_utf8_to_utf16_surrogates(
+    const char* utf8_str,
+    size_t utf8_len,
+    uint16_t* out_utf16,
+    size_t out_cap,
+    size_t* out_len);
+
+// ============================================================================
+// 99. Roblox Permissions Answer Formatter
+// ============================================================================
+
+int32_t mocktail_rust_format_permissions_reply(
+    size_t method,
+    int32_t mic_enabled,
+    const char* request_json,
+    char* out_body,
+    size_t body_cap,
+    size_t* body_len,
+    int32_t* out_code,
+    char* out_outcome,
+    size_t outcome_cap);
+
+// ============================================================================
+// 100. Client Settings Source Naming & Default URL Builder
+// ============================================================================
+
+int32_t mocktail_rust_client_settings_source_name(
+    int32_t source,
+    char* out_buf,
+    size_t out_cap);
+
+int32_t mocktail_rust_client_settings_build_url(
+    const char* app_name,
+    char* out_buf,
+    size_t out_cap);
+
 #ifdef __cplusplus
 }
 #endif

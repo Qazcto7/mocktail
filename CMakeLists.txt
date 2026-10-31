@@ -388,6 +388,7 @@ target_include_directories(mocktail_failure_dialog_runtime PUBLIC include)
 target_compile_definitions(mocktail_failure_dialog_runtime PRIVATE
   "MOCKTAIL_INSTALL_LIBDIR=\"${CMAKE_INSTALL_LIBDIR}\""
 )
+target_link_libraries(mocktail_failure_dialog_runtime PUBLIC mocktail_core_rust)
 mocktail_apply_compile_options(mocktail_failure_dialog_runtime)
 
 add_executable(mocktail_failure_dialog

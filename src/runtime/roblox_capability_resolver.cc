@@ -86,14 +86,17 @@ void ResolveStartupSymbols(const RobloxSymbolLookup& lookup,
           "Java_com_roblox_engine_jni_NativeGLInterface_"
           "nativeAppBridgeV2UpdateSurfaceGameWithPlatformParams");
 
-  flags->has_surface_app =
-      symbols->app_bridge_v2_update_surface_app_with_platform_params != nullptr;
-  flags->has_message_pump = symbols->call_messages_from_main_thread != nullptr;
-  flags->has_start_game =
-      symbols->app_bridge_v2_start_game_with_param != nullptr;
-  flags->has_surface_game =
-      symbols->app_bridge_v2_update_surface_game_with_platform_params !=
-      nullptr;
+  int32_t startup_bitmask = 0;
+  mocktail_rust_evaluate_startup_flags(
+      symbols->app_bridge_v2_update_surface_app_with_platform_params != nullptr,
+      symbols->call_messages_from_main_thread != nullptr,
+      symbols->app_bridge_v2_start_game_with_param != nullptr,
+      symbols->app_bridge_v2_update_surface_game_with_platform_params != nullptr,
+      &startup_bitmask);
+  flags->has_surface_app = (startup_bitmask & (1 << 0)) != 0;
+  flags->has_message_pump = (startup_bitmask & (1 << 1)) != 0;
+  flags->has_start_game = (startup_bitmask & (1 << 2)) != 0;
+  flags->has_surface_game = (startup_bitmask & (1 << 3)) != 0;
 }
 
 void ResolveInputSymbols(const RobloxSymbolLookup& lookup,

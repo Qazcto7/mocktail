@@ -1,5 +1,6 @@
 #include "runtime/roblox_fullscreen_runtime_bridge.h"
 #include "runtime/roblox_fullscreen_runtime_bridge_internal.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <elf.h>
 
@@ -19,21 +20,6 @@ namespace runtime {
 namespace {
 
 constexpr std::size_t kSetterContractBytes = 96;
-
-bool ContainsBytes(const std::uint8_t* code, std::size_t size,
-                   const std::uint8_t* expected,
-                   std::size_t expected_size) {
-  if (code == nullptr || expected == nullptr || expected_size == 0 ||
-      expected_size > size) {
-    return false;
-  }
-  for (std::size_t index = 0; index + expected_size <= size; ++index) {
-    if (std::memcmp(code + index, expected, expected_size) == 0) {
-      return true;
-    }
-  }
-  return false;
-}
 
 bool IsExecutableImageRange(std::uintptr_t base, std::uintptr_t rva,
                             std::size_t size) {
@@ -71,34 +57,7 @@ namespace internal {
 
 bool HasExpectedFullscreenSetterContract(const std::uint8_t* code,
                                          std::size_t size) {
-  if (code == nullptr || size < kSetterContractBytes) {
-    return false;
-  }
-  constexpr std::array<std::uint8_t, 4> kFramePrologue = {
-      0x55, 0x48, 0x89, 0xe5};
-  constexpr std::array<std::uint8_t, 2> kCaptureBoolean = {0x89, 0xf3};
-  constexpr std::array<std::uint8_t, 6> kCompareLegacyFullscreen = {
-      0x38, 0x98, 0x59, 0x01, 0x00, 0x00};
-  constexpr std::array<std::uint8_t, 6> kStoreLegacyFullscreen = {
-      0x88, 0x98, 0x59, 0x01, 0x00, 0x00};
-  constexpr std::array<std::uint8_t, 6> kCompareCurrentFullscreen = {
-      0x38, 0x98, 0x61, 0x01, 0x00, 0x00};
-  constexpr std::array<std::uint8_t, 6> kStoreCurrentFullscreen = {
-      0x88, 0x98, 0x61, 0x01, 0x00, 0x00};
-  const bool has_legacy_fullscreen_field =
-      ContainsBytes(code, size, kCompareLegacyFullscreen.data(),
-                    kCompareLegacyFullscreen.size()) &&
-      ContainsBytes(code, size, kStoreLegacyFullscreen.data(),
-                    kStoreLegacyFullscreen.size());
-  const bool has_current_fullscreen_field =
-      ContainsBytes(code, size, kCompareCurrentFullscreen.data(),
-                    kCompareCurrentFullscreen.size()) &&
-      ContainsBytes(code, size, kStoreCurrentFullscreen.data(),
-                    kStoreCurrentFullscreen.size());
-  return std::memcmp(code, kFramePrologue.data(), kFramePrologue.size()) == 0 &&
-         ContainsBytes(code, 24, kCaptureBoolean.data(),
-                       kCaptureBoolean.size()) &&
-         (has_legacy_fullscreen_field || has_current_fullscreen_field);
+  return mocktail_rust_validate_fullscreen_setter_contract(code, size) == 1;
 }
 
 }  // namespace internal

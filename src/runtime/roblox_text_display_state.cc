@@ -1,4 +1,5 @@
 #include "runtime/roblox_text_display_state.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <utf8proc.h>
 
@@ -30,31 +31,8 @@ void SecureClear(std::string* value) {
 std::size_t Utf8ByteForUtf16Cursor(const char* text, std::size_t size,
                                    int32_t requested_utf16,
                                    std::size_t* codepoints_before_cursor) {
-  const std::size_t target =
-      requested_utf16 > 0 ? static_cast<std::size_t>(requested_utf16) : 0;
-  std::size_t byte = 0;
-  std::size_t utf16 = 0;
-  std::size_t codepoints = 0;
-  while (byte < size) {
-    utf8proc_int32_t codepoint = 0;
-    const utf8proc_ssize_t count = utf8proc_iterate(
-        reinterpret_cast<const utf8proc_uint8_t*>(text + byte),
-        static_cast<utf8proc_ssize_t>(size - byte), &codepoint);
-    if (count <= 0) {
-      break;
-    }
-    const std::size_t units = codepoint > 0xFFFF ? 2U : 1U;
-    if (utf16 + units > target) {
-      break;
-    }
-    byte += static_cast<std::size_t>(count);
-    utf16 += units;
-    ++codepoints;
-  }
-  if (codepoints_before_cursor != nullptr) {
-    *codepoints_before_cursor = codepoints;
-  }
-  return byte;
+  return mocktail_rust_utf8_byte_for_utf16_cursor(
+      text, size, requested_utf16, codepoints_before_cursor);
 }
 
 bool ValidateAndCountUtf8(const char* text, std::size_t size,
@@ -81,17 +59,13 @@ bool ValidateAndCountUtf8(const char* text, std::size_t size,
 bool NativeGeometryIntersectsViewport(
     const RobloxTextDisplayUpdate& update,
     const RobloxTextOverlayViewport& viewport) {
-  if (!viewport.valid() || update.area_width <= 0 ||
-      update.area_height <= 0) {
+  if (!viewport.valid()) {
     return false;
   }
-  const int64_t right = static_cast<int64_t>(update.area_x) +
-                        static_cast<int64_t>(update.area_width);
-  const int64_t bottom = static_cast<int64_t>(update.area_y) +
-                         static_cast<int64_t>(update.area_height);
-  return right > 0 && bottom > 0 &&
-         update.area_x < viewport.coordinate_width() &&
-         update.area_y < viewport.coordinate_height();
+  return mocktail_rust_text_geometry_intersects_viewport(
+             update.area_x, update.area_y, update.area_width,
+             update.area_height, viewport.coordinate_width(),
+             viewport.coordinate_height()) == 1;
 }
 
 }  // namespace

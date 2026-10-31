@@ -1,6 +1,7 @@
 #include "runtime/failure_dialog.h"
 
 #include "runtime/helper_environment.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <spawn.h>
 #include <sys/socket.h>
@@ -167,22 +168,26 @@ std::pair<int, int> SpawnMonitor(const std::filesystem::path& helper) {
 }
 
 bool SendPacket(int socket, char kind, std::string_view payload = {}) {
-  std::string packet(1, kind);
-  packet.append(payload.substr(0, kMaximumMessageBytes));
-  const ssize_t sent = send(socket, packet.data(), packet.size(), MSG_NOSIGNAL);
-  return sent == static_cast<ssize_t>(packet.size());
+  char buf[kMaximumMessageBytes + 2];
+  size_t len = 0;
+  const std::string msg(payload);
+  if (mocktail_rust_failure_dialog_format_packet(
+          kind, msg.c_str(), kMaximumMessageBytes, buf, sizeof(buf), &len) != 0) {
+    return false;
+  }
+  const ssize_t sent = send(socket, buf, len, MSG_NOSIGNAL);
+  return sent == static_cast<ssize_t>(len);
 }
 
 }  // namespace
 
 bool FailureDialogsEnabled(const Environment& environment) {
-  if (Enabled(environment, "MOCKTAIL_DISABLE_FAILURE_DIALOG") ||
-      Enabled(environment, "MOCKTAIL_ISOLATED_CANARY") ||
-      Enabled(environment, "MOCKTAIL_HEADLESS")) {
-    return false;
-  }
-  return HasNonEmpty(environment, "DISPLAY") ||
-         HasNonEmpty(environment, "WAYLAND_DISPLAY");
+  return mocktail_rust_failure_dialogs_enabled(
+             Enabled(environment, "MOCKTAIL_DISABLE_FAILURE_DIALOG") ? 1 : 0,
+             Enabled(environment, "MOCKTAIL_ISOLATED_CANARY") ? 1 : 0,
+             Enabled(environment, "MOCKTAIL_HEADLESS") ? 1 : 0,
+             HasNonEmpty(environment, "DISPLAY") ? 1 : 0,
+             HasNonEmpty(environment, "WAYLAND_DISPLAY") ? 1 : 0) == 1;
 }
 
 bool ShowFailureDialog(const Environment& environment,

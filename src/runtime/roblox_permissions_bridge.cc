@@ -43,38 +43,23 @@ Response Answer(JNIEnv* env, jstring message, std::size_t method,
   if (!request.is_object())
     return rejected;
 
-  if (support) {
-    if (mocktail_rust_validate_json_depth(owned.c_str(), 8) != 1) return rejected;
-    return {{{"permissions", {kMicrophone, kLocalNetwork}}}, 0, "supported"};
+  char body[kMaximumJsonBytes];
+  size_t body_len = 0;
+  int32_t code = 0;
+  char outcome[64];
+  if (mocktail_rust_format_permissions_reply(
+          method, microphone_enabled ? 1 : 0, owned.c_str(),
+          body, sizeof(body), &body_len,
+          &code, outcome, sizeof(outcome)) == 0) {
+    auto parsed_body =
+        nlohmann::json::parse(std::string_view(body, body_len), nullptr, false);
+    if (!parsed_body.is_discarded()) {
+      static thread_local std::string outcome_str;
+      outcome_str = outcome;
+      return {std::move(parsed_body), code, outcome_str.c_str()};
+    }
   }
-
-  int has_missing = 0;
-  std::string missing_json(kMaximumJsonBytes, '\0');
-  const int status = mocktail_rust_check_permission_request(
-      owned.c_str(),
-      microphone_enabled ? 1 : 0,
-      &has_missing,
-      missing_json.data(),
-      missing_json.size());
-
-  if (status != 0) {
-    return rejected;
-  }
-
-  if (upsell) {
-    const auto features = request.find("permissions");
-    return {{{"upsellStatus", "HIDE"},
-             {"hiddenUpsellPermissions", features != request.end() ? *features : nlohmann::json::array()}},
-            0,
-            "HIDE"};
-  }
-
-  auto missing_parsed = nlohmann::json::parse(missing_json.c_str(), nullptr, false);
-  const char* outcome_status = has_missing == 0 ? "AUTHORIZED" : "DENIED";
-  return {{{"status", outcome_status},
-           {"missingPermissions", missing_parsed.is_array() ? missing_parsed : nlohmann::json::array()}},
-          0,
-          outcome_status};
+  return rejected;
 }
 
 }  // namespace

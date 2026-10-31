@@ -81,50 +81,6 @@ Status ParseOptionalBoolean(const nlohmann::json& document, const char* key,
   return Status::Ok();
 }
 
-Status ParseOpenCommand(const nlohmann::json& document,
-                        RobloxBrowserServiceOpenRequest* request) {
-  const auto url = document.find("url");
-  if (url == document.end() || !url->is_string()) {
-    return Invalid("BrowserService open command requires a string url");
-  }
-  Status status = ParseRobloxBrowserServiceOpenWindow(
-      url->get_ref<const std::string&>(), request);
-  if (!status.ok()) {
-    return status;
-  }
-
-  std::optional<std::string> title;
-  std::optional<bool> visible;
-  std::optional<bool> modal;
-  std::optional<bool> back_navigation_disabled;
-  std::optional<bool> show_domain_as_title;
-  status = ParseOptionalString(document, "title", &title);
-  if (status.ok()) {
-    status = ParseOptionalBoolean(document, "visible", &visible);
-  }
-  if (status.ok()) {
-    status = ParseOptionalBoolean(document, "modal", &modal);
-  }
-  if (status.ok()) {
-    status = ParseOptionalBoolean(document, "backNavigationDisabled",
-                                  &back_navigation_disabled);
-  }
-  if (status.ok()) {
-    status = ParseOptionalBoolean(document, "showDomainAsTitle",
-                                  &show_domain_as_title);
-  }
-  if (!status.ok()) {
-    *request = {};
-    return status;
-  }
-
-  request->title = title.value_or("");
-  request->visible = visible.value_or(true);
-  request->modal = modal.value_or(false);
-  request->back_navigation_disabled = back_navigation_disabled.value_or(false);
-  request->show_domain_as_title = show_domain_as_title.value_or(false);
-  return Status::Ok();
-}
 
 Status ParseConfigCommand(const nlohmann::json& document,
                           RobloxBrowserServiceConfigRequest* request) {
@@ -183,29 +139,33 @@ Status ParseRobloxBrowserServiceSendCommand(
     return Invalid("BrowserService command output is null");
   }
   *command = RobloxBrowserServiceOpenRequest{};
-  if (json.empty() || json.size() > kMaximumRobloxBrowserServicePayloadBytes) {
-    return Invalid("BrowserService command JSON size is invalid");
-  }
-  const nlohmann::json document =
-      nlohmann::json::parse(json.begin(), json.end(), nullptr, false);
-  if (document.is_discarded() || !document.is_object()) {
-    return Invalid("BrowserService command payload is not a JSON object");
-  }
-  const auto command_field = document.find("command");
-  if (command_field == document.end() || !command_field->is_string()) {
-    return Invalid("BrowserService command requires a string command");
-  }
-  const std::string& command_name =
-      command_field->get_ref<const std::string&>();
-  if (command_name == "open") {
-    RobloxBrowserServiceOpenRequest request;
-    const Status status = ParseOpenCommand(document, &request);
-    if (status.ok()) {
-      *command = std::move(request);
+  int32_t cmd_type = 0;
+  MocktailRustBrowserServiceOpenCommand out_cmd{};
+  char err_buf[256]{};
+  const int32_t rc = mocktail_rust_parse_browser_service_command(
+      json.data(), json.size(), &cmd_type, &out_cmd, err_buf, sizeof(err_buf));
+  if (rc != 0) {
+    if (rc == -6) {
+      return Unsupported("BrowserService command is unsupported");
     }
-    return status;
+    return Invalid(err_buf[0] != '\0' ? err_buf
+                                      : "BrowserService command parsing failed");
   }
-  if (command_name == "config") {
+
+  if (cmd_type == 1) {
+    RobloxBrowserServiceOpenRequest request;
+    request.url = out_cmd.url;
+    request.title = out_cmd.title;
+    request.visible = out_cmd.visible != 0;
+    request.modal = out_cmd.modal != 0;
+    request.back_navigation_disabled = out_cmd.back_navigation_disabled != 0;
+    request.show_domain_as_title = out_cmd.show_domain_as_title != 0;
+    *command = std::move(request);
+    return Status::Ok();
+  }
+  if (cmd_type == 2) {
+    const nlohmann::json document =
+        nlohmann::json::parse(json.begin(), json.end(), nullptr, false);
     RobloxBrowserServiceConfigRequest request;
     const Status status = ParseConfigCommand(document, &request);
     if (status.ok()) {

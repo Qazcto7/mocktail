@@ -13,34 +13,17 @@
 #include <utility>
 #include <vector>
 
+#include "mocktail/mocktail_rust.h"
+
 extern char** environ;
 
 namespace mocktail::update {
 namespace {
 
-constexpr std::array<std::string_view, 10> kOverriddenVariables = {
-    "ROBLOX_LIB_PATH",
-    "MOCKTAIL_ASSET_ROOT",
-    "MOCKTAIL_ASSET_PATH",
-    "MOCKTAIL_COMPATIBILITY_MANIFEST",
-    "MOCKTAIL_HOST_ABI_PROFILE_FILE",
-    "MOCKTAIL_HOST_ABI_CANARY",
-    "MOCKTAIL_ALLOW_CANDIDATE_HOST_ABI",
-    "MOCKTAIL_HOST_ABI_APPROVAL_RECEIPT",
-    "MOCKTAIL_SKIP_UPDATE_CHECK",
-    "MOCKTAIL_UNSAFE_LATEST",
-};
-
-bool IsEnvironmentEntry(std::string_view entry, std::string_view name) {
-  return entry.size() > name.size() && entry[name.size()] == '=' &&
-         entry.substr(0, name.size()) == name;
-}
 
 bool IsOverridden(std::string_view entry) {
-  for (const std::string_view name : kOverriddenVariables) {
-    if (IsEnvironmentEntry(entry, name)) return true;
-  }
-  return false;
+  const std::string entry_str(entry);
+  return mocktail_rust_is_overridden_environment_var(entry_str.c_str()) == 1;
 }
 
 bool IsRegularFile(const std::filesystem::path& path) {
