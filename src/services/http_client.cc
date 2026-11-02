@@ -165,10 +165,6 @@ HttpResponse PerformRequest(const HttpRequest& request,
     }
     curl_easy_setopt(handle, CURLOPT_NOPROXY, "");
     using_proxy = true;
-  } else if (IsLocalPortListening(1080)) {
-    curl_easy_setopt(handle, CURLOPT_PROXY, "socks5://127.0.0.1:1080");
-    curl_easy_setopt(handle, CURLOPT_NOPROXY, "");
-    using_proxy = true;
   }
   if (headers != nullptr) {
     curl_easy_setopt(handle, CURLOPT_HTTPHEADER, headers);
@@ -177,12 +173,12 @@ HttpResponse PerformRequest(const HttpRequest& request,
   CURLcode result = curl_easy_perform(handle);
   if (result != CURLE_OK) {
     if (using_proxy) {
-      // If the proxy failed, retry directly with DoH
+      // If configured proxy failed, retry directly with Cloudflare DoH
       response.body.clear();
       response.headers.clear();
       error_buffer.fill('\0');
       writer.limit_exceeded = false;
-      curl_easy_setopt(handle, CURLOPT_PROXY, "");
+      curl_easy_setopt(handle, CURLOPT_PROXY, nullptr);
       result = curl_easy_perform(handle);
     } else if (IsLocalPortListening(1080)) {
       // If direct connection failed, retry via local SOCKS proxy
