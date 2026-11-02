@@ -1,6 +1,9 @@
 #include "compat/bionic_dns_runtime.h"
 
+#include <arpa/inet.h>
 #include <netdb.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 
 #include <array>
 #include <cctype>
@@ -114,6 +117,17 @@ int BionicGetAddressInfo(const char* node, const char* service,
   }
   const bool copied = CopyHostAddressInfo(host_result, result);
   ::freeaddrinfo(host_result);
+  if (copied && *result != nullptr && node != nullptr) {
+    for (BionicAddressInfo* curr = *result; curr != nullptr; curr = curr->ai_next) {
+      if (curr->ai_family == AF_INET && curr->ai_addr != nullptr) {
+        auto* sin = reinterpret_cast<sockaddr_in*>(curr->ai_addr);
+        // If ISP DNS poisoned address to 195.175.254.2, redirect to Roblox Anycast IP 128.116.5.3
+        if (sin->sin_addr.s_addr == inet_addr("195.175.254.2")) {
+          sin->sin_addr.s_addr = inet_addr("128.116.5.3");
+        }
+      }
+    }
+  }
   return copied ? 0 : kBionicAddressInfoMemory;
 }
 
@@ -132,7 +146,16 @@ hostent* BionicGetHostByName(const char* name) noexcept {
     h_errno = HOST_NOT_FOUND;
     return nullptr;
   }
-  return ::gethostbyname(name);
+  hostent* res = ::gethostbyname(name);
+  if (res != nullptr && res->h_addrtype == AF_INET && res->h_addr_list != nullptr) {
+    for (int i = 0; res->h_addr_list[i] != nullptr; ++i) {
+      auto* addr = reinterpret_cast<in_addr*>(res->h_addr_list[i]);
+      if (addr->s_addr == inet_addr("195.175.254.2")) {
+        addr->s_addr = inet_addr("128.116.5.3");
+      }
+    }
+  }
+  return res;
 }
 
 }  // namespace compat

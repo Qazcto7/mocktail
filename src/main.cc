@@ -229,7 +229,26 @@ void PromptFirstLaunchSignIn(
   }
 }
 
+void ConfigureOpenSslEnvironment() {
+  const char* config_path = "/tmp/mocktail_openssl.cnf";
+  FILE* fp = std::fopen(config_path, "w");
+  if (fp != nullptr) {
+    std::fputs(
+        "openssl_conf = default_conf\n\n"
+        "[default_conf]\n"
+        "ssl_conf = ssl_sect\n\n"
+        "[ssl_sect]\n"
+        "system_default = system_default_sect\n\n"
+        "[system_default_sect]\n"
+        "Groups = X25519:P-256:P-384\n",
+        fp);
+    std::fclose(fp);
+    setenv("OPENSSL_CONF", config_path, 1);
+  }
+}
+
 void ConfigureHostDriverEnvironment() {
+  ConfigureOpenSslEnvironment();
   auto set_if_unset = [](const char* name, const char* value) {
     if (std::getenv(name) == nullptr) {
       setenv(name, value, 1);
