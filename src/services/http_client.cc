@@ -8,9 +8,11 @@
 #include <unistd.h>
 
 #include <array>
+#include <chrono>
 #include <cstdlib>
 #include <limits>
 #include <mutex>
+#include <thread>
 
 #include "runtime/runtime_config.h"
 
@@ -170,24 +172,28 @@ HttpResponse PerformRequest(const HttpRequest& request,
     curl_easy_setopt(handle, CURLOPT_HTTPHEADER, headers);
   }
 
-  CURLcode result = curl_easy_perform(handle);
-  if (result != CURLE_OK) {
-    if (using_proxy) {
-      // If configured proxy failed, retry directly with Cloudflare DoH
+  constexpr int kMaxAttempts = 5;
+  CURLcode result = CURLE_OK;
+  for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
+    if (attempt > 0) {
       response.body.clear();
       response.headers.clear();
       error_buffer.fill('\0');
       writer.limit_exceeded = false;
+      std::this_thread::sleep_for(std::chrono::milliseconds(50 * attempt));
+    }
+    result = curl_easy_perform(handle);
+    if (result == CURLE_OK) {
+      break;
+    }
+    // If configured proxy failed on first attempt, clear proxy and retry direct
+    if (attempt == 0 && using_proxy) {
       curl_easy_setopt(handle, CURLOPT_PROXY, nullptr);
-      result = curl_easy_perform(handle);
-    } else if (IsLocalPortListening(1080)) {
-      // If direct connection failed, retry via local SOCKS proxy
-      response.body.clear();
-      response.headers.clear();
-      error_buffer.fill('\0');
-      writer.limit_exceeded = false;
+      using_proxy = false;
+    } else if (attempt == 2 && !using_proxy && IsLocalPortListening(1080)) {
+      // If direct attempts failed twice, try local SOCKS proxy as fallback
       curl_easy_setopt(handle, CURLOPT_PROXY, "socks5://127.0.0.1:1080");
-      result = curl_easy_perform(handle);
+      using_proxy = true;
     }
   }
   if (result == CURLE_OK) {
