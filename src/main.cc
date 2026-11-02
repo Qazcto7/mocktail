@@ -240,7 +240,9 @@ void ConfigureOpenSslEnvironment() {
         "[ssl_sect]\n"
         "system_default = system_default_sect\n\n"
         "[system_default_sect]\n"
-        "Groups = X25519:P-256:P-384\n",
+        "Groups = X25519:P-256:P-384\n"
+        "Curves = X25519:P-256:P-384\n"
+        "MinProtocol = TLSv1.2\n",
         fp);
     std::fclose(fp);
     setenv("OPENSSL_CONF", config_path, 1);

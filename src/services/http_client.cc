@@ -157,7 +157,6 @@ HttpResponse PerformRequest(const HttpRequest& request,
   }
   std::string proxy_url;
   const auto proxy = runtime::ReadNetworkProxy(runtime::ProcessEnvironment());
-  bool using_proxy = false;
   if (proxy.has_value()) {
     proxy_url = runtime::BuildNetworkProxyUrl(*proxy);
     curl_easy_setopt(handle, CURLOPT_PROXY, proxy_url.c_str());
@@ -166,13 +165,12 @@ HttpResponse PerformRequest(const HttpRequest& request,
       curl_easy_setopt(handle, CURLOPT_PROXYPASSWORD, proxy->password.c_str());
     }
     curl_easy_setopt(handle, CURLOPT_NOPROXY, "");
-    using_proxy = true;
   }
   if (headers != nullptr) {
     curl_easy_setopt(handle, CURLOPT_HTTPHEADER, headers);
   }
 
-  constexpr int kMaxAttempts = 5;
+  constexpr int kMaxAttempts = 3;
   CURLcode result = CURLE_OK;
   for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
     if (attempt > 0) {
@@ -186,14 +184,16 @@ HttpResponse PerformRequest(const HttpRequest& request,
     if (result == CURLE_OK) {
       break;
     }
-    // If configured proxy failed on first attempt, clear proxy and retry direct
-    if (attempt == 0 && using_proxy) {
-      curl_easy_setopt(handle, CURLOPT_PROXY, nullptr);
-      using_proxy = false;
-    } else if (attempt == 2 && !using_proxy && IsLocalPortListening(1080)) {
-      // If direct attempts failed twice, try local SOCKS proxy as fallback
+    // Fail immediately on certificate verification failures or fatal SSL config errors
+    if (result == CURLE_PEER_FAILED_VERIFICATION ||
+        result == CURLE_SSL_CACERT ||
+        result == CURLE_SSL_CERTPROBLEM ||
+        result == CURLE_SSL_CIPHER) {
+      break;
+    }
+    // If no proxy was explicitly configured and direct connection fails, try local SOCKS proxy
+    if (!proxy.has_value() && attempt == 0 && IsLocalPortListening(1080)) {
       curl_easy_setopt(handle, CURLOPT_PROXY, "socks5://127.0.0.1:1080");
-      using_proxy = true;
     }
   }
   if (result == CURLE_OK) {

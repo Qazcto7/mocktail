@@ -108,44 +108,48 @@ int BionicGetAddressInfo(const char* node, const char* service,
     return kBionicAddressInfoNameNotFound;
   }
 
-  const addrinfo host_hints = HostHints(hints);
+  addrinfo host_hints = HostHints(hints);
+  bool is_roblox = false;
+  if (node != nullptr) {
+    std::string_view node_view(node);
+    is_roblox =
+        (node_view == "roblox.com" ||
+         (node_view.size() > 11 &&
+          node_view.compare(node_view.size() - 11, 11, ".roblox.com") == 0));
+    if (is_roblox && host_hints.ai_family == AF_UNSPEC) {
+      host_hints.ai_family = AF_INET;
+    }
+  }
   addrinfo* host_result = nullptr;
   const int host_error = ::getaddrinfo(
       node, service, hints != nullptr ? &host_hints : nullptr, &host_result);
   if (host_error != 0) {
-    if (node != nullptr) {
-      std::string_view node_view(node);
-      const bool is_roblox =
-          (node_view == "roblox.com" ||
-           (node_view.size() > 11 &&
-            node_view.compare(node_view.size() - 11, 11, ".roblox.com") == 0));
-      if (is_roblox) {
-        auto* fallback = static_cast<BionicAddressInfo*>(
-            std::calloc(1, sizeof(BionicAddressInfo)));
-        if (fallback != nullptr) {
-          fallback->ai_flags = hints ? hints->ai_flags : 0;
-          fallback->ai_family = AF_INET;
-          fallback->ai_socktype = hints ? hints->ai_socktype : SOCK_STREAM;
-          fallback->ai_protocol = hints ? hints->ai_protocol : IPPROTO_TCP;
-          fallback->ai_addrlen = sizeof(sockaddr_in);
-          auto* sin = static_cast<sockaddr_in*>(
-              std::calloc(1, sizeof(sockaddr_in)));
-          if (sin != nullptr) {
-            sin->sin_family = AF_INET;
-            int port = 443;
-            if (service != nullptr) {
-              port = std::atoi(service);
-              if (port <= 0) port = 443;
-            }
-            sin->sin_port = htons(port);
-            sin->sin_addr.s_addr = inet_addr("128.116.21.3");
-            fallback->ai_addr = reinterpret_cast<sockaddr*>(sin);
-            fallback->ai_canonname = ::strdup(node);
-            *result = fallback;
-            return 0;
+    if (is_roblox) {
+      auto* fallback = static_cast<BionicAddressInfo*>(
+          std::calloc(1, sizeof(BionicAddressInfo)));
+      if (fallback != nullptr) {
+        fallback->ai_flags = hints ? hints->ai_flags : 0;
+        fallback->ai_family = AF_INET;
+        fallback->ai_socktype = hints ? hints->ai_socktype : SOCK_STREAM;
+        fallback->ai_protocol = hints ? hints->ai_protocol : IPPROTO_TCP;
+        fallback->ai_addrlen = sizeof(sockaddr_in);
+        auto* sin = static_cast<sockaddr_in*>(
+            std::calloc(1, sizeof(sockaddr_in)));
+        if (sin != nullptr) {
+          sin->sin_family = AF_INET;
+          int port = 443;
+          if (service != nullptr) {
+            port = std::atoi(service);
+            if (port <= 0) port = 443;
           }
-          std::free(fallback);
+          sin->sin_port = htons(port);
+          sin->sin_addr.s_addr = inet_addr("128.116.21.3");
+          fallback->ai_addr = reinterpret_cast<sockaddr*>(sin);
+          fallback->ai_canonname = ::strdup(node);
+          *result = fallback;
+          return 0;
         }
+        std::free(fallback);
       }
     }
     return BionicAddressInfoError(host_error);
@@ -153,19 +157,16 @@ int BionicGetAddressInfo(const char* node, const char* service,
   const bool copied = CopyHostAddressInfo(host_result, result);
   ::freeaddrinfo(host_result);
   if (copied && *result != nullptr && node != nullptr) {
-    std::string_view node_view(node);
-    const bool is_roblox =
-        (node_view == "roblox.com" ||
-         (node_view.size() > 11 &&
-          node_view.compare(node_view.size() - 11, 11, ".roblox.com") == 0));
     for (BionicAddressInfo* curr = *result; curr != nullptr; curr = curr->ai_next) {
       if (curr->ai_family == AF_INET && curr->ai_addr != nullptr) {
         auto* sin = reinterpret_cast<sockaddr_in*>(curr->ai_addr);
         const in_addr_t addr = sin->sin_addr.s_addr;
-        // If ISP DNS poisoned address to 195.175.254.2 or node is any Roblox web endpoint,
-        // redirect to verified unblocked Anycast IP 128.116.21.3
-        if (addr == inet_addr("195.175.254.2") || is_roblox) {
-          sin->sin_addr.s_addr = inet_addr("128.116.21.3");
+        // If ISP DNS poisoned address to 195.175.254.2 or 0.0.0.0 or 127.0.0.1
+        if (addr == inet_addr("195.175.254.2") || addr == inet_addr("0.0.0.0") ||
+            addr == inet_addr("127.0.0.1")) {
+          if (is_roblox) {
+            sin->sin_addr.s_addr = inet_addr("128.116.21.3");
+          }
         }
       }
     }
@@ -197,8 +198,12 @@ hostent* BionicGetHostByName(const char* name) noexcept {
           name_view.compare(name_view.size() - 11, 11, ".roblox.com") == 0));
     for (int i = 0; res->h_addr_list[i] != nullptr; ++i) {
       auto* addr = reinterpret_cast<in_addr*>(res->h_addr_list[i]);
-      if (addr->s_addr == inet_addr("195.175.254.2") || is_roblox) {
-        addr->s_addr = inet_addr("128.116.21.3");
+      if (addr->s_addr == inet_addr("195.175.254.2") ||
+          addr->s_addr == inet_addr("0.0.0.0") ||
+          addr->s_addr == inet_addr("127.0.0.1")) {
+        if (is_roblox) {
+          addr->s_addr = inet_addr("128.116.21.3");
+        }
       }
     }
   }
