@@ -79,6 +79,15 @@ bool BionicEglBridge::Load() {
     return false;
   }
   library_path_ = CanonicalPath(directory + "/libEGL.so");
+  if (::access(library_path_.c_str(), R_OK) != 0) {
+    for (const char* fallback_dir : {"/usr/lib/mocktail", "/usr/local/lib/mocktail"}) {
+      std::string candidate = CanonicalPath(std::string(fallback_dir) + "/libEGL.so");
+      if (::access(candidate.c_str(), R_OK) == 0) {
+        library_path_ = candidate;
+        break;
+      }
+    }
+  }
 
   ::dlerror();
   void *loaded_handle = ::dlopen(library_path_.c_str(), RTLD_NOW | RTLD_LOCAL);

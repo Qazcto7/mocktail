@@ -3356,8 +3356,19 @@ static std::string RuntimeBionicAdapterPath(const char* name) {
     if (separator == std::string::npos) return {};
     directory = separator == 0 ? "/" : path.substr(0, separator);
   }
-  if (directory.empty()) return {};
-  return directory + "/" + name;
+  if (!directory.empty()) {
+    std::string candidate = directory + "/" + name;
+    if (::access(candidate.c_str(), R_OK) == 0) {
+      return candidate;
+    }
+  }
+  for (const char* fallback_dir : {"/usr/lib/mocktail", "/usr/local/lib/mocktail"}) {
+    std::string candidate = std::string(fallback_dir) + "/" + name;
+    if (::access(candidate.c_str(), R_OK) == 0) {
+      return candidate;
+    }
+  }
+  return directory.empty() ? "" : directory + "/" + name;
 }
 
 

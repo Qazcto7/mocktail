@@ -94,4 +94,46 @@ AMediaFormat* AMediaCodec_getOutputFormat(AMediaCodec*) {
   return AMediaFormat_new();
 }
 
+struct AImage {};
+struct AImageReader {};
+struct ANativeWindow;
+struct AHardwareBuffer {};
+
+media_status_t AImageReader_newWithUsage(
+    int32_t /*width*/, int32_t /*height*/, int32_t /*format*/, uint64_t /*usage*/,
+    int32_t /*maxImages*/, AImageReader** reader) {
+  if (reader) *reader = nullptr;
+  return AMEDIA_ERROR_UNKNOWN;
+}
+
+void AImageReader_delete(AImageReader* /*reader*/) {}
+
+media_status_t AImageReader_getWindow(
+    AImageReader* /*reader*/, ANativeWindow** window) {
+  if (window) *window = nullptr;
+  return AMEDIA_ERROR_UNKNOWN;
+}
+
+media_status_t AImageReader_acquireNextImage(
+    AImageReader* /*reader*/, AImage** image) {
+  if (image) *image = nullptr;
+  return AMEDIA_ERROR_UNKNOWN;
+}
+
+void AImage_delete(AImage* /*image*/) {}
+
+media_status_t AImage_getTimestamp(const AImage* /*image*/, int64_t* timestamp) {
+  if (timestamp) *timestamp = 0;
+  return AMEDIA_ERROR_UNKNOWN;
+}
+
+media_status_t AImage_getHardwareBuffer(const AImage* /*image*/,
+                                        AHardwareBuffer** buffer) {
+  if (buffer) *buffer = nullptr;
+  return AMEDIA_ERROR_UNKNOWN;
+}
+
+void AHardwareBuffer_acquire(AHardwareBuffer* /*buffer*/) {}
+void AHardwareBuffer_release(AHardwareBuffer* /*buffer*/) {}
+
 }  // extern "C"

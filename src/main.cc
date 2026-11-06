@@ -779,24 +779,40 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
       }
       if (uses_managed_payload) {
-        bool use_external_profile = !active.compatibility_manifest.empty();
-        if (use_external_profile) {
-          const mocktail::compat::BuildIdResult active_build_id =
-              mocktail::compat::ReadElfBuildId(active.roblox_library.string());
-          if (!active_build_id) {
-            std::cerr << "[FATAL] Cannot identify active Roblox payload: "
-                      << active_build_id.error << '\n';
-            return EXIT_FAILURE;
-          }
-          // Built-in profiles supersede stale probation receipts and never
-          // use external overrides.
-          use_external_profile = mocktail::compat::FindHostAbiProfile(
-                                     active_build_id.build_id) == nullptr;
+        const mocktail::compat::BuildIdResult active_build_id =
+            mocktail::compat::ReadElfBuildId(active.roblox_library.string());
+        if (!active_build_id) {
+          std::cerr << "[FATAL] Cannot identify active Roblox payload: "
+                    << active_build_id.error << '\n';
+          return EXIT_FAILURE;
         }
+
+        // Determine which compatibility manifest to use: prefer active payload's
+        // manifest if present, or if built-in manifest does not contain this Build ID.
+        std::string manifest_to_use = built_in_compatibility_manifest;
+        if (!active.compatibility_manifest.empty()) {
+          const auto builtin_lookup = mocktail::compat::FindBuildProfile(
+              built_in_compatibility_manifest, active_build_id.build_id);
+          const auto active_lookup = mocktail::compat::FindBuildProfile(
+              active.compatibility_manifest, active_build_id.build_id);
+          if (active_lookup.profile.has_value() || !builtin_lookup.profile.has_value()) {
+            manifest_to_use = active.compatibility_manifest;
+          }
+        }
+
+        if (setenv("MOCKTAIL_COMPATIBILITY_MANIFEST", manifest_to_use.c_str(), 1) != 0) {
+          std::cerr << "[FATAL] Cannot activate resolved Roblox compatibility manifest\n";
+          return EXIT_FAILURE;
+        }
+
+        // Built-in profiles supersede stale probation receipts and never
+        // use external overrides for host ABI hooks.
+        const bool use_external_profile =
+            mocktail::compat::FindHostAbiProfile(active_build_id.build_id) == nullptr &&
+            !active.host_abi_profile.empty();
+
         if (use_external_profile) {
-          if (setenv("MOCKTAIL_COMPATIBILITY_MANIFEST",
-                     active.compatibility_manifest.c_str(), 1) != 0 ||
-              setenv("MOCKTAIL_HOST_ABI_PROFILE_FILE",
+          if (setenv("MOCKTAIL_HOST_ABI_PROFILE_FILE",
                      active.host_abi_profile.c_str(), 1) != 0 ||
               setenv("MOCKTAIL_HOST_ABI_APPROVAL_RECEIPT",
                      active.host_abi_approval_receipt.c_str(), 1) != 0) {
@@ -804,9 +820,7 @@ int main(int argc, char* argv[]) {
                 << "[FATAL] Cannot activate approved Roblox ABI profile\n";
             return EXIT_FAILURE;
           }
-        } else if (setenv("MOCKTAIL_COMPATIBILITY_MANIFEST",
-                          built_in_compatibility_manifest.c_str(), 1) != 0 ||
-                   unsetenv("MOCKTAIL_HOST_ABI_PROFILE_FILE") != 0 ||
+        } else if (unsetenv("MOCKTAIL_HOST_ABI_PROFILE_FILE") != 0 ||
                    unsetenv("MOCKTAIL_HOST_ABI_APPROVAL_RECEIPT") != 0) {
           std::cerr << "[FATAL] Cannot activate built-in Roblox ABI profile\n";
           return EXIT_FAILURE;

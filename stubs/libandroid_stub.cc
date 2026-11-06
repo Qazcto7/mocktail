@@ -1064,4 +1064,8 @@ int32_t ANativeWindow_getHeight(ANativeWindow* window) {
   return height;
 }
 
+struct AHardwareBuffer;
+void AHardwareBuffer_acquire(AHardwareBuffer* /*buffer*/) {}
+void AHardwareBuffer_release(AHardwareBuffer* /*buffer*/) {}
+
 }  // extern "C"
