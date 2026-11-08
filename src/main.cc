@@ -656,8 +656,14 @@ int main(int argc, char* argv[]) {
     std::cout << "  [runtime] explicit Roblox library uses adjacent assets: "
               << adjacent_assets << '\n';
   }
+  mocktail::runtime::BackgroundPayloadUpdate background_update;
   if (command_line.options.mode == mocktail::runtime::CommandMode::kRun &&
       uses_managed_payload) {
+    if (setenv("MOCKTAIL_GRAPHICS_BACKEND",
+               runtime_config.config.graphics_backend_name().c_str(), 1) != 0) {
+      std::cerr << "[FATAL] Cannot configure the Roblox update graphics backend\n";
+      return EXIT_FAILURE;
+    }
     failure_dialog.SetMessage(
         "Mocktail could not update or verify the Roblox installation.");
     const mocktail::runtime::PayloadUpdatePreflightResult update_preflight =
@@ -665,21 +671,20 @@ int main(int argc, char* argv[]) {
     if (!update_preflight) {
       std::cerr << "[FATAL] " << update_preflight.error;
       if (!update_preflight.details.empty()) {
-        // Without this the dialog only ever said "could not update or verify",
-        // which is indistinguishable between a provider outage, a rejected
-        // signature, and a full disk.
         std::cerr << ": " << update_preflight.details;
-        failure_dialog.SetMessage(
-            "Mocktail could not update or verify the Roblox installation.\n\n" +
-            update_preflight.details + "\n\nSession log: " +
-            (paths.logs_root() / "sessions").string());
       }
+      failure_dialog.SetMessage(
+          "Mocktail could not update or verify the Roblox installation.\n\n" +
+          (update_preflight.details.empty() ? update_preflight.error
+                                           : update_preflight.details) +
+          "\n\nSession log: " + (paths.logs_root() / "sessions").string());
       std::cerr << '\n';
       return EXIT_FAILURE;
     }
     failure_dialog.SetMessage(
         "Mocktail could not finish starting Roblox because of an internal "
         "error.");
+    background_update.Start(environment, paths);
   }
   if (!mocktail::runtime::ExportRuntimePathEnvironment(paths,
                                                        &command_line_error)) {
@@ -1145,6 +1150,7 @@ int main(int argc, char* argv[]) {
   }
   int runtime_status =
       mocktail::legacy::Run(command_line.options, std::move(dependencies));
+  background_update.Stop();
   if (command_line.options.mode == mocktail::runtime::CommandMode::kRun) {
     mocktail::runtime::LogProcessDiagnostics(
         mocktail::runtime::ProcessDiagnosticStage::kShutdown);

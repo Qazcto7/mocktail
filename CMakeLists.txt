@@ -8,7 +8,7 @@
 
 cmake_minimum_required(VERSION 3.20)
 project(Mocktail
-  VERSION 1.0.4
+  VERSION 1.0.5
   DESCRIPTION "Android Roblox compatibility runtime for Linux"
   LANGUAGES CXX
 )
@@ -59,6 +59,10 @@ set(MOCKTAIL_DEFAULT_SIGNING_TRUST_MANIFEST
   "${CMAKE_SOURCE_DIR}/config/roblox_signing_certificates.json"
   CACHE FILEPATH
   "Fallback signing trust manifest used outside an installed runtime"
+)
+set(MOCKTAIL_DEFAULT_DOWNLOAD_SOURCES_MANIFEST
+  "${CMAKE_SOURCE_DIR}/config/roblox_download_sources.json"
+  CACHE FILEPATH "Pinned Roblox APK download sources"
 )
 set(MOCKTAIL_DISCORD_APPLICATION_ID "1537088975720812655" CACHE STRING
   "Discord application ID baked into Mocktail Rich Presence releases"
@@ -219,7 +223,9 @@ add_library(mocktail_update STATIC
   src/update/host_abi_deriver.cc
   src/update/payload_integrity.cc
   src/update/payload_store.cc
+  src/update/pinned_apk_provider.cc
   src/update/readiness_canary.cc
+  src/update/state_file.cc
   src/update/unsafe_latest_runner.cc
   src/update/update_config.cc
   src/update/update_coordinator.cc
@@ -244,6 +250,7 @@ target_link_libraries(mocktail_updater PRIVATE Mocktail::Update)
 target_compile_definitions(mocktail_updater PRIVATE
   "MOCKTAIL_DEFAULT_COMPATIBILITY_MANIFEST=\"${MOCKTAIL_DEFAULT_COMPATIBILITY_MANIFEST}\""
   "MOCKTAIL_DEFAULT_SIGNING_TRUST_MANIFEST=\"${MOCKTAIL_DEFAULT_SIGNING_TRUST_MANIFEST}\""
+  "MOCKTAIL_DEFAULT_DOWNLOAD_SOURCES_MANIFEST=\"${MOCKTAIL_DEFAULT_DOWNLOAD_SOURCES_MANIFEST}\""
 )
 mocktail_apply_compile_options(mocktail_updater)
 
@@ -700,6 +707,7 @@ endif()
 install(FILES
     config/roblox_compatibility.json
     config/roblox_bootstrap_sources.json
+    config/roblox_download_sources.json
     config/roblox_host_abi_reference.json
     config/roblox_signing_certificates.json
   DESTINATION "${MOCKTAIL_INSTALL_DATA_DIR}/metadata"
