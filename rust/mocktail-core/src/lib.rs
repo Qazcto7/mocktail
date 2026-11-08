@@ -12513,6 +12513,7 @@ pub extern "C" fn mocktail_rust_canary_backend_name(
 pub extern "C" fn mocktail_rust_validate_canary_audio_log(
     log_text: *const c_char,
     log_len: usize,
+    require_clean_shutdown: i32,
     err_buf: *mut c_char,
     err_cap: usize,
 ) -> i32 {
@@ -12549,16 +12550,18 @@ pub extern "C" fn mocktail_rust_validate_canary_audio_log(
     }
     if opensl
         && (!has_positive_number_after(&log, "[mocktail][audio] OpenSL playback evidence: consumed_buffers=")
-            || !log.contains("[mocktail][audio] OpenSL player shutdown: submitted=")
-            || !log.contains("clean=true"))
+            || (require_clean_shutdown != 0
+                && (!log.contains("[mocktail][audio] OpenSL player shutdown: submitted=")
+                    || !log.contains("clean=true"))))
     {
         copy_error(err_buf, err_cap, "graphics canary submitted OpenSL audio without clean consumption");
         return -2;
     }
     if fmod
         && (!has_positive_number_after(&log, "consumed_buffers=")
-            || !log.contains("[mocktail][audio] fmod_java shutdown submitted_buffers=")
-            || !log.contains("pending_buffers=0"))
+            || (require_clean_shutdown != 0
+                && (!log.contains("[mocktail][audio] fmod_java shutdown submitted_buffers=")
+                    || !log.contains("pending_buffers=0"))))
     {
         copy_error(err_buf, err_cap, "graphics canary submitted FMOD audio without clean consumption");
         return -3;
@@ -13067,6 +13070,61 @@ pub extern "C" fn mocktail_rust_apply_interactive_process_launch_policy(
         *out_buf.add(bytes.len()) = 0;
     }
     0
+}
+
+// ============================================================================
+// 106. Pinned APK Provider Archive & Digest Verification Policy
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_pinned_apk_hex_digest(
+    value: *const c_char,
+    len: usize,
+    expected_size: usize,
+) -> i32 {
+    if value.is_null() || len != expected_size {
+        return 0;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(value as *const u8, len) };
+    if slice.iter().all(|&c| (c >= b'0' && c <= b'9') || (c >= b'a' && c <= b'f')) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_pinned_apk_archive_filename_valid(
+    filename: *const c_char,
+    len: usize,
+) -> i32 {
+    if filename.is_null() || len == 0 || len > 128 {
+        return 0;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(filename as *const u8, len) };
+    let valid_chars = slice.iter().all(|&c| {
+        c.is_ascii_alphanumeric() || c == b'.' || c == b'_' || c == b'-'
+    });
+    if !valid_chars {
+        return 0;
+    }
+    if slice.ends_with(b".apk") {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_pinned_apk_archive_limits_valid(
+    size_bytes: u64,
+    maximum_bytes: u64,
+) -> i32 {
+    if size_bytes > 0 && size_bytes <= maximum_bytes {
+        1
+    } else {
+        0
+    }
 }
 
 // ============================================================================
@@ -15701,7 +15759,11 @@ integrations:
 
         let log = CString::new("[mocktail][audio] OpenSL playback activity: submitted_buffers=10\n[mocktail][audio] OpenSL playback evidence: consumed_buffers=10\n[mocktail][audio] OpenSL player shutdown: submitted=10 clean=true\n").unwrap();
         let mut err = [0 as c_char; 128];
-        assert_eq!(mocktail_rust_validate_canary_audio_log(log.as_ptr(), log.as_bytes().len(), err.as_mut_ptr(), err.len()), 0);
+        assert_eq!(mocktail_rust_validate_canary_audio_log(log.as_ptr(), log.as_bytes().len(), 1, err.as_mut_ptr(), err.len()), 0);
+
+        let partial_log = CString::new("[mocktail][audio] OpenSL playback activity: submitted_buffers=10\n[mocktail][audio] OpenSL playback evidence: consumed_buffers=10\n").unwrap();
+        assert_eq!(mocktail_rust_validate_canary_audio_log(partial_log.as_ptr(), partial_log.as_bytes().len(), 0, err.as_mut_ptr(), err.len()), 0);
+        assert_ne!(mocktail_rust_validate_canary_audio_log(partial_log.as_ptr(), partial_log.as_bytes().len(), 1, err.as_mut_ptr(), err.len()), 0);
     }
 
     #[test]
@@ -15820,6 +15882,29 @@ integrations:
         let s = unsafe { CStr::from_ptr(diag.as_ptr()).to_str().unwrap() };
         assert!(s.contains("[process]"));
         assert!(s.contains("RLIMIT_CPU"));
+    }
+
+    #[test]
+    fn test_section106_pinned_apk_provider() {
+        let valid_hex = CString::new("d26d3afb9815d22f812538aca07d69fa686d10ea10aa0b466bb0203b70094d12").unwrap();
+        assert_eq!(mocktail_rust_pinned_apk_hex_digest(valid_hex.as_ptr(), 64, 64), 1);
+        assert_eq!(mocktail_rust_pinned_apk_hex_digest(valid_hex.as_ptr(), 63, 64), 0);
+
+        let invalid_hex = CString::new("z26d3afb9815d22f812538aca07d69fa686d10ea10aa0b466bb0203b70094d12").unwrap();
+        assert_eq!(mocktail_rust_pinned_apk_hex_digest(invalid_hex.as_ptr(), 64, 64), 0);
+
+        let valid_fn = CString::new("base.apk").unwrap();
+        assert_eq!(mocktail_rust_pinned_apk_archive_filename_valid(valid_fn.as_ptr(), 8), 1);
+
+        let invalid_fn1 = CString::new("../base.apk").unwrap();
+        assert_eq!(mocktail_rust_pinned_apk_archive_filename_valid(invalid_fn1.as_ptr(), 11), 0);
+
+        let invalid_fn2 = CString::new("base.zip").unwrap();
+        assert_eq!(mocktail_rust_pinned_apk_archive_filename_valid(invalid_fn2.as_ptr(), 8), 0);
+
+        assert_eq!(mocktail_rust_pinned_apk_archive_limits_valid(102828147, 1024 * 1024 * 1024), 1);
+        assert_eq!(mocktail_rust_pinned_apk_archive_limits_valid(0, 1024 * 1024 * 1024), 0);
+        assert_eq!(mocktail_rust_pinned_apk_archive_limits_valid(2000 * 1024 * 1024, 1024 * 1024 * 1024), 0);
     }
 
 }

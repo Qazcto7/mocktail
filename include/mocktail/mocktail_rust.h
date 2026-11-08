@@ -2139,6 +2139,7 @@ int32_t mocktail_rust_canary_backend_name(
 int32_t mocktail_rust_validate_canary_audio_log(
     const char* log_text,
     size_t log_len,
+    int32_t require_clean_shutdown,
     char* err_buf,
     size_t err_cap);
 
@@ -2241,6 +2242,23 @@ int32_t mocktail_rust_apply_interactive_process_launch_policy(
     char* out_buf,
     size_t out_cap,
     size_t* out_written);
+
+// ============================================================================
+// 106. Pinned APK Provider Archive & Digest Verification Policy
+// ============================================================================
+
+int32_t mocktail_rust_pinned_apk_hex_digest(
+    const char* value,
+    size_t len,
+    size_t expected_size);
+
+int32_t mocktail_rust_pinned_apk_archive_filename_valid(
+    const char* filename,
+    size_t len);
+
+int32_t mocktail_rust_pinned_apk_archive_limits_valid(
+    uint64_t size_bytes,
+    uint64_t maximum_bytes);
 
 #ifdef __cplusplus
 }

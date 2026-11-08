@@ -68,6 +68,13 @@ add_dependencies(payload_update_preflight_test
   native_update_helper_fixture
   native_progress_helper_fixture
 )
+if(MOCKTAIL_TEST_PYTHON)
+  add_test(NAME UpdateLaunchEnvironmentTest.ConfiguredBackend
+    COMMAND ${MOCKTAIL_TEST_PYTHON}
+      ${CMAKE_CURRENT_SOURCE_DIR}/updater_launch_environment_test.py
+      $<TARGET_FILE:mocktail> $<TARGET_FILE:native_update_helper_fixture>)
+  set_tests_properties(UpdateLaunchEnvironmentTest.ConfiguredBackend PROPERTIES TIMEOUT 60)
+endif()
 
 add_executable(native_update_test native_update_test.cc)
 target_link_libraries(native_update_test PRIVATE
@@ -77,6 +84,16 @@ target_link_libraries(native_update_test PRIVATE
 target_compile_definitions(native_update_test PRIVATE
   MOCKTAIL_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
 )
+
+add_executable(http_download_fixture http_download_fixture.cc)
+target_link_libraries(http_download_fixture PRIVATE Mocktail::Update)
+mocktail_apply_compile_options(http_download_fixture)
+if(MOCKTAIL_TEST_PYTHON AND MOCKTAIL_TEST_OPENSSL)
+  add_test(NAME HttpDownloadIntegrationTest.Resume
+    COMMAND ${MOCKTAIL_TEST_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/http_download_integration_test.py
+            $<TARGET_FILE:http_download_fixture> ${MOCKTAIL_TEST_OPENSSL})
+  set_tests_properties(HttpDownloadIntegrationTest.Resume PROPERTIES TIMEOUT 60)
+endif()
 
 add_executable(compatibility_catalog_test compatibility_catalog_test.cc)
 target_link_libraries(compatibility_catalog_test PRIVATE
@@ -89,6 +106,9 @@ target_link_libraries(apk_provider_test PRIVATE
   Mocktail::Update
   GTest::gtest_main
 )
+
+add_executable(pinned_apk_provider_test pinned_apk_provider_test.cc)
+target_link_libraries(pinned_apk_provider_test PRIVATE Mocktail::Update GTest::gtest_main)
 
 add_executable(support_bundle_runtime_test support_bundle_runtime_test.cc)
 target_link_libraries(support_bundle_runtime_test PRIVATE
@@ -653,6 +673,22 @@ target_link_libraries(window_pointer_capture_owner_test PRIVATE
 )
 mocktail_apply_compile_options(window_pointer_capture_owner_test)
 
+find_package(X11 QUIET)
+find_program(MOCKTAIL_TEST_XVFB Xvfb)
+if(X11_FOUND AND X11_Xtst_FOUND AND MOCKTAIL_TEST_XVFB AND
+   MOCKTAIL_TEST_PYTHON AND NOT CMAKE_CROSSCOMPILING)
+  add_executable(window_pointer_capture_sdl_test window_pointer_capture_sdl_test.cc)
+  target_link_libraries(window_pointer_capture_sdl_test PRIVATE
+    mocktail_window SDL3::SDL3 GTest::gtest_main Threads::Threads
+    X11::X11 X11::Xtst)
+  mocktail_apply_compile_options(window_pointer_capture_sdl_test)
+  add_test(NAME WindowPointerCaptureSdlTest.X11
+    COMMAND ${MOCKTAIL_TEST_PYTHON} -B
+      ${CMAKE_CURRENT_SOURCE_DIR}/run_xvfb_pointer_test.py
+      ${MOCKTAIL_TEST_XVFB} $<TARGET_FILE:window_pointer_capture_sdl_test>)
+  set_tests_properties(WindowPointerCaptureSdlTest.X11 PROPERTIES TIMEOUT 60)
+endif()
+
 add_executable(roblox_text_input_jni_bridge_test
   roblox_text_input_jni_bridge_test.cc
 )
@@ -952,6 +988,7 @@ gtest_discover_tests(runtime_config_test)
 gtest_discover_tests(runtime_config_file_test)
 gtest_discover_tests(payload_update_preflight_test)
 gtest_discover_tests(apk_provider_test)
+gtest_discover_tests(pinned_apk_provider_test)
 gtest_discover_tests(native_update_test)
 gtest_discover_tests(compatibility_catalog_test)
 gtest_discover_tests(support_bundle_runtime_test)
