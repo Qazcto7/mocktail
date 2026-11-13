@@ -174,7 +174,7 @@ class VulkanPresentProgressGate final {
            completed_thread_id == render_thread_id) &&
           (record_version & 1U) == 0U &&
           last_call_record_version_.compare_exchange_strong(
-              record_version, record_version + 1, std::memory_order_acquire,
+              record_version, record_version + 1, std::memory_order_acq_rel,
               std::memory_order_relaxed)) {
         last_call_name_.store(slot.call_name.load(std::memory_order_relaxed),
                               std::memory_order_relaxed);
@@ -365,8 +365,9 @@ class VulkanPresentProgressGate final {
           last_call_result_.load(std::memory_order_relaxed);
       const uint64_t completed_lifecycle_epoch =
           last_call_lifecycle_epoch_.load(std::memory_order_relaxed);
+      std::atomic_thread_fence(std::memory_order_acquire);
       const uint64_t record_version_after =
-          last_call_record_version_.load(std::memory_order_acquire);
+          last_call_record_version_.load(std::memory_order_relaxed);
       if (record_version_before != record_version_after ||
           (record_version_after & 1U) != 0U) {
         continue;

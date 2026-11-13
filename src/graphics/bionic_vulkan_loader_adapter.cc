@@ -183,6 +183,7 @@ struct AdapterState {
   PFN_vkGetInstanceProcAddr host_get_instance_proc_addr = nullptr;
   std::atomic<PFN_vkGetDeviceProcAddr> host_get_device_proc_addr{nullptr};
   std::vector<DeviceDispatch> device_dispatches;
+  std::vector<VkInstance> instances;
   std::vector<VkInstance> surface_maintenance_instances;
   std::vector<QueueBinding> queue_bindings;
   std::vector<CommandBufferBinding> command_buffer_bindings;
@@ -1191,19 +1192,27 @@ void ReleaseEtc2PoolCommandBuffers(VkDevice device,
 
 void PrepareEtc2Submit2(std::uint32_t submit_count,
                         const VkSubmitInfo2* submits) {
-  if (submits == nullptr || !State().etc2.HasPendingUploads()) {
+  if (submits == nullptr || submit_count == 0 ||
+      !State().etc2.HasPendingUploads()) {
     return;
   }
   std::vector<VkCommandBuffer> command_buffers;
   for (std::uint32_t index = 0; index < submit_count; ++index) {
+    if (submits[index].commandBufferInfoCount == 0 ||
+        submits[index].pCommandBufferInfos == nullptr) {
+      continue;
+    }
     for (std::uint32_t info = 0; info < submits[index].commandBufferInfoCount;
          ++info) {
       command_buffers.push_back(
           submits[index].pCommandBufferInfos[info].commandBuffer);
     }
   }
-  State().etc2.PrepareSubmit(command_buffers.data(),
-                             static_cast<std::uint32_t>(command_buffers.size()));
+  if (!command_buffers.empty()) {
+    State().etc2.PrepareSubmit(
+        command_buffers.data(),
+        static_cast<std::uint32_t>(command_buffers.size()));
+  }
 }
 
 }  // namespace
@@ -1215,6 +1224,10 @@ vkCreateInstance(const VkInstanceCreateInfo* create_info,
                  const VkAllocationCallbacks* allocator, VkInstance* instance) {
   if (!EnsureInitialized() || create_info == nullptr || instance == nullptr) {
     return VK_ERROR_INITIALIZATION_FAILED;
+  }
+  if (create_info->enabledExtensionCount != 0 &&
+      create_info->ppEnabledExtensionNames == nullptr) {
+    return VK_ERROR_EXTENSION_NOT_PRESENT;
   }
   std::vector<std::string> requested;
   requested.reserve(create_info->enabledExtensionCount);
@@ -1292,7 +1305,8 @@ vkCreateInstance(const VkInstanceCreateInfo* create_info,
   if (result == VK_SUCCESS) {
     AdapterState& state = State();
     std::lock_guard<std::mutex> lock(state.mutex);
-    ++state.active_instance_count;
+    state.instances.push_back(*instance);
+    state.active_instance_count = state.instances.size();
     state.latest_instance = *instance;
     if (surface_maintenance) {
       state.surface_maintenance_instances.push_back(*instance);
@@ -1313,6 +1327,9 @@ vkCreateInstance(const VkInstanceCreateInfo* create_info,
 
 VKAPI_ATTR void VKAPI_CALL
 vkDestroyInstance(VkInstance instance, const VkAllocationCallbacks* allocator) {
+  if (instance == VK_NULL_HANDLE) {
+    return;
+  }
   const auto host_destroy = reinterpret_cast<PFN_vkDestroyInstance>(
       HostInstanceProc(instance, "vkDestroyInstance"));
   if (host_destroy != nullptr) {
@@ -1323,14 +1340,17 @@ vkDestroyInstance(VkInstance instance, const VkAllocationCallbacks* allocator) {
   auto& maintenance = state.surface_maintenance_instances;
   maintenance.erase(std::remove(maintenance.begin(), maintenance.end(), instance),
                       maintenance.end());
-  if (state.active_instance_count != 0) {
-    --state.active_instance_count;
-  }
+  auto& instances = state.instances;
+  instances.erase(std::remove(instances.begin(), instances.end(), instance),
+                  instances.end());
+  state.active_instance_count = instances.size();
+  state.latest_instance = instances.empty() ? VK_NULL_HANDLE : instances.back();
   if (state.active_instance_count == 0 && state.initialized) {
     state.android_wsi.Shutdown();
     state.host_wsi.Shutdown();
     state.host_get_instance_proc_addr = nullptr;
     state.host_get_device_proc_addr.store(nullptr, std::memory_order_release);
+    state.instances.clear();
     state.device_dispatches.clear();
     state.queue_bindings.clear();
     state.command_buffer_bindings.clear();
@@ -1470,6 +1490,14 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(
   if (create_info == nullptr || device == nullptr) {
     return VK_ERROR_INITIALIZATION_FAILED;
   }
+  if (create_info->queueCreateInfoCount != 0 &&
+      create_info->pQueueCreateInfos == nullptr) {
+    return VK_ERROR_INITIALIZATION_FAILED;
+  }
+  if (create_info->enabledExtensionCount != 0 &&
+      create_info->ppEnabledExtensionNames == nullptr) {
+    return VK_ERROR_EXTENSION_NOT_PRESENT;
+  }
   VkInstance instance = VK_NULL_HANDLE;
   bool surface_maintenance = false;
   PFN_vkGetInstanceProcAddr host_get_instance_proc_addr = nullptr;
@@ -1508,6 +1536,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(
                            HostInstanceProc(instance,
                                             "vkGetPhysicalDeviceFeatures")));
   VkPhysicalDeviceFeatures host_enabled_features{};
+  VkPhysicalDeviceFeatures2 host_features2{};
   VkPhysicalDeviceFeatures2* requested_features2 = nullptr;
   VkBool32 requested_features2_etc2 = VK_FALSE;
   if (etc2_emulated) {
@@ -1517,14 +1546,24 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(
       host_enabled_features.textureCompressionETC2 = VK_FALSE;
       host_info.pEnabledFeatures = &host_enabled_features;
     }
-    // Restore the caller-owned feature bit after the host call.
-    requested_features2 = const_cast<VkPhysicalDeviceFeatures2*>(
+    const auto* found_features2 =
         reinterpret_cast<const VkPhysicalDeviceFeatures2*>(FindFeature(
-            create_info->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2)));
-    if (requested_features2 != nullptr) {
-      requested_features2_etc2 =
-          requested_features2->features.textureCompressionETC2;
-      requested_features2->features.textureCompressionETC2 = VK_FALSE;
+            create_info->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2));
+    if (found_features2 != nullptr &&
+        found_features2->features.textureCompressionETC2 != VK_FALSE) {
+      if (found_features2 == create_info->pNext) {
+        host_features2 = *found_features2;
+        host_features2.features.textureCompressionETC2 = VK_FALSE;
+        host_info.pNext = &host_features2;
+      } else {
+        // Restore the caller-owned feature bit after the host call when the
+        // struct sits mid-chain behind unknown pNext nodes.
+        requested_features2 =
+            const_cast<VkPhysicalDeviceFeatures2*>(found_features2);
+        requested_features2_etc2 =
+            requested_features2->features.textureCompressionETC2;
+        requested_features2->features.textureCompressionETC2 = VK_FALSE;
+      }
     }
   }
   enabled.root.pNext = &enabled.vulkan11;
@@ -1648,6 +1687,9 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(
 
 VKAPI_ATTR void VKAPI_CALL
 vkDestroyDevice(VkDevice device, const VkAllocationCallbacks* allocator) {
+  if (device == VK_NULL_HANDLE) {
+    return;
+  }
   const auto host_destroy = reinterpret_cast<PFN_vkDestroyDevice>(
       HostDeviceProc(device, "vkDestroyDevice"));
   State().text_overlay.DestroyDevice(device);
@@ -1796,8 +1838,13 @@ VKAPI_ATTR VkResult VKAPI_CALL vkAcquireNextImage2KHR(
     observation.SetResult(VK_ERROR_INITIALIZATION_FAILED);
     return VK_ERROR_INITIALIZATION_FAILED;
   }
+  const bool fps_trace = FpsTraceEnabled();
+  const std::uint64_t acquire_start_ns = fps_trace ? MonotonicNanos() : 0;
   const VkResult host_result =
       host_acquire(device, acquire_info, image_index);
+  if (fps_trace) {
+    AcquireWaitTrace().Record(acquire_start_ns);
+  }
   const VkResult result = NormalizeSwapchainResult(host_result);
   if (result == VK_ERROR_OUT_OF_DATE_KHR) {
     const NoteSurfaceOutOfDateFn note_surface_out_of_date =
@@ -2015,23 +2062,30 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit(
     observation.SetResult(VK_ERROR_INITIALIZATION_FAILED);
     return VK_ERROR_INITIALIZATION_FAILED;
   }
-  if (submits != nullptr && State().etc2.HasPendingUploads()) {
+  if (submits != nullptr && submit_count != 0 &&
+      State().etc2.HasPendingUploads()) {
     if (submit_count == 1) {
-      State().etc2.PrepareSubmit(submits->pCommandBuffers,
-                                 submits->commandBufferCount);
+      if (submits->commandBufferCount != 0 &&
+          submits->pCommandBuffers != nullptr) {
+        State().etc2.PrepareSubmit(submits->pCommandBuffers,
+                                   submits->commandBufferCount);
+      }
     } else {
       std::vector<VkCommandBuffer> command_buffers;
       for (std::uint32_t index = 0; index < submit_count; ++index) {
-        if (submits[index].commandBufferCount != 0) {
+        if (submits[index].commandBufferCount != 0 &&
+            submits[index].pCommandBuffers != nullptr) {
           command_buffers.insert(command_buffers.end(),
                                    submits[index].pCommandBuffers,
                                    submits[index].pCommandBuffers +
                                        submits[index].commandBufferCount);
         }
       }
-      State().etc2.PrepareSubmit(
-          command_buffers.data(),
-          static_cast<std::uint32_t>(command_buffers.size()));
+      if (!command_buffers.empty()) {
+        State().etc2.PrepareSubmit(
+            command_buffers.data(),
+            static_cast<std::uint32_t>(command_buffers.size()));
+      }
     }
   }
   const VkResult result = State().text_overlay.QueueSubmit(
@@ -2128,10 +2182,25 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
     VkPhysicalDevice physical_device, VkSurfaceKHR surface,
     VkSurfaceCapabilitiesKHR* capabilities) {
   PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR host_capabilities = nullptr;
+  VkInstance instance = VK_NULL_HANDLE;
   {
     AdapterState& state = State();
     std::lock_guard<std::mutex> lock(state.mutex);
     host_capabilities = state.host_surface_capabilities;
+    instance = state.latest_instance;
+  }
+  if (host_capabilities == nullptr && instance != VK_NULL_HANDLE) {
+    host_capabilities =
+        reinterpret_cast<PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR>(
+            HostInstanceProc(instance,
+                             "vkGetPhysicalDeviceSurfaceCapabilitiesKHR"));
+    if (host_capabilities != nullptr) {
+      AdapterState& state = State();
+      std::lock_guard<std::mutex> lock(state.mutex);
+      if (state.host_surface_capabilities == nullptr) {
+        state.host_surface_capabilities = host_capabilities;
+      }
+    }
   }
   if (host_capabilities == nullptr || capabilities == nullptr) {
     return VK_ERROR_INITIALIZATION_FAILED;
@@ -2177,10 +2246,25 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfacePresentModesKHR(
     return VK_ERROR_INITIALIZATION_FAILED;
   }
   PFN_vkGetPhysicalDeviceSurfacePresentModesKHR host_query = nullptr;
+  VkInstance instance = VK_NULL_HANDLE;
   {
     AdapterState& state = State();
     std::lock_guard<std::mutex> lock(state.mutex);
     host_query = state.host_surface_present_modes;
+    instance = state.latest_instance;
+  }
+  if (host_query == nullptr && instance != VK_NULL_HANDLE) {
+    host_query =
+        reinterpret_cast<PFN_vkGetPhysicalDeviceSurfacePresentModesKHR>(
+            HostInstanceProc(instance,
+                             "vkGetPhysicalDeviceSurfacePresentModesKHR"));
+    if (host_query != nullptr) {
+      AdapterState& state = State();
+      std::lock_guard<std::mutex> lock(state.mutex);
+      if (state.host_surface_present_modes == nullptr) {
+        state.host_surface_present_modes = host_query;
+      }
+    }
   }
   if (host_query == nullptr) {
     return VK_ERROR_INITIALIZATION_FAILED;

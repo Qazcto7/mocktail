@@ -152,7 +152,8 @@ void AndroidVulkanWsiAdapter::DestroySurface(
 VkResult AndroidVulkanWsiAdapter::EnumerateInstanceExtensionProperties(
     const char* layer_name, std::uint32_t* property_count,
     VkExtensionProperties* properties) const {
-  if (host_get_instance_proc_address_ == nullptr || property_count == nullptr) {
+  if (host_get_instance_proc_address_ == nullptr || host_wsi_ == nullptr ||
+      property_count == nullptr) {
     return VK_ERROR_INITIALIZATION_FAILED;
   }
   auto enumerate = reinterpret_cast<PFN_vkEnumerateInstanceExtensionProperties>(
@@ -182,17 +183,23 @@ VkResult AndroidVulkanWsiAdapter::EnumerateInstanceExtensionProperties(
   std::vector<VkExtensionProperties> guest_properties;
   guest_properties.reserve(host_properties.size() + 1);
   const auto& host_wsi_extensions = host_wsi_->required_instance_extensions();
+  bool has_android_surface = false;
   for (const VkExtensionProperties& property : host_properties) {
     const std::string name(property.extensionName);
+    if (name == kAndroidSurfaceExtension) {
+      has_android_surface = true;
+    }
     if (!Contains(host_wsi_extensions, name) || name == "VK_KHR_surface") {
       guest_properties.push_back(property);
     }
   }
-  VkExtensionProperties android_surface{};
-  std::strncpy(android_surface.extensionName, kAndroidSurfaceExtension,
-               sizeof(android_surface.extensionName) - 1);
-  android_surface.specVersion = 6;
-  guest_properties.push_back(android_surface);
+  if (!has_android_surface) {
+    VkExtensionProperties android_surface{};
+    std::strncpy(android_surface.extensionName, kAndroidSurfaceExtension,
+                 sizeof(android_surface.extensionName) - 1);
+    android_surface.specVersion = 6;
+    guest_properties.push_back(android_surface);
+  }
 
   if (properties == nullptr) {
     *property_count = static_cast<std::uint32_t>(guest_properties.size());

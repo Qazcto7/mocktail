@@ -173,6 +173,7 @@ static std::unique_ptr<WindowTextInputOwner> g_text_input_owner;
 static std::unique_ptr<SdlPointerCaptureBackend> g_pointer_capture_backend;
 static std::unique_ptr<WindowPointerCaptureOwner> g_pointer_capture_owner;
 static std::unique_ptr<graphics::GlesTextOverlayCompositor> g_gles_text_overlay;
+static std::mutex g_gles_text_overlay_mutex;
 static bool g_auto_angle_retry_attempted = false;
 static std::filesystem::path g_window_state_path;
 
@@ -1177,6 +1178,7 @@ bool Init(int width, int height, const char* title) {
       SDL_DestroyWindow(g_state.sdl_window);
       g_state.sdl_window = nullptr;
       SDL_Quit();
+      g_state.native_window = nullptr;
       g_state.direct_vulkan = false;
       g_state.initialised = false;
       return false;
@@ -1191,6 +1193,7 @@ bool Init(int width, int height, const char* title) {
       SDL_DestroyWindow(g_state.sdl_window);
       g_state.sdl_window = nullptr;
       SDL_Quit();
+      g_state.native_window = nullptr;
       g_state.direct_vulkan = false;
       g_state.initialised = false;
       return false;
@@ -1773,20 +1776,24 @@ bool SwapBuffers() {
     return false;
   }
 
-  static std::once_flag text_overlay_init_flag;
-  std::call_once(text_overlay_init_flag, [] {
-    graphics::GlesTextOverlaySource source;
-    source.may_present = reinterpret_cast<decltype(source.may_present)>(
-        dlsym(RTLD_DEFAULT, "mocktail_text_overlay_may_present"));
-    source.query = reinterpret_cast<decltype(source.query)>(
-        dlsym(RTLD_DEFAULT, "mocktail_text_overlay_query"));
-    source.copy = reinterpret_cast<decltype(source.copy)>(
-        dlsym(RTLD_DEFAULT, "mocktail_text_overlay_copy"));
-    g_gles_text_overlay =
-        std::make_unique<graphics::GlesTextOverlayCompositor>(source);
-  });
-  if (g_gles_text_overlay != nullptr) {
-    (void)g_gles_text_overlay->Draw(g_state.sdl_window);
+  graphics::GlesTextOverlayCompositor* text_overlay = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(g_gles_text_overlay_mutex);
+    if (g_gles_text_overlay == nullptr) {
+      graphics::GlesTextOverlaySource source;
+      source.may_present = reinterpret_cast<decltype(source.may_present)>(
+          dlsym(RTLD_DEFAULT, "mocktail_text_overlay_may_present"));
+      source.query = reinterpret_cast<decltype(source.query)>(
+          dlsym(RTLD_DEFAULT, "mocktail_text_overlay_query"));
+      source.copy = reinterpret_cast<decltype(source.copy)>(
+          dlsym(RTLD_DEFAULT, "mocktail_text_overlay_copy"));
+      g_gles_text_overlay =
+          std::make_unique<graphics::GlesTextOverlayCompositor>(source);
+    }
+    text_overlay = g_gles_text_overlay.get();
+  }
+  if (text_overlay != nullptr) {
+    (void)text_overlay->Draw(g_state.sdl_window);
   }
 
   if (!SDL_GL_SwapWindow(g_state.sdl_window)) {
@@ -2567,7 +2574,10 @@ void Shutdown() {
   // PresentLifecycleGate has drained every compositor call. If the render
   // context is on another thread, destroying that context releases its GL
   // resources below.
-  g_gles_text_overlay.reset();
+  {
+    std::lock_guard<std::mutex> lock(g_gles_text_overlay_mutex);
+    g_gles_text_overlay.reset();
+  }
   if (!g_state.direct_vulkan && g_state.egl_context != nullptr) {
     SDL_GL_MakeCurrent(g_state.sdl_window, nullptr);
   }
@@ -2581,6 +2591,9 @@ void Shutdown() {
   }
   SDL_Quit();
   g_state.initialised = false;
+  g_state.egl_display = nullptr;
+  g_state.egl_config = nullptr;
+  g_state.egl_surface = nullptr;
   g_state.native_window = nullptr;
   g_state.egl_swap_interval = nullptr;
   g_state.min_swap_interval = 1;

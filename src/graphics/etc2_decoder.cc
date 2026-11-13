@@ -53,10 +53,25 @@ bool ImageFits(EtcFormat format, const std::uint8_t* source,
   const std::uint64_t blocks_wide = (static_cast<std::uint64_t>(width) + 3) / 4;
   const std::uint64_t blocks_high =
       (static_cast<std::uint64_t>(height) + 3) / 4;
-  return blocks_wide * blocks_high * EtcBlockBytes(format) <= source_bytes &&
-         static_cast<std::uint64_t>(width) * height *
-                 EtcDecodedTexelBytes(format) <=
-             destination_bytes;
+  const std::uint64_t block_bytes = EtcBlockBytes(format);
+  const std::uint64_t texel_bytes = EtcDecodedTexelBytes(format);
+  constexpr std::uint64_t kMaxU64 = std::numeric_limits<std::uint64_t>::max();
+  if (blocks_wide > kMaxU64 / blocks_high) {
+    return false;
+  }
+  const std::uint64_t total_blocks = blocks_wide * blocks_high;
+  if (total_blocks > kMaxU64 / block_bytes ||
+      total_blocks * block_bytes > source_bytes) {
+    return false;
+  }
+  const std::uint64_t width64 = width;
+  const std::uint64_t height64 = height;
+  if (width64 > kMaxU64 / height64) {
+    return false;
+  }
+  const std::uint64_t total_pixels = width64 * height64;
+  return total_pixels <= kMaxU64 / texel_bytes &&
+         total_pixels * texel_bytes <= destination_bytes;
 }
 
 }  // namespace
@@ -65,8 +80,10 @@ bool DecodeEtcImage(EtcFormat format, const std::uint8_t* source,
                     std::size_t source_bytes, std::uint32_t width,
                     std::uint32_t height, std::uint8_t* destination,
                     std::size_t destination_bytes) {
+  const std::uint32_t blocks_high = static_cast<std::uint32_t>(
+      (static_cast<std::uint64_t>(height) + 3) / 4);
   return DecodeEtcImageBlockRows(format, source, source_bytes, width, height, 0,
-                                 (height + 3) / 4, destination,
+                                 blocks_high, destination,
                                  destination_bytes);
 }
 

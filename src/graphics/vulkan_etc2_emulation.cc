@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -138,11 +139,13 @@ Function DeviceProc(PFN_vkGetDeviceProcAddr get, VkDevice device,
 }
 
 struct BufferBinding {
+  VkDevice device = VK_NULL_HANDLE;
   VkDeviceMemory memory = VK_NULL_HANDLE;
   VkDeviceSize offset = 0;
 };
 
 struct Mapping {
+  VkDevice device = VK_NULL_HANDLE;
   void* data = nullptr;
   VkDeviceSize offset = 0;
   VkDeviceSize size = VK_WHOLE_SIZE;
@@ -291,23 +294,34 @@ bool ScaledAxis(std::uint32_t base, std::uint32_t scale, std::uint32_t mip,
                 std::int32_t offset, std::uint32_t extent,
                 std::uint32_t* texels, std::uint32_t* host_start,
                 std::uint32_t* host_end) {
-  const std::uint32_t app_mip = std::max<std::uint32_t>(1, base >> mip);
-  const std::uint32_t host_mip =
-      std::max<std::uint32_t>(1, (base * scale) >> mip);
-  if (offset < 0 || static_cast<std::uint32_t>(offset) >= app_mip) {
+  if (base == 0 || scale == 0 || offset < 0 || extent == 0) {
     return false;
   }
-  const std::uint32_t app_end =
-      std::min(app_mip, static_cast<std::uint32_t>(offset) + extent);
-  const std::uint32_t start = static_cast<std::uint32_t>(offset) * scale;
-  const std::uint32_t end =
-      app_end == app_mip ? host_mip : std::min(host_mip, app_end * scale);
-  if (end <= start) {
+  const std::uint32_t app_mip =
+      mip >= 32 ? 1U : std::max<std::uint32_t>(1, base >> mip);
+  const std::uint64_t scaled_base =
+      static_cast<std::uint64_t>(base) * scale;
+  const std::uint64_t host_mip64 =
+      mip >= 64 ? 1ULL : std::max<std::uint64_t>(1, scaled_base >> mip);
+  if (static_cast<std::uint32_t>(offset) >= app_mip ||
+      host_mip64 > std::numeric_limits<std::uint32_t>::max()) {
     return false;
   }
-  *texels = app_end - static_cast<std::uint32_t>(offset);
-  *host_start = start;
-  *host_end = end;
+  const std::uint32_t host_mip = static_cast<std::uint32_t>(host_mip64);
+  const std::uint64_t app_end64 = std::min<std::uint64_t>(
+      app_mip, static_cast<std::uint64_t>(offset) + extent);
+  const std::uint64_t start64 = static_cast<std::uint64_t>(offset) * scale;
+  const std::uint64_t end64 =
+      app_end64 == app_mip
+          ? host_mip
+          : std::min<std::uint64_t>(host_mip, app_end64 * scale);
+  if (end64 <= start64 || start64 > std::numeric_limits<std::uint32_t>::max()) {
+    return false;
+  }
+  *texels = static_cast<std::uint32_t>(app_end64 -
+                                       static_cast<std::uint64_t>(offset));
+  *host_start = static_cast<std::uint32_t>(start64);
+  *host_end = static_cast<std::uint32_t>(end64);
   return true;
 }
 
@@ -375,16 +389,34 @@ bool PlanRegions(const ImageRecord& record, VkDevice device, VkBuffer source,
     if (row_texels < upload.width || layer_rows < upload.height) {
       return false;
     }
+    constexpr VkDeviceSize kMaxSize = std::numeric_limits<VkDeviceSize>::max();
     const VkDeviceSize block_bytes = EtcBlockBytes(upload.format);
     const VkDeviceSize block_rows =
         (static_cast<VkDeviceSize>(upload.height) + 3) / 4;
     const VkDeviceSize packed_row =
         ((static_cast<VkDeviceSize>(upload.width) + 3) / 4) * block_bytes;
     upload.source_row_stride = ((row_texels + 3) / 4) * block_bytes;
-    upload.source_layer_stride =
-        upload.source_row_stride * ((layer_rows + 3) / 4);
-    upload.source_span = (upload.layers - 1) * upload.source_layer_stride +
-                         (block_rows - 1) * upload.source_row_stride + packed_row;
+    const VkDeviceSize layer_block_rows = (layer_rows + 3) / 4;
+    if (upload.source_row_stride > kMaxSize / layer_block_rows) {
+      return false;
+    }
+    upload.source_layer_stride = upload.source_row_stride * layer_block_rows;
+    if ((upload.layers - 1) > 0 &&
+        upload.source_layer_stride > kMaxSize / (upload.layers - 1)) {
+      return false;
+    }
+    const VkDeviceSize layer_span =
+        (upload.layers - 1) * upload.source_layer_stride;
+    if ((block_rows - 1) > 0 &&
+        upload.source_row_stride > kMaxSize / (block_rows - 1)) {
+      return false;
+    }
+    const VkDeviceSize row_span = (block_rows - 1) * upload.source_row_stride;
+    if (layer_span > kMaxSize - row_span ||
+        layer_span + row_span > kMaxSize - packed_row) {
+      return false;
+    }
+    upload.source_span = layer_span + row_span + packed_row;
     upload.scale = scale;
     upload.source_width = upload.width;
     upload.source_height = upload.height;
@@ -421,13 +453,26 @@ bool PlanRegions(const ImageRecord& record, VkDevice device, VkBuffer source,
                 &copy.imageExtent.height)) {
         return false;
       }
+      const VkDeviceSize texel_bytes =
+          EtcDecodedTexelBytes(record.format.etc_format);
+      if (upload.target_width > kMaxSize / upload.target_height ||
+          static_cast<VkDeviceSize>(upload.target_width) *
+                  upload.target_height >
+              kMaxSize / texel_bytes) {
+        return false;
+      }
       upload.target_bytes = static_cast<VkDeviceSize>(upload.target_width) *
-                            upload.target_height *
-                            EtcDecodedTexelBytes(record.format.etc_format);
-      upload.full_mip =
-          region.imageOffset.x == 0 && region.imageOffset.y == 0 &&
-          upload.source_width == std::max<std::uint32_t>(1, record.width >> mip) &&
-          upload.source_height == std::max<std::uint32_t>(1, record.height >> mip);
+                            upload.target_height * texel_bytes;
+      const std::uint32_t mip_width =
+          mip >= 32 ? 1U : std::max<std::uint32_t>(1, record.width >> mip);
+      const std::uint32_t mip_height =
+          mip >= 32 ? 1U : std::max<std::uint32_t>(1, record.height >> mip);
+      upload.full_mip = region.imageOffset.x == 0 && region.imageOffset.y == 0 &&
+                        upload.source_width == mip_width &&
+                        upload.source_height == mip_height;
+    }
+    if (upload.target_bytes > kMaxSize - *total) {
+      return false;
     }
     rewritten->push_back(copy);
     uploads->push_back(upload);
@@ -444,7 +489,7 @@ struct VulkanEtc2Emulation::State {
   std::mutex commands_mutex;
   std::mutex memory_mutex;
   std::unordered_map<VkPhysicalDevice, bool> physical_devices;
-  std::vector<std::unique_ptr<HostDevice>> devices;
+  std::vector<std::shared_ptr<const HostDevice>> devices;
   std::unordered_map<VkImage, ImageRecord> images;
   std::unordered_map<VkBuffer, BufferBinding> buffers;
   std::unordered_map<VkDeviceMemory, Mapping> mappings;
@@ -539,11 +584,11 @@ struct VulkanEtc2Emulation::State {
     }
   }
 
-  const HostDevice* Find(VkDevice device) {
+  std::shared_ptr<const HostDevice> Find(VkDevice device) {
     std::shared_lock<std::shared_mutex> lock(devices_mutex);
     for (const auto& candidate : devices) {
       if (candidate->device == device) {
-        return candidate.get();
+        return candidate;
       }
     }
     return nullptr;
@@ -612,7 +657,7 @@ void VulkanEtc2Emulation::RegisterDevice(
   if (device == VK_NULL_HANDLE || get_device_proc_addr == nullptr) {
     return;
   }
-  auto dev = std::make_unique<HostDevice>();
+  auto dev = std::make_shared<HostDevice>();
   const auto get = get_device_proc_addr;
   dev->device = device;
   dev->emulated = emulated;
@@ -661,7 +706,7 @@ void VulkanEtc2Emulation::RegisterDevice(
   std::lock_guard<std::shared_mutex> lock(state_->devices_mutex);
   state_->devices.erase(
       std::remove_if(state_->devices.begin(), state_->devices.end(),
-                     [device](const std::unique_ptr<HostDevice>& candidate) {
+                     [device](const std::shared_ptr<const HostDevice>& candidate) {
                        return candidate->device == device;
                      }),
       state_->devices.end());
@@ -693,7 +738,18 @@ void VulkanEtc2Emulation::DestroyDevice(VkDevice device) {
       it = it->second.device == device ? state_->images.erase(it) : std::next(it);
     }
   }
-  if (const HostDevice* dev = state_->Find(device); dev != nullptr) {
+  {
+    std::lock_guard<std::mutex> lock(state_->memory_mutex);
+    for (auto it = state_->buffers.begin(); it != state_->buffers.end();) {
+      it = it->second.device == device ? state_->buffers.erase(it)
+                                       : std::next(it);
+    }
+    for (auto it = state_->mappings.begin(); it != state_->mappings.end();) {
+      it = it->second.device == device ? state_->mappings.erase(it)
+                                       : std::next(it);
+    }
+  }
+  if (const auto dev = state_->Find(device); dev != nullptr) {
     for (const Staging& staging : doomed) {
       DestroyStaging(*dev, staging);
     }
@@ -701,7 +757,7 @@ void VulkanEtc2Emulation::DestroyDevice(VkDevice device) {
   std::lock_guard<std::shared_mutex> lock(state_->devices_mutex);
   state_->devices.erase(
       std::remove_if(state_->devices.begin(), state_->devices.end(),
-                     [device](const std::unique_ptr<HostDevice>& candidate) {
+                     [device](const std::shared_ptr<const HostDevice>& candidate) {
                        return candidate->device == device;
                      }),
       state_->devices.end());
@@ -711,7 +767,7 @@ VkResult VulkanEtc2Emulation::CreateImage(VkDevice device,
                                           const VkImageCreateInfo* create_info,
                                           const VkAllocationCallbacks* allocator,
                                           VkImage* image) {
-  const HostDevice* dev = state_->Find(device);
+  const std::shared_ptr<const HostDevice> dev = state_->Find(device);
   if (dev == nullptr || dev->create_image == nullptr) {
     return VK_ERROR_INITIALIZATION_FAILED;
   }
@@ -761,7 +817,7 @@ VkResult VulkanEtc2Emulation::CreateImage(VkDevice device,
 
 void VulkanEtc2Emulation::DestroyImage(VkDevice device, VkImage image,
                                        const VkAllocationCallbacks* allocator) {
-  const HostDevice* dev = state_->Find(device);
+  const std::shared_ptr<const HostDevice> dev = state_->Find(device);
   if (dev == nullptr || dev->destroy_image == nullptr) {
     return;
   }
@@ -775,7 +831,7 @@ void VulkanEtc2Emulation::DestroyImage(VkDevice device, VkImage image,
 VkResult VulkanEtc2Emulation::CreateImageView(
     VkDevice device, const VkImageViewCreateInfo* create_info,
     const VkAllocationCallbacks* allocator, VkImageView* view) {
-  const HostDevice* dev = state_->Find(device);
+  const std::shared_ptr<const HostDevice> dev = state_->Find(device);
   if (dev == nullptr || dev->create_image_view == nullptr) {
     return VK_ERROR_INITIALIZATION_FAILED;
   }
@@ -792,7 +848,7 @@ VkResult VulkanEtc2Emulation::CreateImageView(
 VkResult VulkanEtc2Emulation::BindBufferMemory(VkDevice device, VkBuffer buffer,
                                                VkDeviceMemory memory,
                                                VkDeviceSize offset) {
-  const HostDevice* dev = state_->Find(device);
+  const std::shared_ptr<const HostDevice> dev = state_->Find(device);
   if (dev == nullptr || dev->bind_buffer_memory == nullptr) {
     return VK_ERROR_INITIALIZATION_FAILED;
   }
@@ -800,14 +856,14 @@ VkResult VulkanEtc2Emulation::BindBufferMemory(VkDevice device, VkBuffer buffer,
       dev->bind_buffer_memory(device, buffer, memory, offset);
   if (result == VK_SUCCESS && dev->emulated) {
     std::lock_guard<std::mutex> lock(state_->memory_mutex);
-    state_->buffers[buffer] = {memory, offset};
+    state_->buffers[buffer] = {device, memory, offset};
   }
   return result;
 }
 
 VkResult VulkanEtc2Emulation::BindBufferMemory2(
     VkDevice device, std::uint32_t count, const VkBindBufferMemoryInfo* infos) {
-  const HostDevice* dev = state_->Find(device);
+  const std::shared_ptr<const HostDevice> dev = state_->Find(device);
   if (dev == nullptr || dev->bind_buffer_memory2 == nullptr) {
     return VK_ERROR_INITIALIZATION_FAILED;
   }
@@ -815,7 +871,7 @@ VkResult VulkanEtc2Emulation::BindBufferMemory2(
   if (result == VK_SUCCESS && dev->emulated && infos != nullptr) {
     std::lock_guard<std::mutex> lock(state_->memory_mutex);
     for (std::uint32_t index = 0; index < count; ++index) {
-      state_->buffers[infos[index].buffer] = {infos[index].memory,
+      state_->buffers[infos[index].buffer] = {device, infos[index].memory,
                                               infos[index].memoryOffset};
     }
   }
@@ -825,7 +881,7 @@ VkResult VulkanEtc2Emulation::BindBufferMemory2(
 VkResult VulkanEtc2Emulation::MapMemory(VkDevice device, VkDeviceMemory memory,
                                         VkDeviceSize offset, VkDeviceSize size,
                                         VkMemoryMapFlags flags, void** data) {
-  const HostDevice* dev = state_->Find(device);
+  const std::shared_ptr<const HostDevice> dev = state_->Find(device);
   if (dev == nullptr || dev->map_memory == nullptr) {
     return VK_ERROR_INITIALIZATION_FAILED;
   }
@@ -836,7 +892,7 @@ VkResult VulkanEtc2Emulation::MapMemory(VkDevice device, VkDeviceMemory memory,
   const VkResult result =
       dev->map_memory(device, memory, offset, size, flags, data);
   if (result == VK_SUCCESS && dev->emulated && data != nullptr) {
-    state_->mappings[memory] = {*data, offset, size};
+    state_->mappings[memory] = {device, *data, offset, size};
   }
   return result;
 }
@@ -844,7 +900,7 @@ VkResult VulkanEtc2Emulation::MapMemory(VkDevice device, VkDeviceMemory memory,
 VkResult VulkanEtc2Emulation::MapMemory2(VkDevice device,
                                          const VkMemoryMapInfo* info,
                                          void** data) {
-  const HostDevice* dev = state_->Find(device);
+  const std::shared_ptr<const HostDevice> dev = state_->Find(device);
   if (dev == nullptr || dev->map_memory2 == nullptr) {
     return VK_ERROR_INITIALIZATION_FAILED;
   }
@@ -855,13 +911,13 @@ VkResult VulkanEtc2Emulation::MapMemory2(VkDevice device,
   const VkResult result = dev->map_memory2(device, info, data);
   if (result == VK_SUCCESS && dev->emulated && info != nullptr &&
       data != nullptr) {
-    state_->mappings[info->memory] = {*data, info->offset, info->size};
+    state_->mappings[info->memory] = {device, *data, info->offset, info->size};
   }
   return result;
 }
 
 void VulkanEtc2Emulation::UnmapMemory(VkDevice device, VkDeviceMemory memory) {
-  const HostDevice* dev = state_->Find(device);
+  const std::shared_ptr<const HostDevice> dev = state_->Find(device);
   if (dev == nullptr || dev->unmap_memory == nullptr) {
     return;
   }
@@ -875,7 +931,7 @@ void VulkanEtc2Emulation::UnmapMemory(VkDevice device, VkDeviceMemory memory) {
 
 VkResult VulkanEtc2Emulation::UnmapMemory2(VkDevice device,
                                            const VkMemoryUnmapInfo* info) {
-  const HostDevice* dev = state_->Find(device);
+  const std::shared_ptr<const HostDevice> dev = state_->Find(device);
   if (dev == nullptr || dev->unmap_memory2 == nullptr) {
     return VK_ERROR_INITIALIZATION_FAILED;
   }
@@ -889,7 +945,7 @@ VkResult VulkanEtc2Emulation::UnmapMemory2(VkDevice device,
 
 void VulkanEtc2Emulation::FreeMemory(VkDevice device, VkDeviceMemory memory,
                                      const VkAllocationCallbacks* allocator) {
-  const HostDevice* dev = state_->Find(device);
+  const std::shared_ptr<const HostDevice> dev = state_->Find(device);
   if (dev == nullptr || dev->free_memory == nullptr) {
     return;
   }
@@ -903,7 +959,7 @@ void VulkanEtc2Emulation::FreeMemory(VkDevice device, VkDeviceMemory memory,
 
 void VulkanEtc2Emulation::DestroyBuffer(VkDevice device, VkBuffer buffer,
                                         const VkAllocationCallbacks* allocator) {
-  const HostDevice* dev = state_->Find(device);
+  const std::shared_ptr<const HostDevice> dev = state_->Find(device);
   if (dev == nullptr || dev->destroy_buffer == nullptr) {
     return;
   }
@@ -918,7 +974,7 @@ void VulkanEtc2Emulation::CmdCopyBufferToImage(
     VkDevice device, VkCommandBuffer command_buffer, VkBuffer source,
     VkImage destination, VkImageLayout layout, std::uint32_t region_count,
     const VkBufferImageCopy* regions) {
-  const HostDevice* dev = state_->Find(device);
+  const std::shared_ptr<const HostDevice> dev = state_->Find(device);
   if (dev == nullptr || dev->copy_buffer_to_image == nullptr) {
     return;
   }
@@ -926,6 +982,9 @@ void VulkanEtc2Emulation::CmdCopyBufferToImage(
   if (!state_->LookupImage(*dev, destination, &record)) {
     dev->copy_buffer_to_image(command_buffer, source, destination, layout,
                               region_count, regions);
+    return;
+  }
+  if (region_count == 0) {
     return;
   }
   std::vector<VkBufferImageCopy> rewritten;
@@ -954,7 +1013,7 @@ void VulkanEtc2Emulation::CmdCopyBufferToImage(
 void VulkanEtc2Emulation::CmdCopyBufferToImage2(
     VkDevice device, VkCommandBuffer command_buffer,
     const VkCopyBufferToImageInfo2* info) {
-  const HostDevice* dev = state_->Find(device);
+  const std::shared_ptr<const HostDevice> dev = state_->Find(device);
   if (dev == nullptr || dev->copy_buffer_to_image2 == nullptr ||
       info == nullptr) {
     return;
@@ -962,6 +1021,9 @@ void VulkanEtc2Emulation::CmdCopyBufferToImage2(
   ImageRecord record;
   if (!state_->LookupImage(*dev, info->dstImage, &record)) {
     dev->copy_buffer_to_image2(command_buffer, info);
+    return;
+  }
+  if (info->regionCount == 0) {
     return;
   }
   std::vector<VkBufferImageCopy2> rewritten;
@@ -1037,7 +1099,7 @@ void VulkanEtc2Emulation::CmdCopyImage(
     VkImageLayout source_layout, VkImage destination,
     VkImageLayout destination_layout, std::uint32_t region_count,
     const VkImageCopy* regions) {
-  const HostDevice* dev = state_->Find(device);
+  const std::shared_ptr<const HostDevice> dev = state_->Find(device);
   if (dev == nullptr || dev->copy_image == nullptr) {
     return;
   }
@@ -1054,7 +1116,7 @@ void VulkanEtc2Emulation::CmdCopyImage(
 void VulkanEtc2Emulation::CmdCopyImage2(VkDevice device,
                                         VkCommandBuffer command_buffer,
                                         const VkCopyImageInfo2* info) {
-  const HostDevice* dev = state_->Find(device);
+  const std::shared_ptr<const HostDevice> dev = state_->Find(device);
   if (dev == nullptr || dev->copy_image2 == nullptr || info == nullptr) {
     return;
   }
@@ -1080,7 +1142,7 @@ void VulkanEtc2Emulation::CmdCopyImage2(VkDevice device,
 void VulkanEtc2Emulation::CmdExecuteCommands(
     VkDevice device, VkCommandBuffer command_buffer, std::uint32_t count,
     const VkCommandBuffer* secondaries) {
-  const HostDevice* dev = state_->Find(device);
+  const std::shared_ptr<const HostDevice> dev = state_->Find(device);
   if (dev == nullptr || dev->execute_commands == nullptr) {
     return;
   }
@@ -1153,6 +1215,11 @@ void VulkanEtc2Emulation::PrepareSubmit(const VkCommandBuffer* command_buffers,
       }
       Work item;
       item.upload = upload;
+      if (upload.source_offset >
+          std::numeric_limits<VkDeviceSize>::max() - binding->second.offset) {
+        LogFailure("upload source offset overflowed");
+        continue;
+      }
       const VkDeviceSize absolute =
           binding->second.offset + upload.source_offset;
       const auto mapping = state_->mappings.find(binding->second.memory);
@@ -1179,7 +1246,7 @@ void VulkanEtc2Emulation::PrepareSubmit(const VkCommandBuffer* command_buffers,
   // Decode in cached RAM; mapped Vulkan memory makes scattered reads slow.
   // Map each source allocation once: Vulkan forbids concurrent mappings.
   struct TemporaryMapping {
-    const HostDevice* dev = nullptr;
+    std::shared_ptr<const HostDevice> dev;
     std::uint8_t* data = nullptr;
   };
   std::unordered_map<VkDeviceMemory, TemporaryMapping> temporary;
@@ -1187,20 +1254,32 @@ void VulkanEtc2Emulation::PrepareSubmit(const VkCommandBuffer* command_buffers,
     const std::uint8_t* source = nullptr;
     VkDeviceSize compressed = 0;
     VkDeviceSize decoded = 0;
+    std::size_t job_begin = 0;
+    std::size_t job_end = 0;
   };
   std::vector<Copy> copies;
   std::vector<const PendingUpload*> copied_uploads;
   VkDeviceSize compressed_total = 0;
   VkDeviceSize decoded_total = 0;
+  constexpr VkDeviceSize kMaxSize = std::numeric_limits<VkDeviceSize>::max();
   for (const Work& item : work) {
     const PendingUpload& upload = item.upload;
+    const bool direct = upload.target_cached && upload.scale == 1 &&
+                        !state_->overrides.enabled();
+    const VkDeviceSize decoded = direct ? 0 : upload.decoded;
+    if (upload.compressed > kMaxSize - compressed_total ||
+        decoded > kMaxSize - decoded_total) {
+      LogFailure("upload scratch byte total overflowed");
+      continue;
+    }
     const std::uint8_t* source = item.source;
     if (source == nullptr) {
       auto found = temporary.find(item.memory);
       if (found == temporary.end()) {
-        const HostDevice* dev = state_->Find(upload.device);
+        const std::shared_ptr<const HostDevice> dev = state_->Find(upload.device);
         void* data = nullptr;
         if (dev == nullptr || dev->map_memory == nullptr ||
+            dev->unmap_memory == nullptr ||
             dev->map_memory(dev->device, item.memory, 0, VK_WHOLE_SIZE, 0,
                             &data) != VK_SUCCESS) {
           LogFailure("could not map an unmapped upload source");
@@ -1214,10 +1293,7 @@ void VulkanEtc2Emulation::PrepareSubmit(const VkCommandBuffer* command_buffers,
       }
       source = found->second.data + item.memory_offset;
     }
-    const bool direct = upload.target_cached && upload.scale == 1 &&
-                        !state_->overrides.enabled();
-    const VkDeviceSize decoded = direct ? 0 : upload.decoded;
-    copies.push_back({source, upload.compressed, decoded});
+    copies.push_back({source, upload.compressed, decoded, 0, 0});
     copied_uploads.push_back(&upload);
     compressed_total += upload.compressed;
     decoded_total += decoded;
@@ -1235,7 +1311,7 @@ void VulkanEtc2Emulation::PrepareSubmit(const VkCommandBuffer* command_buffers,
   VkDeviceSize compressed_offset = 0;
   VkDeviceSize decoded_offset = 0;
   for (std::size_t index = 0; index < copies.size(); ++index) {
-    const Copy& copy = copies[index];
+    Copy& copy = copies[index];
     const PendingUpload& upload = *copied_uploads[index];
     std::uint8_t* source = scratch_source.data() + compressed_offset;
     std::uint8_t* decoded = copy.decoded == 0
@@ -1258,6 +1334,7 @@ void VulkanEtc2Emulation::PrepareSubmit(const VkCommandBuffer* command_buffers,
         }
       }
     }
+    copy.job_begin = jobs.size();
     for (std::uint32_t layer = 0; layer < upload.layers; ++layer) {
       EtcDecodeJob job;
       job.format = upload.format;
@@ -1269,6 +1346,7 @@ void VulkanEtc2Emulation::PrepareSubmit(const VkCommandBuffer* command_buffers,
       job.destination_bytes = decoded_layer;
       jobs.push_back(job);
     }
+    copy.job_end = jobs.size();
     compressed_offset += copy.compressed;
     decoded_offset += copy.decoded;
     if (ShouldLog(&g_decode_logs, 4)) {
@@ -1278,9 +1356,7 @@ void VulkanEtc2Emulation::PrepareSubmit(const VkCommandBuffer* command_buffers,
     }
   }
   for (const auto& [memory, mapping] : temporary) {
-    if (mapping.dev->unmap_memory != nullptr) {
-      mapping.dev->unmap_memory(mapping.dev->device, memory);
-    }
+    mapping.dev->unmap_memory(mapping.dev->device, memory);
   }
   memory_lock.unlock();
   DecodeEtcJobs(jobs.data(), jobs.size(), DecodeWorkerCount());
@@ -1292,13 +1368,18 @@ void VulkanEtc2Emulation::PrepareSubmit(const VkCommandBuffer* command_buffers,
   compressed_offset = 0;
   decoded_offset = 0;
   for (std::size_t index = 0; index < copied_uploads.size(); ++index) {
-    if (copies[index].decoded != 0) {
+    const Copy& copy = copies[index];
+    const bool upload_ok = std::all_of(
+        jobs.begin() + static_cast<std::ptrdiff_t>(copy.job_begin),
+        jobs.begin() + static_cast<std::ptrdiff_t>(copy.job_end),
+        [](const EtcDecodeJob& job) { return job.ok; });
+    if (copy.decoded != 0 && upload_ok) {
       state_->EmitUpload(*copied_uploads[index],
                          scratch_source.data() + compressed_offset,
                          scratch_decoded.data() + decoded_offset);
     }
-    compressed_offset += copies[index].compressed;
-    decoded_offset += copies[index].decoded;
+    compressed_offset += copy.compressed;
+    decoded_offset += copy.decoded;
   }
 }
 
@@ -1319,7 +1400,7 @@ void VulkanEtc2Emulation::ReleaseCommandBuffer(VkCommandBuffer command_buffer) {
                                std::memory_order_release);
   }
   for (const Staging& staging : doomed) {
-    if (const HostDevice* dev = state_->Find(staging.device); dev != nullptr) {
+    if (const auto dev = state_->Find(staging.device); dev != nullptr) {
       DestroyStaging(*dev, staging);
     }
   }

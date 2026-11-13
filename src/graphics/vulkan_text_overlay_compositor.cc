@@ -299,7 +299,11 @@ struct VulkanTextOverlayCompositor::Impl {
       if (image.target == nullptr || !image.target->params.renderable ||
           image.target->params.format == nullptr ||
           (image.target->params.format->caps & PL_FMT_CAP_BLENDABLE) == 0) {
-        DestroyImage(device, &image);
+        for (ImageState& entry : swapchain->images) {
+          DestroyImage(device, &entry);
+        }
+        swapchain->wrapped = false;
+        swapchain->enabled = false;
         return false;
       }
       pl_vulkan_sem_params semaphore{};
@@ -307,7 +311,11 @@ struct VulkanTextOverlayCompositor::Impl {
       image.bridge = pl_vulkan_sem_create(device->vulkan->gpu, &semaphore);
       image.done = pl_vulkan_sem_create(device->vulkan->gpu, &semaphore);
       if (image.bridge == VK_NULL_HANDLE || image.done == VK_NULL_HANDLE) {
-        DestroyImage(device, &image);
+        for (ImageState& entry : swapchain->images) {
+          DestroyImage(device, &entry);
+        }
+        swapchain->wrapped = false;
+        swapchain->enabled = false;
         return false;
       }
     }
@@ -956,9 +964,6 @@ VkResult VulkanTextOverlayCompositor::QueuePresent(
     impl_->SetOverlayActive(false);
     return fallback(queue, present_info);
   }
-  if (impl_->overlay_may_present != nullptr) {
-    impl_->SetOverlayActive(true);
-  }
 
   Impl::DeviceState* device = nullptr;
   Impl::QueueState queue_state{};
@@ -977,6 +982,7 @@ VkResult VulkanTextOverlayCompositor::QueuePresent(
   }
   if (device == nullptr || !device->enabled ||
       !overlay_callbacks_available) {
+    impl_->SetOverlayActive(false);
     return impl_->CallFallback(shared_queue_mutex, queue, present_info,
                                fallback);
   }
@@ -991,19 +997,22 @@ VkResult VulkanTextOverlayCompositor::QueuePresent(
       frame.abi_version != MocktailTextOverlayFrameInfo::kAbiVersion ||
       frame.visible == 0 || frame.revision == 0 ||
       !impl_->EnsureSource(device, frame)) {
+    impl_->SetOverlayActive(false);
     return impl_->CallFallback(shared_queue_mutex, queue, present_info,
                                fallback);
   }
   if (present_info->pSwapchains == nullptr &&
       present_info->swapchainCount != 0) {
+    impl_->SetOverlayActive(false);
     return impl_->CallFallback(shared_queue_mutex, queue, present_info,
                                fallback);
   }
   for (std::uint32_t index = 0; index < present_info->swapchainCount; ++index) {
     Impl::SwapchainState* swapchain = impl_->FindSwapchain(
         device, present_info->pSwapchains[index]);
-    if (swapchain == nullptr ||
+    if (swapchain == nullptr || !swapchain->enabled ||
         !impl_->WrapSwapchainImages(device, swapchain)) {
+      impl_->SetOverlayActive(false);
       return impl_->CallFallback(shared_queue_mutex, queue, present_info,
                                  fallback);
     }
@@ -1013,6 +1022,7 @@ VkResult VulkanTextOverlayCompositor::QueuePresent(
   work_items.reserve(present_info->swapchainCount);
   if (!impl_->BuildWorkItems(device, &queue_state, *present_info, frame,
                              &work_items)) {
+    impl_->SetOverlayActive(false);
     return impl_->CallFallback(shared_queue_mutex, queue, present_info,
                                fallback);
   }

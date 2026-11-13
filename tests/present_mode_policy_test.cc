@@ -118,6 +118,11 @@ TEST(PresentModePolicyTest, MailboxReservesAnImageBeyondTheSurfaceMinimum) {
             4U);
 }
 
+TEST(PresentModePolicyTest, HandlesEmptyHostModeListSafely) {
+  EXPECT_TRUE(FilterPresentModes(PresentModePolicy::kVsync, {}).empty());
+  EXPECT_TRUE(FilterPresentModes(PresentModePolicy::kHostDefault, {}).empty());
+}
+
 } // namespace
 } // namespace graphics
 } // namespace mocktail

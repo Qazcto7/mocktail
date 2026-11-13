@@ -2,6 +2,9 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <thread>
+
 namespace mocktail {
 namespace window {
 namespace {
@@ -448,6 +451,35 @@ TEST(VulkanPresentProgressGateTest, SuspendedWindowDoesNotConsumeReport) {
   VulkanPresentStallReport report;
   EXPECT_FALSE(gate.Poll(stalled_ticks, false, &report));
   EXPECT_TRUE(gate.Poll(stalled_ticks, true, &report));
+}
+
+TEST(VulkanPresentProgressGateTest,
+     PollRemainsCoherentUnderConcurrentCallRecording) {
+  VulkanPresentProgressGate gate;
+  ASSERT_TRUE(gate.Activate());
+  gate.NotifyFramePresented(kFirstFrameTicksNs, 1);
+  std::atomic<bool> done{false};
+  std::thread writer([&] {
+    for (uint64_t i = 0; i < 5000; ++i) {
+      const uint64_t seq = gate.NotifyCallBegin(
+          "vkQueuePresentKHR", kFirstFrameTicksNs + i * 10, 1);
+      gate.NotifyCallEnd(seq, 0, kFirstFrameTicksNs + i * 10 + 5, 1);
+    }
+    done.store(true, std::memory_order_release);
+  });
+  uint64_t poll_time =
+      kFirstFrameTicksNs + VulkanPresentProgressGate::kStallThresholdNs;
+  while (!done.load(std::memory_order_acquire)) {
+    VulkanPresentStallReport report;
+    (void)gate.Poll(poll_time, true, &report);
+    if (report.last_completed_call_snapshot_coherent &&
+        report.last_completed_call_name != nullptr) {
+      EXPECT_GE(report.last_completed_call_completed_ns,
+                report.last_completed_call_started_ns);
+    }
+    poll_time += VulkanPresentProgressGate::kStallThresholdNs;
+  }
+  writer.join();
 }
 
 }  // namespace

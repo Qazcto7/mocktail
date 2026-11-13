@@ -161,12 +161,16 @@ struct PixelCopy {
 
 bool ValidFrame(const MocktailTextOverlayFrameInfo &frame) {
   const std::uint64_t row_bytes = std::uint64_t{frame.width} * 4;
+  if (frame.abi_version != MocktailTextOverlayFrameInfo::kAbiVersion ||
+      frame.coordinate_width == 0 || frame.coordinate_height == 0 ||
+      frame.width == 0 || frame.height == 0 ||
+      row_bytes > kMaximumOverlayBytes ||
+      frame.height > kMaximumOverlayBytes / row_bytes) {
+    return false;
+  }
   const std::uint64_t bytes = row_bytes * frame.height;
-  return frame.abi_version == MocktailTextOverlayFrameInfo::kAbiVersion &&
-         frame.coordinate_width != 0 && frame.coordinate_height != 0 &&
-         frame.width != 0 && frame.height != 0 &&
-         row_bytes <= kMaximumOverlayBytes && bytes <= kMaximumOverlayBytes &&
-         frame.row_bytes == row_bytes && frame.rgba_bytes == bytes;
+  return bytes <= kMaximumOverlayBytes && frame.row_bytes == row_bytes &&
+         frame.rgba_bytes == bytes;
 }
 
 } // namespace
@@ -175,13 +179,25 @@ struct GlesTextOverlayCompositor::Impl {
   explicit Impl(GlesTextOverlaySource input) : source(input) {}
   ~Impl() {
     if (context != nullptr && SDL_GL_GetCurrentContext() == context) {
-      if (texture != 0)
-        gl.DeleteTextures(1, &texture);
-      if (vertex_array != 0)
-        gl.DeleteVertexArrays(1, &vertex_array);
-      if (program != 0)
-        gl.DeleteProgram(program);
+      DestroyResources();
     }
+  }
+
+  void DestroyResources() {
+    if (texture != 0) {
+      gl.DeleteTextures(1, &texture);
+      texture = 0;
+    }
+    if (vertex_array != 0) {
+      gl.DeleteVertexArrays(1, &vertex_array);
+      vertex_array = 0;
+    }
+    if (program != 0) {
+      gl.DeleteProgram(program);
+      program = 0;
+    }
+    bounds_location = -1;
+    image_location = -1;
   }
 
   bool Fail(const char *message) {
@@ -250,8 +266,11 @@ void main() { color = texture(image, uv); }
       gl.GetProgramiv(program, GL_LINK_STATUS, &linked);
     if (linked != GL_TRUE) {
       char log[1024] = "unable to create the GLES text program";
-      if (program != 0)
+      if (program != 0) {
         gl.GetProgramInfoLog(program, sizeof(log), nullptr, log);
+        gl.DeleteProgram(program);
+        program = 0;
+      }
       return Fail(log);
     }
     bounds_location = gl.GetUniformLocation(program, "bounds");
@@ -259,8 +278,12 @@ void main() { color = texture(image, uv); }
     gl.GenVertexArrays(1, &vertex_array);
     gl.GenTextures(1, &texture);
     gl.GetIntegerv(GL_MAX_TEXTURE_SIZE, &max_texture_size);
-    return vertex_array != 0 && texture != 0 && bounds_location >= 0 &&
-           image_location >= 0;
+    const bool ready = vertex_array != 0 && texture != 0 &&
+                       bounds_location >= 0 && image_location >= 0;
+    if (!ready) {
+      DestroyResources();
+    }
+    return ready;
   }
 
   GlesTextOverlaySource source;

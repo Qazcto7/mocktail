@@ -329,5 +329,13 @@ TEST(AndroidVulkanWsiAdapterTest, AcceptsSuboptimalSwapchainImages) {
   EXPECT_EQ(graphics::NormalizeAndroidSwapchainResult(kOutOfDate), kOutOfDate);
 }
 
+TEST(AndroidVulkanWsiAdapterTest,
+     RejectsExtensionEnumerationWithoutHostWsi) {
+  graphics::AndroidVulkanWsiAdapter adapter;
+  std::uint32_t count = 7;
+  EXPECT_EQ(adapter.EnumerateInstanceExtensionProperties(nullptr, &count, nullptr),
+            VK_ERROR_INITIALIZATION_FAILED);
+}
+
 }  // namespace
 }  // namespace mocktail

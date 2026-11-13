@@ -64,4 +64,50 @@ TEST(VulkanLoaderAdapterTest, KeepsOwnDispatchWhenAdapterLoadsFirst) {
   ExpectAdapterDispatch(false);
 }
 
+TEST(VulkanLoaderAdapterTest, HandlesNullDestroyAndNullCreateArraysSafely) {
+  const pid_t child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    void* adapter = dlopen(MOCKTAIL_VULKAN_ADAPTER, RTLD_NOW | RTLD_LOCAL);
+    if (adapter == nullptr) {
+      std::_Exit(20);
+    }
+    const auto destroy_instance =
+        reinterpret_cast<PFN_vkDestroyInstance>(
+            dlsym(adapter, "vkDestroyInstance"));
+    const auto destroy_device =
+        reinterpret_cast<PFN_vkDestroyDevice>(dlsym(adapter, "vkDestroyDevice"));
+    const auto create_device =
+        reinterpret_cast<PFN_vkCreateDevice>(dlsym(adapter, "vkCreateDevice"));
+    const auto surface_caps =
+        reinterpret_cast<PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR>(
+            dlsym(adapter, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR"));
+    if (destroy_instance == nullptr || destroy_device == nullptr ||
+        create_device == nullptr || surface_caps == nullptr) {
+      std::_Exit(21);
+    }
+    destroy_instance(VK_NULL_HANDLE, nullptr);
+    destroy_device(VK_NULL_HANDLE, nullptr);
+
+    VkDeviceCreateInfo dev_info{};
+    dev_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    dev_info.queueCreateInfoCount = 1;
+    dev_info.pQueueCreateInfos = nullptr;
+    VkDevice dev = VK_NULL_HANDLE;
+    if (create_device(VK_NULL_HANDLE, &dev_info, nullptr, &dev) !=
+        VK_ERROR_INITIALIZATION_FAILED) {
+      std::_Exit(22);
+    }
+    if (surface_caps(VK_NULL_HANDLE, VK_NULL_HANDLE, nullptr) !=
+        VK_ERROR_INITIALIZATION_FAILED) {
+      std::_Exit(23);
+    }
+    std::_Exit(0);
+  }
+  int status = 0;
+  ASSERT_EQ(waitpid(child, &status, 0), child);
+  ASSERT_TRUE(WIFEXITED(status));
+  EXPECT_EQ(WEXITSTATUS(status), 0);
+}
+
 }  // namespace

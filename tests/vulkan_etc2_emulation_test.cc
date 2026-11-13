@@ -436,6 +436,25 @@ TEST_P(VulkanEtc2Test, NativeSupportPassesThroughWithoutCpuUploads) {
   EXPECT_FALSE(emulation->HasPendingUploads());
 }
 
+TEST_P(VulkanEtc2Test, HandlesZeroRegionsAndOverflowAndCleansUpOnDestroy) {
+  Start(true, nullptr);
+  const auto source = CreateSource(16);
+  const auto image = CreateImage(4, 4);
+  const auto command = Handle<VkCommandBuffer>(11);
+
+  emulation->CmdCopyBufferToImage(device, command, source.buffer, image,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+                                  nullptr);
+  EXPECT_FALSE(emulation->HasPendingUploads());
+
+  Record(command, source, image, 4, 4, 1, 0, UINT32_MAX, UINT32_MAX);
+  EXPECT_FALSE(emulation->HasPendingUploads());
+
+  emulation->DestroyDevice(device);
+  emulation->DestroyImage(device, image, nullptr);
+  EXPECT_FALSE(emulation->HasPendingUploads());
+}
+
 INSTANTIATE_TEST_SUITE_P(HostMemory, VulkanEtc2Test, ::testing::Bool());
 
 }

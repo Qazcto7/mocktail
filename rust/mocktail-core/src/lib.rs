@@ -4302,21 +4302,29 @@ pub extern "C" fn mocktail_rust_decode_etc_image_block_rows(
     let block_bytes = etc_block_bytes(format);
     let texel_bytes = etc_decoded_texel_bytes(format);
 
-    if (blocks_wide * blocks_high * (block_bytes as u64)) > (source_bytes as u64) {
-        return 0;
+    let required_source_bytes = blocks_wide
+        .checked_mul(blocks_high)
+        .and_then(|blocks| blocks.checked_mul(block_bytes as u64));
+    match required_source_bytes {
+        Some(bytes) if bytes <= (source_bytes as u64) => {}
+        _ => return 0,
     }
-    if ((width as u64) * (height as u64) * (texel_bytes as u64)) > (destination_bytes as u64) {
-        return 0;
+    let required_dest_bytes = (width as u64)
+        .checked_mul(height as u64)
+        .and_then(|pixels| pixels.checked_mul(texel_bytes as u64));
+    match required_dest_bytes {
+        Some(bytes) if bytes <= (destination_bytes as u64) => {}
+        _ => return 0,
     }
-    if (first_block_row as u64) + (block_row_count as u64) > blocks_high {
-        return 0;
-    }
+    let end_block_row = match (first_block_row as u64).checked_add(block_row_count as u64) {
+        Some(end) if end <= blocks_high => end as u32,
+        _ => return 0,
+    };
 
     let src_slice = unsafe { slice::from_raw_parts(source, source_bytes) };
     let dst_slice = unsafe { slice::from_raw_parts_mut(destination, destination_bytes) };
 
     let mut rgba = [0u8; 64];
-    let end_block_row = first_block_row + block_row_count;
 
     for by in first_block_row..end_block_row {
         for bx in 0..blocks_wide as u32 {
@@ -4331,15 +4339,17 @@ pub extern "C" fn mocktail_rust_decode_etc_image_block_rows(
             }
 
             for y in 0..4u32 {
-                if by * 4 + y >= height {
+                let py = (by as u64) * 4 + (y as u64);
+                if py >= (height as u64) {
                     continue;
                 }
                 for x in 0..4u32 {
-                    if bx * 4 + x >= width {
+                    let px = (bx as u64) * 4 + (x as u64);
+                    if px >= (width as u64) {
                         continue;
                     }
                     let texel = (x * 4 + y) as usize;
-                    let out_offset = (((by * 4 + y) * width + bx * 4 + x) as usize) * texel_bytes;
+                    let out_offset = ((py as usize) * (width as usize) + (px as usize)) * texel_bytes;
                     match format {
                         MocktailRustEtcFormat::Etc2Rgb8 | MocktailRustEtcFormat::Etc2Rgb8A1 | MocktailRustEtcFormat::Etc2Rgba8 => {
                             dst_slice[out_offset..out_offset + 4].copy_from_slice(&rgba[texel * 4..texel * 4 + 4]);
@@ -6766,19 +6776,27 @@ pub extern "C" fn mocktail_rust_present_mode_filter(
     out_cap: usize,
     out_count: *mut usize,
 ) -> c_int {
-    if host_modes_ptr.is_null() || out_modes_ptr.is_null() || out_count.is_null() {
+    if out_count.is_null()
+        || (host_count > 0 && host_modes_ptr.is_null())
+        || (out_cap > 0 && out_modes_ptr.is_null())
+    {
         return -1;
     }
-    let host_modes = unsafe { std::slice::from_raw_parts(host_modes_ptr, host_count) };
 
     if policy == MocktailRustPresentModePolicy::HostDefault as c_int || host_count == 0 {
         let copy_len = host_count.min(out_cap);
+        if copy_len > 0 {
+            unsafe {
+                std::ptr::copy_nonoverlapping(host_modes_ptr, out_modes_ptr, copy_len);
+            }
+        }
         unsafe {
-            std::ptr::copy_nonoverlapping(host_modes_ptr, out_modes_ptr, copy_len);
             *out_count = copy_len;
         }
         return 0;
     }
+
+    let host_modes = unsafe { std::slice::from_raw_parts(host_modes_ptr, host_count) };
 
     let mut explicit_mode = 0u32;
     if mocktail_rust_present_mode_explicit(policy, &mut explicit_mode) != 0 {
@@ -6835,8 +6853,12 @@ pub extern "C" fn mocktail_rust_present_mode_filter(
     }
 
     let copy_len = host_count.min(out_cap);
+    if copy_len > 0 {
+        unsafe {
+            std::ptr::copy_nonoverlapping(host_modes_ptr, out_modes_ptr, copy_len);
+        }
+    }
     unsafe {
-        std::ptr::copy_nonoverlapping(host_modes_ptr, out_modes_ptr, copy_len);
         *out_count = copy_len;
     }
     0
@@ -11305,6 +11327,11 @@ pub extern "C" fn mocktail_rust_translate_android_vulkan_instance_extensions(
     let mut requested_android_surface = false;
     let mut translated: Vec<String> = Vec::new();
 
+    if android_count > 0 && android_exts_ptr.is_null() {
+        copy_error(err_buf, err_cap, "Vulkan extension names must not be empty");
+        return -1;
+    }
+
     for i in 0..android_count {
         let p = unsafe { *android_exts_ptr.add(i) };
         if p.is_null() {
@@ -11329,6 +11356,10 @@ pub extern "C" fn mocktail_rust_translate_android_vulkan_instance_extensions(
         if host_count == 0 {
             copy_error(err_buf, err_cap, "Android Vulkan surface requested without host WSI extensions");
             return -2;
+        }
+        if host_wsi_exts_ptr.is_null() {
+            copy_error(err_buf, err_cap, "Vulkan extension names must not be empty");
+            return -1;
         }
         for i in 0..host_count {
             let p = unsafe { *host_wsi_exts_ptr.add(i) };
@@ -13617,6 +13648,7 @@ pub extern "C" fn mocktail_rust_etc1_transcode_ktx1_for_vulkan(
     let mut offset = KTX1_HEADER_SIZE + key_value_bytes;
     let mut mip_w = width;
     let mut mip_h = height;
+    let mut mip_ranges: Vec<(usize, usize)> = Vec::with_capacity(mip_levels as usize);
     for _ in 0..mip_levels {
         if offset > len || len - offset < 4 {
             return 0;
@@ -13627,12 +13659,7 @@ pub extern "C" fn mocktail_rust_etc1_transcode_ktx1_for_vulkan(
         if (image_size as u64) != blocks || image_size > len - offset {
             return 0;
         }
-        for block_off in (0..image_size).step_by(8) {
-            let block_slice: [u8; 8] = file[offset + block_off..offset + block_off + 8].try_into().unwrap();
-            let mut converted = [0u8; 8];
-            etc1_convert_block_to_bc1_slice(&block_slice, &mut converted);
-            file[offset + block_off..offset + block_off + 8].copy_from_slice(&converted);
-        }
+        mip_ranges.push((offset, image_size));
         offset += image_size;
         let padding = (4 - (image_size % 4)) % 4;
         if padding > len - offset {
@@ -13641,6 +13668,15 @@ pub extern "C" fn mocktail_rust_etc1_transcode_ktx1_for_vulkan(
         offset += padding;
         mip_w = (mip_w / 2).max(1);
         mip_h = (mip_h / 2).max(1);
+    }
+
+    for (mip_offset, image_size) in mip_ranges {
+        for block_off in (0..image_size).step_by(8) {
+            let block_slice: [u8; 8] = file[mip_offset + block_off..mip_offset + block_off + 8].try_into().unwrap();
+            let mut converted = [0u8; 8];
+            etc1_convert_block_to_bc1_slice(&block_slice, &mut converted);
+            file[mip_offset + block_off..mip_offset + block_off + 8].copy_from_slice(&converted);
+        }
     }
 
     file[28..32].copy_from_slice(&GL_COMPRESSED_RGB_S3TC_DXT1.to_le_bytes());
@@ -19422,6 +19458,126 @@ integrations:
         assert_eq!(snap.accepted_events, 1);
         assert_eq!(snap.last_generation, 1);
         assert!(!snap.failed);
+    }
+
+    #[test]
+    fn test_graphics_vulkan_bug_fixes() {
+        // 1. Overflow guard in mocktail_rust_decode_etc_image_block_rows:
+        // ((u32::MAX as u64 + 3) / 4)^2 * 16 would not wrap on u64 alone only for some sizes,
+        // whereas (width=0xFFFF_FFFF, height=0xFFFF_FFFF) width*height*16 wraps or exceeds tiny buffers cleanly.
+        let mut src_block = [0u8; 16];
+        let mut dst_pixel = [0u8; 16];
+        assert_eq!(
+            mocktail_rust_decode_etc_image_block_rows(
+                MocktailRustEtcFormat::Etc2Rgb8,
+                src_block.as_ptr(),
+                src_block.len(),
+                u32::MAX,
+                u32::MAX,
+                0,
+                1,
+                dst_pixel.as_mut_ptr(),
+                dst_pixel.len(),
+            ),
+            0
+        );
+        // Also test 2^31 x 2^31: width * height * 4 = 2^64 (wraps u64 to 0 without checked_mul!).
+        assert_eq!(
+            mocktail_rust_decode_etc_image_block_rows(
+                MocktailRustEtcFormat::Etc2Rgb8,
+                src_block.as_ptr(),
+                src_block.len(),
+                1u32 << 31,
+                1u32 << 31,
+                0,
+                1,
+                dst_pixel.as_mut_ptr(),
+                dst_pixel.len(),
+            ),
+            0
+        );
+        let _ = &mut src_block;
+
+        // 2. Empty host_modes_ptr with host_count == 0 in mocktail_rust_present_mode_filter
+        let mut out_mode = 99u32;
+        let mut out_count = 99usize;
+        let pm_rc = mocktail_rust_present_mode_filter(
+            MocktailRustPresentModePolicy::Vsync as c_int,
+            std::ptr::null(),
+            0,
+            &mut out_mode,
+            1,
+            &mut out_count,
+        );
+        assert_eq!(pm_rc, 0);
+        assert_eq!(out_count, 0);
+        assert_eq!(
+            mocktail_rust_present_mode_filter(
+                MocktailRustPresentModePolicy::Vsync as c_int,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                &mut out_count,
+            ),
+            0
+        );
+        assert_eq!(out_count, 0);
+
+        // 3. Null pointer guards in mocktail_rust_translate_android_vulkan_instance_extensions
+        let mut ext_count = 0usize;
+        let mut err = [0 as c_char; 128];
+        assert_eq!(
+            mocktail_rust_translate_android_vulkan_instance_extensions(
+                std::ptr::null(),
+                1,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                &mut ext_count,
+                err.as_mut_ptr(),
+                err.len(),
+            ),
+            -1
+        );
+        let android_surface = CString::new("VK_KHR_android_surface").unwrap();
+        let android_exts = [android_surface.as_ptr()];
+        assert_eq!(
+            mocktail_rust_translate_android_vulkan_instance_extensions(
+                android_exts.as_ptr(),
+                android_exts.len(),
+                std::ptr::null(),
+                1,
+                std::ptr::null_mut(),
+                0,
+                &mut ext_count,
+                err.as_mut_ptr(),
+                err.len(),
+            ),
+            -1
+        );
+
+        // 4. Atomic validation before in-place transcode in mocktail_rust_etc1_transcode_ktx1_for_vulkan
+        let mut ktx = vec![0u8; 64 + 4 + 32 + 4];
+        ktx[0..12].copy_from_slice(&[0xab, 0x4b, 0x54, 0x58, 0x20, 0x31, 0x31, 0xbb, 0x0d, 0x0a, 0x1a, 0x0a]);
+        ktx[12..16].copy_from_slice(&0x0403_0201u32.to_le_bytes());
+        ktx[20..24].copy_from_slice(&1u32.to_le_bytes());
+        ktx[28..32].copy_from_slice(&0x0000_8d64u32.to_le_bytes());
+        ktx[32..36].copy_from_slice(&0x0000_1907u32.to_le_bytes());
+        ktx[36..40].copy_from_slice(&8u32.to_le_bytes()); // width = 8
+        ktx[40..44].copy_from_slice(&8u32.to_le_bytes()); // height = 8
+        ktx[52..56].copy_from_slice(&1u32.to_le_bytes()); // faces = 1
+        ktx[56..60].copy_from_slice(&2u32.to_le_bytes()); // mip_levels = 2
+        ktx[64..68].copy_from_slice(&32u32.to_le_bytes()); // mip 0 size = 32
+        for (i, b) in ktx[68..100].iter_mut().enumerate() {
+            *b = (i as u8) ^ 0x5a;
+        }
+        // mip 1 size claims 8 bytes, but no payload follows -> must fail and leave mip 0 untouched
+        ktx[100..104].copy_from_slice(&8u32.to_le_bytes());
+        let before = ktx.clone();
+        assert_eq!(mocktail_rust_etc1_transcode_ktx1_for_vulkan(ktx.as_mut_ptr(), ktx.len()), 0);
+        assert_eq!(ktx, before);
     }
 
 }

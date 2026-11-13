@@ -45,7 +45,7 @@ std::string ExecutableDirectory() {
   char executable_path[PATH_MAX + 1] = {};
   const ssize_t length =
       ::readlink("/proc/self/exe", executable_path, PATH_MAX);
-  if (length <= 0) {
+  if (length <= 0 || length >= PATH_MAX) {
     return {};
   }
   executable_path[length] = '\0';

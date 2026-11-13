@@ -123,5 +123,16 @@ TEST(EtcDecoderTest, SmallBatchesDoNotCreateThreads) {
   EXPECT_EQ(thread_creations.load(), created);
 }
 
+TEST(EtcDecoderTest, RejectsExtremeDimensionsWithoutIntegerOverflow) {
+  std::array<std::uint8_t, 16> source{};
+  std::array<std::uint8_t, 64> destination{};
+  EXPECT_FALSE(DecodeEtcImage(EtcFormat::kEtc2Rgb8, source.data(),
+                              source.size(), UINT32_MAX, UINT32_MAX,
+                              destination.data(), destination.size()));
+  EXPECT_FALSE(DecodeEtcImage(EtcFormat::kEtc2Rgb8, source.data(),
+                              source.size(), 1U << 31, 1U << 31,
+                              destination.data(), destination.size()));
+}
+
 }
 }
