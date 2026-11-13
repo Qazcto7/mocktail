@@ -6761,6 +6761,18 @@ pub extern "C" fn mocktail_rust_present_mode_swap_interval(
 }
 
 #[no_mangle]
+pub extern "C" fn mocktail_rust_present_mode_resolve_vulkan_surface(
+    configured: c_int,
+    wayland_surface: i32,
+) -> c_int {
+    if wayland_surface != 0 && configured == MocktailRustPresentModePolicy::HostDefault as c_int {
+        MocktailRustPresentModePolicy::Mailbox as c_int
+    } else {
+        configured
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn mocktail_rust_present_mode_prefer_min_image_count(
     policy: c_int,
     requested: u32,
@@ -6783,16 +6795,21 @@ pub extern "C" fn mocktail_rust_present_mode_prefer_min_image_count(
         const UNTHROTTLED_IMAGES: u32 = 5;
         count = count.max(UNTHROTTLED_IMAGES);
         if min_images != 0 {
-            count = count.max(min_images + 2);
+            count = count.max(min_images.saturating_add(2));
         }
     } else if policy == MocktailRustPresentModePolicy::Vsync as c_int {
         const VSYNC_IMAGES: u32 = 4;
         count = count.max(VSYNC_IMAGES);
         if min_images != 0 {
-            count = count.max(min_images + 2);
+            count = count.max(min_images.saturating_add(2));
         }
     } else if policy == MocktailRustPresentModePolicy::Mailbox as c_int {
         count = count.max(3);
+        // The presentation engine can retain more than two images. Mailbox
+        // needs the surface minimum plus one to leave an image for acquisition.
+        if min_images < u32::MAX {
+            count = count.max(min_images + 1);
+        }
     }
     if max_images != 0 {
         count = count.min(max_images);
@@ -6885,20 +6902,47 @@ pub extern "C" fn mocktail_rust_present_mode_filter(
     0
 }
 
+fn present_mode_khr_name_static(mode: u32) -> &'static [u8] {
+    match mode {
+        VK_PRESENT_MODE_IMMEDIATE_KHR => b"immediate\0",
+        VK_PRESENT_MODE_MAILBOX_KHR => b"mailbox\0",
+        VK_PRESENT_MODE_FIFO_KHR => b"fifo\0",
+        VK_PRESENT_MODE_FIFO_RELAXED_KHR => b"fifo-relaxed\0",
+        VK_PRESENT_MODE_FIFO_LATEST_READY_KHR => b"fifo-latest-ready\0",
+        _ => b"other\0",
+    }
+}
+
+fn present_mode_policy_name_static(policy: c_int) -> &'static [u8] {
+    match policy {
+        0 => b"host-default\0",
+        1 => b"vsync\0",
+        2 => b"unthrottled\0",
+        3 => b"fifo\0",
+        4 => b"mailbox\0",
+        5 => b"immediate\0",
+        _ => b"unknown\0",
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_present_mode_khr_name_ptr(mode: u32) -> *const c_char {
+    present_mode_khr_name_static(mode).as_ptr() as *const c_char
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_present_mode_policy_name_ptr(policy: c_int) -> *const c_char {
+    present_mode_policy_name_static(policy).as_ptr() as *const c_char
+}
+
 #[no_mangle]
 pub extern "C" fn mocktail_rust_present_mode_khr_name(
     mode: u32,
     out_buf: *mut c_char,
     cap: usize,
 ) -> c_int {
-    let name = match mode {
-        VK_PRESENT_MODE_IMMEDIATE_KHR => "immediate",
-        VK_PRESENT_MODE_MAILBOX_KHR => "mailbox",
-        VK_PRESENT_MODE_FIFO_KHR => "fifo",
-        VK_PRESENT_MODE_FIFO_RELAXED_KHR => "fifo-relaxed",
-        VK_PRESENT_MODE_FIFO_LATEST_READY_KHR => "fifo-latest-ready",
-        _ => "other",
-    };
+    let bytes = present_mode_khr_name_static(mode);
+    let name = unsafe { std::str::from_utf8_unchecked(&bytes[..bytes.len() - 1]) };
     copy_to_c_buffer(name, out_buf, cap)
 }
 
@@ -6908,15 +6952,8 @@ pub extern "C" fn mocktail_rust_present_mode_policy_name(
     out_buf: *mut c_char,
     cap: usize,
 ) -> c_int {
-    let name = match policy {
-        0 => "host-default",
-        1 => "vsync",
-        2 => "unthrottled",
-        3 => "fifo",
-        4 => "mailbox",
-        5 => "immediate",
-        _ => "unknown",
-    };
+    let bytes = present_mode_policy_name_static(policy);
+    let name = unsafe { std::str::from_utf8_unchecked(&bytes[..bytes.len() - 1]) };
     copy_to_c_buffer(name, out_buf, cap)
 }
 
@@ -10673,8 +10710,19 @@ pub unsafe extern "C" fn mocktail_rust_audio_capture_merge_overrides(
 // ============================================================================
 
 fn copy_error(dst: *mut c_char, cap: usize, msg: &str) {
-    if !dst.is_null() && cap > 0 {
-        copy_to_c_buffer(msg, dst, cap);
+    if dst.is_null() || cap == 0 {
+        return;
+    }
+    let max_bytes = cap - 1;
+    let mut len = msg.len().min(max_bytes);
+    while len > 0 && !msg.is_char_boundary(len) {
+        len -= 1;
+    }
+    unsafe {
+        if len > 0 {
+            std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, dst, len);
+        }
+        *dst.add(len) = 0;
     }
 }
 
@@ -11535,7 +11583,6 @@ const INTERACTIVE_DEFAULTS: &[(&str, &str)] = &[
     ("MOCKTAIL_RESUME_GAME_WITH_PLATFORM_PARAMS_AFTER_START_GAME", "0"),
     ("MOCKTAIL_SEND_APP_READY", "0"),
     ("MOCKTAIL_SEND_GAME_LOADED", "0"),
-    ("MOCKTAIL_MAIN_THREAD_MESSAGE_PUMP", "1"),
     ("MOCKTAIL_AUTO_EXIT_AFTER_PRESENT_MS", "0"),
 ];
 
@@ -12188,20 +12235,29 @@ pub extern "C" fn mocktail_rust_http_spin_limiter_observe(
 // 89. Owned Pthread Wait Status Name
 // ============================================================================
 
+fn owned_pthread_status_name_static(status: i32) -> &'static [u8] {
+    match status {
+        0 => b"Joined\0",
+        1 => b"TimedOut\0",
+        2 => b"PlatformError\0",
+        _ => b"Unknown\0",
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_owned_pthread_status_name_ptr(status: i32) -> *const c_char {
+    owned_pthread_status_name_static(status).as_ptr() as *const c_char
+}
+
 #[no_mangle]
 pub extern "C" fn mocktail_rust_owned_pthread_status_name(
     status: i32,
     out_buf: *mut c_char,
     out_cap: usize,
 ) -> i32 {
-    let name = match status {
-        0 => "Joined",
-        1 => "TimedOut",
-        2 => "PlatformError",
-        _ => "Unknown",
-    };
-    copy_to_c_buffer(name, out_buf, out_cap);
-    0
+    let bytes = owned_pthread_status_name_static(status);
+    let name = unsafe { std::str::from_utf8_unchecked(&bytes[..bytes.len() - 1]) };
+    copy_to_c_buffer(name, out_buf, out_cap)
 }
 
 // ============================================================================
@@ -12624,20 +12680,47 @@ pub extern "C" fn mocktail_rust_evaluate_startup_flags(
 // 97. Roblox App Lifecycle Status Name Engine
 // ============================================================================
 
+fn app_lifecycle_status_name_static(status: i32) -> &'static [u8] {
+    match status {
+        0 => b"Uninitialized\0",
+        1 => b"Ready\0",
+        2 => b"MissingRequiredSymbols\0",
+        _ => b"Unknown\0",
+    }
+}
+
+fn app_shutdown_status_name_static(status: i32) -> &'static [u8] {
+    match status {
+        0 => b"Completed\0",
+        1 => b"AlreadyStopped\0",
+        2 => b"ShutdownInProgress\0",
+        3 => b"MissingRequiredSymbols\0",
+        4 => b"InvalidJniState\0",
+        5 => b"ReasonAllocationFailed\0",
+        6 => b"OperationTimedOut\0",
+        _ => b"Unknown\0",
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_app_lifecycle_status_name_ptr(status: i32) -> *const c_char {
+    app_lifecycle_status_name_static(status).as_ptr() as *const c_char
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_app_shutdown_status_name_ptr(status: i32) -> *const c_char {
+    app_shutdown_status_name_static(status).as_ptr() as *const c_char
+}
+
 #[no_mangle]
 pub extern "C" fn mocktail_rust_app_lifecycle_status_name(
     status: i32,
     out_buf: *mut c_char,
     out_cap: usize,
 ) -> i32 {
-    let name = match status {
-        0 => "Uninitialized",
-        1 => "Ready",
-        2 => "MissingRequiredSymbols",
-        _ => "Unknown",
-    };
-    copy_to_c_buffer(name, out_buf, out_cap);
-    0
+    let bytes = app_lifecycle_status_name_static(status);
+    let name = unsafe { std::str::from_utf8_unchecked(&bytes[..bytes.len() - 1]) };
+    copy_to_c_buffer(name, out_buf, out_cap)
 }
 
 #[no_mangle]
@@ -12646,18 +12729,9 @@ pub extern "C" fn mocktail_rust_app_shutdown_status_name(
     out_buf: *mut c_char,
     out_cap: usize,
 ) -> i32 {
-    let name = match status {
-        0 => "Completed",
-        1 => "AlreadyStopped",
-        2 => "ShutdownInProgress",
-        3 => "MissingRequiredSymbols",
-        4 => "InvalidJniState",
-        5 => "ReasonAllocationFailed",
-        6 => "OperationTimedOut",
-        _ => "Unknown",
-    };
-    copy_to_c_buffer(name, out_buf, out_cap);
-    0
+    let bytes = app_shutdown_status_name_static(status);
+    let name = unsafe { std::str::from_utf8_unchecked(&bytes[..bytes.len() - 1]) };
+    copy_to_c_buffer(name, out_buf, out_cap)
 }
 
 // ============================================================================
@@ -12777,24 +12851,33 @@ pub extern "C" fn mocktail_rust_format_permissions_reply(
 // 100. Client Settings Source Naming & Default URL Builder
 // ============================================================================
 
+fn client_settings_source_name_static(source: i32) -> &'static [u8] {
+    match source {
+        0 => b"explicit JSON\0",
+        1 => b"explicit file\0",
+        2 => b"bundled file\0",
+        3 => b"safe defaults\0",
+        4 => b"download\0",
+        5 => b"cache\0",
+        6 => b"empty defaults\0",
+        _ => b"unknown\0",
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_client_settings_source_name_ptr(source: i32) -> *const c_char {
+    client_settings_source_name_static(source).as_ptr() as *const c_char
+}
+
 #[no_mangle]
 pub extern "C" fn mocktail_rust_client_settings_source_name(
     source: i32,
     out_buf: *mut c_char,
     out_cap: usize,
 ) -> i32 {
-    let name = match source {
-        0 => "explicit JSON",
-        1 => "explicit file",
-        2 => "bundled file",
-        3 => "safe defaults",
-        4 => "download",
-        5 => "cache",
-        6 => "empty defaults",
-        _ => "unknown",
-    };
-    copy_to_c_buffer(name, out_buf, out_cap);
-    0
+    let bytes = client_settings_source_name_static(source);
+    let name = unsafe { std::str::from_utf8_unchecked(&bytes[..bytes.len() - 1]) };
+    copy_to_c_buffer(name, out_buf, out_cap)
 }
 
 #[no_mangle]
@@ -12812,8 +12895,7 @@ pub extern "C" fn mocktail_rust_client_settings_build_url(
         "https://clientsettingscdn.roblox.com/v2/settings/application/{}",
         app
     );
-    copy_to_c_buffer(&url, out_buf, out_cap);
-    0
+    copy_to_c_buffer(&url, out_buf, out_cap)
 }
 
 // ============================================================================
@@ -13128,12 +13210,1863 @@ pub extern "C" fn mocktail_rust_pinned_apk_archive_limits_valid(
 }
 
 // ============================================================================
+// 107. Vulkan Swapchain Present & Surface Maintenance Policy
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_vulkan_select_surface_maintenance_exts(
+    supported_ptrs: *const *const c_char,
+    supported_count: usize,
+    enabled_ptrs: *const *const c_char,
+    enabled_count: usize,
+    out_append_nl: *mut c_char,
+    out_cap: usize,
+    out_len: *mut usize,
+) -> i32 {
+    const VK_KHR_SURFACE: &str = "VK_KHR_surface";
+    const VK_KHR_CAPS2: &str = "VK_KHR_get_surface_capabilities2";
+    const VK_KHR_MAINT1: &str = "VK_KHR_surface_maintenance1";
+    const VK_EXT_MAINT1: &str = "VK_EXT_surface_maintenance1";
+
+    if !out_len.is_null() {
+        unsafe { *out_len = 0 };
+    }
+    if !out_append_nl.is_null() && out_cap > 0 {
+        unsafe { *out_append_nl = 0 };
+    }
+    if (supported_ptrs.is_null() && supported_count > 0)
+        || (enabled_ptrs.is_null() && enabled_count > 0)
+    {
+        return -1;
+    }
+
+    let mut supported: Vec<&str> = Vec::with_capacity(supported_count);
+    for i in 0..supported_count {
+        let p = unsafe { *supported_ptrs.add(i) };
+        if !p.is_null() {
+            if let Ok(s) = unsafe { CStr::from_ptr(p) }.to_str() {
+                supported.push(s);
+            }
+        }
+    }
+
+    let has_supported = |needle: &str| supported.iter().any(|&s| s == needle);
+    let maintenance = if has_supported(VK_KHR_MAINT1) {
+        VK_KHR_MAINT1
+    } else {
+        VK_EXT_MAINT1
+    };
+
+    if !has_supported(maintenance) || !has_supported(VK_KHR_CAPS2) || !has_supported(VK_KHR_SURFACE) {
+        return 0;
+    }
+
+    let mut enabled: Vec<&str> = Vec::with_capacity(enabled_count);
+    for i in 0..enabled_count {
+        let p = unsafe { *enabled_ptrs.add(i) };
+        if !p.is_null() {
+            if let Ok(s) = unsafe { CStr::from_ptr(p) }.to_str() {
+                enabled.push(s);
+            }
+        }
+    }
+
+    let mut to_append = String::new();
+    for &req in &[VK_KHR_SURFACE, VK_KHR_CAPS2, maintenance] {
+        if !enabled.iter().any(|&e| e == req) {
+            if !to_append.is_empty() {
+                to_append.push('\n');
+            }
+            to_append.push_str(req);
+        }
+    }
+
+    if !out_len.is_null() {
+        unsafe { *out_len = to_append.len() };
+    }
+    if !out_append_nl.is_null() {
+        let rc = copy_to_c_buffer(&to_append, out_append_nl, out_cap);
+        if rc != 0 {
+            return rc;
+        }
+    }
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_vulkan_swapchain_image_policy(
+    policy: c_int,
+    selected_present_mode: u32,
+) -> c_int {
+    if selected_present_mode == VK_PRESENT_MODE_MAILBOX_KHR {
+        return MocktailRustPresentModePolicy::Mailbox as c_int;
+    }
+    let mut explicit_mode = 0u32;
+    if mocktail_rust_present_mode_explicit(policy, &mut explicit_mode) != 0
+        && selected_present_mode != explicit_mode
+    {
+        return MocktailRustPresentModePolicy::Fifo as c_int;
+    }
+    policy
+}
+
+// ============================================================================
+// 108. Texture Override Policy, FNV-1a Hash & RGBA Resampler
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_texture_override_has_png(dir_ptr: *const c_char) -> i32 {
+    if dir_ptr.is_null() {
+        return 0;
+    }
+    let dir_str = match unsafe { CStr::from_ptr(dir_ptr) }.to_str() {
+        Ok(s) if !s.is_empty() => s,
+        _ => return 0,
+    };
+    let entries = match std::fs::read_dir(dir_str) {
+        Ok(it) => it,
+        Err(_) => return 0,
+    };
+    for entry in entries.flatten() {
+        if entry.path().extension().and_then(|e| e.to_str()) == Some("png") {
+            return 1;
+        }
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_texture_override_hash_bytes(
+    data: *const u8,
+    size: usize,
+) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    if data.is_null() || size == 0 {
+        return hash;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(data, size) };
+    for &b in slice {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_texture_override_hash_name(
+    hash: u64,
+    out_buf: *mut c_char,
+    out_cap: usize,
+) -> i32 {
+    let text = format!("{hash:016x}");
+    copy_to_c_buffer(&text, out_buf, out_cap)
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_texture_override_resample_rgba(
+    source: *const u8,
+    source_width: u32,
+    source_height: u32,
+    width: u32,
+    height: u32,
+    destination: *mut u8,
+) -> i32 {
+    if source.is_null()
+        || destination.is_null()
+        || width == 0
+        || height == 0
+        || source_width == 0
+        || source_height == 0
+    {
+        return -1;
+    }
+    let src_bytes = match (source_width as usize)
+        .checked_mul(source_height as usize)
+        .and_then(|v| v.checked_mul(4))
+    {
+        Some(v) if v <= isize::MAX as usize => v,
+        _ => return -1,
+    };
+    let dst_bytes = match (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|v| v.checked_mul(4))
+    {
+        Some(v) if v <= isize::MAX as usize => v,
+        _ => return -1,
+    };
+    if width == source_width && height == source_height {
+        if source as *const u8 != destination as *const u8 {
+            unsafe {
+                std::ptr::copy_nonoverlapping(source, destination, dst_bytes);
+            }
+        }
+        return 0;
+    }
+    let src = unsafe { std::slice::from_raw_parts(source, src_bytes) };
+    let dst = unsafe { std::slice::from_raw_parts_mut(destination, dst_bytes) };
+    if width % source_width == 0 && height % source_height == 0 {
+        let scale_x = (width / source_width) as usize;
+        let scale_y = (height / source_height) as usize;
+        let row_bytes = (width as usize) * 4;
+        let mut row = vec![0u8; row_bytes];
+        for y in 0..source_height as usize {
+            let src_row_off = y * (source_width as usize) * 4;
+            for x in 0..source_width as usize {
+                let px = &src[src_row_off + x * 4..src_row_off + x * 4 + 4];
+                for rep in 0..scale_x {
+                    let dst_off = (x * scale_x + rep) * 4;
+                    row[dst_off..dst_off + 4].copy_from_slice(px);
+                }
+            }
+            let target_base = y * scale_y * row_bytes;
+            for rep in 0..scale_y {
+                let row_start = target_base + rep * row_bytes;
+                dst[row_start..row_start + row_bytes].copy_from_slice(&row);
+            }
+        }
+        return 0;
+    }
+    let sw = source_width as u64;
+    let sh = source_height as u64;
+    let dw = width as u64;
+    let dh = height as u64;
+    for y in 0..dh {
+        let y0 = y * sh / dh;
+        let mut y1 = (y + 1) * sh / dh;
+        if y1 <= y0 {
+            y1 = y0 + 1;
+        }
+        for x in 0..dw {
+            let x0 = x * sw / dw;
+            let mut x1 = (x + 1) * sw / dw;
+            if x1 <= x0 {
+                x1 = x0 + 1;
+            }
+            let mut sum = [0u64; 4];
+            for sy in y0..y1 {
+                for sx in x0..x1 {
+                    let off = ((sy * sw + sx) * 4) as usize;
+                    for ch in 0..4 {
+                        sum[ch] += src[off + ch] as u64;
+                    }
+                }
+            }
+            let count = (y1 - y0) * (x1 - x0);
+            let out_off = ((y * dw + x) * 4) as usize;
+            for ch in 0..4 {
+                dst[out_off + ch] = ((sum[ch] + count / 2) / count) as u8;
+            }
+        }
+    }
+    0
+}
+
+// ============================================================================
+// 109. Bundled Sky ETC1-to-BC1 KTX1 Transcoder
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_etc1_is_bundled_sky_texture(path: *const c_char) -> i32 {
+    if path.is_null() {
+        return 0;
+    }
+    let bytes = unsafe { CStr::from_ptr(path) }.to_bytes();
+    const SKY_DIR: &[u8] = b"/assets/android/textures/sky/";
+    let has_dir = bytes.windows(SKY_DIR.len()).any(|w| w == SKY_DIR);
+    if has_dir && bytes.ends_with(b".tex") {
+        1
+    } else {
+        0
+    }
+}
+
+fn etc1_decode_rgb_block(data: &[u8; 8]) -> [[u8; 3]; 16] {
+    const WRITE_ORDER: [usize; 16] = [0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15];
+    const MODIFIER: [[i32; 2]; 8] = [
+        [2, 8],
+        [5, 17],
+        [9, 29],
+        [13, 42],
+        [18, 60],
+        [24, 80],
+        [33, 106],
+        [47, 183],
+    ];
+    const SUBBLOCK: [[usize; 16]; 2] = [
+        [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1],
+        [0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1],
+    ];
+    let expand4 = |v: u8| -> u8 { (v << 4) | v };
+    let expand5 = |v: i32| -> u8 { (((v << 3) | (v >> 2)) & 0xff) as u8 };
+    let sign_ext3 = |v: u8| -> i32 {
+        if (v & 4) != 0 {
+            v as i32 - 8
+        } else {
+            v as i32
+        }
+    };
+
+    let mut color = [[0u8; 3]; 2];
+    if (data[3] & 2) != 0 {
+        for ch in 0..3 {
+            let base = (data[ch] >> 3) as i32;
+            color[0][ch] = expand5(base);
+            color[1][ch] = expand5(base + sign_ext3(data[ch] & 7));
+        }
+    } else {
+        for ch in 0..3 {
+            color[0][ch] = expand4(data[ch] >> 4);
+            color[1][ch] = expand4(data[ch] & 15);
+        }
+    }
+
+    let mut low_indices = ((data[6] as u16) << 8) | (data[7] as u16);
+    let mut high_indices = ((data[4] as u16) << 8) | (data[5] as u16);
+    let code = [(data[3] >> 5) as usize, ((data[3] >> 2) & 7) as usize];
+    let subblock = &SUBBLOCK[(data[3] & 1) as usize];
+    let mut out = [[0u8; 3]; 16];
+    for pixel in 0..16 {
+        let side = subblock[pixel];
+        let modifier = MODIFIER[code[side]][(low_indices & 1) as usize];
+        let delta = if (high_indices & 1) != 0 { -modifier } else { modifier };
+        let base = color[side];
+        out[WRITE_ORDER[pixel]] = [
+            (base[0] as i32 + delta).clamp(0, 255) as u8,
+            (base[1] as i32 + delta).clamp(0, 255) as u8,
+            (base[2] as i32 + delta).clamp(0, 255) as u8,
+        ];
+        low_indices >>= 1;
+        high_indices >>= 1;
+    }
+    out
+}
+
+fn etc1_convert_block_to_bc1_slice(etc1: &[u8; 8], bc1: &mut [u8; 8]) {
+    let pack565 = |c: [u8; 3]| -> u16 {
+        (((c[0] >> 3) as u16) << 11) | (((c[1] >> 2) as u16) << 5) | ((c[2] >> 3) as u16)
+    };
+    let unpack565 = |c: u16| -> [u8; 3] {
+        let r = ((c >> 11) & 31) as u8;
+        let g = ((c >> 5) & 63) as u8;
+        let b = (c & 31) as u8;
+        [(r << 3) | (r >> 2), (g << 2) | (g >> 4), (b << 3) | (b >> 2)]
+    };
+    let dist = |a: [u8; 3], b: [u8; 3]| -> u32 {
+        let dr = a[0] as i32 - b[0] as i32;
+        let dg = a[1] as i32 - b[1] as i32;
+        let db = a[2] as i32 - b[2] as i32;
+        (dr * dr + dg * dg + db * db) as u32
+    };
+
+    let pixels = etc1_decode_rgb_block(etc1);
+    let mut min_c = pixels[0];
+    let mut max_c = pixels[0];
+    for p in &pixels {
+        for ch in 0..3 {
+            min_c[ch] = min_c[ch].min(p[ch]);
+            max_c[ch] = max_c[ch].max(p[ch]);
+        }
+    }
+    for ch in 0..3 {
+        let inset = (max_c[ch] - min_c[ch]) / 16;
+        min_c[ch] += inset;
+        max_c[ch] -= inset;
+    }
+    let mut ep0 = pack565(max_c);
+    let mut ep1 = pack565(min_c);
+    if ep0 < ep1 {
+        std::mem::swap(&mut ep0, &mut ep1);
+    }
+    if ep0 == ep1 {
+        if ep0 < u16::MAX {
+            ep0 += 1;
+        } else {
+            ep1 -= 1;
+        }
+    }
+    let c0 = unpack565(ep0);
+    let c1 = unpack565(ep1);
+    let c2 = [
+        ((2 * c0[0] as u16 + c1[0] as u16) / 3) as u8,
+        ((2 * c0[1] as u16 + c1[1] as u16) / 3) as u8,
+        ((2 * c0[2] as u16 + c1[2] as u16) / 3) as u8,
+    ];
+    let c3 = [
+        ((c0[0] as u16 + 2 * c1[0] as u16) / 3) as u8,
+        ((c0[1] as u16 + 2 * c1[1] as u16) / 3) as u8,
+        ((c0[2] as u16 + 2 * c1[2] as u16) / 3) as u8,
+    ];
+    let palette = [c0, c1, c2, c3];
+    let mut indices = 0u32;
+    for (pix_idx, &pix) in pixels.iter().enumerate() {
+        let mut best_dist = u32::MAX;
+        let mut best_idx = 0u32;
+        for (pal_idx, &pal) in palette.iter().enumerate() {
+            let d = dist(pix, pal);
+            if d < best_dist {
+                best_dist = d;
+                best_idx = pal_idx as u32;
+            }
+        }
+        indices |= best_idx << (pix_idx * 2);
+    }
+    bc1[0..2].copy_from_slice(&ep0.to_le_bytes());
+    bc1[2..4].copy_from_slice(&ep1.to_le_bytes());
+    bc1[4..8].copy_from_slice(&indices.to_le_bytes());
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_etc1_convert_rgb_block_to_bc1(
+    etc1: *const u8,
+    bc1: *mut u8,
+) -> i32 {
+    if etc1.is_null() || bc1.is_null() {
+        return -1;
+    }
+    let src: &[u8; 8] = unsafe { &*(etc1 as *const [u8; 8]) };
+    let dst: &mut [u8; 8] = unsafe { &mut *(bc1 as *mut [u8; 8]) };
+    etc1_convert_block_to_bc1_slice(src, dst);
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_etc1_transcode_ktx1_for_vulkan(
+    data: *mut u8,
+    len: usize,
+) -> i32 {
+    const KTX1_HEADER_SIZE: usize = 64;
+    const KTX1_IDENT: [u8; 12] = [0xab, 0x4b, 0x54, 0x58, 0x20, 0x31, 0x31, 0xbb, 0x0d, 0x0a, 0x1a, 0x0a];
+    const KTX1_LE: u32 = 0x04030201;
+    const GL_ETC1_RGB8_OES: u32 = 0x00008d64;
+    const GL_COMPRESSED_RGB_S3TC_DXT1: u32 = 0x000083f0;
+    const GL_RGB: u32 = 0x00001907;
+    const MAX_SKY_SIZE: usize = 16 * 1024 * 1024;
+
+    if data.is_null() || len < KTX1_HEADER_SIZE || len > MAX_SKY_SIZE {
+        return 0;
+    }
+    let file = unsafe { std::slice::from_raw_parts_mut(data, len) };
+    let le32 = |off: usize| -> u32 {
+        u32::from_le_bytes([file[off], file[off + 1], file[off + 2], file[off + 3]])
+    };
+
+    if file[0..12] != KTX1_IDENT
+        || le32(12) != KTX1_LE
+        || le32(16) != 0
+        || le32(20) != 1
+        || le32(24) != 0
+        || le32(28) != GL_ETC1_RGB8_OES
+        || le32(32) != GL_RGB
+    {
+        return 0;
+    }
+    let width = le32(36);
+    let height = le32(40);
+    let depth = le32(44);
+    let array_elements = le32(48);
+    let faces = le32(52);
+    let mip_levels = le32(56);
+    let key_value_bytes = le32(60) as usize;
+    if width == 0
+        || height == 0
+        || depth != 0
+        || array_elements != 0
+        || faces != 1
+        || mip_levels == 0
+        || mip_levels > 32
+        || key_value_bytes > len - KTX1_HEADER_SIZE
+    {
+        return 0;
+    }
+
+    let mut offset = KTX1_HEADER_SIZE + key_value_bytes;
+    let mut mip_w = width;
+    let mut mip_h = height;
+    for _ in 0..mip_levels {
+        if offset > len || len - offset < 4 {
+            return 0;
+        }
+        let image_size = u32::from_le_bytes([file[offset], file[offset + 1], file[offset + 2], file[offset + 3]]) as usize;
+        offset += 4;
+        let blocks = (((mip_w as u64 + 3) / 4) * ((mip_h as u64 + 3) / 4)) * 8;
+        if (image_size as u64) != blocks || image_size > len - offset {
+            return 0;
+        }
+        for block_off in (0..image_size).step_by(8) {
+            let block_slice: [u8; 8] = file[offset + block_off..offset + block_off + 8].try_into().unwrap();
+            let mut converted = [0u8; 8];
+            etc1_convert_block_to_bc1_slice(&block_slice, &mut converted);
+            file[offset + block_off..offset + block_off + 8].copy_from_slice(&converted);
+        }
+        offset += image_size;
+        let padding = (4 - (image_size % 4)) % 4;
+        if padding > len - offset {
+            return 0;
+        }
+        offset += padding;
+        mip_w = (mip_w / 2).max(1);
+        mip_h = (mip_h / 2).max(1);
+    }
+
+    file[28..32].copy_from_slice(&GL_COMPRESSED_RGB_S3TC_DXT1.to_le_bytes());
+    1
+}
+
+// ============================================================================
+// 110. Vulkan ETC2 Emulation Helpers & Streaming Staging Copy
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_vulkan_etc2_lookup_format(
+    vk_format: i32,
+    out_host_format: *mut i32,
+    out_etc_format: *mut i32,
+) -> i32 {
+    const VK_FORMAT_R8G8B8A8_UNORM: i32 = 37;
+    const VK_FORMAT_R8G8B8A8_SRGB: i32 = 43;
+    const VK_FORMAT_R16_UNORM: i32 = 70;
+    const VK_FORMAT_R16_SNORM: i32 = 71;
+    const VK_FORMAT_R16G16_UNORM: i32 = 77;
+    const VK_FORMAT_R16G16_SNORM: i32 = 78;
+
+    let (host, etc) = match vk_format {
+        147 => (VK_FORMAT_R8G8B8A8_UNORM, 0),
+        148 => (VK_FORMAT_R8G8B8A8_SRGB, 0),
+        149 => (VK_FORMAT_R8G8B8A8_UNORM, 1),
+        150 => (VK_FORMAT_R8G8B8A8_SRGB, 1),
+        151 => (VK_FORMAT_R8G8B8A8_UNORM, 2),
+        152 => (VK_FORMAT_R8G8B8A8_SRGB, 2),
+        153 => (VK_FORMAT_R16_UNORM, 3),
+        154 => (VK_FORMAT_R16_SNORM, 4),
+        155 => (VK_FORMAT_R16G16_UNORM, 5),
+        156 => (VK_FORMAT_R16G16_SNORM, 6),
+        _ => return 0,
+    };
+    if !out_host_format.is_null() {
+        unsafe { *out_host_format = host };
+    }
+    if !out_etc_format.is_null() {
+        unsafe { *out_etc_format = etc };
+    }
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_vulkan_etc2_emulated_features(host_features: u32) -> u32 {
+    const COMPRESSED_FEATURES: u32 = 0x0000_0001 | 0x0000_1000 | 0x0000_0400 | 0x0000_4000 | 0x0000_8000;
+    host_features & COMPRESSED_FEATURES
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_vulkan_etc2_upload_byte_counts(
+    block_bytes: u64,
+    texel_bytes: u64,
+    width: u32,
+    height: u32,
+    depth: u32,
+    layer_count: u32,
+    out_compressed: *mut u64,
+    out_decoded: *mut u64,
+) -> i32 {
+    if width == 0
+        || height == 0
+        || depth != 1
+        || layer_count == 0
+        || out_compressed.is_null()
+        || out_decoded.is_null()
+    {
+        return 0;
+    }
+    let blocks_w = (width as u64).saturating_add(3) / 4;
+    let blocks_h = (height as u64).saturating_add(3) / 4;
+    let compressed = blocks_w
+        .checked_mul(blocks_h)
+        .and_then(|b| b.checked_mul(block_bytes))
+        .and_then(|b| b.checked_mul(layer_count as u64));
+    let decoded = (width as u64)
+        .checked_mul(height as u64)
+        .and_then(|p| p.checked_mul(texel_bytes))
+        .and_then(|p| p.checked_mul(layer_count as u64));
+    match (compressed, decoded) {
+        (Some(c), Some(d)) => {
+            unsafe {
+                *out_compressed = c;
+                *out_decoded = d;
+            }
+            1
+        }
+        _ => 0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_vulkan_etc2_support_advertised(value: *const c_char) -> i32 {
+    if value.is_null() {
+        return 1;
+    }
+    if unsafe { CStr::from_ptr(value) }.to_bytes() != b"0" {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_vulkan_etc2_small_texture_upscale(value: *const c_char) -> u32 {
+    if value.is_null() {
+        return 1;
+    }
+    let bytes = unsafe { CStr::from_ptr(value) }.to_bytes();
+    if bytes.is_empty() || !bytes[0].is_ascii_digit() {
+        return 1;
+    }
+    let mut parsed: u64 = 0;
+    for &b in bytes {
+        if !b.is_ascii_digit() {
+            break;
+        }
+        parsed = parsed.saturating_mul(10).saturating_add((b - b'0') as u64);
+    }
+    parsed.clamp(1, 8) as u32
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse4.1")]
+unsafe fn copy_from_mapped_sse41(mut dst: *mut u8, mut src: *const u8, mut size: usize) {
+    use std::arch::x86_64::{__m128i, _mm_storeu_si128, _mm_stream_load_si128};
+    while size != 0 && ((src as usize) & 15) != 0 {
+        *dst = *src;
+        dst = dst.add(1);
+        src = src.add(1);
+        size -= 1;
+    }
+    let mut in_ptr = src as *mut __m128i;
+    while size >= 64 {
+        let a = _mm_stream_load_si128(in_ptr);
+        let b = _mm_stream_load_si128(in_ptr.add(1));
+        let c = _mm_stream_load_si128(in_ptr.add(2));
+        let d = _mm_stream_load_si128(in_ptr.add(3));
+        _mm_storeu_si128(dst as *mut __m128i, a);
+        _mm_storeu_si128(dst.add(16) as *mut __m128i, b);
+        _mm_storeu_si128(dst.add(32) as *mut __m128i, c);
+        _mm_storeu_si128(dst.add(48) as *mut __m128i, d);
+        in_ptr = in_ptr.add(4);
+        dst = dst.add(64);
+        size -= 64;
+    }
+    if size > 0 {
+        std::ptr::copy_nonoverlapping(in_ptr as *const u8, dst, size);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_vulkan_etc2_copy_from_mapped(
+    destination: *mut u8,
+    source: *const u8,
+    size: usize,
+) {
+    if destination.is_null() || source.is_null() || size == 0 || destination as *const u8 == source {
+        return;
+    }
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("sse4.1") {
+        unsafe {
+            copy_from_mapped_sse41(destination, source, size);
+        }
+        return;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(source, destination, size);
+    }
+}
+
+// ============================================================================
+// 111. Graphics Launch Policy, PCI GPU & Vulkan ICD Selector
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_graphics_is_haswell_intel(device_id: u32) -> i32 {
+    let matched = (0x0150..=0x016a).contains(&device_id)
+        || (0x0400..=0x042f).contains(&device_id)
+        || (0x0a00..=0x0a2f).contains(&device_id)
+        || (0x0c00..=0x0c2f).contains(&device_id)
+        || (0x0d00..=0x0d2f).contains(&device_id);
+    if matched { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_graphics_parse_pci_hex(
+    raw: *const c_char,
+    out_val: *mut u32,
+) -> i32 {
+    if raw.is_null() || out_val.is_null() {
+        return 0;
+    }
+    let s = match unsafe { CStr::from_ptr(raw) }.to_str() {
+        Ok(s) => s.trim(),
+        Err(_) => return 0,
+    };
+    let hex_part = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+    if hex_part.is_empty() {
+        return 0;
+    }
+    match u32::from_str_radix(hex_part, 16) {
+        Ok(v) if v <= 0xffff => {
+            unsafe { *out_val = v };
+            1
+        }
+        _ => 0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_graphics_anv_sys_mem_limit_percent(
+    meminfo_content: *const c_char,
+) -> u32 {
+    if meminfo_content.is_null() {
+        return 50;
+    }
+    let content = match unsafe { CStr::from_ptr(meminfo_content) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return 50,
+    };
+    for line in content.lines() {
+        let mut parts = line.split_whitespace();
+        if parts.next() == Some("MemTotal:") {
+            if let Some(kb_str) = parts.next() {
+                if let Ok(kb) = kb_str.parse::<u64>() {
+                    return if kb > 4 * 1024 * 1024 { 75 } else { 50 };
+                }
+            }
+        }
+    }
+    50
+}
+
+fn is_foreign_icd_arch(name: &str, target_is_aarch64: bool) -> bool {
+    const FOREIGN_X86_64: &[&str] = &[
+        "i686", "i586", "i486", "i386", "x86.", "aarch64", "arm64", "armhf", "armv7", "ppc64",
+        "riscv64", "s390x",
+    ];
+    const FOREIGN_AARCH64: &[&str] = &[
+        "i686", "i586", "i486", "i386", "x86_64", "x86.", "amd64", "armhf", "armv7", "ppc64",
+        "riscv64", "s390x",
+    ];
+    let list = if target_is_aarch64 { FOREIGN_AARCH64 } else { FOREIGN_X86_64 };
+    list.iter().any(|&arch| name.contains(arch))
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_graphics_is_foreign_icd_name(
+    name: *const c_char,
+    target_is_aarch64: i32,
+) -> i32 {
+    if name.is_null() {
+        return 0;
+    }
+    match unsafe { CStr::from_ptr(name) }.to_str() {
+        Ok(s) if is_foreign_icd_arch(s, target_is_aarch64 != 0) => 1,
+        _ => 0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_graphics_select_icd_manifest(
+    dirs_nl: *const c_char,
+    needle: *const c_char,
+    target_is_aarch64: i32,
+    out_buf: *mut c_char,
+    out_cap: usize,
+) -> i32 {
+    if !out_buf.is_null() && out_cap > 0 {
+        unsafe { *out_buf = 0 };
+    }
+    if dirs_nl.is_null() || needle.is_null() {
+        return -1;
+    }
+    let dirs_str = match unsafe { CStr::from_ptr(dirs_nl) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let needle_str = match unsafe { CStr::from_ptr(needle) }.to_str() {
+        Ok(s) if !s.is_empty() => s,
+        _ => return 0,
+    };
+    let native_arch = if target_is_aarch64 != 0 { "aarch64" } else { "x86_64" };
+
+    for dir in dirs_str.lines().filter(|d| !d.is_empty()) {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let mut names: Vec<String> = Vec::new();
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if !meta.is_file() {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+            if let Some(fname) = entry.file_name().to_str() {
+                if fname.contains(".json")
+                    && fname.contains(needle_str)
+                    && !is_foreign_icd_arch(fname, target_is_aarch64 != 0)
+                {
+                    names.push(fname.to_string());
+                }
+            }
+        }
+        names.sort();
+        let mut generic: Option<String> = None;
+        for name in names {
+            let full = Path::new(dir).join(&name);
+            if File::open(&full).is_err() {
+                continue;
+            }
+            let full_str = full.to_string_lossy();
+            if name.contains(native_arch) {
+                return copy_to_c_buffer(&full_str, out_buf, out_cap);
+            }
+            if generic.is_none() {
+                generic = Some(full_str.into_owned());
+            }
+        }
+        if let Some(g) = generic {
+            return copy_to_c_buffer(&g, out_buf, out_cap);
+        }
+    }
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_graphics_is_radv_icd_list(manifests: *const c_char) -> i32 {
+    if manifests.is_null() {
+        return 0;
+    }
+    let s = match unsafe { CStr::from_ptr(manifests) }.to_str() {
+        Ok(s) if !s.is_empty() => s,
+        _ => return 0,
+    };
+    let mut saw_any = false;
+    for part in s.split(':') {
+        if part.is_empty() {
+            return 0;
+        }
+        let path = Path::new(part);
+        let fname = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if !fname.starts_with("radeon_icd.") || ext != "json" {
+            return 0;
+        }
+        saw_any = true;
+    }
+    if saw_any { 1 } else { 0 }
+}
+
+// ============================================================================
+// 112. Graphics Backend Selection Policy
+// ============================================================================
+
+fn graphics_backend_name_str(backend: i32) -> &'static str {
+    match backend {
+        0 => "angle-vulkan",
+        1 => "direct-vulkan",
+        2 => "system-egl",
+        _ => "unknown",
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_graphics_backend_name_ptr(backend: i32) -> *const c_char {
+    let bytes: &'static [u8] = match backend {
+        0 => b"angle-vulkan\0",
+        1 => b"direct-vulkan\0",
+        2 => b"system-egl\0",
+        _ => b"unknown\0",
+    };
+    bytes.as_ptr() as *const c_char
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_graphics_backend_select(
+    requested: i32,
+    allow_fallback: i32,
+    require_hw: i32,
+    require_runtime: i32,
+    caps_backends: *const i32,
+    caps_states: *const i32,
+    caps_accels: *const i32,
+    caps_details: *const *const c_char,
+    caps_count: usize,
+    out_selected_backend: *mut i32,
+    out_detail_buf: *mut c_char,
+    out_detail_cap: usize,
+) -> i32 {
+    if out_selected_backend.is_null() {
+        return -1;
+    }
+    if caps_count > 0
+        && (caps_backends.is_null()
+            || caps_states.is_null()
+            || caps_accels.is_null()
+            || caps_details.is_null())
+    {
+        copy_error(out_detail_buf, out_detail_cap, "invalid graphics capability array");
+        unsafe { *out_selected_backend = requested };
+        return -1;
+    }
+
+    let find_idx = |target_backend: i32| -> Option<usize> {
+        for i in 0..caps_count {
+            let b = unsafe { *caps_backends.add(i) };
+            if b == target_backend {
+                return Some(i);
+            }
+        }
+        None
+    };
+
+    let is_usable = |idx: usize| -> bool {
+        let state = unsafe { *caps_states.add(idx) };
+        let accel = unsafe { *caps_accels.add(idx) };
+        if state == 0 {
+            return false; // kUnavailable
+        }
+        if require_runtime != 0 && state != 2 {
+            return false; // kReady == 2
+        }
+        if require_hw != 0 && accel != 2 {
+            return false; // kHardware == 2
+        }
+        true
+    };
+
+    let read_detail = |idx: usize| -> String {
+        let p = unsafe { *caps_details.add(idx) };
+        if p.is_null() {
+            String::new()
+        } else {
+            unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+        }
+    };
+
+    if let Some(req_idx) = find_idx(requested) {
+        if is_usable(req_idx) {
+            unsafe { *out_selected_backend = requested };
+            let d = read_detail(req_idx);
+            copy_error(out_detail_buf, out_detail_cap, &d);
+            return 0;
+        }
+    }
+
+    let mut reason = format!(
+        "requested graphics backend {}",
+        graphics_backend_name_str(requested)
+    );
+    match find_idx(requested) {
+        None => reason.push_str(" was not probed"),
+        Some(idx) => {
+            let d = read_detail(idx);
+            if !d.is_empty() {
+                reason.push_str(" is unavailable: ");
+                reason.push_str(&d);
+            } else {
+                reason.push_str(" did not satisfy the production capability policy");
+            }
+        }
+    }
+
+    if allow_fallback != 0 {
+        for &candidate in &[0i32, 1i32, 2i32] {
+            if candidate == requested {
+                continue;
+            }
+            if let Some(idx) = find_idx(candidate) {
+                if is_usable(idx) {
+                    unsafe { *out_selected_backend = candidate };
+                    let d = read_detail(idx);
+                    copy_error(out_detail_buf, out_detail_cap, &d);
+                    return 0;
+                }
+            }
+        }
+        reason.push_str("; no explicitly allowed fallback satisfies the policy");
+    }
+
+    unsafe { *out_selected_backend = requested };
+    copy_error(out_detail_buf, out_detail_cap, &reason);
+    -1
+}
+
+// ============================================================================
+// 113. Window Surface Lifecycle State Machine & Creation Policy
+// ============================================================================
+
+const SURFACE_MIN_WIDTH: u32 = 160;
+const SURFACE_MIN_HEIGHT: u32 = 120;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MocktailRustSurfaceSnapshot {
+    pub generation: u64,
+    pub native_window: usize,
+    pub width: u32,
+    pub height: u32,
+    pub available: i32,
+    pub dpi_scale: f32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MocktailRustSurfaceEvent {
+    pub event_type: i32, // 0=Created, 1=Changed, 2=Destroyed
+    pub surface: MocktailRustSurfaceSnapshot,
+}
+
+struct SurfaceLifecycleEngine {
+    events: std::collections::VecDeque<MocktailRustSurfaceEvent>,
+    current: MocktailRustSurfaceSnapshot,
+    active: bool,
+}
+
+impl Default for SurfaceLifecycleEngine {
+    fn default() -> Self {
+        Self {
+            events: std::collections::VecDeque::new(),
+            current: MocktailRustSurfaceSnapshot {
+                dpi_scale: 1.0,
+                ..Default::default()
+            },
+            active: false,
+        }
+    }
+}
+
+impl SurfaceLifecycleEngine {
+    fn valid_available(native_window: usize, width: u32, height: u32, dpi_scale: f32) -> bool {
+        native_window != 0
+            && width >= SURFACE_MIN_WIDTH
+            && height >= SURFACE_MIN_HEIGHT
+            && dpi_scale.is_finite()
+            && dpi_scale > 0.0
+    }
+
+    fn queue(&mut self, event_type: i32, surface: MocktailRustSurfaceSnapshot) {
+        if event_type == 1 {
+            if let Some(last) = self.events.back_mut() {
+                if last.event_type == 1 && last.surface.generation == surface.generation {
+                    last.surface = surface;
+                    return;
+                }
+            }
+        }
+        self.events.push_back(MocktailRustSurfaceEvent {
+            event_type,
+            surface,
+        });
+    }
+
+    fn restore(&mut self, native_window: usize, width: u32, height: u32, dpi_scale: f32) -> Result<(), &'static str> {
+        if self.current.generation == u64::MAX {
+            return Err("window surface generation overflowed");
+        }
+        self.current.generation += 1;
+        self.current.native_window = native_window;
+        self.current.width = width;
+        self.current.height = height;
+        self.current.dpi_scale = dpi_scale;
+        self.current.available = 1;
+        let snap = self.current;
+        self.queue(0, snap);
+        self.queue(1, snap);
+        Ok(())
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_surface_lifecycle_new() -> *mut std::ffi::c_void {
+    Box::into_raw(Box::new(SurfaceLifecycleEngine::default())) as *mut std::ffi::c_void
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_surface_lifecycle_free(ptr: *mut std::ffi::c_void) {
+    if !ptr.is_null() {
+        unsafe {
+            drop(Box::from_raw(ptr as *mut SurfaceLifecycleEngine));
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_surface_lifecycle_activate(
+    ptr: *mut std::ffi::c_void,
+    native_window: usize,
+    width: u32,
+    height: u32,
+    dpi_scale: f32,
+    err_buf: *mut c_char,
+    err_cap: usize,
+) -> i32 {
+    if ptr.is_null() {
+        return -1;
+    }
+    let st = unsafe { &mut *(ptr as *mut SurfaceLifecycleEngine) };
+    if st.active {
+        copy_error(err_buf, err_cap, "window surface lifecycle is already active");
+        return 1;
+    }
+    if !SurfaceLifecycleEngine::valid_available(native_window, width, height, dpi_scale) {
+        copy_error(
+            err_buf,
+            err_cap,
+            "initial window surface requires a native handle, dimensions and DPI scale",
+        );
+        return 2;
+    }
+    st.events.clear();
+    st.current = MocktailRustSurfaceSnapshot {
+        generation: 1,
+        native_window,
+        width,
+        height,
+        available: 1,
+        dpi_scale,
+    };
+    st.active = true;
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_surface_lifecycle_deactivate(ptr: *mut std::ffi::c_void) {
+    if ptr.is_null() {
+        return;
+    }
+    let st = unsafe { &mut *(ptr as *mut SurfaceLifecycleEngine) };
+    st.active = false;
+    st.events.clear();
+    st.current = MocktailRustSurfaceSnapshot {
+        dpi_scale: 1.0,
+        ..Default::default()
+    };
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_surface_lifecycle_observe(
+    ptr: *mut std::ffi::c_void,
+    native_window: usize,
+    width: u32,
+    height: u32,
+    dpi_scale: f32,
+    err_buf: *mut c_char,
+    err_cap: usize,
+) -> i32 {
+    if ptr.is_null() {
+        return -1;
+    }
+    let st = unsafe { &mut *(ptr as *mut SurfaceLifecycleEngine) };
+    if !st.active {
+        copy_error(err_buf, err_cap, "window surface lifecycle is not active");
+        return 1;
+    }
+    if native_window == 0 {
+        if st.current.available != 0 {
+            let mut destroyed = st.current;
+            destroyed.available = 0;
+            st.queue(2, destroyed);
+            st.current.native_window = 0;
+            st.current.available = 0;
+        }
+        return 0;
+    }
+    if !dpi_scale.is_finite() || dpi_scale <= 0.0 {
+        copy_error(err_buf, err_cap, "observed window surface requires a DPI scale");
+        return 2;
+    }
+    if width < SURFACE_MIN_WIDTH || height < SURFACE_MIN_HEIGHT {
+        if st.current.available != 0 && native_window != st.current.native_window {
+            let mut destroyed = st.current;
+            destroyed.available = 0;
+            st.queue(2, destroyed);
+            st.current.native_window = 0;
+            st.current.available = 0;
+        }
+        return 0;
+    }
+    if st.current.available == 0 {
+        return match st.restore(native_window, width, height, dpi_scale) {
+            Ok(()) => 0,
+            Err(msg) => {
+                copy_error(err_buf, err_cap, msg);
+                1
+            }
+        };
+    }
+    if native_window != st.current.native_window {
+        let mut destroyed = st.current;
+        destroyed.available = 0;
+        st.queue(2, destroyed);
+        st.current.native_window = 0;
+        st.current.available = 0;
+        return match st.restore(native_window, width, height, dpi_scale) {
+            Ok(()) => 0,
+            Err(msg) => {
+                copy_error(err_buf, err_cap, msg);
+                1
+            }
+        };
+    }
+    if width == st.current.width && height == st.current.height && dpi_scale == st.current.dpi_scale {
+        return 0;
+    }
+    st.current.width = width;
+    st.current.height = height;
+    st.current.dpi_scale = dpi_scale;
+    let snap = st.current;
+    st.queue(1, snap);
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_surface_lifecycle_refresh(
+    ptr: *mut std::ffi::c_void,
+    err_buf: *mut c_char,
+    err_cap: usize,
+) -> i32 {
+    if ptr.is_null() {
+        return -1;
+    }
+    let st = unsafe { &mut *(ptr as *mut SurfaceLifecycleEngine) };
+    if !st.active {
+        copy_error(err_buf, err_cap, "window surface lifecycle is not active");
+        return 1;
+    }
+    if st.current.available == 0
+        || !SurfaceLifecycleEngine::valid_available(
+            st.current.native_window,
+            st.current.width,
+            st.current.height,
+            st.current.dpi_scale,
+        )
+    {
+        copy_error(err_buf, err_cap, "window surface is unavailable for refresh");
+        return 1;
+    }
+    let snap = st.current;
+    st.queue(1, snap);
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_surface_lifecycle_recreate(
+    ptr: *mut std::ffi::c_void,
+    err_buf: *mut c_char,
+    err_cap: usize,
+) -> i32 {
+    if ptr.is_null() {
+        return -1;
+    }
+    let st = unsafe { &mut *(ptr as *mut SurfaceLifecycleEngine) };
+    if !st.active {
+        copy_error(err_buf, err_cap, "window surface lifecycle is not active");
+        return 1;
+    }
+    if st.current.available == 0
+        || !SurfaceLifecycleEngine::valid_available(
+            st.current.native_window,
+            st.current.width,
+            st.current.height,
+            st.current.dpi_scale,
+        )
+    {
+        copy_error(err_buf, err_cap, "window surface is unavailable for recreation");
+        return 1;
+    }
+    if st.current.generation == u64::MAX {
+        copy_error(err_buf, err_cap, "window surface generation overflowed");
+        return 1;
+    }
+    let mut destroyed = st.current;
+    destroyed.available = 0;
+    st.queue(2, destroyed);
+    st.current.generation += 1;
+    let snap = st.current;
+    st.queue(0, snap);
+    st.queue(1, snap);
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_surface_lifecycle_poll(
+    ptr: *mut std::ffi::c_void,
+    out_event: *mut MocktailRustSurfaceEvent,
+) -> i32 {
+    if ptr.is_null() || out_event.is_null() {
+        return 0;
+    }
+    let st = unsafe { &mut *(ptr as *mut SurfaceLifecycleEngine) };
+    match st.events.pop_front() {
+        Some(ev) => {
+            unsafe { *out_event = ev };
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_surface_lifecycle_snapshot(
+    ptr: *const std::ffi::c_void,
+    out_snapshot: *mut MocktailRustSurfaceSnapshot,
+) -> i32 {
+    if ptr.is_null() || out_snapshot.is_null() {
+        return 0;
+    }
+    let st = unsafe { &*(ptr as *const SurfaceLifecycleEngine) };
+    unsafe { *out_snapshot = st.current };
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_surface_lifecycle_is_active(ptr: *const std::ffi::c_void) -> i32 {
+    if ptr.is_null() {
+        return 0;
+    }
+    let st = unsafe { &*(ptr as *const SurfaceLifecycleEngine) };
+    if st.active { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_surface_event_type_name_ptr(event_type: i32) -> *const c_char {
+    let bytes: &'static [u8] = match event_type {
+        0 => b"Created\0",
+        1 => b"Changed\0",
+        2 => b"Destroyed\0",
+        _ => b"Unknown\0",
+    };
+    bytes.as_ptr() as *const c_char
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_window_apply_high_dpi_flag(
+    flags: u64,
+    high_dpi: i32,
+    high_dpi_bit: u64,
+) -> u64 {
+    if high_dpi != 0 {
+        flags | high_dpi_bit
+    } else {
+        flags & !high_dpi_bit
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_window_direct_vulkan_requires_sync(
+    video_driver: *const c_char,
+) -> i32 {
+    if video_driver.is_null() {
+        return 0;
+    }
+    if unsafe { CStr::from_ptr(video_driver) }.to_bytes() == b"wayland" {
+        1
+    } else {
+        0
+    }
+}
+
+// ============================================================================
+// 114. Roblox Presence Cookie Extractor & JSON Parser
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_presence_extract_cookie(
+    raw_cookie: *const c_char,
+    out_buf: *mut c_char,
+    out_cap: usize,
+) -> i32 {
+    if raw_cookie.is_null() || out_buf.is_null() || out_cap == 0 {
+        return -1;
+    }
+    let owned = zeroize::Zeroizing::new(
+        unsafe { CStr::from_ptr(raw_cookie) }.to_string_lossy().into_owned(),
+    );
+    let mut found: Option<&str> = None;
+    for raw_seg in owned.split(|c| c == ';' || c == '\r' || c == '\n' || c == '\t') {
+        let seg = raw_seg.trim_start_matches(' ');
+        if let Some(rest) = seg.strip_prefix(".ROBLOSECURITY=") {
+            found = Some(rest);
+            break;
+        }
+        if seg.starts_with("_|") {
+            found = Some(seg);
+            break;
+        }
+    }
+    let value = match found {
+        Some(v) => v,
+        None => {
+            unsafe { *out_buf = 0 };
+            return 0;
+        }
+    };
+    if value.bytes().any(|b| b <= 0x20 || b >= 0x7f || b == b';') {
+        unsafe { *out_buf = 0 };
+        return 0;
+    }
+    let wrapped = zeroize::Zeroizing::new(value.to_string());
+    copy_to_c_buffer(&wrapped, out_buf, out_cap)
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_presence_parse_follow_response(
+    json_str: *const c_char,
+    out_place_id: *mut i64,
+    out_game_id: *mut c_char,
+    out_game_id_cap: usize,
+    err_buf: *mut c_char,
+    err_cap: usize,
+) -> i32 {
+    if !out_game_id.is_null() && out_game_id_cap > 0 {
+        unsafe { *out_game_id = 0 };
+    }
+    if json_str.is_null() || out_place_id.is_null() {
+        copy_error(err_buf, err_cap, "Roblox presence lookup returned malformed JSON");
+        return -1;
+    }
+    let s = match unsafe { CStr::from_ptr(json_str) }.to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            copy_error(err_buf, err_cap, "Roblox presence lookup returned malformed JSON");
+            return -1;
+        }
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(s) {
+        Ok(v) => v,
+        Err(_) => {
+            copy_error(err_buf, err_cap, "Roblox presence lookup returned malformed JSON");
+            return -1;
+        }
+    };
+    let presences = match parsed.get("userPresences").and_then(|v| v.as_array()) {
+        Some(a) if !a.is_empty() => a,
+        _ => {
+            copy_error(err_buf, err_cap, "Roblox presence lookup returned no data for user");
+            return -1;
+        }
+    };
+    let presence = &presences[0];
+    let ptype = presence
+        .get("userPresenceType")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    if ptype != 2 {
+        copy_error(
+            err_buf,
+            err_cap,
+            "User is not currently in a joinable Roblox experience",
+        );
+        return -1;
+    }
+    let place_val = match presence.get("placeId") {
+        Some(v) if !v.is_null() => v,
+        _ => {
+            copy_error(
+                err_buf,
+                err_cap,
+                "Roblox presence lookup did not include a placeId",
+            );
+            return -1;
+        }
+    };
+    let place_id = place_val.as_i64().unwrap_or(0);
+    if place_id <= 0 {
+        copy_error(
+            err_buf,
+            err_cap,
+            "Roblox presence lookup returned an invalid placeId",
+        );
+        return -1;
+    }
+    if let Some(game_id) = presence.get("gameId").and_then(|v| v.as_str()) {
+        if !out_game_id.is_null() {
+            let rc = copy_to_c_buffer(game_id, out_game_id, out_game_id_cap);
+            if rc != 0 {
+                copy_error(err_buf, err_cap, "Roblox presence gameId buffer too small");
+                return -2;
+            }
+        }
+    }
+    unsafe { *out_place_id = place_id };
+    0
+}
+
+// ============================================================================
+// 115. Bounded JSON State File Reader/Validator
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_update_state_read_json_file(
+    path_ptr: *const c_char,
+    out_buf: *mut c_char,
+    out_cap: usize,
+    out_len: *mut usize,
+) -> i32 {
+    const MAX_STATE_BYTES: u64 = 65536;
+    if !out_len.is_null() {
+        unsafe { *out_len = 0 };
+    }
+    if !out_buf.is_null() && out_cap > 0 {
+        unsafe { *out_buf = 0 };
+    }
+    if path_ptr.is_null() || out_buf.is_null() || out_cap == 0 {
+        return -1;
+    }
+    let path_str = match unsafe { CStr::from_ptr(path_ptr) }.to_str() {
+        Ok(s) if !s.is_empty() => s,
+        _ => return -1,
+    };
+    let meta = match std::fs::symlink_metadata(path_str) {
+        Ok(m) => m,
+        Err(_) => return -1,
+    };
+    if meta.file_type().is_symlink() || !meta.file_type().is_file() || meta.len() > MAX_STATE_BYTES {
+        return -1;
+    }
+    let file = match File::open(path_str) {
+        Ok(f) => f,
+        Err(_) => return -1,
+    };
+    let mut buf = String::new();
+    if file
+        .take(MAX_STATE_BYTES + 1)
+        .read_to_string(&mut buf)
+        .is_err()
+        || buf.len() as u64 > MAX_STATE_BYTES
+    {
+        return -1;
+    }
+    let doc: serde_json::Value = match serde_json::from_str(&buf) {
+        Ok(v) => v,
+        Err(_) => return -1,
+    };
+    if !doc.is_object() {
+        return -1;
+    }
+    let rc = copy_to_c_buffer(&buf, out_buf, out_cap);
+    if rc == 0 && !out_len.is_null() {
+        unsafe { *out_len = buf.len() };
+    }
+    rc
+}
+
+// ============================================================================
+// 116. WebView Helper Security Policy & Navigation URI Evaluator
+// ============================================================================
+
+fn webview_is_safe_version_str(version: &str) -> bool {
+    !version.is_empty()
+        && version.len() <= 32
+        && version
+            .bytes()
+            .all(|b| b.is_ascii_digit() || b == b'.' || b == b'-')
+}
+
+fn webview_is_roblox_host_str(host: &str) -> bool {
+    const ROOT: &str = "roblox.com";
+    if host.len() < ROOT.len() {
+        return false;
+    }
+    let tail = &host[host.len() - ROOT.len()..];
+    if !tail.eq_ignore_ascii_case(ROOT) {
+        return false;
+    }
+    host.len() == ROOT.len() || host.as_bytes()[host.len() - ROOT.len() - 1] == b'.'
+}
+
+fn webview_bounded_token(value: Option<&str>, fallback: &str) -> String {
+    match value {
+        Some(v) if !v.is_empty() => v
+            .bytes()
+            .take(128)
+            .map(|b| if (0x21..=0x7e).contains(&b) { b as char } else { '?' })
+            .collect(),
+        _ => fallback.to_string(),
+    }
+}
+
+fn webview_eval_uri(uri: &str) -> (bool, bool, String, String, Option<String>) {
+    if uri == "about:blank" {
+        return (true, false, "about".into(), "none".into(), None);
+    }
+    if uri.len() >= 8 && uri[..8].eq_ignore_ascii_case("https://") {
+        let rest = &uri[8..];
+        if rest.is_empty() || rest.starts_with('/') {
+            return (false, false, "https".into(), "none".into(), None);
+        }
+    }
+    let parsed = match url::Url::parse(uri) {
+        Ok(u) => u,
+        Err(_) => return (false, false, String::new(), String::new(), None),
+    };
+    let scheme = webview_bounded_token(Some(parsed.scheme()), "invalid");
+    let raw_host = parsed.host_str().unwrap_or("");
+    let host = webview_bounded_token(Some(raw_host), "none");
+    let has_userinfo = !parsed.username().is_empty() || parsed.password().is_some();
+    let port_ok = match parsed.port() {
+        None | Some(443) => true,
+        Some(_) => false,
+    };
+    let allowed = parsed.scheme().eq_ignore_ascii_case("https")
+        && !raw_host.is_empty()
+        && !has_userinfo
+        && port_ok;
+    let priv_allowed = allowed && webview_is_roblox_host_str(raw_host);
+    (allowed, priv_allowed, scheme, host, Some(parsed.path().to_string()))
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_webview_should_disable_sandbox(
+    kernel_version: *const c_char,
+    sandbox_override: *const c_char,
+) -> i32 {
+    if !sandbox_override.is_null() || kernel_version.is_null() {
+        return 0;
+    }
+    let kv = unsafe { CStr::from_ptr(kernel_version) }.to_string_lossy();
+    if kv.contains("FreeBSD") || kv.contains("freebsd.org") {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_webview_should_disable_hw_accel(
+    wayland_display: i32,
+    compositing_override: *const c_char,
+) -> i32 {
+    if !compositing_override.is_null() {
+        let ov = unsafe { CStr::from_ptr(compositing_override) }.to_bytes();
+        return if ov != b"0" { 1 } else { 0 };
+    }
+    if wayland_display != 0 { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_webview_build_user_agent(
+    configured_version: *const c_char,
+    out_buf: *mut c_char,
+    out_cap: usize,
+) -> i32 {
+    const FALLBACK: &str = "2.725.1142";
+    let ver = if configured_version.is_null() {
+        FALLBACK
+    } else {
+        match unsafe { CStr::from_ptr(configured_version) }.to_str() {
+            Ok(v) if webview_is_safe_version_str(v) => v,
+            _ => FALLBACK,
+        }
+    };
+    let ua = format!(
+        "Mozilla/5.0 AppleWebKit/605.1.15 (KHTML, like Gecko)  ROBLOX Android App {ver} Tablet Hybrid()  GooglePlayStore RobloxApp/{ver} (GlobalDist; GooglePlayStore)"
+    );
+    copy_to_c_buffer(&ua, out_buf, out_cap)
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_webview_evaluate_navigation_uri(
+    uri: *const c_char,
+    out_allowed: *mut i32,
+    out_privileged: *mut i32,
+    scheme_buf: *mut c_char,
+    scheme_cap: usize,
+    host_buf: *mut c_char,
+    host_cap: usize,
+) -> i32 {
+    if !out_allowed.is_null() {
+        unsafe { *out_allowed = 0 };
+    }
+    if !out_privileged.is_null() {
+        unsafe { *out_privileged = 0 };
+    }
+    if uri.is_null() {
+        copy_error(scheme_buf, scheme_cap, "");
+        copy_error(host_buf, host_cap, "");
+        return 0;
+    }
+    let s = match unsafe { CStr::from_ptr(uri) }.to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            copy_error(scheme_buf, scheme_cap, "");
+            copy_error(host_buf, host_cap, "");
+            return 0;
+        }
+    };
+    let (allowed, priv_allowed, scheme, host, _) = webview_eval_uri(s);
+    if !out_allowed.is_null() {
+        unsafe { *out_allowed = if allowed { 1 } else { 0 } };
+    }
+    if !out_privileged.is_null() {
+        unsafe { *out_privileged = if priv_allowed { 1 } else { 0 } };
+    }
+    copy_error(scheme_buf, scheme_cap, &scheme);
+    copy_error(host_buf, host_cap, &host);
+    if allowed { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_webview_is_browser_login_url(url_ptr: *const c_char) -> i32 {
+    if url_ptr.is_null() {
+        return 0;
+    }
+    let s = match unsafe { CStr::from_ptr(url_ptr) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    let (allowed, _, _, host, path) = webview_eval_uri(s);
+    if !allowed {
+        return 0;
+    }
+    let host_ok = host.eq_ignore_ascii_case("www.roblox.com") || host.eq_ignore_ascii_case("roblox.com");
+    let path_str = path.as_deref().unwrap_or("");
+    let path_ok = path_str.eq_ignore_ascii_case("/login") || path_str.eq_ignore_ascii_case("/login/");
+    if host_ok && path_ok { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_webview_is_essential_resource(uri_ptr: *const c_char) -> i32 {
+    if uri_ptr.is_null() {
+        return 0;
+    }
+    let s = match unsafe { CStr::from_ptr(uri_ptr) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    let (allowed, _, _, host, path) = webview_eval_uri(s);
+    if !allowed {
+        return 0;
+    }
+    if host == "css.rbxcdn.com" || host == "js.rbxcdn.com" {
+        return 1;
+    }
+    if host != "arkoselabs.roblox.com" && host != "apis.rbxcdn.com" {
+        return 0;
+    }
+    let path_str = path.as_deref().unwrap_or("");
+    let essential = if host == "apis.rbxcdn.com" {
+        path_str == "/captcha/v1/metadata"
+    } else {
+        path_str.starts_with("/v2/") || path_str.starts_with("/fc/")
+    };
+    if essential { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_webview_captcha_event_name_ptr(event_type: i32) -> *const c_char {
+    if event_type == 1 {
+        b"CaptchaSuccess\0".as_ptr() as *const c_char
+    } else {
+        b"CaptchaShown\0".as_ptr() as *const c_char
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_webview_parse_captcha_event(
+    cmd: *const c_char,
+    cmd_len: usize,
+    out_type: *mut i32,
+    out_cb: *mut c_char,
+    cb_cap: usize,
+) -> i32 {
+    const MAX_CMD: usize = 65536;
+    if cmd.is_null() || out_type.is_null() || cmd_len == 0 || cmd_len > MAX_CMD {
+        return 0;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(cmd as *const u8, cmd_len) };
+    let text = match std::str::from_utf8(slice) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    let msg = match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(v) if v.is_object() => v,
+        _ => return 0,
+    };
+    let valid_ident = |s: &str, max_len: usize| -> bool {
+        s.len() <= max_len && !s.bytes().any(|b| b < 0x20 || b == 0x7f)
+    };
+    fn read_req<'a>(obj: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+        let s = obj.get(key)?.as_str()?;
+        if s.len() <= 128 && !s.bytes().any(|b| b < 0x20 || b == 0x7f) {
+            Some(s)
+        } else {
+            None
+        }
+    }
+    if read_req(&msg, "moduleID") != Some("Navigation")
+        || read_req(&msg, "functionName") != Some("navigateToFeature")
+    {
+        return 0;
+    }
+    let feature = msg
+        .get("params")
+        .and_then(|p| p.get("params"))
+        .and_then(|n| read_req(n, "feature"));
+    let ev_type = match feature {
+        Some("CaptchaShown") => 0i32,
+        Some("CaptchaSuccess") => 1i32,
+        _ => return 0,
+    };
+    let cb = match msg.get("callbackID") {
+        None => "",
+        Some(v) => match v.as_str() {
+            Some(s) if valid_ident(s, 1024) => s,
+            _ => return 0,
+        },
+    };
+    if !out_cb.is_null() && copy_to_c_buffer(cb, out_cb, cb_cap) != 0 {
+        return 0;
+    }
+    unsafe { *out_type = ev_type };
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_webview_build_callback_script(
+    cb_id: *const c_char,
+    cb_len: usize,
+    out_buf: *mut c_char,
+    out_cap: usize,
+) -> i32 {
+    let slice = if cb_id.is_null() || cb_len == 0 {
+        &[][..]
+    } else {
+        unsafe { std::slice::from_raw_parts(cb_id as *const u8, cb_len) }
+    };
+    let cb = String::from_utf8_lossy(slice);
+    let quoted = match serde_json::to_string(&*cb) {
+        Ok(q) => q,
+        Err(_) => return -1,
+    };
+    let script = format!(
+        "(() => {{ try {{ if (window.Roblox.Hybrid && window.Roblox.Hybrid.Bridge.nativeCallback && typeof window.Roblox.Hybrid.Bridge.nativeCallback === \"function\") {{ window.Roblox.Hybrid.Bridge.nativeCallback({quoted}, true, {{}}); return true; }} }} catch (_) {{}} return false; }})();"
+    );
+    copy_to_c_buffer(&script, out_buf, out_cap)
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
 
     #[test]
     fn test_secure_zero() {
@@ -14158,6 +16091,8 @@ integrations:
 
     #[test]
     fn test_present_mode_and_swapchain() {
+        let _guard = test_env_lock();
+        std::env::remove_var("MOCKTAIL_SWAPCHAIN_IMAGES");
         let vsync_auto = CString::new("auto").unwrap();
         let fps_neg1 = CString::new("-1").unwrap();
         let fps_display = CString::new("display").unwrap();
@@ -14174,6 +16109,11 @@ integrations:
         assert_eq!(mocktail_rust_present_mode_resolve(vsync_auto.as_ptr(), fps_display.as_ptr(), pm_mailbox.as_ptr()), 4); // Mailbox
         assert_eq!(mocktail_rust_present_mode_resolve(vsync_auto.as_ptr(), fps_display.as_ptr(), pm_immediate.as_ptr()), 5); // Immediate
 
+        // Wayland HostDefault promotes to Mailbox (ede9080)
+        assert_eq!(mocktail_rust_present_mode_resolve_vulkan_surface(0, 1), 4);
+        assert_eq!(mocktail_rust_present_mode_resolve_vulkan_surface(0, 0), 0);
+        assert_eq!(mocktail_rust_present_mode_resolve_vulkan_surface(3, 1), 3);
+
         let mut explicit = 0u32;
         assert_eq!(mocktail_rust_present_mode_explicit(3, &mut explicit), 1);
         assert_eq!(explicit, VK_PRESENT_MODE_FIFO_KHR);
@@ -14185,6 +16125,8 @@ integrations:
         assert_eq!(mocktail_rust_present_mode_swap_interval(5, 1), 0);
 
         assert_eq!(mocktail_rust_present_mode_prefer_min_image_count(4 /* Mailbox */, 2, 2, 8), 3);
+        // Mailbox preserves min_images + 1 headroom when min_images >= 3 (94715e3)
+        assert_eq!(mocktail_rust_present_mode_prefer_min_image_count(4 /* Mailbox */, 3, 3, 8), 4);
         assert_eq!(mocktail_rust_present_mode_prefer_min_image_count(3 /* Fifo */, 2, 2, 8), 2);
         assert_eq!(mocktail_rust_present_mode_prefer_min_image_count(1 /* Vsync */, 2, 2, 8), 4);
         assert_eq!(mocktail_rust_present_mode_prefer_min_image_count(2 /* Unthrottled */, 2, 2, 8), 5);
@@ -14196,6 +16138,11 @@ integrations:
         assert_eq!(rc, 0);
         assert_eq!(out_count, 1);
         assert_eq!(out_modes[0], VK_PRESENT_MODE_FIFO_KHR);
+
+        let khr = unsafe { CStr::from_ptr(mocktail_rust_present_mode_khr_name_ptr(VK_PRESENT_MODE_MAILBOX_KHR)) }.to_str().unwrap();
+        let pol = unsafe { CStr::from_ptr(mocktail_rust_present_mode_policy_name_ptr(4)) }.to_str().unwrap();
+        assert_eq!(khr, "mailbox");
+        assert_eq!(pol, "mailbox");
     }
 
     #[test]
@@ -15439,6 +17386,7 @@ integrations:
 
     #[test]
     fn test_swapchain_images_env_override() {
+        let _guard = test_env_lock();
         std::env::set_var("MOCKTAIL_SWAPCHAIN_IMAGES", "3");
         assert_eq!(mocktail_rust_present_mode_prefer_min_image_count(3 /* Fifo */, 2, 2, 8), 3);
         assert_eq!(mocktail_rust_present_mode_prefer_min_image_count(1 /* Vsync */, 2, 2, 8), 3);
@@ -15510,17 +17458,25 @@ integrations:
     #[test]
     fn test_section77_supported_launch_defaults() {
         let cnt = mocktail_rust_supported_launch_defaults_count(1);
-        assert_eq!(cnt, 28);
+        assert_eq!(cnt, 27);
         assert_eq!(mocktail_rust_supported_launch_defaults_count(0), 0);
 
-        let mut key = [0 as c_char; 64];
-        let mut val = [0 as c_char; 64];
+        let mut key = [0 as c_char; 96];
+        let mut val = [0 as c_char; 96];
         assert_eq!(
             mocktail_rust_supported_launch_default_entry(1, 0, key.as_mut_ptr(), key.len(), val.as_mut_ptr(), val.len()),
             0
         );
         assert_eq!(unsafe { CStr::from_ptr(key.as_ptr()).to_str().unwrap() }, "MOCKTAIL_ALLOW_NO_COOKIE_LUA_APP");
         assert_eq!(unsafe { CStr::from_ptr(val.as_ptr()).to_str().unwrap() }, "1");
+        for i in 0..cnt {
+            assert_eq!(
+                mocktail_rust_supported_launch_default_entry(1, i, key.as_mut_ptr(), key.len(), val.as_mut_ptr(), val.len()),
+                0
+            );
+            let k = unsafe { CStr::from_ptr(key.as_ptr()).to_str().unwrap() };
+            assert_ne!(k, "MOCKTAIL_MAIN_THREAD_MESSAGE_PUMP");
+        }
     }
 
     #[test]
@@ -15679,6 +17635,10 @@ integrations:
         let mut buf = [0 as c_char; 32];
         mocktail_rust_owned_pthread_status_name(0, buf.as_mut_ptr(), buf.len());
         assert_eq!(unsafe { CStr::from_ptr(buf.as_ptr()).to_str().unwrap() }, "Joined");
+        assert_eq!(
+            unsafe { CStr::from_ptr(mocktail_rust_owned_pthread_status_name_ptr(1)).to_str().unwrap() },
+            "TimedOut"
+        );
     }
 
     #[test]
@@ -15791,6 +17751,14 @@ integrations:
 
         mocktail_rust_app_shutdown_status_name(1, buf.as_mut_ptr(), buf.len());
         assert_eq!(unsafe { CStr::from_ptr(buf.as_ptr()).to_str().unwrap() }, "AlreadyStopped");
+        assert_eq!(
+            unsafe { CStr::from_ptr(mocktail_rust_app_lifecycle_status_name_ptr(2)).to_str().unwrap() },
+            "MissingRequiredSymbols"
+        );
+        assert_eq!(
+            unsafe { CStr::from_ptr(mocktail_rust_app_shutdown_status_name_ptr(2)).to_str().unwrap() },
+            "ShutdownInProgress"
+        );
     }
 
     #[test]
@@ -15826,6 +17794,10 @@ integrations:
         let mut buf = [0 as c_char; 32];
         mocktail_rust_client_settings_source_name(0, buf.as_mut_ptr(), buf.len());
         assert_eq!(unsafe { CStr::from_ptr(buf.as_ptr()).to_str().unwrap() }, "explicit JSON");
+        assert_eq!(
+            unsafe { CStr::from_ptr(mocktail_rust_client_settings_source_name_ptr(2)).to_str().unwrap() },
+            "bundled file"
+        );
 
         let app = CString::new("RobloxStudio").unwrap();
         let mut url_buf = [0 as c_char; 128];
@@ -15905,6 +17877,340 @@ integrations:
         assert_eq!(mocktail_rust_pinned_apk_archive_limits_valid(102828147, 1024 * 1024 * 1024), 1);
         assert_eq!(mocktail_rust_pinned_apk_archive_limits_valid(0, 1024 * 1024 * 1024), 0);
         assert_eq!(mocktail_rust_pinned_apk_archive_limits_valid(2000 * 1024 * 1024, 1024 * 1024 * 1024), 0);
+    }
+
+    #[test]
+    fn test_section107_vulkan_swapchain_policy() {
+        let sup = [
+            CString::new("VK_KHR_surface").unwrap(),
+            CString::new("VK_KHR_get_surface_capabilities2").unwrap(),
+            CString::new("VK_EXT_surface_maintenance1").unwrap(),
+        ];
+        let sup_ptrs: Vec<*const c_char> = sup.iter().map(|s| s.as_ptr()).collect();
+        let en = [CString::new("VK_KHR_surface").unwrap()];
+        let en_ptrs: Vec<*const c_char> = en.iter().map(|s| s.as_ptr()).collect();
+        let mut out = [0 as c_char; 256];
+        let mut out_len = 0usize;
+        let rc = mocktail_rust_vulkan_select_surface_maintenance_exts(
+            sup_ptrs.as_ptr(),
+            sup_ptrs.len(),
+            en_ptrs.as_ptr(),
+            en_ptrs.len(),
+            out.as_mut_ptr(),
+            out.len(),
+            &mut out_len,
+        );
+        assert_eq!(rc, 1);
+        let text = unsafe { CStr::from_ptr(out.as_ptr()) }.to_str().unwrap();
+        assert_eq!(text, "VK_KHR_get_surface_capabilities2\nVK_EXT_surface_maintenance1");
+
+        // Missing maintenance extension -> returns 0 (cannot enable)
+        let rc_none = mocktail_rust_vulkan_select_surface_maintenance_exts(
+            en_ptrs.as_ptr(),
+            en_ptrs.len(),
+            std::ptr::null(),
+            0,
+            out.as_mut_ptr(),
+            out.len(),
+            &mut out_len,
+        );
+        assert_eq!(rc_none, 0);
+        assert_eq!(out_len, 0);
+
+        // Image policy fallback & mailbox override
+        assert_eq!(mocktail_rust_vulkan_swapchain_image_policy(3 /* Fifo */, VK_PRESENT_MODE_MAILBOX_KHR), 4 /* Mailbox */);
+        assert_eq!(mocktail_rust_vulkan_swapchain_image_policy(5 /* Immediate */, VK_PRESENT_MODE_FIFO_KHR), 3 /* Fifo */);
+        assert_eq!(mocktail_rust_vulkan_swapchain_image_policy(1 /* Vsync */, VK_PRESENT_MODE_FIFO_KHR), 1 /* Vsync */);
+    }
+
+    #[test]
+    fn test_section108_texture_override() {
+        let dir = std::env::temp_dir().join(format!("mocktail_rust_tex_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir_c = CString::new(dir.to_string_lossy().as_bytes()).unwrap();
+        assert_eq!(mocktail_rust_texture_override_has_png(dir_c.as_ptr()), 0);
+        std::fs::write(dir.join("note.txt"), b"hi").unwrap();
+        assert_eq!(mocktail_rust_texture_override_has_png(dir_c.as_ptr()), 0);
+        std::fs::write(dir.join("0001.png"), b"\x89PNG").unwrap();
+        assert_eq!(mocktail_rust_texture_override_has_png(dir_c.as_ptr()), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let h = mocktail_rust_texture_override_hash_bytes(b"abc".as_ptr(), 3);
+        assert_eq!(h, 0xe71fa2190541574bu64);
+        let mut name = [0 as c_char; 32];
+        assert_eq!(mocktail_rust_texture_override_hash_name(h, name.as_mut_ptr(), name.len()), 0);
+        let name_str = unsafe { CStr::from_ptr(name.as_ptr()) }.to_str().unwrap();
+        assert_eq!(name_str, "e71fa2190541574b");
+
+        // Nearest-neighbor 1x1 -> 2x2 integer upscale + box downsample
+        let src = [10u8, 20, 30, 40];
+        let mut up = [0u8; 2 * 2 * 4];
+        assert_eq!(mocktail_rust_texture_override_resample_rgba(src.as_ptr(), 1, 1, 2, 2, up.as_mut_ptr()), 0);
+        assert_eq!(&up[0..4], &src);
+        assert_eq!(&up[12..16], &src);
+
+        let mut down = [0u8; 4];
+        assert_eq!(mocktail_rust_texture_override_resample_rgba(up.as_ptr(), 2, 2, 1, 1, down.as_mut_ptr()), 0);
+        assert_eq!(down, src);
+    }
+
+    #[test]
+    fn test_section109_etc1_sky_transcoder() {
+        let sky = CString::new("/data/pkg/assets/android/textures/sky/day.tex").unwrap();
+        let nonsky = CString::new("/data/pkg/assets/android/textures/ui/btn.tex").unwrap();
+        assert_eq!(mocktail_rust_etc1_is_bundled_sky_texture(sky.as_ptr()), 1);
+        assert_eq!(mocktail_rust_etc1_is_bundled_sky_texture(nonsky.as_ptr()), 0);
+
+        // Build valid 4x4 ETC1 KTX1 file (64-byte header + 4-byte imageSize + 8-byte ETC1 block = 76 bytes)
+        let mut ktx = vec![0u8; 76];
+        ktx[0..12].copy_from_slice(&[0xab, 0x4b, 0x54, 0x58, 0x20, 0x31, 0x31, 0xbb, 0x0d, 0x0a, 0x1a, 0x0a]);
+        ktx[12..16].copy_from_slice(&0x04030201u32.to_le_bytes()); // LE
+        ktx[20..24].copy_from_slice(&1u32.to_le_bytes()); // typeSize = 1
+        ktx[28..32].copy_from_slice(&0x00008d64u32.to_le_bytes()); // GL_ETC1_RGB8_OES
+        ktx[32..36].copy_from_slice(&0x00001907u32.to_le_bytes()); // GL_RGB
+        ktx[36..40].copy_from_slice(&4u32.to_le_bytes()); // w=4
+        ktx[40..44].copy_from_slice(&4u32.to_le_bytes()); // h=4
+        ktx[52..56].copy_from_slice(&1u32.to_le_bytes()); // faces=1
+        ktx[56..60].copy_from_slice(&1u32.to_le_bytes()); // mips=1
+        ktx[64..68].copy_from_slice(&8u32.to_le_bytes()); // imageSize=8
+        assert_eq!(mocktail_rust_etc1_transcode_ktx1_for_vulkan(ktx.as_mut_ptr(), ktx.len()), 1);
+        let new_fmt = u32::from_le_bytes([ktx[28], ktx[29], ktx[30], ktx[31]]);
+        assert_eq!(new_fmt, 0x000083f0u32); // GL_COMPRESSED_RGB_S3TC_DXT1
+
+        let mut bc1 = [0u8; 8];
+        let etc1 = [0xffu8, 0x80, 0x00, 0x02, 0, 0, 0, 0];
+        assert_eq!(mocktail_rust_etc1_convert_rgb_block_to_bc1(etc1.as_ptr(), bc1.as_mut_ptr()), 0);
+        let ep0 = u16::from_le_bytes([bc1[0], bc1[1]]);
+        let ep1 = u16::from_le_bytes([bc1[2], bc1[3]]);
+        assert!(ep0 > ep1);
+    }
+
+    #[test]
+    fn test_section110_vulkan_etc2_and_copy() {
+        let mut host = 0;
+        let mut etc = -1;
+        assert_eq!(mocktail_rust_vulkan_etc2_lookup_format(147, &mut host, &mut etc), 1);
+        assert_eq!((host, etc), (37, 0));
+        assert_eq!(mocktail_rust_vulkan_etc2_lookup_format(156, &mut host, &mut etc), 1);
+        assert_eq!((host, etc), (78, 6));
+        assert_eq!(mocktail_rust_vulkan_etc2_lookup_format(37, &mut host, &mut etc), 0);
+
+        let masked = mocktail_rust_vulkan_etc2_emulated_features(0xffff_ffff);
+        assert_eq!(masked, 0x0000_d401);
+
+        let mut comp = 0u64;
+        let mut dec = 0u64;
+        assert_eq!(mocktail_rust_vulkan_etc2_upload_byte_counts(8, 4, 8, 4, 1, 2, &mut comp, &mut dec), 1);
+        assert_eq!((comp, dec), (32, 256));
+        assert_eq!(mocktail_rust_vulkan_etc2_upload_byte_counts(8, 4, u32::MAX, u32::MAX, 1, 1, &mut comp, &mut dec), 0);
+
+        let zero = CString::new("0").unwrap();
+        let one = CString::new("1").unwrap();
+        let ten = CString::new("10").unwrap();
+        assert_eq!(mocktail_rust_vulkan_etc2_support_advertised(std::ptr::null()), 1);
+        assert_eq!(mocktail_rust_vulkan_etc2_support_advertised(zero.as_ptr()), 0);
+        assert_eq!(mocktail_rust_vulkan_etc2_small_texture_upscale(one.as_ptr()), 1);
+        assert_eq!(mocktail_rust_vulkan_etc2_small_texture_upscale(ten.as_ptr()), 8);
+
+        let src: Vec<u8> = (0..137u8).collect();
+        let mut dst = vec![0u8; 137];
+        mocktail_rust_vulkan_etc2_copy_from_mapped(dst.as_mut_ptr(), src.as_ptr(), src.len());
+        assert_eq!(dst, src);
+    }
+
+    #[test]
+    fn test_section111_graphics_launch_policy() {
+        assert_eq!(mocktail_rust_graphics_is_haswell_intel(0x0412), 1);
+        assert_eq!(mocktail_rust_graphics_is_haswell_intel(0x5916), 0);
+
+        let mut parsed = 0u32;
+        let ok = CString::new("0x8086\n").unwrap();
+        let bad = CString::new("0x10000").unwrap();
+        assert_eq!(mocktail_rust_graphics_parse_pci_hex(ok.as_ptr(), &mut parsed), 1);
+        assert_eq!(parsed, 0x8086);
+        assert_eq!(mocktail_rust_graphics_parse_pci_hex(bad.as_ptr(), &mut parsed), 0);
+
+        let mem_big = CString::new("MemTotal:       8388608 kB\n").unwrap();
+        let mem_small = CString::new("MemTotal:       2097152 kB\n").unwrap();
+        assert_eq!(mocktail_rust_graphics_anv_sys_mem_limit_percent(mem_big.as_ptr()), 75);
+        assert_eq!(mocktail_rust_graphics_anv_sys_mem_limit_percent(mem_small.as_ptr()), 50);
+
+        let f_i686 = CString::new("radeon_icd.i686.json").unwrap();
+        let f_x64 = CString::new("radeon_icd.x86_64.json").unwrap();
+        assert_eq!(mocktail_rust_graphics_is_foreign_icd_name(f_i686.as_ptr(), 0), 1);
+        assert_eq!(mocktail_rust_graphics_is_foreign_icd_name(f_x64.as_ptr(), 0), 0);
+        assert_eq!(mocktail_rust_graphics_is_foreign_icd_name(f_x64.as_ptr(), 1), 1);
+
+        let icd_dir = std::env::temp_dir().join(format!("mocktail_rust_icd_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&icd_dir);
+        std::fs::create_dir_all(&icd_dir).unwrap();
+        std::fs::write(icd_dir.join("radeon_icd.i686.json"), b"{}").unwrap();
+        std::fs::write(icd_dir.join("radeon_icd.x86_64.json"), b"{}").unwrap();
+        let dirs_c = CString::new(icd_dir.to_string_lossy().as_bytes()).unwrap();
+        let needle_c = CString::new("radeon_icd").unwrap();
+        let mut selected = [0 as c_char; 512];
+        assert_eq!(mocktail_rust_graphics_select_icd_manifest(dirs_c.as_ptr(), needle_c.as_ptr(), 0, selected.as_mut_ptr(), selected.len()), 0);
+        let sel_str = unsafe { CStr::from_ptr(selected.as_ptr()) }.to_str().unwrap();
+        assert!(sel_str.ends_with("radeon_icd.x86_64.json"));
+        let sel_c = CString::new(sel_str).unwrap();
+        assert_eq!(mocktail_rust_graphics_is_radv_icd_list(sel_c.as_ptr()), 1);
+        let _ = std::fs::remove_dir_all(&icd_dir);
+    }
+
+    #[test]
+    fn test_section112_graphics_backend() {
+        let n0 = unsafe { CStr::from_ptr(mocktail_rust_graphics_backend_name_ptr(0)) }.to_str().unwrap();
+        let n1 = unsafe { CStr::from_ptr(mocktail_rust_graphics_backend_name_ptr(1)) }.to_str().unwrap();
+        let n2 = unsafe { CStr::from_ptr(mocktail_rust_graphics_backend_name_ptr(2)) }.to_str().unwrap();
+        let n9 = unsafe { CStr::from_ptr(mocktail_rust_graphics_backend_name_ptr(9)) }.to_str().unwrap();
+        assert_eq!((n0, n1, n2, n9), ("angle-vulkan", "direct-vulkan", "system-egl", "unknown"));
+
+        let backends = [0i32, 1, 2];
+        let states = [0i32, 2, 1]; // angle=unavail, direct=ready, egl=probed
+        let accels = [0i32, 2, 1]; // angle=unknown, direct=hw, egl=sw
+        let d0 = CString::new("no vulkan").unwrap();
+        let d1 = CString::new("vk ready").unwrap();
+        let d2 = CString::new("llvmpipe").unwrap();
+        let details = [d0.as_ptr(), d1.as_ptr(), d2.as_ptr()];
+        let mut selected = -1;
+        let mut detail = [0 as c_char; 256];
+        // Request angle with fallback enabled, require_hw=1, require_runtime=1 -> falls back to direct-vulkan
+        let rc = mocktail_rust_graphics_backend_select(
+            0, 1, 1, 1,
+            backends.as_ptr(), states.as_ptr(), accels.as_ptr(), details.as_ptr(), 3,
+            &mut selected, detail.as_mut_ptr(), detail.len(),
+        );
+        assert_eq!(rc, 0);
+        assert_eq!(selected, 1);
+
+        // Request angle without fallback -> fails with reason
+        let rc_fail = mocktail_rust_graphics_backend_select(
+            0, 0, 1, 1,
+            backends.as_ptr(), states.as_ptr(), accels.as_ptr(), details.as_ptr(), 3,
+            &mut selected, detail.as_mut_ptr(), detail.len(),
+        );
+        assert_eq!(rc_fail, -1);
+    }
+
+    #[test]
+    fn test_section113_surface_lifecycle_and_window() {
+        let eng = mocktail_rust_surface_lifecycle_new();
+        assert!(!eng.is_null());
+        assert_eq!(mocktail_rust_surface_lifecycle_is_active(eng), 0);
+        let mut err = [0 as c_char; 128];
+        // Zero or sub-minimum (<160x120) size rejected on activate, 160x120 accepted
+        assert_eq!(mocktail_rust_surface_lifecycle_activate(eng, 0x100, 159, 120, 1.0, err.as_mut_ptr(), err.len()), 2);
+        // Valid activate
+        assert_eq!(mocktail_rust_surface_lifecycle_activate(eng, 0x100, 160, 120, 1.0, err.as_mut_ptr(), err.len()), 0);
+        assert_eq!(mocktail_rust_surface_lifecycle_is_active(eng), 1);
+
+        // Coalesce resize events on same generation
+        assert_eq!(mocktail_rust_surface_lifecycle_observe(eng, 0x100, 1300, 720, 1.0, err.as_mut_ptr(), err.len()), 0);
+        assert_eq!(mocktail_rust_surface_lifecycle_observe(eng, 0x100, 1400, 800, 2.0, err.as_mut_ptr(), err.len()), 0);
+        let mut ev = MocktailRustSurfaceEvent::default();
+        assert_eq!(mocktail_rust_surface_lifecycle_poll(eng, &mut ev), 1);
+        assert_eq!((ev.event_type, ev.surface.width, ev.surface.height), (1, 1400, 800));
+        assert_eq!(mocktail_rust_surface_lifecycle_poll(eng, &mut ev), 0);
+
+        // Recreate emits Destroyed -> Created -> Changed with generation 2
+        assert_eq!(mocktail_rust_surface_lifecycle_recreate(eng, err.as_mut_ptr(), err.len()), 0);
+        assert_eq!(mocktail_rust_surface_lifecycle_poll(eng, &mut ev), 1);
+        assert_eq!(ev.event_type, 2);
+        assert_eq!(mocktail_rust_surface_lifecycle_poll(eng, &mut ev), 1);
+        assert_eq!((ev.event_type, ev.surface.generation), (0, 2));
+        mocktail_rust_surface_lifecycle_free(eng);
+
+        assert_eq!(mocktail_rust_window_apply_high_dpi_flag(0x10, 1, 0x2000), 0x2010);
+        assert_eq!(mocktail_rust_window_apply_high_dpi_flag(0x2010, 0, 0x2000), 0x10);
+        let wl = CString::new("wayland").unwrap();
+        let x11 = CString::new("x11").unwrap();
+        assert_eq!(mocktail_rust_window_direct_vulkan_requires_sync(wl.as_ptr()), 1);
+        assert_eq!(mocktail_rust_window_direct_vulkan_requires_sync(x11.as_ptr()), 0);
+    }
+
+    #[test]
+    fn test_section114_presence_resolver() {
+        let raw = CString::new("foo=1; .ROBLOSECURITY=_|WARNING:secret_val; Path=/").unwrap();
+        let mut cookie = [0 as c_char; 256];
+        assert_eq!(mocktail_rust_presence_extract_cookie(raw.as_ptr(), cookie.as_mut_ptr(), cookie.len()), 0);
+        let cstr = unsafe { CStr::from_ptr(cookie.as_ptr()) }.to_str().unwrap();
+        assert_eq!(cstr, "_|WARNING:secret_val");
+
+        let json_ok = CString::new(r#"{"userPresences":[{"userPresenceType":2,"placeId":1818,"gameId":"job-xyz"}]}"#).unwrap();
+        let mut place = 0i64;
+        let mut gid = [0 as c_char; 128];
+        let mut err = [0 as c_char; 256];
+        assert_eq!(mocktail_rust_presence_parse_follow_response(json_ok.as_ptr(), &mut place, gid.as_mut_ptr(), gid.len(), err.as_mut_ptr(), err.len()), 0);
+        assert_eq!(place, 1818);
+        assert_eq!(unsafe { CStr::from_ptr(gid.as_ptr()) }.to_str().unwrap(), "job-xyz");
+
+        let json_offline = CString::new(r#"{"userPresences":[{"userPresenceType":0}]}"#).unwrap();
+        assert_eq!(mocktail_rust_presence_parse_follow_response(json_offline.as_ptr(), &mut place, gid.as_mut_ptr(), gid.len(), err.as_mut_ptr(), err.len()), -1);
+    }
+
+    #[test]
+    fn test_section115_update_state_file() {
+        let dir = std::env::temp_dir().join(format!("mocktail_rust_state_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let good = dir.join("state.json");
+        let bad = dir.join("bad.json");
+        std::fs::write(&good, br#"{"version":1}"#).unwrap();
+        std::fs::write(&bad, b"[1,2,3]").unwrap();
+
+        let good_c = CString::new(good.to_string_lossy().as_bytes()).unwrap();
+        let bad_c = CString::new(bad.to_string_lossy().as_bytes()).unwrap();
+        let mut out = [0 as c_char; 256];
+        let mut len = 0usize;
+        assert_eq!(mocktail_rust_update_state_read_json_file(good_c.as_ptr(), out.as_mut_ptr(), out.len(), &mut len), 0);
+        assert_eq!(len, 13);
+        assert_eq!(mocktail_rust_update_state_read_json_file(bad_c.as_ptr(), out.as_mut_ptr(), out.len(), &mut len), -1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_section116_webview_helper_policy() {
+        let fbsd = CString::new("FreeBSD 14.1-RELEASE").unwrap();
+        let lin = CString::new("6.8.0-generic").unwrap();
+        assert_eq!(mocktail_rust_webview_should_disable_sandbox(fbsd.as_ptr(), std::ptr::null()), 1);
+        assert_eq!(mocktail_rust_webview_should_disable_sandbox(lin.as_ptr(), std::ptr::null()), 0);
+        assert_eq!(mocktail_rust_webview_should_disable_hw_accel(1, std::ptr::null()), 1);
+        let zero = CString::new("0").unwrap();
+        assert_eq!(mocktail_rust_webview_should_disable_hw_accel(1, zero.as_ptr()), 0);
+
+        let mut ua = [0 as c_char; 256];
+        let bad_ver = CString::new("2.0\nEvil").unwrap();
+        assert_eq!(mocktail_rust_webview_build_user_agent(bad_ver.as_ptr(), ua.as_mut_ptr(), ua.len()), 0);
+        let ua_s = unsafe { CStr::from_ptr(ua.as_ptr()) }.to_str().unwrap();
+        assert!(ua_s.contains("2.725.1142"));
+
+        let mut allowed = 0;
+        let mut priv_allowed = 0;
+        let mut scheme = [0 as c_char; 64];
+        let mut host = [0 as c_char; 128];
+        let rbx = CString::new("https://www.roblox.com/login").unwrap();
+        assert_eq!(mocktail_rust_webview_evaluate_navigation_uri(rbx.as_ptr(), &mut allowed, &mut priv_allowed, scheme.as_mut_ptr(), scheme.len(), host.as_mut_ptr(), host.len()), 1);
+        assert_eq!((allowed, priv_allowed), (1, 1));
+        assert_eq!(mocktail_rust_webview_is_browser_login_url(rbx.as_ptr()), 1);
+
+        let triple_slash = CString::new("https:///missing-host").unwrap();
+        assert_eq!(mocktail_rust_webview_evaluate_navigation_uri(triple_slash.as_ptr(), &mut allowed, &mut priv_allowed, scheme.as_mut_ptr(), scheme.len(), host.as_mut_ptr(), host.len()), 0);
+        assert_eq!((allowed, priv_allowed), (0, 0));
+
+        let essential = CString::new("https://apis.rbxcdn.com/captcha/v1/metadata").unwrap();
+        assert_eq!(mocktail_rust_webview_is_essential_resource(essential.as_ptr()), 1);
+
+        let cmd = br#"{"moduleID":"Navigation","functionName":"navigateToFeature","callbackID":"cb\"1","params":{"params":{"feature":"CaptchaSuccess"}}}"#;
+        let mut ev_type = -1;
+        let mut cb = [0 as c_char; 64];
+        assert_eq!(mocktail_rust_webview_parse_captcha_event(cmd.as_ptr() as *const c_char, cmd.len(), &mut ev_type, cb.as_mut_ptr(), cb.len()), 1);
+        assert_eq!(ev_type, 1);
+        let mut script = [0 as c_char; 512];
+        let cb_len = unsafe { CStr::from_ptr(cb.as_ptr()) }.to_bytes().len();
+        assert_eq!(mocktail_rust_webview_build_callback_script(cb.as_ptr(), cb_len, script.as_mut_ptr(), script.len()), 0);
+        let script_s = unsafe { CStr::from_ptr(script.as_ptr()) }.to_str().unwrap();
+        assert!(script_s.contains("nativeCallback(\"cb\\\"1\""));
     }
 
 }

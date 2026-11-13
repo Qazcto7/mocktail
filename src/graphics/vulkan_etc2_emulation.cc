@@ -1,6 +1,7 @@
 #include "mocktail/graphics/vulkan_etc2_emulation.h"
 
 #include "mocktail/graphics/texture_override.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <algorithm>
 #include <atomic>
@@ -16,77 +17,44 @@
 #include <utility>
 #include <vector>
 
-#if defined(__x86_64__)
-#include <immintrin.h>
-#endif
-
 namespace mocktail::graphics {
 
 bool LookupEmulatedEtc2Format(VkFormat format, Etc2EmulatedFormat* out) {
-  Etc2EmulatedFormat mapped;
-  switch (format) {
-    case VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK:
-      mapped = {VK_FORMAT_R8G8B8A8_UNORM, EtcFormat::kEtc2Rgb8};
-      break;
-    case VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK:
-      mapped = {VK_FORMAT_R8G8B8A8_SRGB, EtcFormat::kEtc2Rgb8};
-      break;
-    case VK_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK:
-      mapped = {VK_FORMAT_R8G8B8A8_UNORM, EtcFormat::kEtc2Rgb8A1};
-      break;
-    case VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK:
-      mapped = {VK_FORMAT_R8G8B8A8_SRGB, EtcFormat::kEtc2Rgb8A1};
-      break;
-    case VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK:
-      mapped = {VK_FORMAT_R8G8B8A8_UNORM, EtcFormat::kEtc2Rgba8};
-      break;
-    case VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK:
-      mapped = {VK_FORMAT_R8G8B8A8_SRGB, EtcFormat::kEtc2Rgba8};
-      break;
-    case VK_FORMAT_EAC_R11_UNORM_BLOCK:
-      mapped = {VK_FORMAT_R16_UNORM, EtcFormat::kEacR11};
-      break;
-    case VK_FORMAT_EAC_R11_SNORM_BLOCK:
-      mapped = {VK_FORMAT_R16_SNORM, EtcFormat::kEacR11Signed};
-      break;
-    case VK_FORMAT_EAC_R11G11_UNORM_BLOCK:
-      mapped = {VK_FORMAT_R16G16_UNORM, EtcFormat::kEacRg11};
-      break;
-    case VK_FORMAT_EAC_R11G11_SNORM_BLOCK:
-      mapped = {VK_FORMAT_R16G16_SNORM, EtcFormat::kEacRg11Signed};
-      break;
-    default:
-      return false;
+  int32_t host_format = 0;
+  int32_t etc_format = 0;
+  if (mocktail_rust_vulkan_etc2_lookup_format(
+          static_cast<int32_t>(format), &host_format, &etc_format) == 0) {
+    return false;
   }
   if (out != nullptr) {
-    *out = mapped;
+    out->host_format = static_cast<VkFormat>(host_format);
+    out->etc_format = static_cast<EtcFormat>(etc_format);
   }
   return true;
 }
 
 VkFormatFeatureFlags EmulatedEtc2FormatFeatures(
     VkFormatFeatureFlags host_features) {
-  constexpr VkFormatFeatureFlags kCompressedFeatures =
-      VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
-      VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
-      VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
-      VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
-  return host_features & kCompressedFeatures;
+  return static_cast<VkFormatFeatureFlags>(
+      mocktail_rust_vulkan_etc2_emulated_features(
+          static_cast<uint32_t>(host_features)));
 }
 
 bool Etc2UploadByteCounts(EtcFormat format, const VkExtent3D& extent,
                           std::uint32_t layer_count, VkDeviceSize* compressed,
                           VkDeviceSize* decoded) {
-  if (extent.width == 0 || extent.height == 0 || extent.depth != 1 ||
-      layer_count == 0 || compressed == nullptr || decoded == nullptr) {
+  uint64_t comp = 0;
+  uint64_t dec = 0;
+  if (mocktail_rust_vulkan_etc2_upload_byte_counts(
+          EtcBlockBytes(format), EtcDecodedTexelBytes(format), extent.width,
+          extent.height, extent.depth, layer_count, &comp, &dec) == 0) {
     return false;
   }
-  const VkDeviceSize blocks =
-      ((static_cast<VkDeviceSize>(extent.width) + 3) / 4) *
-      ((static_cast<VkDeviceSize>(extent.height) + 3) / 4);
-  *compressed = blocks * EtcBlockBytes(format) * layer_count;
-  *decoded = static_cast<VkDeviceSize>(extent.width) * extent.height *
-             EtcDecodedTexelBytes(format) * layer_count;
+  if (compressed == nullptr || decoded == nullptr) {
+    return false;
+  }
+  *compressed = comp;
+  *decoded = dec;
   return true;
 }
 
@@ -103,7 +71,7 @@ bool EmulationDisabledByEnvironment() {
 }  // namespace
 
 bool Etc2SupportAdvertised(const char* value) {
-  return value == nullptr || std::strcmp(value, "0") != 0;
+  return mocktail_rust_vulkan_etc2_support_advertised(value) != 0;
 }
 
 bool Etc2SupportAdvertised() {
@@ -113,44 +81,15 @@ bool Etc2SupportAdvertised() {
 }
 
 std::uint32_t SmallTextureUpscale(const char* value) {
-  if (value == nullptr || value[0] < '0' || value[0] > '9') {
-    return kDefaultSmallTextureUpscale;
-  }
-  const long parsed = std::strtol(value, nullptr, 10);
-  if (parsed < 1) {
-    return 1;
-  }
-  return parsed > 8 ? 8 : static_cast<std::uint32_t>(parsed);
+  return mocktail_rust_vulkan_etc2_small_texture_upscale(value);
 }
 
 namespace {
 
-#if defined(__x86_64__)
-__attribute__((target("sse4.1"))) void CopyFromMapped(
-    std::uint8_t* destination, const std::uint8_t* source, std::size_t size) {
-  while (size != 0 && (reinterpret_cast<std::uintptr_t>(source) & 15) != 0) {
-    *destination++ = *source++;
-    --size;
-  }
-  auto* in = reinterpret_cast<__m128i*>(const_cast<std::uint8_t*>(source));
-  for (; size >= 64; size -= 64, in += 4, destination += 64) {
-    const __m128i a = _mm_stream_load_si128(in);
-    const __m128i b = _mm_stream_load_si128(in + 1);
-    const __m128i c = _mm_stream_load_si128(in + 2);
-    const __m128i d = _mm_stream_load_si128(in + 3);
-    _mm_storeu_si128(reinterpret_cast<__m128i*>(destination), a);
-    _mm_storeu_si128(reinterpret_cast<__m128i*>(destination + 16), b);
-    _mm_storeu_si128(reinterpret_cast<__m128i*>(destination + 32), c);
-    _mm_storeu_si128(reinterpret_cast<__m128i*>(destination + 48), d);
-  }
-  std::memcpy(destination, in, size);
-}
-#else
 void CopyFromMapped(std::uint8_t* destination, const std::uint8_t* source,
                     std::size_t size) {
-  std::memcpy(destination, source, size);
+  mocktail_rust_vulkan_etc2_copy_from_mapped(destination, source, size);
 }
-#endif
 
 bool ShouldLog(std::atomic<unsigned>* counter, unsigned limit) {
   return counter->fetch_add(1, std::memory_order_relaxed) < limit;

@@ -160,7 +160,7 @@ add_executable(texture_resample_test
 target_include_directories(texture_resample_test PRIVATE
   ${CMAKE_SOURCE_DIR}/include
 )
-target_link_libraries(texture_resample_test PRIVATE PNG::PNG GTest::gtest_main)
+target_link_libraries(texture_resample_test PRIVATE mocktail_core_rust PNG::PNG GTest::gtest_main)
 mocktail_apply_compile_options(texture_resample_test)
 
 add_executable(etc2_decoder_test

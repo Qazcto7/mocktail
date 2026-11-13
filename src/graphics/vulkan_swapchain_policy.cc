@@ -1,6 +1,8 @@
 #include "mocktail/graphics/vulkan_swapchain_policy.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 
 namespace mocktail::graphics {
@@ -9,26 +11,35 @@ bool EnableSurfaceMaintenanceExtensions(
     const std::vector<VkExtensionProperties>& supported,
     std::vector<std::string>* enabled) {
   if (enabled == nullptr) return false;
-  const auto supports = [&](const char* name) {
-    return std::any_of(supported.begin(), supported.end(),
-                       [&](const VkExtensionProperties& extension) {
-                         return std::strcmp(extension.extensionName, name) == 0;
-                       });
-  };
-  const char* maintenance =
-      supports(VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME)
-          ? VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME
-          : VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME;
-  if (!supports(maintenance) ||
-      !supports(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME) ||
-      !supports(VK_KHR_SURFACE_EXTENSION_NAME)) {
-    return false;
+  std::vector<const char*> supported_ptrs;
+  supported_ptrs.reserve(supported.size());
+  for (const auto& extension : supported) {
+    supported_ptrs.push_back(extension.extensionName);
   }
-  for (const char* name : {VK_KHR_SURFACE_EXTENSION_NAME,
-                            VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME,
-                            maintenance}) {
-    if (std::find(enabled->begin(), enabled->end(), name) == enabled->end()) {
-      enabled->emplace_back(name);
+  std::vector<const char*> enabled_ptrs;
+  enabled_ptrs.reserve(enabled->size());
+  for (const auto& entry : *enabled) {
+    enabled_ptrs.push_back(entry.c_str());
+  }
+  std::array<char, 256> to_append{};
+  size_t out_len = 0;
+  const int32_t rc = mocktail_rust_vulkan_select_surface_maintenance_exts(
+      supported_ptrs.empty() ? nullptr : supported_ptrs.data(),
+      supported_ptrs.size(),
+      enabled_ptrs.empty() ? nullptr : enabled_ptrs.data(),
+      enabled_ptrs.size(), to_append.data(), to_append.size(), &out_len);
+  if (rc != 1) return false;
+  if (out_len > 0) {
+    const std::string append_str(to_append.data(), out_len);
+    std::size_t start = 0;
+    while (start < append_str.size()) {
+      const std::size_t nl = append_str.find('\n', start);
+      const std::size_t end =
+          (nl == std::string::npos) ? append_str.size() : nl;
+      if (end > start) {
+        enabled->emplace_back(append_str.substr(start, end - start));
+      }
+      start = end + 1;
     }
   }
   return true;
@@ -80,13 +91,10 @@ VkResult ApplySwapchainPresentPolicy(PresentModePolicy policy,
   }
   if (result != VK_SUCCESS) return result;
 
-  auto image_policy = policy;
-  if (selected.presentMode == VK_PRESENT_MODE_MAILBOX_KHR) {
-    image_policy = PresentModePolicy::kMailbox;
-  } else if (const auto explicit_mode = ExplicitPresentMode(policy);
-             explicit_mode && selected.presentMode != *explicit_mode) {
-    image_policy = PresentModePolicy::kFifo;
-  }
+  const auto image_policy = static_cast<PresentModePolicy>(
+      mocktail_rust_vulkan_swapchain_image_policy(
+          static_cast<int>(policy),
+          static_cast<uint32_t>(selected.presentMode)));
   selected.minImageCount = PreferSwapchainMinImageCount(
       image_policy, selected.minImageCount, capabilities.minImageCount,
       capabilities.maxImageCount);

@@ -2,7 +2,7 @@
 #define MOCKTAIL_WINDOW_WINDOW_SURFACE_LIFECYCLE_H_
 
 #include <cstdint>
-#include <deque>
+#include <memory>
 #include <mutex>
 
 #include "mocktail/status.h"
@@ -36,6 +36,11 @@ struct WindowSurfaceEvent {
 // handle loss followed by restoration.
 class WindowSurfaceLifecycle final {
  public:
+  WindowSurfaceLifecycle();
+  ~WindowSurfaceLifecycle();
+  WindowSurfaceLifecycle(const WindowSurfaceLifecycle&) = delete;
+  WindowSurfaceLifecycle& operator=(const WindowSurfaceLifecycle&) = delete;
+
   Status Activate(uintptr_t native_window, uint32_t width, uint32_t height,
                   float dpi_scale = 1.0f);
   void Deactivate();
@@ -55,15 +60,8 @@ class WindowSurfaceLifecycle final {
   bool active() const;
 
  private:
-  void QueueLocked(WindowSurfaceEventType type,
-                   const WindowSurfaceSnapshot& surface);
-  Status RestoreLocked(uintptr_t native_window, uint32_t width,
-                       uint32_t height, float dpi_scale);
-
   mutable std::mutex mutex_;
-  std::deque<WindowSurfaceEvent> events_;
-  WindowSurfaceSnapshot current_;
-  bool active_ = false;
+  std::unique_ptr<void, void (*)(void*)> engine_;
 };
 
 const char* WindowSurfaceEventTypeName(WindowSurfaceEventType type);

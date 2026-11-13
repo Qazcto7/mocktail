@@ -97,9 +97,12 @@ target_include_directories(mocktail_graphics_foundation
   PUBLIC ${MOCKTAIL_PLATFORM_GRAPHICS_ROOT}/include
   PRIVATE ${MOCKTAIL_EGL_INCLUDE_DIR}
 )
-target_link_libraries(mocktail_graphics_foundation PRIVATE
-  Mocktail::AngleHeaders
-  ${CMAKE_DL_LIBS}
+target_link_libraries(mocktail_graphics_foundation
+  PUBLIC
+    mocktail_core_rust
+  PRIVATE
+    Mocktail::AngleHeaders
+    ${CMAKE_DL_LIBS}
 )
 target_compile_features(mocktail_graphics_foundation PUBLIC cxx_std_17)
 add_library(Mocktail::GraphicsFoundation ALIAS mocktail_graphics_foundation)

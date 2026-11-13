@@ -811,6 +811,10 @@ int mocktail_rust_present_mode_resolve(
     const char* fps_str,
     const char* present_mode_str);
 
+int mocktail_rust_present_mode_resolve_vulkan_surface(
+    int configured,
+    int32_t wayland_surface);
+
 int mocktail_rust_present_mode_explicit(
     int policy,
     uint32_t* out_mode);
@@ -832,6 +836,10 @@ int mocktail_rust_present_mode_filter(
     uint32_t* out_modes,
     size_t out_cap,
     size_t* out_count);
+
+const char* mocktail_rust_present_mode_khr_name_ptr(uint32_t mode);
+
+const char* mocktail_rust_present_mode_policy_name_ptr(int policy);
 
 int mocktail_rust_present_mode_khr_name(
     uint32_t mode,
@@ -2067,6 +2075,8 @@ uint64_t mocktail_rust_http_spin_limiter_observe(
 // 89. Owned Pthread Wait Status Name
 // ============================================================================
 
+const char* mocktail_rust_owned_pthread_status_name_ptr(int32_t status);
+
 int32_t mocktail_rust_owned_pthread_status_name(
     int32_t status,
     char* out_buf,
@@ -2166,6 +2176,10 @@ void mocktail_rust_evaluate_startup_flags(
 // 97. Roblox App Lifecycle Status Name Engine
 // ============================================================================
 
+const char* mocktail_rust_app_lifecycle_status_name_ptr(int32_t status);
+
+const char* mocktail_rust_app_shutdown_status_name_ptr(int32_t status);
+
 int32_t mocktail_rust_app_lifecycle_status_name(
     int32_t status,
     char* out_buf,
@@ -2205,6 +2219,8 @@ int32_t mocktail_rust_format_permissions_reply(
 // ============================================================================
 // 100. Client Settings Source Naming & Default URL Builder
 // ============================================================================
+
+const char* mocktail_rust_client_settings_source_name_ptr(int32_t source);
 
 int32_t mocktail_rust_client_settings_source_name(
     int32_t source,
@@ -2259,6 +2275,280 @@ int32_t mocktail_rust_pinned_apk_archive_filename_valid(
 int32_t mocktail_rust_pinned_apk_archive_limits_valid(
     uint64_t size_bytes,
     uint64_t maximum_bytes);
+
+// ============================================================================
+// 107. Vulkan Swapchain Present & Surface Maintenance Policy
+// ============================================================================
+
+int32_t mocktail_rust_vulkan_select_surface_maintenance_exts(
+    const char* const* supported_ptrs,
+    size_t supported_count,
+    const char* const* enabled_ptrs,
+    size_t enabled_count,
+    char* out_append_nl,
+    size_t out_cap,
+    size_t* out_len);
+
+int mocktail_rust_vulkan_swapchain_image_policy(
+    int policy,
+    uint32_t selected_present_mode);
+
+// ============================================================================
+// 108. Texture Override Policy, FNV-1a Hash & RGBA Resampler
+// ============================================================================
+
+int32_t mocktail_rust_texture_override_has_png(const char* dir_ptr);
+
+uint64_t mocktail_rust_texture_override_hash_bytes(
+    const uint8_t* data,
+    size_t size);
+
+int32_t mocktail_rust_texture_override_hash_name(
+    uint64_t hash,
+    char* out_buf,
+    size_t out_cap);
+
+int32_t mocktail_rust_texture_override_resample_rgba(
+    const uint8_t* source,
+    uint32_t source_width,
+    uint32_t source_height,
+    uint32_t width,
+    uint32_t height,
+    uint8_t* destination);
+
+// ============================================================================
+// 109. Bundled Sky ETC1-to-BC1 KTX1 Transcoder
+// ============================================================================
+
+int32_t mocktail_rust_etc1_is_bundled_sky_texture(const char* path);
+
+int32_t mocktail_rust_etc1_convert_rgb_block_to_bc1(
+    const uint8_t* etc1,
+    uint8_t* bc1);
+
+int32_t mocktail_rust_etc1_transcode_ktx1_for_vulkan(
+    uint8_t* data,
+    size_t len);
+
+// ============================================================================
+// 110. Vulkan ETC2 Emulation Helpers & Streaming Staging Copy
+// ============================================================================
+
+int32_t mocktail_rust_vulkan_etc2_lookup_format(
+    int32_t vk_format,
+    int32_t* out_host_format,
+    int32_t* out_etc_format);
+
+uint32_t mocktail_rust_vulkan_etc2_emulated_features(uint32_t host_features);
+
+int32_t mocktail_rust_vulkan_etc2_upload_byte_counts(
+    uint64_t block_bytes,
+    uint64_t texel_bytes,
+    uint32_t width,
+    uint32_t height,
+    uint32_t depth,
+    uint32_t layer_count,
+    uint64_t* out_compressed,
+    uint64_t* out_decoded);
+
+int32_t mocktail_rust_vulkan_etc2_support_advertised(const char* value);
+
+uint32_t mocktail_rust_vulkan_etc2_small_texture_upscale(const char* value);
+
+void mocktail_rust_vulkan_etc2_copy_from_mapped(
+    uint8_t* destination,
+    const uint8_t* source,
+    size_t size);
+
+// ============================================================================
+// 111. Graphics Launch Policy, PCI GPU & Vulkan ICD Selector
+// ============================================================================
+
+int32_t mocktail_rust_graphics_is_haswell_intel(uint32_t device_id);
+
+int32_t mocktail_rust_graphics_parse_pci_hex(
+    const char* raw,
+    uint32_t* out_val);
+
+uint32_t mocktail_rust_graphics_anv_sys_mem_limit_percent(
+    const char* meminfo_content);
+
+int32_t mocktail_rust_graphics_is_foreign_icd_name(
+    const char* name,
+    int32_t target_is_aarch64);
+
+int32_t mocktail_rust_graphics_select_icd_manifest(
+    const char* dirs_nl,
+    const char* needle,
+    int32_t target_is_aarch64,
+    char* out_buf,
+    size_t out_cap);
+
+int32_t mocktail_rust_graphics_is_radv_icd_list(const char* manifests);
+
+// ============================================================================
+// 112. Graphics Backend Selection Policy
+// ============================================================================
+
+const char* mocktail_rust_graphics_backend_name_ptr(int32_t backend);
+
+int32_t mocktail_rust_graphics_backend_select(
+    int32_t requested,
+    int32_t allow_fallback,
+    int32_t require_hw,
+    int32_t require_runtime,
+    const int32_t* caps_backends,
+    const int32_t* caps_states,
+    const int32_t* caps_accels,
+    const char* const* caps_details,
+    size_t caps_count,
+    int32_t* out_selected_backend,
+    char* out_detail_buf,
+    size_t out_detail_cap);
+
+// ============================================================================
+// 113. Window Surface Lifecycle State Machine & Creation Policy
+// ============================================================================
+
+typedef struct MocktailRustSurfaceSnapshot {
+    uint64_t generation;
+    uintptr_t native_window;
+    uint32_t width;
+    uint32_t height;
+    int32_t available;
+    float dpi_scale;
+} MocktailRustSurfaceSnapshot;
+
+typedef struct MocktailRustSurfaceEvent {
+    int32_t event_type;
+    MocktailRustSurfaceSnapshot surface;
+} MocktailRustSurfaceEvent;
+
+void* mocktail_rust_surface_lifecycle_new(void);
+
+void mocktail_rust_surface_lifecycle_free(void* ptr);
+
+int32_t mocktail_rust_surface_lifecycle_activate(
+    void* ptr,
+    uintptr_t native_window,
+    uint32_t width,
+    uint32_t height,
+    float dpi_scale,
+    char* err_buf,
+    size_t err_cap);
+
+void mocktail_rust_surface_lifecycle_deactivate(void* ptr);
+
+int32_t mocktail_rust_surface_lifecycle_observe(
+    void* ptr,
+    uintptr_t native_window,
+    uint32_t width,
+    uint32_t height,
+    float dpi_scale,
+    char* err_buf,
+    size_t err_cap);
+
+int32_t mocktail_rust_surface_lifecycle_refresh(
+    void* ptr,
+    char* err_buf,
+    size_t err_cap);
+
+int32_t mocktail_rust_surface_lifecycle_recreate(
+    void* ptr,
+    char* err_buf,
+    size_t err_cap);
+
+int32_t mocktail_rust_surface_lifecycle_poll(
+    void* ptr,
+    MocktailRustSurfaceEvent* out_event);
+
+int32_t mocktail_rust_surface_lifecycle_snapshot(
+    const void* ptr,
+    MocktailRustSurfaceSnapshot* out_snapshot);
+
+int32_t mocktail_rust_surface_lifecycle_is_active(const void* ptr);
+
+const char* mocktail_rust_surface_event_type_name_ptr(int32_t event_type);
+
+uint64_t mocktail_rust_window_apply_high_dpi_flag(
+    uint64_t flags,
+    int32_t high_dpi,
+    uint64_t high_dpi_bit);
+
+int32_t mocktail_rust_window_direct_vulkan_requires_sync(
+    const char* video_driver);
+
+// ============================================================================
+// 114. Roblox Presence Cookie Extractor & JSON Parser
+// ============================================================================
+
+int32_t mocktail_rust_presence_extract_cookie(
+    const char* raw_cookie,
+    char* out_buf,
+    size_t out_cap);
+
+int32_t mocktail_rust_presence_parse_follow_response(
+    const char* json_str,
+    int64_t* out_place_id,
+    char* out_game_id,
+    size_t out_game_id_cap,
+    char* err_buf,
+    size_t err_cap);
+
+// ============================================================================
+// 115. Bounded JSON State File Reader/Validator
+// ============================================================================
+
+int32_t mocktail_rust_update_state_read_json_file(
+    const char* path_ptr,
+    char* out_buf,
+    size_t out_cap,
+    size_t* out_len);
+
+// ============================================================================
+// 116. WebView Helper Security Policy & Navigation URI Evaluator
+// ============================================================================
+
+int32_t mocktail_rust_webview_should_disable_sandbox(
+    const char* kernel_version,
+    const char* sandbox_override);
+
+int32_t mocktail_rust_webview_should_disable_hw_accel(
+    int32_t wayland_display,
+    const char* compositing_override);
+
+int32_t mocktail_rust_webview_build_user_agent(
+    const char* configured_version,
+    char* out_buf,
+    size_t out_cap);
+
+int32_t mocktail_rust_webview_evaluate_navigation_uri(
+    const char* uri,
+    int32_t* out_allowed,
+    int32_t* out_privileged,
+    char* scheme_buf,
+    size_t scheme_cap,
+    char* host_buf,
+    size_t host_cap);
+
+int32_t mocktail_rust_webview_is_browser_login_url(const char* url_ptr);
+
+int32_t mocktail_rust_webview_is_essential_resource(const char* uri_ptr);
+
+const char* mocktail_rust_webview_captcha_event_name_ptr(int32_t event_type);
+
+int32_t mocktail_rust_webview_parse_captcha_event(
+    const char* cmd,
+    size_t cmd_len,
+    int32_t* out_type,
+    char* out_cb,
+    size_t cb_cap);
+
+int32_t mocktail_rust_webview_build_callback_script(
+    const char* cb_id,
+    size_t cb_len,
+    char* out_buf,
+    size_t out_cap);
 
 #ifdef __cplusplus
 }

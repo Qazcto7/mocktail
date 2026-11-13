@@ -444,6 +444,7 @@ add_library(mocktail_webview_helper_policy STATIC
 add_library(Mocktail::WebViewHelperPolicy ALIAS mocktail_webview_helper_policy)
 target_include_directories(mocktail_webview_helper_policy PUBLIC src)
 target_link_libraries(mocktail_webview_helper_policy PUBLIC
+  mocktail_core_rust
   PkgConfig::WEBKITGTK6
   nlohmann_json::nlohmann_json
 )

@@ -193,10 +193,8 @@ bool ClientSettingsService::IsValidJson(const std::string& content) {
 }
 
 const char* ClientSettingsSourceName(ClientSettingsSource source) {
-  thread_local char buf[32];
-  mocktail_rust_client_settings_source_name(
-      static_cast<int32_t>(source), buf, sizeof(buf));
-  return buf;
+  return mocktail_rust_client_settings_source_name_ptr(
+      static_cast<int32_t>(source));
 }
 
 }  // namespace services

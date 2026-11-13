@@ -1731,16 +1731,17 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(
   const VkResult images_result =
       host_get_images(device, *swapchain, &image_count, images.data());
   if (images_result == VK_SUCCESS || images_result == VK_INCOMPLETE) {
-    images.resize(image_count);
+    images.resize(std::min<std::size_t>(image_count, images.size()));
     std::fprintf(stderr,
-                 "  [vulkan] swapchain present_mode=%s images=%u "
+                 "  [vulkan] swapchain present_mode=%s images=%zu "
                  "(requested_mode=%s requested_images=%u selected_min=%u)\n",
                  mocktail::graphics::PresentModeKhrName(host_info.presentMode),
-                 image_count,
+                 images.size(),
                  mocktail::graphics::PresentModeKhrName(create_info->presentMode),
                  create_info->minImageCount, host_info.minImageCount);
     (void)State().text_overlay.RegisterSwapchain(
-        device, *swapchain, host_info, images.data(), image_count);
+        device, *swapchain, host_info, images.data(),
+        static_cast<std::uint32_t>(images.size()));
   }
   return result;
 }

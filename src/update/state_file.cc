@@ -9,32 +9,19 @@
 #include <string>
 #include <vector>
 
+#include "mocktail/mocktail_rust.h"
+
 namespace mocktail::update {
 
 nlohmann::json ReadStateFile(const std::filesystem::path& path) {
-  const int descriptor =
-      open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
-  if (descriptor < 0) return nullptr;
-  struct stat status{};
-  if (fstat(descriptor, &status) != 0 || !S_ISREG(status.st_mode) ||
-      status.st_size > 65536) {
-    close(descriptor);
+  std::array<char, 65537> contents{};
+  size_t out_len = 0;
+  if (mocktail_rust_update_state_read_json_file(
+          path.c_str(), contents.data(), contents.size(), &out_len) != 0) {
     return nullptr;
   }
-  std::string contents;
-  std::array<char, 4096> buffer{};
-  for (;;) {
-    const ssize_t size = read(descriptor, buffer.data(), buffer.size());
-    if (size < 0 && errno == EINTR) continue;
-    if (size < 0 || contents.size() + (size > 0 ? size : 0) > 65536) {
-      close(descriptor);
-      return nullptr;
-    }
-    if (size == 0) break;
-    contents.append(buffer.data(), static_cast<std::size_t>(size));
-  }
-  close(descriptor);
-  auto document = nlohmann::json::parse(contents, nullptr, false);
+  auto document = nlohmann::json::parse(
+      std::string_view(contents.data(), out_len), nullptr, false);
   return document.is_object() ? document : nlohmann::json(nullptr);
 }
 

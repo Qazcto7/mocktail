@@ -1,28 +1,24 @@
 #include "mocktail/graphics/texture_override.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <png.h>
 
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <filesystem>
 
 namespace mocktail::graphics {
 
 std::uint64_t HashBytes(const std::uint8_t* data, std::size_t size) {
-  std::uint64_t hash = 0xcbf29ce484222325ULL;
-  for (std::size_t index = 0; index < size; ++index) {
-    hash ^= data[index];
-    hash *= 0x100000001b3ULL;
-  }
-  return hash;
+  return mocktail_rust_texture_override_hash_bytes(data, size);
 }
 
 std::string HashName(std::uint64_t hash) {
   char text[17];
-  std::snprintf(text, sizeof(text), "%016llx",
-                static_cast<unsigned long long>(hash));
-  return text;
+  if (mocktail_rust_texture_override_hash_name(hash, text, sizeof(text)) == 0) {
+    return text;
+  }
+  return {};
 }
 
 bool ReadPngRgba(const std::string& path, RgbaImage* image) {
@@ -78,71 +74,8 @@ void ResampleRgba(const RgbaImage& source, std::uint32_t width,
 void ResampleRgba(const std::uint8_t* source, std::uint32_t source_width,
                   std::uint32_t source_height, std::uint32_t width,
                   std::uint32_t height, std::uint8_t* destination) {
-  if (source == nullptr || destination == nullptr || width == 0 ||
-      height == 0 || source_width == 0 || source_height == 0) {
-    return;
-  }
-  if (width == source_width && height == source_height) {
-    if (source != destination) {
-      std::memcpy(destination, source,
-                  static_cast<std::size_t>(width) * height * 4);
-    }
-    return;
-  }
-  if (width % source_width == 0 && height % source_height == 0) {
-    const std::uint32_t scale_x = width / source_width;
-    const std::uint32_t scale_y = height / source_height;
-    const std::size_t row_bytes = static_cast<std::size_t>(width) * 4;
-    std::vector<std::uint8_t> row(row_bytes);
-    for (std::uint32_t y = 0; y < source_height; ++y) {
-      const std::uint8_t* source_row =
-          source + static_cast<std::size_t>(y) * source_width * 4;
-      for (std::uint32_t x = 0; x < source_width; ++x) {
-        for (std::uint32_t repeat = 0; repeat < scale_x; ++repeat) {
-          std::memcpy(row.data() +
-                          (static_cast<std::size_t>(x) * scale_x + repeat) * 4,
-                      source_row + static_cast<std::size_t>(x) * 4, 4);
-        }
-      }
-      std::uint8_t* target_row =
-          destination + static_cast<std::size_t>(y) * scale_y * row_bytes;
-      for (std::uint32_t repeat = 0; repeat < scale_y; ++repeat) {
-        std::memcpy(target_row + repeat * row_bytes, row.data(), row_bytes);
-      }
-    }
-    return;
-  }
-  for (std::uint32_t y = 0; y < height; ++y) {
-    const std::uint64_t y0 = static_cast<std::uint64_t>(y) * source_height / height;
-    std::uint64_t y1 =
-        (static_cast<std::uint64_t>(y) + 1) * source_height / height;
-    if (y1 <= y0) {
-      y1 = y0 + 1;
-    }
-    for (std::uint32_t x = 0; x < width; ++x) {
-      const std::uint64_t x0 = static_cast<std::uint64_t>(x) * source_width / width;
-      std::uint64_t x1 =
-          (static_cast<std::uint64_t>(x) + 1) * source_width / width;
-      if (x1 <= x0) {
-        x1 = x0 + 1;
-      }
-      std::uint64_t sum[4] = {0, 0, 0, 0};
-      for (std::uint64_t sy = y0; sy < y1; ++sy) {
-        for (std::uint64_t sx = x0; sx < x1; ++sx) {
-          const std::uint8_t* pixel = source + (sy * source_width + sx) * 4;
-          for (int channel = 0; channel < 4; ++channel) {
-            sum[channel] += pixel[channel];
-          }
-        }
-      }
-      const std::uint64_t count = (y1 - y0) * (x1 - x0);
-      std::uint8_t* out = destination + (static_cast<std::size_t>(y) * width + x) * 4;
-      for (int channel = 0; channel < 4; ++channel) {
-        out[channel] =
-            static_cast<std::uint8_t>((sum[channel] + count / 2) / count);
-      }
-    }
-  }
+  mocktail_rust_texture_override_resample_rgba(
+      source, source_width, source_height, width, height, destination);
 }
 
 namespace {
@@ -153,14 +86,7 @@ std::string EnvironmentString(const char* name) {
 }
 
 bool HasPng(const std::string& dir) {
-  std::error_code error;
-  for (std::filesystem::directory_iterator it(dir, error), end;
-       !error && it != end; it.increment(error)) {
-    if (it->path().extension() == ".png") {
-      return true;
-    }
-  }
-  return false;
+  return mocktail_rust_texture_override_has_png(dir.c_str()) != 0;
 }
 
 }  // namespace

@@ -1,8 +1,9 @@
 #include "runtime/graphics_launch_policy.h"
 
+#include "mocktail/mocktail_rust.h"
 #include "runtime/frame_rate_policy.h"
 
-#include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -10,8 +11,6 @@
 #include <fstream>
 #include <string>
 #include <string_view>
-#include <system_error>
-#include <unistd.h>
 #include <vector>
 
 namespace mocktail {
@@ -28,19 +27,9 @@ constexpr const char* kIcdDirectories[] = {
 };
 
 #if defined(__aarch64__)
-constexpr char kNativeArchitecture[] = "aarch64";
-
-constexpr const char* kForeignArchitectures[] = {
-    "i686",  "i586", "i486",  "i386",    "x86_64",  "x86.",
-    "amd64", "armhf", "armv7", "ppc64", "riscv64", "s390x",
-};
+constexpr int32_t kTargetIsAarch64 = 1;
 #else
-constexpr char kNativeArchitecture[] = "x86_64";
-
-constexpr const char* kForeignArchitectures[] = {
-    "i686", "i586", "i486", "i386",   "x86.",   "aarch64",
-    "arm64", "armhf", "armv7", "ppc64", "riscv64", "s390x",
-};
+constexpr int32_t kTargetIsAarch64 = 0;
 #endif
 
 struct HostGpus {
@@ -51,21 +40,7 @@ struct HostGpus {
 };
 
 bool IsHaswellOrIvyBridgeIntel(unsigned int device_id) {
-  if (device_id >= 0x0150 && device_id <= 0x016a) return true;
-  if (device_id >= 0x0400 && device_id <= 0x042f) return true;
-  if (device_id >= 0x0a00 && device_id <= 0x0a2f) return true;
-  if (device_id >= 0x0c00 && device_id <= 0x0c2f) return true;
-  if (device_id >= 0x0d00 && device_id <= 0x0d2f) return true;
-  return false;
-}
-
-bool ForeignArchitecture(const std::string& name) {
-  for (const char* architecture : kForeignArchitectures) {
-    if (name.find(architecture) != std::string::npos) {
-      return true;
-    }
-  }
-  return false;
+  return mocktail_rust_graphics_is_haswell_intel(device_id) != 0;
 }
 
 bool SetValue(const char* name, const std::string& value, std::string* error) {
@@ -102,12 +77,11 @@ bool ParsePciVendor(const std::string& raw, unsigned int* vendor) {
   if (vendor == nullptr || raw.empty()) {
     return false;
   }
-  char* end = nullptr;
-  const unsigned long parsed = std::strtoul(raw.c_str(), &end, 16);
-  if (end == raw.c_str() || parsed > 0xffffUL) {
+  uint32_t parsed = 0;
+  if (mocktail_rust_graphics_parse_pci_hex(raw.c_str(), &parsed) == 0) {
     return false;
   }
-  *vendor = static_cast<unsigned int>(parsed);
+  *vendor = parsed;
   return true;
 }
 
@@ -203,15 +177,18 @@ std::string SelectHardwareIcd(const HostGpus& gpus) {
 // would, which increases BO eviction inside GEM_EXECBUFFER2.
 const char* AnvSysMemLimitPercent() {
   std::ifstream input("/proc/meminfo");
-  std::string key;
-  unsigned long kb = 0;
-  std::string unit;
-  while (input >> key >> kb >> unit) {
-    if (key == "MemTotal:") {
-      return kb > 4UL * 1024UL * 1024UL ? "75" : "50";
+  std::string line;
+  std::string meminfo;
+  while (std::getline(input, line)) {
+    meminfo.append(line);
+    meminfo.push_back('\n');
+    if (line.rfind("MemTotal:", 0) == 0 || meminfo.size() >= 4096) {
+      break;
     }
   }
-  return "50";
+  return mocktail_rust_graphics_anv_sys_mem_limit_percent(meminfo.c_str()) >= 75
+             ? "75"
+             : "50";
 }
 
 bool ApplyVulkanIcdPolicy(const HostGpus& gpus, std::string* error) {
@@ -241,23 +218,7 @@ bool RadvIcdSelected() {
   if (manifests == nullptr || manifests[0] == '\0') {
     manifests = std::getenv("VK_ICD_FILENAMES");
   }
-  if (manifests == nullptr || manifests[0] == '\0') {
-    return false;
-  }
-  std::string_view remaining(manifests);
-  while (!remaining.empty()) {
-    const std::size_t separator = remaining.find(':');
-    const std::filesystem::path manifest{remaining.substr(0, separator)};
-    const std::string filename = manifest.filename().string();
-    if (filename.rfind("radeon_icd.", 0) != 0 || manifest.extension() != ".json") {
-      return false;
-    }
-    if (separator == std::string_view::npos) {
-      return true;
-    }
-    remaining.remove_prefix(separator + 1);
-  }
-  return false;
+  return mocktail_rust_graphics_is_radv_icd_list(manifests) != 0;
 }
 
 bool UsesCpuTextureOptions() {
@@ -281,38 +242,19 @@ std::string SelectVulkanIcdManifest(
   if (vendor.empty()) {
     return {};
   }
+  std::string dirs_nl;
   for (const std::filesystem::path& directory : directories) {
-    std::error_code error;
-    std::vector<std::string> names;
-    for (std::filesystem::directory_iterator iterator(directory, error), end;
-         !error && iterator != end; iterator.increment(error)) {
-      if (!iterator->is_regular_file(error)) {
-        continue;
-      }
-      const std::string name = iterator->path().filename().string();
-      if (name.find(".json") == std::string::npos ||
-          name.find(vendor) == std::string::npos || ForeignArchitecture(name)) {
-        continue;
-      }
-      names.push_back(name);
+    if (!dirs_nl.empty()) {
+      dirs_nl.push_back('\n');
     }
-    std::sort(names.begin(), names.end());
-    std::string generic;
-    for (const std::string& name : names) {
-      const std::string path = (directory / name).string();
-      if (access(path.c_str(), R_OK) != 0) {
-        continue;
-      }
-      if (name.find(kNativeArchitecture) != std::string::npos) {
-        return path;
-      }
-      if (generic.empty()) {
-        generic = path;
-      }
-    }
-    if (!generic.empty()) {
-      return generic;
-    }
+    dirs_nl.append(directory.string());
+  }
+  const std::string needle(vendor);
+  std::array<char, 4096> selected{};
+  if (mocktail_rust_graphics_select_icd_manifest(
+          dirs_nl.c_str(), needle.c_str(), kTargetIsAarch64,
+          selected.data(), selected.size()) == 0) {
+    return selected.data();
   }
   return {};
 }

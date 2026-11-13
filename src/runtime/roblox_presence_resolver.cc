@@ -2,11 +2,13 @@
 
 #include <curl/curl.h>
 
+#include <array>
 #include <cstdlib>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <string_view>
 
+#include "mocktail/mocktail_rust.h"
 #include "runtime/environment.h"
 #include "runtime/roblox_cookie_store.h"
 #include "runtime/runtime_paths.h"
@@ -42,29 +44,19 @@ std::string ReadStoredRoblosecurityCookie(
     cookie = LoadManagedRobloxCookie(paths.cookie_file(), *secrets);
   }
   if (cookie.status != StoredCookieStatus::kFound) return {};
-  std::string value;
-  std::string_view remaining(cookie.value);
-  while (!remaining.empty()) {
-    const auto end = remaining.find_first_of(";\r\n\t");
-    auto segment = remaining.substr(0, end);
-    while (!segment.empty() && segment.front() == ' ') segment.remove_prefix(1);
-    constexpr std::string_view prefix = ".ROBLOSECURITY=";
-    if (segment.substr(0, prefix.size()) == prefix) {
-      value = segment.substr(prefix.size());
-      break;
-    }
-    if (segment.substr(0, 2) == "_|") {
-      value = segment;
-      break;
-    }
-    if (end == remaining.npos) break;
-    remaining.remove_prefix(end + 1);
+  std::string value(cookie.value.size() + 1, '\0');
+  const int32_t rc = mocktail_rust_presence_extract_cookie(
+      cookie.value.c_str(), value.data(), value.size());
+  if (!cookie.value.empty()) {
+    mocktail_rust_secure_zero(cookie.value.data(), cookie.value.size());
   }
-  volatile char* bytes = cookie.value.empty() ? nullptr : cookie.value.data();
-  for (size_t i = 0; i < cookie.value.size(); ++i) bytes[i] = '\0';
-  for (unsigned char ch : value) {
-    if (ch <= 0x20 || ch >= 0x7f || ch == ';') return {};
+  if (rc != 0) {
+    if (!value.empty()) {
+      mocktail_rust_secure_zero(value.data(), value.size());
+    }
+    return {};
   }
+  value.resize(std::char_traits<char>::length(value.c_str()));
   return value;
 }
 
@@ -88,7 +80,7 @@ Status ResolveFollowUserPlace(int64_t user_id, const std::string& auth_cookie,
 
   struct curl_slist* headers = nullptr;
   headers = curl_slist_append(headers, "Content-Type: application/json");
-  const std::string cookie_header = "Cookie: .ROBLOSECURITY=" + auth_cookie;
+  std::string cookie_header = "Cookie: .ROBLOSECURITY=" + auth_cookie;
   headers = curl_slist_append(headers, cookie_header.c_str());
 
   curl_easy_setopt(curl, CURLOPT_URL,
@@ -107,6 +99,9 @@ Status ResolveFollowUserPlace(int64_t user_id, const std::string& auth_cookie,
   long http_status = 0;
   curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
   curl_slist_free_all(headers);
+  if (!cookie_header.empty()) {
+    mocktail_rust_secure_zero(cookie_header.data(), cookie_header.size());
+  }
   curl_easy_cleanup(curl);
 
   if (result != CURLE_OK) {
@@ -117,35 +112,17 @@ Status ResolveFollowUserPlace(int64_t user_id, const std::string& auth_cookie,
                    std::to_string(http_status) + ")");
   }
 
-  const nlohmann::json parsed = nlohmann::json::parse(
-      response, /*cb=*/nullptr, /*allow_exceptions=*/false);
-  if (parsed.is_discarded()) {
-    return Invalid("Roblox presence lookup returned malformed JSON");
+  int64_t place_id = 0;
+  std::array<char, 256> game_id{};
+  std::array<char, 256> err_buf{};
+  const int32_t parse_rc = mocktail_rust_presence_parse_follow_response(
+      response.c_str(), &place_id, game_id.data(), game_id.size(),
+      err_buf.data(), err_buf.size());
+  if (parse_rc != 0) {
+    return Invalid(err_buf.data());
   }
-
-  if (!parsed.contains("userPresences") ||
-      !parsed["userPresences"].is_array() ||
-      parsed["userPresences"].empty()) {
-    return Invalid("Roblox presence lookup returned no data for user");
-  }
-
-  const auto& presence = parsed["userPresences"][0];
-  // userPresenceType: 0 offline, 1 online, 2 in-game, 3 in-studio.
-  const int presence_type = presence.value("userPresenceType", 0);
-  if (presence_type != 2) {
-    return Invalid("User is not currently in a joinable Roblox experience");
-  }
-  if (!presence.contains("placeId") || presence["placeId"].is_null()) {
-    return Invalid("Roblox presence lookup did not include a placeId");
-  }
-
-  out->place_id = presence.value("placeId", int64_t{0});
-  if (presence.contains("gameId") && !presence["gameId"].is_null()) {
-    out->game_instance_id = presence.value("gameId", std::string());
-  }
-  if (out->place_id <= 0) {
-    return Invalid("Roblox presence lookup returned an invalid placeId");
-  }
+  out->place_id = place_id;
+  out->game_instance_id = game_id.data();
   return Status::Ok();
 }
 

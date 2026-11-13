@@ -1,6 +1,8 @@
 #include "runtime/roblox_permissions_bridge.h"
 #include "mocktail/mocktail_rust.h"
 
+#include <string_view>
+
 #include <nlohmann/json.hpp>
 
 namespace mocktail {
@@ -8,7 +10,14 @@ namespace runtime {
 namespace {
 constexpr std::size_t kMaximumJsonBytes = 64 * 1024;
 constexpr char kMicrophone[] = "MICROPHONE_ACCESS";
-constexpr char kLocalNetwork[] = "LOCAL_NETWORK";
+
+const char* StaticOutcomeLiteral(std::string_view value) {
+  if (value == "supported") return "supported";
+  if (value == "HIDE") return "HIDE";
+  if (value == "AUTHORIZED") return "AUTHORIZED";
+  if (value == "DENIED") return "DENIED";
+  return "invalid_request";
+}
 
 struct Response {
   nlohmann::json body;
@@ -54,9 +63,7 @@ Response Answer(JNIEnv* env, jstring message, std::size_t method,
     auto parsed_body =
         nlohmann::json::parse(std::string_view(body, body_len), nullptr, false);
     if (!parsed_body.is_discarded()) {
-      static thread_local std::string outcome_str;
-      outcome_str = outcome;
-      return {std::move(parsed_body), code, outcome_str.c_str()};
+      return {std::move(parsed_body), code, StaticOutcomeLiteral(outcome)};
     }
   }
   return rejected;

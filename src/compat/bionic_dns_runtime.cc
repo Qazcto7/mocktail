@@ -138,11 +138,21 @@ int BionicGetAddressInfo(const char* node, const char* service,
         if (sin != nullptr) {
           sin->sin_family = AF_INET;
           int port = 443;
-          if (service != nullptr) {
-            port = std::atoi(service);
-            if (port <= 0) port = 443;
+          if (service != nullptr && service[0] != '\0') {
+            if (std::strcmp(service, "http") == 0) {
+              port = 80;
+            } else if (std::strcmp(service, "https") == 0) {
+              port = 443;
+            } else {
+              char* end = nullptr;
+              const long parsed = std::strtol(service, &end, 10);
+              if (end != service && *end == '\0' && parsed > 0 &&
+                  parsed <= 65535) {
+                port = static_cast<int>(parsed);
+              }
+            }
           }
-          sin->sin_port = htons(port);
+          sin->sin_port = htons(static_cast<uint16_t>(port));
           sin->sin_addr.s_addr = inet_addr("128.116.21.3");
           fallback->ai_addr = reinterpret_cast<sockaddr*>(sin);
           fallback->ai_canonname = ::strdup(node);

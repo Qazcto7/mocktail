@@ -118,17 +118,13 @@ bool RobloxAppLifecycle::stopped() const {
 
 const char *RobloxAppLifecycleResolutionStatusName(
     RobloxAppLifecycleResolutionStatus status) {
-  thread_local char buf[32];
-  mocktail_rust_app_lifecycle_status_name(
-      static_cast<int32_t>(status), buf, sizeof(buf));
-  return buf;
+  return mocktail_rust_app_lifecycle_status_name_ptr(
+      static_cast<int32_t>(status));
 }
 
 const char *RobloxAppShutdownStatusName(RobloxAppShutdownStatus status) {
-  thread_local char buf[32];
-  mocktail_rust_app_shutdown_status_name(
-      static_cast<int32_t>(status), buf, sizeof(buf));
-  return buf;
+  return mocktail_rust_app_shutdown_status_name_ptr(
+      static_cast<int32_t>(status));
 }
 
 } // namespace runtime

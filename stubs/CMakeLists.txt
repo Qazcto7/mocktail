@@ -48,6 +48,7 @@ target_include_directories(stub_android PUBLIC ${CMAKE_SOURCE_DIR}/include)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(MINIZIP REQUIRED IMPORTED_TARGET minizip)
 target_link_libraries(stub_android PRIVATE
+  mocktail_core_rust
   PkgConfig::MINIZIP
   Threads::Threads
   ${CMAKE_DL_LIBS}

@@ -152,7 +152,8 @@ HttpResponse PerformRequest(const HttpRequest& request,
   curl_easy_setopt(handle, CURLOPT_WRITEDATA, &writer);
   curl_easy_setopt(handle, CURLOPT_HEADERFUNCTION, WriteHeader);
   curl_easy_setopt(handle, CURLOPT_HEADERDATA, &response.headers);
-  if (const char* ca_bundle = std::getenv("MOCKTAIL_CA_BUNDLE")) {
+  if (const char* ca_bundle = std::getenv("MOCKTAIL_CA_BUNDLE");
+      ca_bundle != nullptr && ca_bundle[0] != '\0') {
     curl_easy_setopt(handle, CURLOPT_CAINFO, ca_bundle);
   }
   std::string proxy_url;
@@ -181,7 +182,7 @@ HttpResponse PerformRequest(const HttpRequest& request,
       std::this_thread::sleep_for(std::chrono::milliseconds(50 * attempt));
     }
     result = curl_easy_perform(handle);
-    if (result == CURLE_OK) {
+    if (result == CURLE_OK || writer.limit_exceeded) {
       break;
     }
     // Fail immediately on certificate verification failures or fatal SSL config errors

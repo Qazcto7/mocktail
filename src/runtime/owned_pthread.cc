@@ -111,10 +111,8 @@ int OwnedPthread::Signal(int signal_number) const {
 }
 
 const char* OwnedPthreadWaitStatusName(OwnedPthreadWaitStatus status) {
-  thread_local char buffer[32];
-  mocktail_rust_owned_pthread_status_name(
-      static_cast<int32_t>(status), buffer, sizeof(buffer));
-  return buffer;
+  return mocktail_rust_owned_pthread_status_name_ptr(
+      static_cast<int32_t>(status));
 }
 
 }  // namespace runtime

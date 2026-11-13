@@ -67,9 +67,8 @@ PresentModePolicy CachedPresentModePolicy() {
 
 PresentModePolicy ResolveVulkanSurfacePolicy(PresentModePolicy configured,
                                              bool wayland_surface) {
-  return wayland_surface && configured == PresentModePolicy::kHostDefault
-             ? PresentModePolicy::kMailbox
-             : configured;
+  return FromRustPolicy(mocktail_rust_present_mode_resolve_vulkan_surface(
+      ToRustPolicy(configured), wayland_surface ? 1 : 0));
 }
 
 std::vector<VkPresentModeKHR>
@@ -110,21 +109,11 @@ int ResolveSwapInterval(PresentModePolicy policy, int requested) {
 }
 
 const char *PresentModeKhrName(VkPresentModeKHR mode) {
-  static thread_local std::array<char, 32> buffer{};
-  if (mocktail_rust_present_mode_khr_name(static_cast<uint32_t>(mode),
-                                          buffer.data(), buffer.size()) == 0) {
-    return buffer.data();
-  }
-  return "other";
+  return mocktail_rust_present_mode_khr_name_ptr(static_cast<uint32_t>(mode));
 }
 
 const char *PresentModePolicyName(PresentModePolicy policy) {
-  static thread_local std::array<char, 32> buffer{};
-  if (mocktail_rust_present_mode_policy_name(ToRustPolicy(policy),
-                                             buffer.data(), buffer.size()) == 0) {
-    return buffer.data();
-  }
-  return "unknown";
+  return mocktail_rust_present_mode_policy_name_ptr(ToRustPolicy(policy));
 }
 
 std::uint32_t PreferSwapchainMinImageCount(PresentModePolicy policy,
