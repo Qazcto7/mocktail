@@ -1546,8 +1546,16 @@ jobject MakePackageInfoObject() {
   SetStringFieldRaw(object, "versionName",
                     version_name != nullptr ? version_name : "unknown");
   const char* version_code = std::getenv("MOCKTAIL_ROBLOX_VERSION_CODE");
-  const int parsed_version_code =
-      version_code != nullptr ? std::atoi(version_code) : 0;
+  int parsed_version_code = 0;
+  if (version_code != nullptr && version_code[0] != '\0') {
+    errno = 0;
+    char* end = nullptr;
+    const long raw_code = std::strtol(version_code, &end, 10);
+    if (errno == 0 && end != version_code && *end == '\0' && raw_code >= 0 &&
+        raw_code <= std::numeric_limits<int>::max()) {
+      parsed_version_code = static_cast<int>(raw_code);
+    }
+  }
   SetIntFieldRaw(object, "versionCode", parsed_version_code);
   return object;
 }

@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -2487,11 +2488,14 @@ bool PumpEvents() {
   static const char* auto_exit_value =
       GetEnvNonEmpty("MOCKTAIL_AUTO_EXIT_AFTER_PRESENT_MS");
   if (!g_state.quit_requested && auto_exit_value != nullptr) {
+    errno = 0;
     char* end = nullptr;
     const long delay_ms = std::strtol(auto_exit_value, &end, 10);
     const uint64_t first_present_ns =
         g_first_present_ticks_ns.load(std::memory_order_acquire);
-    if (end != auto_exit_value && delay_ms > 0 && first_present_ns != 0) {
+    if (errno == 0 && end != auto_exit_value && *end == '\0' && delay_ms > 0 &&
+        static_cast<uint64_t>(delay_ms) <= UINT64_MAX / 1000000ULL &&
+        first_present_ns != 0) {
       const uint64_t elapsed_ns = SDL_GetTicksNS() - first_present_ns;
       if (elapsed_ns >= static_cast<uint64_t>(delay_ms) * 1000000ULL) {
         fprintf(stderr,

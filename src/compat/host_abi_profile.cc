@@ -1,9 +1,16 @@
 #include "compat/host_abi_profile.h"
 
 #include "compat/host_abi_profile_loader.h"
+#include "mocktail/mocktail_rust.h"
 
 namespace mocktail::compat {
 namespace {
+
+static_assert(sizeof(ConstructorRange) == sizeof(MocktailRustConstructorRange),
+              "ConstructorRange layout mismatch");
+static_assert(
+    alignof(ConstructorRange) == alignof(MocktailRustConstructorRange),
+    "ConstructorRange alignment mismatch");
 
 constexpr HostAbiProfile kProfiles[] = {
     // Roblox 2.746.1266 (20836). Derived from candidate payload and validated
@@ -236,107 +243,79 @@ const HostAbiProfile *FindHostAbiProfile(std::string_view build_id) noexcept {
 }
 
 bool HostAbiProfile::HasValidConstructorRanges() const noexcept {
-  if (constructor_run_range_count == 0 ||
-      constructor_run_range_count > constructor_run_ranges.size()) {
-    return false;
-  }
-  size_t previous_end = 0;
-  for (size_t index = 0; index < constructor_run_range_count; ++index) {
-    const ConstructorRange &range = constructor_run_ranges[index];
-    if (!range.IsValidFor(init_array_count) ||
-        (index != 0 && range.begin < previous_end)) {
-      return false;
-    }
-    previous_end = range.end_exclusive;
-  }
-  return true;
+  return mocktail_rust_host_abi_has_valid_ranges(
+      reinterpret_cast<const MocktailRustConstructorRange *>(
+          constructor_run_ranges.data()),
+      constructor_run_range_count, constructor_run_ranges.size(),
+      init_array_count);
 }
 
 bool HostAbiProfile::AllowsConstructor(size_t index) const noexcept {
-  if (!HasValidConstructorRanges()) {
-    return false;
-  }
-  for (size_t range_index = 0; range_index < constructor_run_range_count;
-       ++range_index) {
-    const ConstructorRange &range = constructor_run_ranges[range_index];
-    if (range.begin <= index && index < range.end_exclusive) {
-      return true;
-    }
-  }
-  return false;
+  return mocktail_rust_host_abi_allows_constructor(
+      reinterpret_cast<const MocktailRustConstructorRange *>(
+          constructor_run_ranges.data()),
+      constructor_run_range_count, constructor_run_ranges.size(),
+      init_array_count, index);
 }
 
 size_t HostAbiProfile::ConstructorRangeBegin() const noexcept {
-  return HasValidConstructorRanges() ? constructor_run_ranges[0].begin : 0;
+  return mocktail_rust_host_abi_range_begin(
+      reinterpret_cast<const MocktailRustConstructorRange *>(
+          constructor_run_ranges.data()),
+      constructor_run_range_count, constructor_run_ranges.size(),
+      init_array_count);
 }
 
 size_t HostAbiProfile::ConstructorRangeEndExclusive() const noexcept {
-  return HasValidConstructorRanges()
-             ? constructor_run_ranges[constructor_run_range_count - 1]
-                   .end_exclusive
-             : 0;
+  return mocktail_rust_host_abi_range_end_exclusive(
+      reinterpret_cast<const MocktailRustConstructorRange *>(
+          constructor_run_ranges.data()),
+      constructor_run_range_count, constructor_run_ranges.size(),
+      init_array_count);
 }
 
 bool HostAbiProfile::HasValidNativeMimallocConstructorRanges() const noexcept {
-  if (native_mimalloc_constructor_run_range_count == 0 ||
-      native_mimalloc_constructor_run_range_count >
-          native_mimalloc_constructor_run_ranges.size()) {
-    return false;
-  }
-  size_t previous_end = 0;
-  for (size_t index = 0; index < native_mimalloc_constructor_run_range_count;
-       ++index) {
-    const ConstructorRange &range =
-        native_mimalloc_constructor_run_ranges[index];
-    if (!range.IsValidFor(init_array_count) ||
-        (index != 0 && range.begin < previous_end)) {
-      return false;
-    }
-    previous_end = range.end_exclusive;
-  }
-  return true;
+  return mocktail_rust_host_abi_has_valid_ranges(
+      reinterpret_cast<const MocktailRustConstructorRange *>(
+          native_mimalloc_constructor_run_ranges.data()),
+      native_mimalloc_constructor_run_range_count,
+      native_mimalloc_constructor_run_ranges.size(), init_array_count);
 }
 
 bool HostAbiProfile::AllowsNativeMimallocConstructor(
     size_t index) const noexcept {
-  if (!HasValidNativeMimallocConstructorRanges()) {
-    return false;
-  }
-  for (size_t range_index = 0;
-       range_index < native_mimalloc_constructor_run_range_count;
-       ++range_index) {
-    const ConstructorRange &range =
-        native_mimalloc_constructor_run_ranges[range_index];
-    if (range.begin <= index && index < range.end_exclusive) {
-      return true;
-    }
-  }
-  return false;
+  return mocktail_rust_host_abi_allows_constructor(
+      reinterpret_cast<const MocktailRustConstructorRange *>(
+          native_mimalloc_constructor_run_ranges.data()),
+      native_mimalloc_constructor_run_range_count,
+      native_mimalloc_constructor_run_ranges.size(), init_array_count, index);
 }
 
 size_t HostAbiProfile::NativeMimallocConstructorRangeBegin() const noexcept {
-  return HasValidNativeMimallocConstructorRanges()
-             ? native_mimalloc_constructor_run_ranges[0].begin
-             : 0;
+  return mocktail_rust_host_abi_range_begin(
+      reinterpret_cast<const MocktailRustConstructorRange *>(
+          native_mimalloc_constructor_run_ranges.data()),
+      native_mimalloc_constructor_run_range_count,
+      native_mimalloc_constructor_run_ranges.size(), init_array_count);
 }
 
 size_t
 HostAbiProfile::NativeMimallocConstructorRangeEndExclusive() const noexcept {
-  return HasValidNativeMimallocConstructorRanges()
-             ? native_mimalloc_constructor_run_ranges
-                   [native_mimalloc_constructor_run_range_count - 1]
-                       .end_exclusive
-             : 0;
+  return mocktail_rust_host_abi_range_end_exclusive(
+      reinterpret_cast<const MocktailRustConstructorRange *>(
+          native_mimalloc_constructor_run_ranges.data()),
+      native_mimalloc_constructor_run_range_count,
+      native_mimalloc_constructor_run_ranges.size(), init_array_count);
 }
 
 bool HostAbiProfile::ShouldInitializeNativeMimallocThreadAfterConstructor(
     size_t index) const noexcept {
-  return HasValidNativeMimallocConstructorRanges() &&
-         native_mimalloc_thread_initializer_after_constructor <
-             init_array_count &&
-         AllowsNativeMimallocConstructor(
-             native_mimalloc_thread_initializer_after_constructor) &&
-         index == native_mimalloc_thread_initializer_after_constructor;
+  return mocktail_rust_host_abi_should_init_mimalloc_thread(
+      reinterpret_cast<const MocktailRustConstructorRange *>(
+          native_mimalloc_constructor_run_ranges.data()),
+      native_mimalloc_constructor_run_range_count,
+      native_mimalloc_constructor_run_ranges.size(), init_array_count,
+      native_mimalloc_thread_initializer_after_constructor, index);
 }
 
 bool HostAbiProfile::HasValidNativePreJniBootstrap() const noexcept {
@@ -346,12 +325,10 @@ bool HostAbiProfile::HasValidNativePreJniBootstrap() const noexcept {
 HostAllocatorStrategy HostAbiProfile::ResolveAllocatorStrategy(
     bool host_bridges_override_present,
     bool host_bridges_override_enabled) const noexcept {
-  if (!host_bridges_override_present) {
-    return default_allocator_strategy;
-  }
-  return host_bridges_override_enabled
-             ? HostAllocatorStrategy::kHostBridges
-             : HostAllocatorStrategy::kNativeMimalloc;
+  return static_cast<HostAllocatorStrategy>(
+      mocktail_rust_host_abi_resolve_allocator_strategy(
+          static_cast<int32_t>(default_allocator_strategy),
+          host_bridges_override_present, host_bridges_override_enabled));
 }
 
 } // namespace mocktail::compat

@@ -629,6 +629,12 @@ int mocktail_rust_fflags_load_and_merge(
 // 30. APKPure Update Provider
 // ============================================================================
 
+bool mocktail_rust_apkpure_is_valid_version_name(
+    const char* name_ptr,
+    size_t name_len);
+
+bool mocktail_rust_apkpure_has_zip_magic(const char* path_ptr);
+
 int mocktail_rust_apkpure_parse_latest(
     const uint8_t* metadata,
     size_t meta_len,
@@ -642,6 +648,7 @@ int mocktail_rust_apkpure_parse_exact_urls(
     const uint8_t* metadata,
     size_t meta_len,
     const char* version,
+    uint64_t version_code,
     char* out_urls_json,
     size_t json_cap,
     char* out_err,
@@ -2549,6 +2556,177 @@ int32_t mocktail_rust_webview_build_callback_script(
     size_t cb_len,
     char* out_buf,
     size_t out_cap);
+
+// ============================================================================
+// 118. Roblox Text Font Resolver
+// ============================================================================
+
+int32_t mocktail_rust_resolve_roblox_text_font(
+    int32_t font,
+    const char* asset_content_root_ptr,
+    size_t asset_content_root_len,
+    char* out_primary_file,
+    size_t primary_file_cap,
+    float* out_size_scale,
+    bool* out_exact_mapping);
+
+// ============================================================================
+// 119. Runtime Config & Network Proxy Helpers
+// ============================================================================
+
+bool mocktail_rust_network_proxy_parse(
+    const char* host_ptr,
+    size_t host_len,
+    const char* port_ptr,
+    size_t port_len,
+    const char* scheme_ptr,
+    size_t scheme_len,
+    const char* user_ptr,
+    size_t user_len,
+    const char* pass_ptr,
+    size_t pass_len,
+    char* out_scheme,
+    size_t scheme_cap,
+    int32_t* out_port);
+
+size_t mocktail_rust_network_proxy_build_url(
+    const char* scheme_ptr,
+    size_t scheme_len,
+    const char* host_ptr,
+    size_t host_len,
+    int32_t port,
+    const char* user_ptr,
+    size_t user_len,
+    const char* pass_ptr,
+    size_t pass_len,
+    bool include_credentials,
+    char* out_url,
+    size_t url_cap);
+
+int32_t mocktail_rust_runtime_config_parse_graphics_backend(
+    const char* name_ptr,
+    size_t name_len);
+
+bool mocktail_rust_runtime_config_parse_bool(
+    const char* val_ptr,
+    size_t val_len,
+    bool default_val,
+    bool* out_valid);
+
+int32_t mocktail_rust_runtime_config_parse_positive_int(
+    const char* val_ptr,
+    size_t val_len,
+    int32_t default_val);
+
+bool mocktail_rust_runtime_config_is_discord_app_id(
+    const char* val_ptr,
+    size_t val_len);
+
+bool mocktail_rust_runtime_config_is_discord_text(
+    const char* val_ptr,
+    size_t val_len,
+    size_t max_len);
+
+// ============================================================================
+// 120. Runtime Config Bootstrap
+// ============================================================================
+
+const char* mocktail_rust_runtime_config_default_yaml_ptr(size_t* out_len);
+
+int32_t mocktail_rust_runtime_config_ensure_file(
+    const char* path_ptr,
+    bool* out_created,
+    char* out_err,
+    size_t err_cap);
+
+// ============================================================================
+// 121. Host Allocator Bridge
+// ============================================================================
+
+void* mocktail_rust_host_aligned_allocate(size_t size, size_t alignment);
+void* mocktail_rust_host_allocate(size_t size);
+void* mocktail_rust_host_reallocate(void* pointer, size_t size);
+void mocktail_rust_host_free(void* pointer);
+size_t mocktail_rust_host_usable_size(void* pointer);
+
+// ============================================================================
+// 122. Host ABI Profile & Experiment Engine
+// ============================================================================
+
+typedef struct MocktailRustConstructorRange {
+    size_t begin;
+    size_t end_exclusive;
+} MocktailRustConstructorRange;
+
+bool mocktail_rust_host_abi_has_valid_ranges(
+    const MocktailRustConstructorRange* ranges_ptr,
+    size_t range_count,
+    size_t max_ranges,
+    size_t init_array_count);
+
+bool mocktail_rust_host_abi_allows_constructor(
+    const MocktailRustConstructorRange* ranges_ptr,
+    size_t range_count,
+    size_t max_ranges,
+    size_t init_array_count,
+    size_t index);
+
+size_t mocktail_rust_host_abi_range_begin(
+    const MocktailRustConstructorRange* ranges_ptr,
+    size_t range_count,
+    size_t max_ranges,
+    size_t init_array_count);
+
+size_t mocktail_rust_host_abi_range_end_exclusive(
+    const MocktailRustConstructorRange* ranges_ptr,
+    size_t range_count,
+    size_t max_ranges,
+    size_t init_array_count);
+
+bool mocktail_rust_host_abi_should_init_mimalloc_thread(
+    const MocktailRustConstructorRange* ranges_ptr,
+    size_t range_count,
+    size_t max_ranges,
+    size_t init_array_count,
+    size_t init_after,
+    size_t index);
+
+int32_t mocktail_rust_host_abi_resolve_allocator_strategy(
+    int32_t default_strategy,
+    bool override_present,
+    bool override_enabled);
+
+bool mocktail_rust_host_abi_patch_absolute_jump(
+    size_t address,
+    void* target);
+
+bool mocktail_rust_host_abi_seed_jni_singleton(
+    size_t library_base,
+    size_t jni_singleton_slot,
+    size_t jni_singleton_bytes,
+    void** out_seeded_ptr);
+
+// ============================================================================
+// 123. Window Game Surface Bridge Validation & State Machine
+// ============================================================================
+
+typedef struct MocktailRustGameSurfaceBridgeSnapshot {
+    uint64_t accepted_events;
+    uint64_t duplicate_events;
+    uint64_t last_generation;
+    int32_t last_event_type;
+    bool failed;
+} MocktailRustGameSurfaceBridgeSnapshot;
+
+int32_t mocktail_rust_game_surface_bridge_validate_event(
+    const MocktailRustSurfaceEvent* event,
+    char* out_err,
+    size_t err_cap);
+
+void mocktail_rust_game_surface_bridge_record_event(
+    const MocktailRustSurfaceEvent* event,
+    bool changed,
+    MocktailRustGameSurfaceBridgeSnapshot* io_snapshot);
 
 #ifdef __cplusplus
 }

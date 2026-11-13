@@ -1706,13 +1706,7 @@ pub extern "C" fn mocktail_rust_parse_compatibility_catalog(
     error_cap: usize,
 ) -> c_int {
     let set_error = |msg: &str| {
-        if !out_error.is_null() && error_cap > 0 {
-            let len = std::cmp::min(msg.len(), error_cap - 1);
-            unsafe {
-                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_error, len);
-                *out_error.add(len) = 0;
-            }
-        }
+        copy_error(out_error, error_cap, msg);
     };
 
     if json_bytes.is_null() || out_count.is_null() || (out_profiles.is_null() && out_cap > 0) {
@@ -2519,13 +2513,7 @@ pub extern "C" fn mocktail_rust_parse_roblox_launch_uri(
     out_follow_user_id: *mut i64,
 ) -> c_int {
     let set_error = |msg: &str| {
-        if !out_error.is_null() && error_cap > 0 {
-            let len = std::cmp::min(msg.len(), error_cap - 1);
-            unsafe {
-                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_error, len);
-                *out_error.add(len) = 0;
-            }
-        }
+        copy_error(out_error, error_cap, msg);
     };
 
     if uri.is_null() || out_json.is_null() || out_cap == 0 {
@@ -2620,13 +2608,7 @@ pub extern "C" fn mocktail_rust_parse_webview_launch_game(
     out_follow_user_id: *mut i64,
 ) -> c_int {
     let set_error = |msg: &str| {
-        if !out_error.is_null() && error_cap > 0 {
-            let len = std::cmp::min(msg.len(), error_cap - 1);
-            unsafe {
-                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_error, len);
-                *out_error.add(len) = 0;
-            }
-        }
+        copy_error(out_error, error_cap, msg);
     };
     if command_json.is_null() || out_json.is_null() || out_cap == 0 {
         set_error("invalid argument");
@@ -2806,13 +2788,7 @@ pub extern "C" fn mocktail_rust_parse_runtime_config_yaml(
     error_cap: usize,
 ) -> c_int {
     let set_error = |msg: &str| {
-        if !out_error.is_null() && error_cap > 0 {
-            let len = std::cmp::min(msg.len(), error_cap - 1);
-            unsafe {
-                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_error, len);
-                *out_error.add(len) = 0;
-            }
-        }
+        copy_error(out_error, error_cap, msg);
     };
     if yaml_bytes.is_null() || out_env_json.is_null() || out_cap == 0 {
         set_error("invalid argument");
@@ -3849,13 +3825,7 @@ pub extern "C" fn mocktail_rust_fleasion_prepare_bundle(
     error_cap: usize,
 ) -> c_int {
     let set_error = |msg: &str| {
-        if !out_error.is_null() && error_cap > 0 {
-            let len = std::cmp::min(msg.len(), error_cap - 1);
-            unsafe {
-                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_error, len);
-                *out_error.add(len) = 0;
-            }
-        }
+        copy_error(out_error, error_cap, msg);
     };
     if ca_pem_path.is_null() || base_bundle_path.is_null() || dest_bundle_path.is_null() {
         set_error("invalid argument");
@@ -3992,13 +3962,7 @@ pub extern "C" fn mocktail_rust_find_apk_signing_block(
     error_cap: usize,
 ) -> c_int {
     let set_error = |msg: &str| {
-        if !out_error.is_null() && error_cap > 0 {
-            let len = std::cmp::min(msg.len(), error_cap - 1);
-            unsafe {
-                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_error, len);
-                *out_error.add(len) = 0;
-            }
-        }
+        copy_error(out_error, error_cap, msg);
     };
     if file_bytes.is_null() || out_info.is_null() || file_size < 32 {
         set_error("invalid argument");
@@ -4452,13 +4416,7 @@ pub extern "C" fn mocktail_rust_zip_list_entries(
     err_cap: usize,
 ) -> c_int {
     let set_err = |msg: &str| {
-        if !out_err.is_null() && err_cap > 0 {
-            let len = std::cmp::min(msg.len(), err_cap - 1);
-            unsafe {
-                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_err, len);
-                *out_err.add(len) = 0;
-            }
-        }
+        copy_error(out_err, err_cap, msg);
     };
     if archive_path.is_null() || out_json.is_null() || json_cap == 0 {
         set_err("invalid arguments");
@@ -4544,13 +4502,7 @@ pub extern "C" fn mocktail_rust_zip_read_entry(
     err_cap: usize,
 ) -> c_int {
     let set_err = |msg: &str| {
-        if !out_err.is_null() && err_cap > 0 {
-            let len = std::cmp::min(msg.len(), err_cap - 1);
-            unsafe {
-                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_err, len);
-                *out_err.add(len) = 0;
-            }
-        }
+        copy_error(out_err, err_cap, msg);
     };
     if archive_path.is_null() || entry_name.is_null() || out_buf.is_null() || out_read_len.is_null() {
         set_err("invalid arguments");
@@ -4630,13 +4582,7 @@ pub extern "C" fn mocktail_rust_zip_extract_entry(
     err_cap: usize,
 ) -> c_int {
     let set_err = |msg: &str| {
-        if !out_err.is_null() && err_cap > 0 {
-            let len = std::cmp::min(msg.len(), err_cap - 1);
-            unsafe {
-                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_err, len);
-                *out_err.add(len) = 0;
-            }
-        }
+        copy_error(out_err, err_cap, msg);
     };
     if archive_path.is_null() || entry_name.is_null() || dest_path.is_null() {
         set_err("invalid arguments");
@@ -4752,13 +4698,7 @@ pub extern "C" fn mocktail_rust_zip_extract_prefix(
     err_cap: usize,
 ) -> c_int {
     let set_err = |msg: &str| {
-        if !out_err.is_null() && err_cap > 0 {
-            let len = std::cmp::min(msg.len(), err_cap - 1);
-            unsafe {
-                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_err, len);
-                *out_err.add(len) = 0;
-            }
-        }
+        copy_error(out_err, err_cap, msg);
     };
     if archive_path.is_null() || prefix.is_null() || dest_dir.is_null() || out_extracted_count.is_null() {
         set_err("invalid arguments");
@@ -4920,13 +4860,7 @@ pub extern "C" fn mocktail_rust_payload_hash_asset_tree(
     err_cap: usize,
 ) -> c_int {
     let set_err = |msg: &str| {
-        if !out_err.is_null() && err_cap > 0 {
-            let len = std::cmp::min(msg.len(), err_cap - 1);
-            unsafe {
-                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_err, len);
-                *out_err.add(len) = 0;
-            }
-        }
+        copy_error(out_err, err_cap, msg);
     };
     if root_dir.is_null() || out_hex.is_null() || hex_cap < 65 {
         set_err("invalid arguments");
@@ -5156,13 +5090,7 @@ pub extern "C" fn mocktail_rust_payload_inspect(
     err_cap: usize,
 ) -> c_int {
     let set_err = |msg: &str| {
-        if !out_err.is_null() && err_cap > 0 {
-            let len = std::cmp::min(msg.len(), err_cap - 1);
-            unsafe {
-                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_err, len);
-                *out_err.add(len) = 0;
-            }
-        }
+        copy_error(out_err, err_cap, msg);
     };
     if dir_path.is_null() || out_json.is_null() || json_cap == 0 {
         set_err("invalid arguments");
@@ -5204,13 +5132,7 @@ pub extern "C" fn mocktail_rust_payload_verify(
     err_cap: usize,
 ) -> c_int {
     let set_err = |msg: &str| {
-        if !out_err.is_null() && err_cap > 0 {
-            let len = std::cmp::min(msg.len(), err_cap - 1);
-            unsafe {
-                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_err, len);
-                *out_err.add(len) = 0;
-            }
-        }
+        copy_error(out_err, err_cap, msg);
     };
     if dir_path.is_null() || out_json.is_null() || json_cap == 0 {
         set_err("invalid arguments");
@@ -5333,13 +5255,7 @@ pub extern "C" fn mocktail_rust_fflags_load_and_merge(
     err_cap: usize,
 ) -> c_int {
     let set_err = |msg: &str| {
-        if !out_err.is_null() && err_cap > 0 {
-            let len = std::cmp::min(msg.len(), err_cap - 1);
-            unsafe {
-                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_err, len);
-                *out_err.add(len) = 0;
-            }
-        }
+        copy_error(out_err, err_cap, msg);
     };
     if out_json.is_null() || json_cap == 0 {
         set_err("invalid arguments");
@@ -5511,6 +5427,35 @@ fn is_apkpure_url_char(c: u8) -> bool {
     c.is_ascii_alphanumeric() || b"-@:%._+~#=?&/()".contains(&c)
 }
 
+fn apkpure_version_code(data: &[u8], marker: &ApkPureVersionMarker) -> u64 {
+    let begin = marker.begin.saturating_sub(128);
+    let mut position = marker.begin;
+    while position > begin {
+        position -= 1;
+        if data[position] != 0x2a || position + 3 >= marker.begin {
+            continue;
+        }
+        let code_len = data[position + 1] as usize;
+        let code_begin = position + 2;
+        let name_tag = code_begin + code_len;
+        if code_len == 0 || code_len > 20 || name_tag + 2 != marker.begin {
+            continue;
+        }
+        if data[name_tag] != 0x32 || data[name_tag + 1] as usize != marker.value.len() {
+            continue;
+        }
+        let code_slice = &data[code_begin..name_tag];
+        if code_slice.iter().all(|b| b.is_ascii_digit()) {
+            if let Ok(text) = std::str::from_utf8(code_slice) {
+                if let Ok(code) = text.parse::<u64>() {
+                    return code;
+                }
+            }
+        }
+    }
+    0
+}
+
 fn apkpure_downloads_in_record(record: &[u8]) -> Vec<String> {
     let allowed_hosts = ["pureapk.com", "apkpure.com", "winudf.com"];
     let mut downloads = Vec::new();
@@ -5530,10 +5475,20 @@ fn apkpure_downloads_in_record(record: &[u8]) -> Vec<String> {
                 }
                 if let Ok(url_str) = std::str::from_utf8(&record[begin..url_end]) {
                     if let Ok(parsed) = url::Url::parse(url_str) {
-                        if let Some(host) = parsed.host_str() {
-                            let trusted = allowed_hosts.iter().any(|&h| host == h || host.ends_with(&format!(".{}", h)));
-                            if trusted {
-                                downloads.push(url_str.to_string());
+                        if parsed.scheme() == "https"
+                            && parsed.username().is_empty()
+                            && parsed.password().is_none()
+                            && parsed.port().map_or(true, |p| p == 443)
+                        {
+                            if let Some(host) = parsed.host_str() {
+                                let normalized_host = host.trim_end_matches('.').to_ascii_lowercase();
+                                let trusted = allowed_hosts.iter().any(|&h| {
+                                    normalized_host == h
+                                        || normalized_host.ends_with(&format!(".{}", h))
+                                });
+                                if trusted {
+                                    downloads.push(url_str.to_string());
+                                }
                             }
                         }
                     }
@@ -5548,6 +5503,40 @@ fn apkpure_downloads_in_record(record: &[u8]) -> Vec<String> {
 }
 
 #[no_mangle]
+pub extern "C" fn mocktail_rust_apkpure_is_valid_version_name(
+    name_ptr: *const c_char,
+    name_len: usize,
+) -> bool {
+    if name_ptr.is_null() || name_len == 0 || name_len > 128 {
+        return false;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(name_ptr as *const u8, name_len) };
+    slice.iter().copied().all(apkpure_version_character)
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_apkpure_has_zip_magic(path_ptr: *const c_char) -> bool {
+    if path_ptr.is_null() {
+        return false;
+    }
+    let path_str = match unsafe { CStr::from_ptr(path_ptr) }.to_str() {
+        Ok(s) if !s.is_empty() => s,
+        _ => return false,
+    };
+    let mut file = match File::open(path_str) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut magic = [0u8; 4];
+    let n = file.read(&mut magic).unwrap_or(0);
+    n == 4
+        && magic[0] == b'P'
+        && magic[1] == b'K'
+        && matches!(magic[2], 3 | 5 | 7)
+        && matches!(magic[3], 4 | 6 | 8)
+}
+
+#[no_mangle]
 pub extern "C" fn mocktail_rust_apkpure_parse_latest(
     metadata: *const u8,
     meta_len: usize,
@@ -5558,67 +5547,47 @@ pub extern "C" fn mocktail_rust_apkpure_parse_latest(
     err_cap: usize,
 ) -> c_int {
     let set_err = |msg: &str| {
-        if !out_err.is_null() && err_cap > 0 {
-            let len = std::cmp::min(msg.len(), err_cap - 1);
-            unsafe {
-                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_err, len);
-                *out_err.add(len) = 0;
-            }
-        }
+        copy_error(out_err, err_cap, msg);
     };
-    if metadata.is_null() || meta_len == 0 || out_version_name.is_null() || out_version_code.is_null() {
+    if (metadata.is_null() && meta_len > 0) || out_version_name.is_null() || ver_cap == 0 || out_version_code.is_null() {
         set_err("invalid arguments");
         return -1;
     }
-    let data = unsafe { std::slice::from_raw_parts(metadata, meta_len) };
-    let markers = apkpure_version_markers(data);
-    if markers.is_empty() {
-        set_err("APKPure metadata contains no version identity");
+    if meta_len == 0 {
+        set_err("APKPure metadata contains no downloadable version identity");
         return -2;
     }
-    let marker = &markers[0];
-    let prefix_begin = if marker.begin > 128 { marker.begin - 128 } else { 0 };
-
-    let mut position = marker.begin;
-    while position > prefix_begin {
-        position -= 1;
-        if data[position] != 0x2a || position + 3 >= marker.begin {
-            continue;
-        }
-        let code_len = data[position + 1] as usize;
-        let code_begin = position + 2;
-        let name_tag = code_begin + code_len;
-        if code_len == 0 || code_len > 20 || name_tag + 2 != marker.begin {
-            continue;
-        }
-        if data[name_tag] != 0x32 || data[name_tag + 1] as usize != marker.value.len() {
-            continue;
-        }
-        let mut code: u64 = 0;
-        let mut valid = true;
-        for i in code_begin..name_tag {
-            let c = data[i];
-            if !c.is_ascii_digit() || code > 999999999999999999 {
-                valid = false;
-                break;
-            }
-            code = code * 10 + (c - b'0') as u64;
-        }
-        if valid && code > 0 {
-            if marker.value.len() >= ver_cap {
-                set_err("version name buffer too small");
-                return -3;
-            }
-            unsafe {
-                std::ptr::copy_nonoverlapping(marker.value.as_ptr() as *const c_char, out_version_name, marker.value.len());
-                *out_version_name.add(marker.value.len()) = 0;
-                *out_version_code = code;
-            }
-            return 0;
+    let data = unsafe { std::slice::from_raw_parts(metadata, meta_len) };
+    let markers = apkpure_version_markers(data);
+    let mut best_code: u64 = 0;
+    let mut best_name = String::new();
+    for (index, marker) in markers.iter().enumerate() {
+        let code = apkpure_version_code(data, marker);
+        let end = if index + 1 < markers.len() {
+            markers[index + 1].begin
+        } else {
+            data.len()
+        };
+        let record_slice = &data[marker.colon + 1..end];
+        if code > best_code && !apkpure_downloads_in_record(record_slice).is_empty() {
+            best_code = code;
+            best_name = marker.value.clone();
         }
     }
-    set_err("APKPure metadata contains no version code");
-    -4
+    if best_code == 0 || best_name.is_empty() {
+        set_err("APKPure metadata contains no downloadable version identity");
+        return -2;
+    }
+    if best_name.len() >= ver_cap {
+        set_err("version name buffer too small");
+        return -3;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(best_name.as_ptr() as *const c_char, out_version_name, best_name.len());
+        *out_version_name.add(best_name.len()) = 0;
+        *out_version_code = best_code;
+    }
+    0
 }
 
 #[no_mangle]
@@ -5626,21 +5595,16 @@ pub extern "C" fn mocktail_rust_apkpure_parse_exact_urls(
     metadata: *const u8,
     meta_len: usize,
     version: *const c_char,
+    version_code: u64,
     out_urls_json: *mut c_char,
     json_cap: usize,
     out_err: *mut c_char,
     err_cap: usize,
 ) -> c_int {
     let set_err = |msg: &str| {
-        if !out_err.is_null() && err_cap > 0 {
-            let len = std::cmp::min(msg.len(), err_cap - 1);
-            unsafe {
-                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_err, len);
-                *out_err.add(len) = 0;
-            }
-        }
+        copy_error(out_err, err_cap, msg);
     };
-    if metadata.is_null() || meta_len == 0 || version.is_null() || out_urls_json.is_null() {
+    if (metadata.is_null() && meta_len > 0) || version.is_null() || out_urls_json.is_null() || json_cap == 0 {
         set_err("invalid arguments");
         return -1;
     }
@@ -5651,19 +5615,25 @@ pub extern "C" fn mocktail_rust_apkpure_parse_exact_urls(
             return -2;
         }
     };
+    if meta_len == 0 {
+        set_err("APKPure does not offer the requested exact version");
+        return -3;
+    }
     let data = unsafe { std::slice::from_raw_parts(metadata, meta_len) };
     let markers = apkpure_version_markers(data);
     let mut results = Vec::new();
     for i in 0..markers.len() {
-        if markers[i].value != ver_target {
+        if markers[i].value != ver_target
+            || (version_code != 0 && apkpure_version_code(data, &markers[i]) != version_code)
+        {
             continue;
         }
         let record_end = if i + 1 < markers.len() { markers[i + 1].begin } else { data.len() };
         let record_slice = &data[markers[i].colon + 1..record_end];
         let downloads = apkpure_downloads_in_record(record_slice);
-        for d in downloads {
-            if !results.contains(&d) {
-                results.push(d);
+        if let Some(first) = downloads.first() {
+            if !results.contains(first) {
+                results.push(first.clone());
             }
         }
     }
@@ -5961,13 +5931,7 @@ pub extern "C" fn mocktail_rust_atomic_write_file(
     err_cap: usize,
 ) -> c_int {
     let set_err = |msg: &str| {
-        if !out_err.is_null() && err_cap > 0 {
-            let len = std::cmp::min(msg.len(), err_cap - 1);
-            unsafe {
-                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_err, len);
-                *out_err.add(len) = 0;
-            }
-        }
+        copy_error(out_err, err_cap, msg);
     };
     if file_path.is_null() {
         set_err("path is null");
@@ -6076,13 +6040,7 @@ pub extern "C" fn mocktail_rust_window_state_load(
     err_cap: usize,
 ) -> c_int {
     let set_err = |msg: &str| {
-        if !out_err.is_null() && err_cap > 0 {
-            let len = std::cmp::min(msg.len(), err_cap - 1);
-            unsafe {
-                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_err, len);
-                *out_err.add(len) = 0;
-            }
-        }
+        copy_error(out_err, err_cap, msg);
     };
     if path_ptr.is_null() || out_state.is_null() || out_found.is_null() {
         set_err("invalid arguments");
@@ -6258,13 +6216,7 @@ pub extern "C" fn mocktail_rust_window_state_store(
     err_cap: usize,
 ) -> c_int {
     let set_err = |msg: &str| {
-        if !out_err.is_null() && err_cap > 0 {
-            let len = std::cmp::min(msg.len(), err_cap - 1);
-            unsafe {
-                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_err, len);
-                *out_err.add(len) = 0;
-            }
-        }
+        copy_error(out_err, err_cap, msg);
     };
     if path_ptr.is_null() || state_ptr.is_null() {
         set_err("invalid arguments");
@@ -6518,13 +6470,7 @@ pub extern "C" fn mocktail_rust_compute_file_sha256(
     err_cap: usize,
 ) -> c_int {
     let set_err = |msg: &str| {
-        if !out_err.is_null() && err_cap > 0 {
-            let len = std::cmp::min(msg.len(), err_cap - 1);
-            unsafe {
-                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_err, len);
-                *out_err.add(len) = 0;
-            }
-        }
+        copy_error(out_err, err_cap, msg);
     };
     if file_path.is_null() || out_hex.is_null() || hex_cap < 65 {
         set_err("invalid arguments");
@@ -6584,13 +6530,7 @@ pub extern "C" fn mocktail_rust_audio_validate_pcm(
     err_cap: usize,
 ) -> c_int {
     let set_err = |msg: &str| {
-        if !out_err.is_null() && err_cap > 0 {
-            let len = std::cmp::min(msg.len(), err_cap - 1);
-            unsafe {
-                std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, out_err, len);
-                *out_err.add(len) = 0;
-            }
-        }
+        copy_error(out_err, err_cap, msg);
     };
     if sample_rate_hz < 8000 || sample_rate_hz > 384000 {
         set_err("PCM sample rate must be between 8000 and 384000 Hz");
@@ -10028,12 +9968,7 @@ pub unsafe extern "C" fn mocktail_rust_candidate_approval_generation(
 }
 
 unsafe fn write_err_msg(out_err: *mut c_char, err_cap: usize, msg: &str) {
-    if !out_err.is_null() && err_cap > 0 {
-        let bytes = msg.as_bytes();
-        let to_copy = bytes.len().min(err_cap - 1);
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_err as *mut u8, to_copy);
-        *out_err.add(to_copy) = 0;
-    }
+    copy_error(out_err, err_cap, msg);
 }
 
 #[no_mangle]
@@ -15054,6 +14989,1074 @@ pub extern "C" fn mocktail_rust_webview_build_callback_script(
 }
 
 // ============================================================================
+// 118. Roblox Text Font Resolver
+// ============================================================================
+
+fn lexical_normalize_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut stack: Vec<std::ffi::OsString> = Vec::new();
+    let mut is_abs = false;
+    for comp in path.components() {
+        match comp {
+            Component::RootDir => {
+                is_abs = true;
+            }
+            Component::Prefix(p) => {
+                stack.push(p.as_os_str().to_os_string());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(stack.last(), Some(s) if s != "..") {
+                    stack.pop();
+                } else if !is_abs {
+                    stack.push(std::ffi::OsString::from(".."));
+                }
+            }
+            Component::Normal(s) => {
+                stack.push(s.to_os_string());
+            }
+        }
+    }
+    let mut out = PathBuf::new();
+    if is_abs {
+        out.push(std::path::MAIN_SEPARATOR_STR);
+    }
+    for s in stack {
+        out.push(s);
+    }
+    if out.as_os_str().is_empty() && !is_abs {
+        return PathBuf::from(".");
+    }
+    out
+}
+
+fn is_safe_font_file_name(value: &str) -> bool {
+    if value.is_empty()
+        || value.contains('/')
+        || value.contains('\\')
+        || value == "."
+        || value == ".."
+    {
+        return false;
+    }
+    let p = Path::new(value);
+    !p.is_absolute() && p.file_name() == Some(std::ffi::OsStr::new(value))
+}
+
+fn load_font_mappings(
+    asset_content_root: &Path,
+) -> std::collections::HashMap<i32, (String, f32)> {
+    let mut mappings = std::collections::HashMap::new();
+    let mapping_file = asset_content_root
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join("android/fonts/font-mappings.json");
+    let raw = match std::fs::read(&mapping_file) {
+        Ok(b) => b,
+        Err(_) => return mappings,
+    };
+    let doc: serde_json::Value = match serde_json::from_slice(&raw) {
+        Ok(v) => v,
+        Err(_) => return mappings,
+    };
+    let items = match doc.as_array() {
+        Some(a) => a,
+        None => return mappings,
+    };
+    for item in items {
+        let obj = match item.as_object() {
+            Some(o) => o,
+            None => continue,
+        };
+        let encoded_enum = match obj.get("enum").and_then(|v| v.as_i64()) {
+            Some(e) if (0..=(i32::MAX as i64)).contains(&e) => e as i32,
+            _ => continue,
+        };
+        let encoded_font = match obj.get("font").and_then(|v| v.as_str()) {
+            Some(s) if is_safe_font_file_name(s) => s.to_string(),
+            _ => continue,
+        };
+        let encoded_ratio = match obj.get("fromRbxFontRatio").and_then(|v| v.as_f64()) {
+            Some(r) if r.is_finite() && r > 0.0 && r <= 4.0 => r as f32,
+            _ => continue,
+        };
+        mappings.insert(encoded_enum, (encoded_font, encoded_ratio));
+    }
+    mappings
+}
+
+fn font_mapping_for(font: i32, asset_content_root: &Path) -> Option<(String, f32)> {
+    static FONT_CATALOGS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::collections::HashMap<i32, (String, f32)>>>,
+    > = std::sync::OnceLock::new();
+    let key = lexical_normalize_path(asset_content_root)
+        .to_string_lossy()
+        .into_owned();
+    let map = FONT_CATALOGS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
+    let catalog = guard
+        .entry(key)
+        .or_insert_with(|| load_font_mappings(asset_content_root));
+    catalog.get(&font).cloned()
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_resolve_roblox_text_font(
+    font: i32,
+    asset_content_root_ptr: *const c_char,
+    asset_content_root_len: usize,
+    out_primary_file: *mut c_char,
+    primary_file_cap: usize,
+    out_size_scale: *mut f32,
+    out_exact_mapping: *mut bool,
+) -> c_int {
+    unsafe {
+        if !out_size_scale.is_null() {
+            *out_size_scale = 0.795;
+        }
+        if !out_exact_mapping.is_null() {
+            *out_exact_mapping = false;
+        }
+        if !out_primary_file.is_null() && primary_file_cap > 0 {
+            *out_primary_file = 0;
+        }
+    }
+    let root_owned = if asset_content_root_ptr.is_null() {
+        std::env::var("MOCKTAIL_ASSET_PATH").unwrap_or_default()
+    } else if asset_content_root_len == 0 {
+        String::new()
+    } else {
+        let slice = unsafe {
+            std::slice::from_raw_parts(asset_content_root_ptr as *const u8, asset_content_root_len)
+        };
+        String::from_utf8_lossy(slice).into_owned()
+    };
+    if root_owned.is_empty() {
+        return 0;
+    }
+
+    let content = Path::new(&root_owned);
+    if let Some((mapped_file, size_scale)) = font_mapping_for(font, content) {
+        let candidate = content.join("fonts").join(mapped_file);
+        if std::fs::metadata(&candidate).map(|m| m.is_file()).unwrap_or(false) {
+            let norm = lexical_normalize_path(&candidate);
+            let norm_str = norm.to_string_lossy();
+            if !out_primary_file.is_null() && copy_to_c_buffer(&norm_str, out_primary_file, primary_file_cap) != 0 {
+                return -1;
+            }
+            unsafe {
+                if !out_size_scale.is_null() {
+                    *out_size_scale = size_scale;
+                }
+                if !out_exact_mapping.is_null() {
+                    *out_exact_mapping = true;
+                }
+            }
+            return 0;
+        }
+    }
+
+    let legacy_name = match font {
+        4 => "SourceSansPro-Bold.ttf",
+        5 => "SourceSansPro-Light.ttf",
+        _ => "SourceSansPro-Regular.ttf",
+    };
+    let legacy = content
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join("fonts")
+        .join(legacy_name);
+    if std::fs::metadata(&legacy).map(|m| m.is_file()).unwrap_or(false) {
+        let norm = lexical_normalize_path(&legacy);
+        let norm_str = norm.to_string_lossy();
+        if !out_primary_file.is_null() && copy_to_c_buffer(&norm_str, out_primary_file, primary_file_cap) != 0 {
+            return -1;
+        }
+    }
+    0
+}
+
+// ============================================================================
+// 119. Runtime Config & Network Proxy Engine
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_network_proxy_parse(
+    host_ptr: *const c_char,
+    host_len: usize,
+    port_ptr: *const c_char,
+    port_len: usize,
+    scheme_ptr: *const c_char,
+    scheme_len: usize,
+    user_ptr: *const c_char,
+    user_len: usize,
+    pass_ptr: *const c_char,
+    pass_len: usize,
+    out_scheme: *mut c_char,
+    scheme_cap: usize,
+    out_port: *mut c_int,
+) -> bool {
+    let slice_from = |ptr: *const c_char, len: usize| -> &'static [u8] {
+        if ptr.is_null() || len == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(ptr as *const u8, len) }
+        }
+    };
+    let scheme_bytes = slice_from(scheme_ptr, scheme_len);
+    let normalized_scheme = match scheme_bytes {
+        b"http" | b"https" => "http",
+        b"socks" | b"socks5" | b"socks5h" => "socks5h",
+        _ => return false,
+    };
+    let user_bytes = slice_from(user_ptr, user_len);
+    let pass_bytes = slice_from(pass_ptr, pass_len);
+    if (user_bytes.is_empty() && !pass_bytes.is_empty())
+        || user_bytes.contains(&0)
+        || pass_bytes.contains(&0)
+        || (normalized_scheme == "socks5h" && (user_bytes.len() > 255 || pass_bytes.len() > 255))
+    {
+        return false;
+    }
+    let host_bytes = slice_from(host_ptr, host_len);
+    let port_bytes = slice_from(port_ptr, port_len);
+    if host_bytes.is_empty()
+        || port_bytes.is_empty()
+        || host_bytes.windows(3).any(|w| w == b"://")
+        || host_bytes.iter().any(|&c| {
+            c <= 0x20
+                || c == 0x7f
+                || matches!(c, b'/' | b'\\' | b'@' | b'[' | b']' | b'?' | b'#')
+        })
+    {
+        return false;
+    }
+    if !port_bytes.iter().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    let parsed_port = match std::str::from_utf8(port_bytes).ok().and_then(|s| s.parse::<i32>().ok()) {
+        Some(p) if (1..=65535).contains(&p) => p,
+        _ => return false,
+    };
+    if !out_scheme.is_null() && copy_to_c_buffer(normalized_scheme, out_scheme, scheme_cap) != 0 {
+        return false;
+    }
+    if !out_port.is_null() {
+        unsafe { *out_port = parsed_port };
+    }
+    true
+}
+
+fn encode_proxy_credential(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(bytes.len());
+    for &b in bytes {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(b as char);
+        } else {
+            encoded.push('%');
+            encoded.push(HEX[(b >> 4) as usize] as char);
+            encoded.push(HEX[(b & 15) as usize] as char);
+        }
+    }
+    encoded
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_network_proxy_build_url(
+    scheme_ptr: *const c_char,
+    scheme_len: usize,
+    host_ptr: *const c_char,
+    host_len: usize,
+    port: c_int,
+    user_ptr: *const c_char,
+    user_len: usize,
+    pass_ptr: *const c_char,
+    pass_len: usize,
+    include_credentials: bool,
+    out_url: *mut c_char,
+    url_cap: usize,
+) -> usize {
+    let slice_from = |ptr: *const c_char, len: usize| -> &'static [u8] {
+        if ptr.is_null() || len == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(ptr as *const u8, len) }
+        }
+    };
+    let scheme = String::from_utf8_lossy(slice_from(scheme_ptr, scheme_len));
+    let host = String::from_utf8_lossy(slice_from(host_ptr, host_len));
+    let user_bytes = slice_from(user_ptr, user_len);
+    let pass_bytes = slice_from(pass_ptr, pass_len);
+    let ipv6 = host.contains(':');
+    let credentials = if include_credentials && !user_bytes.is_empty() {
+        format!("{}:{}@", encode_proxy_credential(user_bytes), encode_proxy_credential(pass_bytes))
+    } else {
+        String::new()
+    };
+    let built = format!(
+        "{}://{}{}{}{}:{}",
+        scheme,
+        credentials,
+        if ipv6 { "[" } else { "" },
+        host,
+        if ipv6 { "]" } else { "" },
+        port
+    );
+    if !out_url.is_null() && url_cap > 0 {
+        let _ = copy_to_c_buffer(&built, out_url, url_cap);
+    }
+    built.len()
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_runtime_config_parse_graphics_backend(
+    name_ptr: *const c_char,
+    name_len: usize,
+) -> c_int {
+    let name = if name_ptr.is_null() || name_len == 0 {
+        ""
+    } else {
+        let slice = unsafe { std::slice::from_raw_parts(name_ptr as *const u8, name_len) };
+        match std::str::from_utf8(slice) {
+            Ok(s) => s,
+            Err(_) => return 5,
+        }
+    };
+    match name {
+        "" | "auto" => 0,
+        "system" | "gles" | "opengl" => 1,
+        "vulkan" | "native-vulkan" | "direct-vulkan" => 2,
+        "angle-vulkan" => 3,
+        "angle-swiftshader" => 4,
+        _ => 5,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_runtime_config_parse_bool(
+    val_ptr: *const c_char,
+    val_len: usize,
+    default_val: bool,
+    out_valid: *mut bool,
+) -> bool {
+    let bytes = if val_ptr.is_null() || val_len == 0 {
+        &[][..]
+    } else {
+        unsafe { std::slice::from_raw_parts(val_ptr as *const u8, val_len) }
+    };
+    match bytes {
+        b"1" | b"true" | b"on" => {
+            if !out_valid.is_null() {
+                unsafe { *out_valid = true };
+            }
+            true
+        }
+        b"0" | b"false" | b"off" => {
+            if !out_valid.is_null() {
+                unsafe { *out_valid = true };
+            }
+            false
+        }
+        _ => {
+            if !out_valid.is_null() {
+                unsafe { *out_valid = false };
+            }
+            default_val
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_runtime_config_parse_positive_int(
+    val_ptr: *const c_char,
+    val_len: usize,
+    default_val: c_int,
+) -> c_int {
+    if val_ptr.is_null() || val_len == 0 {
+        return default_val;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(val_ptr as *const u8, val_len) };
+    if !slice.iter().all(|b| b.is_ascii_digit()) {
+        return default_val;
+    }
+    match std::str::from_utf8(slice).ok().and_then(|s| s.parse::<i32>().ok()) {
+        Some(v) if v > 0 => v,
+        _ => default_val,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_runtime_config_is_discord_app_id(
+    val_ptr: *const c_char,
+    val_len: usize,
+) -> bool {
+    if val_len == 0 {
+        return true;
+    }
+    if val_ptr.is_null() || !(17..=20).contains(&val_len) {
+        return false;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(val_ptr as *const u8, val_len) };
+    slice.iter().all(|b| b.is_ascii_digit())
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_runtime_config_is_discord_text(
+    val_ptr: *const c_char,
+    val_len: usize,
+    max_len: usize,
+) -> bool {
+    if val_ptr.is_null() || val_len == 0 || val_len > max_len {
+        return false;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(val_ptr as *const u8, val_len) };
+    slice.iter().all(|&b| b >= 0x20 && b != 0x7f)
+}
+
+// ============================================================================
+// 120. Runtime Config Bootstrap
+// ============================================================================
+
+const DEFAULT_RUNTIME_CONFIG_YAML_WITH_NUL: &str =
+    concat!(include_str!("../../../config/mocktail.example.yaml"), "\0");
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_runtime_config_default_yaml_ptr(
+    out_len: *mut usize,
+) -> *const c_char {
+    let bytes = DEFAULT_RUNTIME_CONFIG_YAML_WITH_NUL.as_bytes();
+    if !out_len.is_null() {
+        unsafe { *out_len = bytes.len() - 1 };
+    }
+    bytes.as_ptr() as *const c_char
+}
+
+fn inspect_existing_config_file(path: &Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err("refusing symlink runtime configuration".to_string());
+            }
+            if !metadata.file_type().is_file() {
+                return Err("runtime configuration must be a regular file".to_string());
+            }
+            Ok(true)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("cannot inspect first-run configuration: {}", e)),
+    }
+}
+
+fn create_unique_temp_config(parent: &Path, fname: &str) -> Result<(std::fs::File, std::path::PathBuf), String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let pid = std::process::id();
+    for _ in 0..64 {
+        let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let candidate = parent.join(format!(".{}.tmp.{}.{}", fname, pid, seq));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&candidate)
+        {
+            Ok(file) => return Ok((file, candidate)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("cannot create temporary configuration: {}", e)),
+        }
+    }
+    Err("cannot allocate unique temporary configuration path".to_string())
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_runtime_config_ensure_file(
+    path_ptr: *const c_char,
+    out_created: *mut bool,
+    out_err: *mut c_char,
+    err_cap: usize,
+) -> c_int {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    if !out_created.is_null() {
+        unsafe { *out_created = false };
+    }
+    if !out_err.is_null() && err_cap > 0 {
+        unsafe { *out_err = 0 };
+    }
+    if path_ptr.is_null() {
+        copy_error(out_err, err_cap, "first-run configuration path must name a file");
+        return -1;
+    }
+    let path_c = unsafe { CStr::from_ptr(path_ptr) };
+    let path_str = match path_c.to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            copy_error(out_err, err_cap, "invalid configuration path encoding");
+            return -1;
+        }
+    };
+    let path = Path::new(path_str);
+    let fname = match path.file_name().and_then(|n| n.to_str()) {
+        Some(n) if !path_str.is_empty() && !path_str.ends_with('/') && !n.is_empty() => n,
+        _ => {
+            copy_error(out_err, err_cap, "first-run configuration path must name a file");
+            return -1;
+        }
+    };
+
+    match inspect_existing_config_file(path) {
+        Ok(true) => return 0,
+        Ok(false) => {}
+        Err(msg) => {
+            copy_error(out_err, err_cap, &msg);
+            return -1;
+        }
+    }
+
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let parent_existed = std::fs::symlink_metadata(parent).is_ok();
+    if let Err(e) = std::fs::create_dir_all(parent) {
+        copy_error(
+            out_err,
+            err_cap,
+            &format!("cannot create configuration directory {}: {}", parent.display(), e),
+        );
+        return -1;
+    }
+    if !parent_existed {
+        match std::fs::symlink_metadata(parent) {
+            Ok(meta) if !meta.file_type().is_symlink() && meta.file_type().is_dir() => {
+                if let Err(e) = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)) {
+                    copy_error(out_err, err_cap, &format!("cannot secure configuration directory: {}", e));
+                    return -1;
+                }
+            }
+            Ok(_) => {
+                copy_error(out_err, err_cap, "cannot secure configuration directory: unexpected non-directory");
+                return -1;
+            }
+            Err(e) => {
+                copy_error(out_err, err_cap, &format!("cannot secure configuration directory: {}", e));
+                return -1;
+            }
+        }
+    }
+
+    let (mut file, tmp_path) = match create_unique_temp_config(parent, fname) {
+        Ok(res) => res,
+        Err(msg) => {
+            copy_error(out_err, err_cap, &msg);
+            return -1;
+        }
+    };
+
+    let contents = &DEFAULT_RUNTIME_CONFIG_YAML_WITH_NUL.as_bytes()[..DEFAULT_RUNTIME_CONFIG_YAML_WITH_NUL.len() - 1];
+    if let Err(e) = file.write_all(contents) {
+        drop(file);
+        let _ = std::fs::remove_file(&tmp_path);
+        copy_error(out_err, err_cap, &format!("cannot write first-run configuration: {}", e));
+        return -1;
+    }
+    if let Err(e) = file.sync_all() {
+        drop(file);
+        let _ = std::fs::remove_file(&tmp_path);
+        copy_error(out_err, err_cap, &format!("cannot synchronize first-run configuration: {}", e));
+        return -1;
+    }
+    drop(file);
+
+    if let Err(e) = std::fs::hard_link(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            match inspect_existing_config_file(path) {
+                Ok(true) => return 0,
+                Ok(false) => {
+                    copy_error(out_err, err_cap, "runtime configuration disappeared during creation");
+                    return -1;
+                }
+                Err(msg) => {
+                    copy_error(out_err, err_cap, &msg);
+                    return -1;
+                }
+            }
+        }
+        copy_error(out_err, err_cap, &format!("cannot publish first-run configuration: {}", e));
+        return -1;
+    }
+
+    if !out_created.is_null() {
+        unsafe { *out_created = true };
+    }
+    if let Err(e) = std::fs::remove_file(&tmp_path) {
+        copy_error(
+            out_err,
+            err_cap,
+            &format!("configuration was created but its temporary link cannot be removed: {}", e),
+        );
+        return -1;
+    }
+    0
+}
+
+mod c_ffi {
+    use std::ffi::c_void;
+    use std::os::raw::{c_int, c_long};
+
+    pub const PROT_READ: c_int = 1;
+    pub const PROT_WRITE: c_int = 2;
+    pub const PROT_EXEC: c_int = 4;
+    pub const SC_PAGESIZE: c_int = 30;
+
+    extern "C" {
+        pub fn calloc(nmemb: usize, size: usize) -> *mut c_void;
+        pub fn free(ptr: *mut c_void);
+        pub fn sysconf(name: c_int) -> c_long;
+        pub fn mprotect(addr: *mut c_void, len: usize, prot: c_int) -> c_int;
+    }
+}
+
+// ============================================================================
+// 121. Host Allocator Bridge
+// ============================================================================
+
+const HOST_ALLOC_MAGIC: u64 = 0x4d4f434b5441494c;
+const HOST_ALLOC_FRONT_PADDING: usize = 0x80;
+const HOST_ALLOC_BACK_PADDING: usize = 0x200;
+const HOST_ALLOC_MAX: usize = 1usize << 30;
+
+#[repr(C)]
+struct HostAllocHeader {
+    magic: u64,
+    raw: *mut std::ffi::c_void,
+    requested_size: usize,
+    usable_size: usize,
+}
+
+fn host_allocations_map() -> &'static std::sync::Mutex<std::collections::HashMap<usize, usize>> {
+    static MAP: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<usize, usize>>> =
+        std::sync::OnceLock::new();
+    MAP.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_host_aligned_allocate(
+    size: usize,
+    mut alignment: usize,
+) -> *mut std::ffi::c_void {
+    if size > HOST_ALLOC_MAX {
+        return std::ptr::null_mut();
+    }
+    if alignment == 0 || (alignment & (alignment - 1)) != 0 {
+        alignment = 16;
+    }
+    alignment = alignment.max(std::mem::align_of::<HostAllocHeader>());
+    let actual_size = if size == 0 { 1 } else { size };
+    let overhead = std::mem::size_of::<HostAllocHeader>()
+        + HOST_ALLOC_FRONT_PADDING
+        + HOST_ALLOC_BACK_PADDING
+        + alignment
+        - 1;
+    if actual_size > usize::MAX - overhead {
+        return std::ptr::null_mut();
+    }
+    let raw = unsafe { c_ffi::calloc(1, actual_size + overhead) };
+    if raw.is_null() {
+        return std::ptr::null_mut();
+    }
+    let first = (raw as usize) + std::mem::size_of::<HostAllocHeader>() + HOST_ALLOC_FRONT_PADDING;
+    let aligned = (first + alignment - 1) & !(alignment - 1);
+    let header_addr = aligned - HOST_ALLOC_FRONT_PADDING - std::mem::size_of::<HostAllocHeader>();
+    unsafe {
+        std::ptr::write(
+            header_addr as *mut HostAllocHeader,
+            HostAllocHeader {
+                magic: HOST_ALLOC_MAGIC,
+                raw,
+                requested_size: actual_size,
+                usable_size: actual_size,
+            },
+        );
+    }
+    let mut guard = host_allocations_map().lock().unwrap_or_else(|e| e.into_inner());
+    guard.insert(aligned, header_addr);
+    aligned as *mut std::ffi::c_void
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_host_allocate(size: usize) -> *mut std::ffi::c_void {
+    mocktail_rust_host_aligned_allocate(size, 16)
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_host_reallocate(
+    pointer: *mut std::ffi::c_void,
+    size: usize,
+) -> *mut std::ffi::c_void {
+    if pointer.is_null() {
+        return mocktail_rust_host_allocate(size);
+    }
+    if size == 0 {
+        mocktail_rust_host_free(pointer);
+        return std::ptr::null_mut();
+    }
+    let copy_size = {
+        let guard = host_allocations_map().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(&header_addr) = guard.get(&(pointer as usize)) {
+            let header = unsafe { &*(header_addr as *const HostAllocHeader) };
+            if header.magic == HOST_ALLOC_MAGIC {
+                size.min(header.usable_size)
+            } else {
+                0
+            }
+        } else {
+            0
+        }
+    };
+    let replacement = mocktail_rust_host_allocate(size);
+    if replacement.is_null() {
+        return std::ptr::null_mut();
+    }
+    if copy_size != 0 {
+        unsafe {
+            std::ptr::copy_nonoverlapping(pointer as *const u8, replacement as *mut u8, copy_size);
+        }
+        mocktail_rust_host_free(pointer);
+    }
+    replacement
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_host_free(pointer: *mut std::ffi::c_void) {
+    if pointer.is_null() {
+        return;
+    }
+    let raw = {
+        let mut guard = host_allocations_map().lock().unwrap_or_else(|e| e.into_inner());
+        let header_addr = match guard.remove(&(pointer as usize)) {
+            Some(addr) => addr,
+            None => return,
+        };
+        let header = unsafe { &mut *(header_addr as *mut HostAllocHeader) };
+        if header.magic == HOST_ALLOC_MAGIC {
+            header.magic = 0;
+            header.raw
+        } else {
+            std::ptr::null_mut()
+        }
+    };
+    if !raw.is_null() {
+        unsafe { c_ffi::free(raw) };
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_host_usable_size(pointer: *mut std::ffi::c_void) -> usize {
+    if pointer.is_null() {
+        return 0;
+    }
+    let guard = host_allocations_map().lock().unwrap_or_else(|e| e.into_inner());
+    match guard.get(&(pointer as usize)) {
+        Some(&header_addr) => {
+            let header = unsafe { &*(header_addr as *const HostAllocHeader) };
+            if header.magic == HOST_ALLOC_MAGIC {
+                header.usable_size
+            } else {
+                0
+            }
+        }
+        None => 0,
+    }
+}
+
+// ============================================================================
+// 122. Host ABI Profile & Experiment Engine
+// ============================================================================
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MocktailRustConstructorRange {
+    pub begin: usize,
+    pub end_exclusive: usize,
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_host_abi_has_valid_ranges(
+    ranges_ptr: *const MocktailRustConstructorRange,
+    range_count: usize,
+    max_ranges: usize,
+    init_array_count: usize,
+) -> bool {
+    if ranges_ptr.is_null() || range_count == 0 || range_count > max_ranges {
+        return false;
+    }
+    let ranges = unsafe { std::slice::from_raw_parts(ranges_ptr, range_count) };
+    let mut previous_end = 0usize;
+    for (index, range) in ranges.iter().enumerate() {
+        let valid_for = range.begin < range.end_exclusive && range.end_exclusive <= init_array_count;
+        if !valid_for || (index != 0 && range.begin < previous_end) {
+            return false;
+        }
+        previous_end = range.end_exclusive;
+    }
+    true
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_host_abi_allows_constructor(
+    ranges_ptr: *const MocktailRustConstructorRange,
+    range_count: usize,
+    max_ranges: usize,
+    init_array_count: usize,
+    index: usize,
+) -> bool {
+    if !mocktail_rust_host_abi_has_valid_ranges(ranges_ptr, range_count, max_ranges, init_array_count) {
+        return false;
+    }
+    let ranges = unsafe { std::slice::from_raw_parts(ranges_ptr, range_count) };
+    ranges
+        .iter()
+        .any(|r| r.begin <= index && index < r.end_exclusive)
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_host_abi_range_begin(
+    ranges_ptr: *const MocktailRustConstructorRange,
+    range_count: usize,
+    max_ranges: usize,
+    init_array_count: usize,
+) -> usize {
+    if !mocktail_rust_host_abi_has_valid_ranges(ranges_ptr, range_count, max_ranges, init_array_count) {
+        return 0;
+    }
+    unsafe { (*ranges_ptr).begin }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_host_abi_range_end_exclusive(
+    ranges_ptr: *const MocktailRustConstructorRange,
+    range_count: usize,
+    max_ranges: usize,
+    init_array_count: usize,
+) -> usize {
+    if !mocktail_rust_host_abi_has_valid_ranges(ranges_ptr, range_count, max_ranges, init_array_count) {
+        return 0;
+    }
+    unsafe { (*ranges_ptr.add(range_count - 1)).end_exclusive }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_host_abi_should_init_mimalloc_thread(
+    ranges_ptr: *const MocktailRustConstructorRange,
+    range_count: usize,
+    max_ranges: usize,
+    init_array_count: usize,
+    init_after: usize,
+    index: usize,
+) -> bool {
+    mocktail_rust_host_abi_has_valid_ranges(ranges_ptr, range_count, max_ranges, init_array_count)
+        && init_after < init_array_count
+        && mocktail_rust_host_abi_allows_constructor(
+            ranges_ptr,
+            range_count,
+            max_ranges,
+            init_array_count,
+            init_after,
+        )
+        && index == init_after
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_host_abi_resolve_allocator_strategy(
+    default_strategy: c_int,
+    override_present: bool,
+    override_enabled: bool,
+) -> c_int {
+    if !override_present {
+        return default_strategy;
+    }
+    if override_enabled { 0 } else { 1 }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_host_abi_patch_absolute_jump(
+    address: usize,
+    target: *mut std::ffi::c_void,
+) -> bool {
+    let page_size = unsafe { c_ffi::sysconf(c_ffi::SC_PAGESIZE) };
+    if page_size <= 0 || address == 0 || target.is_null() {
+        return false;
+    }
+    let target_addr = target as usize;
+    #[cfg(target_arch = "aarch64")]
+    let patch: [u8; 16] = {
+        let mut buf = [
+            0x50, 0x00, 0x00, 0x58, 0x00, 0x02, 0x1f, 0xd6,
+            0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        buf[8..16].copy_from_slice(&(target_addr as u64).to_ne_bytes());
+        buf
+    };
+    #[cfg(not(target_arch = "aarch64"))]
+    let patch: [u8; 12] = {
+        let mut buf = [0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xe0];
+        buf[2..10].copy_from_slice(&(target_addr as u64).to_ne_bytes());
+        buf
+    };
+
+    let page_mask = (page_size as usize) - 1;
+    let page = address & !page_mask;
+    let end = address + patch.len();
+    let page_end = (end + page_mask) & !page_mask;
+    let protect_size = page_end - page;
+    if unsafe {
+        c_ffi::mprotect(
+            page as *mut std::ffi::c_void,
+            protect_size,
+            c_ffi::PROT_READ | c_ffi::PROT_WRITE | c_ffi::PROT_EXEC,
+        )
+    } != 0
+    {
+        return false;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(patch.as_ptr(), address as *mut u8, patch.len());
+    }
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        extern "C" {
+            fn __clear_cache(beg: *mut c_char, end: *mut c_char);
+        }
+        __clear_cache(address as *mut c_char, (address + patch.len()) as *mut c_char);
+    }
+    unsafe {
+        c_ffi::mprotect(
+            page as *mut std::ffi::c_void,
+            protect_size,
+            c_ffi::PROT_READ | c_ffi::PROT_EXEC,
+        ) == 0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_host_abi_seed_jni_singleton(
+    library_base: usize,
+    jni_singleton_slot: usize,
+    jni_singleton_bytes: usize,
+    out_seeded_ptr: *mut *mut std::ffi::c_void,
+) -> bool {
+    if !out_seeded_ptr.is_null() {
+        unsafe { *out_seeded_ptr = std::ptr::null_mut() };
+    }
+    if jni_singleton_slot == 0 || jni_singleton_bytes == 0 {
+        return true;
+    }
+    let slot = (library_base + jni_singleton_slot) as *mut *mut std::ffi::c_void;
+    if !unsafe { *slot }.is_null() {
+        return true;
+    }
+    let object = unsafe { c_ffi::calloc(1, jni_singleton_bytes) };
+    if object.is_null() {
+        return false;
+    }
+    const K_LOAD_FACTOR_OFFSET: usize = 0x30 + 0x20;
+    if jni_singleton_bytes >= K_LOAD_FACTOR_OFFSET + std::mem::size_of::<f32>() {
+        let load_factor: f32 = 1.0;
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                &load_factor.to_ne_bytes() as *const u8,
+                (object as *mut u8).add(K_LOAD_FACTOR_OFFSET),
+                std::mem::size_of::<f32>(),
+            );
+        }
+    }
+    unsafe {
+        *slot = object;
+        if !out_seeded_ptr.is_null() {
+            *out_seeded_ptr = object;
+        }
+    }
+    true
+}
+
+// ============================================================================
+// 123. Window Game Surface Bridge Validation & State Machine
+// ============================================================================
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MocktailRustGameSurfaceBridgeSnapshot {
+    pub accepted_events: u64,
+    pub duplicate_events: u64,
+    pub last_generation: u64,
+    pub last_event_type: i32,
+    pub failed: bool,
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_game_surface_bridge_validate_event(
+    event: *const MocktailRustSurfaceEvent,
+    out_err: *mut c_char,
+    err_cap: usize,
+) -> c_int {
+    if event.is_null() {
+        copy_error(out_err, err_cap, "window surface event is null");
+        return -1;
+    }
+    let ev = unsafe { &*event };
+    if ev.surface.generation == 0 {
+        copy_error(out_err, err_cap, "window surface event has no generation");
+        return -1;
+    }
+    match ev.event_type {
+        0 | 2 => 0,
+        1 => {
+            if ev.surface.available == 0
+                || ev.surface.native_window == 0
+                || ev.surface.width == 0
+                || ev.surface.height == 0
+            {
+                copy_error(
+                    out_err,
+                    err_cap,
+                    "changed window surface requires an available handle and extent",
+                );
+                return -1;
+            }
+            0
+        }
+        _ => {
+            copy_error(out_err, err_cap, "window surface event type is invalid");
+            -1
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_game_surface_bridge_record_event(
+    event: *const MocktailRustSurfaceEvent,
+    changed: bool,
+    io_snapshot: *mut MocktailRustGameSurfaceBridgeSnapshot,
+) {
+    if event.is_null() || io_snapshot.is_null() {
+        return;
+    }
+    let ev = unsafe { &*event };
+    let snap = unsafe { &mut *io_snapshot };
+    snap.last_event_type = ev.event_type;
+    snap.last_generation = ev.surface.generation;
+    if changed {
+        snap.accepted_events = snap.accepted_events.saturating_add(1);
+    } else {
+        snap.duplicate_events = snap.duplicate_events.saturating_add(1);
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -18211,6 +19214,214 @@ integrations:
         assert_eq!(mocktail_rust_webview_build_callback_script(cb.as_ptr(), cb_len, script.as_mut_ptr(), script.len()), 0);
         let script_s = unsafe { CStr::from_ptr(script.as_ptr()) }.to_str().unwrap();
         assert!(script_s.contains("nativeCallback(\"cb\\\"1\""));
+    }
+
+    #[test]
+    fn test_section117_apkpure_provider() {
+        let valid = b"2.681.812";
+        assert!(mocktail_rust_apkpure_is_valid_version_name(valid.as_ptr() as *const c_char, valid.len()));
+        let bad = b"../bad";
+        assert!(!mocktail_rust_apkpure_is_valid_version_name(bad.as_ptr() as *const c_char, bad.len()));
+
+        let mut meta = Vec::new();
+        meta.extend_from_slice(&[0x2a, 3]);
+        meta.extend_from_slice(b"812");
+        meta.extend_from_slice(&[0x32, 9]);
+        meta.extend_from_slice(b"2.681.812:");
+        meta.extend_from_slice(b"XAPKJ\x00\x00https://user:pass@d.apkpure.com/b/APK/bad");
+        meta.push(0);
+        meta.extend_from_slice(b"APKJ\x00\x00https://d.apkpure.com./b/APK/com.roblox.client?versionCode=812");
+        meta.push(0);
+
+        let mut ver_buf = [0 as c_char; 64];
+        let mut code = 0u64;
+        let mut err_buf = [0 as c_char; 256];
+        let rc = mocktail_rust_apkpure_parse_latest(
+            meta.as_ptr(),
+            meta.len(),
+            ver_buf.as_mut_ptr(),
+            ver_buf.len(),
+            &mut code,
+            err_buf.as_mut_ptr(),
+            err_buf.len(),
+        );
+        assert_eq!(rc, 0);
+        let ver_s = unsafe { CStr::from_ptr(ver_buf.as_ptr()) }.to_str().unwrap();
+        assert_eq!(ver_s, "2.681.812");
+        assert_eq!(code, 812);
+
+        let target_ver = CString::new("2.681.812").unwrap();
+        let mut urls_buf = [0 as c_char; 1024];
+        let rc2 = mocktail_rust_apkpure_parse_exact_urls(
+            meta.as_ptr(),
+            meta.len(),
+            target_ver.as_ptr(),
+            812,
+            urls_buf.as_mut_ptr(),
+            urls_buf.len(),
+            err_buf.as_mut_ptr(),
+            err_buf.len(),
+        );
+        assert_eq!(rc2, 0);
+        let urls_s = unsafe { CStr::from_ptr(urls_buf.as_ptr()) }.to_str().unwrap();
+        assert!(!urls_s.contains("user:pass"));
+        assert!(urls_s.contains("https://d.apkpure.com./b/APK/com.roblox.client?versionCode=812"));
+
+        let tmp = std::env::temp_dir().join("mocktail_apkpure_zip_test.bin");
+        std::fs::write(&tmp, b"PK\x03\x04rest").unwrap();
+        let tmp_c = CString::new(tmp.to_string_lossy().as_bytes()).unwrap();
+        assert!(mocktail_rust_apkpure_has_zip_magic(tmp_c.as_ptr()));
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn test_section118_roblox_text_font_resolver() {
+        let mut buf = [0 as c_char; 256];
+        let mut scale = 0.0f32;
+        let mut exact = false;
+        let rc = mocktail_rust_resolve_roblox_text_font(
+            0,
+            std::ptr::null(),
+            0,
+            buf.as_mut_ptr(),
+            buf.len(),
+            &mut scale,
+            &mut exact,
+        );
+        assert!(rc >= 0);
+    }
+
+    #[test]
+    fn test_section119_runtime_config() {
+        let host = b"127.0.0.1";
+        let port = b"8080";
+        let scheme = b"http";
+        let mut out_scheme = [0 as c_char; 32];
+        let mut out_port = 0i32;
+        assert!(mocktail_rust_network_proxy_parse(
+            host.as_ptr() as *const c_char, host.len(),
+            port.as_ptr() as *const c_char, port.len(),
+            scheme.as_ptr() as *const c_char, scheme.len(),
+            std::ptr::null(), 0,
+            std::ptr::null(), 0,
+            out_scheme.as_mut_ptr(), out_scheme.len(),
+            &mut out_port,
+        ));
+        assert_eq!(out_port, 8080);
+
+        let mut url_buf = [0 as c_char; 256];
+        let url_len = mocktail_rust_network_proxy_build_url(
+            scheme.as_ptr() as *const c_char, scheme.len(),
+            host.as_ptr() as *const c_char, host.len(),
+            out_port,
+            std::ptr::null(), 0,
+            std::ptr::null(), 0,
+            false,
+            url_buf.as_mut_ptr(), url_buf.len(),
+        );
+        assert!(url_len > 0);
+
+        let vulkan = b"vulkan";
+        assert_ne!(mocktail_rust_runtime_config_parse_graphics_backend(vulkan.as_ptr() as *const c_char, vulkan.len()), -1);
+
+        let mut valid = false;
+        let yes = b"true";
+        assert!(mocktail_rust_runtime_config_parse_bool(yes.as_ptr() as *const c_char, yes.len(), false, &mut valid));
+        assert!(valid);
+
+        let num = b"42";
+        assert_eq!(mocktail_rust_runtime_config_parse_positive_int(num.as_ptr() as *const c_char, num.len(), 10), 42);
+
+        let app_id = b"123456789012345678";
+        assert!(mocktail_rust_runtime_config_is_discord_app_id(app_id.as_ptr() as *const c_char, app_id.len()));
+        let short_id = b"1234567890";
+        assert!(!mocktail_rust_runtime_config_is_discord_app_id(short_id.as_ptr() as *const c_char, short_id.len()));
+        let text = b"Playing Roblox";
+        assert!(mocktail_rust_runtime_config_is_discord_text(text.as_ptr() as *const c_char, text.len(), 128));
+    }
+
+    #[test]
+    fn test_section120_runtime_config_bootstrap() {
+        let mut yaml_len = 0usize;
+        let ptr = mocktail_rust_runtime_config_default_yaml_ptr(&mut yaml_len);
+        assert!(!ptr.is_null() && yaml_len > 0);
+
+        let tmp = std::env::temp_dir().join(format!("mocktail_cfg_boot_{}.yaml", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        let tmp_c = CString::new(tmp.to_string_lossy().as_bytes()).unwrap();
+        let mut created = false;
+        let mut err = [0 as c_char; 256];
+        let rc = mocktail_rust_runtime_config_ensure_file(tmp_c.as_ptr(), &mut created, err.as_mut_ptr(), err.len());
+        assert_eq!(rc, 0);
+        assert!(created);
+        assert!(tmp.exists());
+        let rc2 = mocktail_rust_runtime_config_ensure_file(tmp_c.as_ptr(), &mut created, err.as_mut_ptr(), err.len());
+        assert_eq!(rc2, 0);
+        assert!(!created);
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn test_section121_host_allocator_bridge() {
+        let p = mocktail_rust_host_allocate(64);
+        assert!(!p.is_null());
+        assert!(mocktail_rust_host_usable_size(p) >= 64);
+        let p2 = mocktail_rust_host_reallocate(p, 128);
+        assert!(!p2.is_null());
+        assert!(mocktail_rust_host_usable_size(p2) >= 128);
+        mocktail_rust_host_free(p2);
+
+        let pa = mocktail_rust_host_aligned_allocate(256, 64);
+        assert!(!pa.is_null());
+        assert_eq!((pa as usize) % 64, 0);
+        mocktail_rust_host_free(pa);
+    }
+
+    #[test]
+    fn test_section122_host_abi_profile_and_experiment() {
+        let ranges = [
+            MocktailRustConstructorRange { begin: 1, end_exclusive: 4 },
+            MocktailRustConstructorRange { begin: 6, end_exclusive: 8 },
+        ];
+        assert!(mocktail_rust_host_abi_has_valid_ranges(ranges.as_ptr(), ranges.len(), 8, 10));
+        assert!(mocktail_rust_host_abi_allows_constructor(ranges.as_ptr(), ranges.len(), 8, 10, 2));
+        assert!(!mocktail_rust_host_abi_allows_constructor(ranges.as_ptr(), ranges.len(), 8, 10, 5));
+        assert_eq!(mocktail_rust_host_abi_range_begin(ranges.as_ptr(), ranges.len(), 8, 10), 1);
+        assert_eq!(mocktail_rust_host_abi_range_end_exclusive(ranges.as_ptr(), ranges.len(), 8, 10), 8);
+        assert!(mocktail_rust_host_abi_should_init_mimalloc_thread(ranges.as_ptr(), ranges.len(), 8, 10, 3, 3));
+        assert!(!mocktail_rust_host_abi_should_init_mimalloc_thread(ranges.as_ptr(), ranges.len(), 8, 10, 3, 4));
+        assert_eq!(mocktail_rust_host_abi_resolve_allocator_strategy(1, true, true), 0);
+        assert_eq!(mocktail_rust_host_abi_resolve_allocator_strategy(0, true, false), 1);
+        assert_eq!(mocktail_rust_host_abi_resolve_allocator_strategy(1, false, true), 1);
+    }
+
+    #[test]
+    fn test_section123_window_game_surface_bridge() {
+        let ev = MocktailRustSurfaceEvent {
+            event_type: 0,
+            surface: MocktailRustSurfaceSnapshot {
+                generation: 1,
+                native_window: 0x1234,
+                width: 1280,
+                height: 720,
+                available: 1,
+                dpi_scale: 1.0,
+            },
+        };
+        let mut err = [0 as c_char; 256];
+        let rc = mocktail_rust_game_surface_bridge_validate_event(&ev, err.as_mut_ptr(), err.len());
+        assert_eq!(rc, 0);
+        let mut snap = MocktailRustGameSurfaceBridgeSnapshot {
+            accepted_events: 0,
+            duplicate_events: 0,
+            last_generation: 0,
+            last_event_type: -1,
+            failed: false,
+        };
+        mocktail_rust_game_surface_bridge_record_event(&ev, true, &mut snap);
+        assert_eq!(snap.accepted_events, 1);
+        assert_eq!(snap.last_generation, 1);
+        assert!(!snap.failed);
     }
 
 }

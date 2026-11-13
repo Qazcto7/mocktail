@@ -1,13 +1,28 @@
 #include "window/window_game_surface_bridge.h"
 
+#include <array>
 #include <utility>
 
+#include "mocktail/mocktail_rust.h"
 #include "runtime/roblox_game_session_native_adapter.h"
 #include "window/window.h"
 
 namespace mocktail {
 namespace window {
 namespace {
+
+MocktailRustSurfaceEvent ToRustSurfaceEvent(const WindowSurfaceEvent& event) {
+  MocktailRustSurfaceEvent rust_event{};
+  rust_event.event_type = static_cast<int32_t>(event.type);
+  rust_event.surface.generation = event.surface.generation;
+  rust_event.surface.native_window =
+      static_cast<uintptr_t>(event.surface.native_window);
+  rust_event.surface.width = event.surface.width;
+  rust_event.surface.height = event.surface.height;
+  rust_event.surface.available = event.surface.available ? 1 : 0;
+  rust_event.surface.dpi_scale = event.surface.dpi_scale;
+  return rust_event;
+}
 
 Status InvalidArgument(std::string message) {
   return Status::Error(StatusCode::kInvalidArgument, std::move(message));
@@ -104,13 +119,22 @@ WindowGameSurfaceDrainResult WindowGameSurfaceBridge::Drain() {
       }
     }
 
-    snapshot_.last_event_type = event.type;
-    snapshot_.last_generation = event.surface.generation;
-    if (update.changed()) {
-      ++snapshot_.accepted_events;
-    } else {
-      ++snapshot_.duplicate_events;
-    }
+    const MocktailRustSurfaceEvent rust_event = ToRustSurfaceEvent(event);
+    MocktailRustGameSurfaceBridgeSnapshot rust_snapshot{
+        snapshot_.accepted_events,
+        snapshot_.duplicate_events,
+        snapshot_.last_generation,
+        static_cast<int32_t>(snapshot_.last_event_type),
+        snapshot_.failed,
+    };
+    mocktail_rust_game_surface_bridge_record_event(
+        &rust_event, update.changed(), &rust_snapshot);
+    snapshot_.accepted_events = rust_snapshot.accepted_events;
+    snapshot_.duplicate_events = rust_snapshot.duplicate_events;
+    snapshot_.last_generation = rust_snapshot.last_generation;
+    snapshot_.last_event_type =
+        static_cast<WindowSurfaceEventType>(rust_snapshot.last_event_type);
+    snapshot_.failed = rust_snapshot.failed;
   }
   return {Status::Ok(), drained_events};
 }
@@ -121,23 +145,15 @@ WindowGameSurfaceBridgeSnapshot WindowGameSurfaceBridge::Snapshot() const {
 
 Status WindowGameSurfaceBridge::ValidateEvent(
     const WindowSurfaceEvent& event) const {
-  if (event.surface.generation == 0) {
-    return InvalidArgument("window surface event has no generation");
+  const MocktailRustSurfaceEvent rust_event = ToRustSurfaceEvent(event);
+  std::array<char, 256> err_buf{};
+  if (mocktail_rust_game_surface_bridge_validate_event(
+          &rust_event, err_buf.data(), err_buf.size()) != 0) {
+    return InvalidArgument(err_buf[0] != '\0'
+                               ? std::string(err_buf.data())
+                               : "window surface event is invalid");
   }
-  switch (event.type) {
-    case WindowSurfaceEventType::kCreated:
-      return Status::Ok();
-    case WindowSurfaceEventType::kChanged:
-      if (!event.surface.available || event.surface.native_window == 0 ||
-          event.surface.width == 0 || event.surface.height == 0) {
-        return InvalidArgument(
-            "changed window surface requires an available handle and extent");
-      }
-      return Status::Ok();
-    case WindowSurfaceEventType::kDestroyed:
-      return Status::Ok();
-  }
-  return InvalidArgument("window surface event type is invalid");
+  return Status::Ok();
 }
 
 runtime::GameSessionUpdateResult WindowGameSurfaceBridge::Dispatch(

@@ -1,12 +1,10 @@
 #include "runtime/runtime_config.h"
 
-#include <algorithm>
 #include <array>
-#include <cerrno>
-#include <charconv>
-#include <climits>
-#include <cstdlib>
 #include <optional>
+#include <string>
+
+#include "mocktail/mocktail_rust.h"
 
 #ifndef MOCKTAIL_DISCORD_APPLICATION_ID
 #define MOCKTAIL_DISCORD_APPLICATION_ID ""
@@ -15,23 +13,6 @@
 namespace mocktail {
 namespace runtime {
 namespace {
-
-std::string EncodeProxyCredential(std::string_view value) {
-  constexpr char hex[] = "0123456789ABCDEF";
-  std::string encoded;
-  for (unsigned char byte : value) {
-    if ((byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') ||
-        (byte >= '0' && byte <= '9') || byte == '-' || byte == '.' ||
-        byte == '_' || byte == '~') {
-      encoded += static_cast<char>(byte);
-    } else {
-      encoded += '%';
-      encoded += hex[byte >> 4];
-      encoded += hex[byte & 15];
-    }
-  }
-  return encoded;
-}
 
 constexpr std::array<std::string_view, 7> kUnsafeDetachedThreadOverrides = {
     "MOCKTAIL_APP_BRIDGE_APP_START_THREAD",
@@ -49,18 +30,13 @@ bool LegacyEnabled(const Environment& environment, std::string_view name) {
 }
 
 bool IsDiscordApplicationId(std::string_view value) {
-  return value.empty() ||
-         (value.size() >= 17 && value.size() <= 20 &&
-          std::all_of(value.begin(), value.end(), [](unsigned char byte) {
-            return byte >= '0' && byte <= '9';
-          }));
+  return mocktail_rust_runtime_config_is_discord_app_id(value.data(),
+                                                        value.size());
 }
 
 bool IsDiscordText(std::string_view value, std::size_t maximum) {
-  return !value.empty() && value.size() <= maximum &&
-         std::none_of(value.begin(), value.end(), [](unsigned char byte) {
-           return byte < 0x20 || byte == 0x7f;
-         });
+  return mocktail_rust_runtime_config_is_discord_text(value.data(), value.size(),
+                                                     maximum);
 }
 
 bool ReadBoolean(const Environment& environment, std::string_view name,
@@ -69,14 +45,8 @@ bool ReadBoolean(const Environment& environment, std::string_view name,
   if (!value.has_value()) {
     return default_value;
   }
-  if (*value == "1" || *value == "true" || *value == "on") {
-    return true;
-  }
-  if (*value == "0" || *value == "false" || *value == "off") {
-    return false;
-  }
-  *valid = false;
-  return default_value;
+  return mocktail_rust_runtime_config_parse_bool(value->data(), value->size(),
+                                                 default_value, valid);
 }
 
 std::optional<bool> InputEnabled(const Environment& environment,
@@ -118,15 +88,8 @@ int ReadPositiveInt(const Environment& environment, std::string_view name,
   if (!value.has_value() || value->empty()) {
     return default_value;
   }
-
-  errno = 0;
-  char* end = nullptr;
-  const long parsed = std::strtol(value->c_str(), &end, 10);
-  if (end == value->c_str() || errno == ERANGE || parsed <= 0 ||
-      parsed > INT_MAX) {
-    return default_value;
-  }
-  return static_cast<int>(parsed);
+  return mocktail_rust_runtime_config_parse_positive_int(
+      value->data(), value->size(), default_value);
 }
 
 }  // namespace
@@ -151,55 +114,35 @@ std::optional<NetworkProxyConfig> ReadNetworkProxy(
 std::optional<NetworkProxyConfig> ParseNetworkProxyConfig(
     std::string_view host, std::string_view port, std::string_view scheme,
     std::string_view username, std::string_view password) {
-  std::string normalized_scheme;
-  if (scheme == "http" || scheme == "https") {
-    // Desktop resolvers commonly label the proxy selected for an HTTPS URL as
-    // `https://` even when the local endpoint speaks plain HTTP CONNECT.
-    normalized_scheme = "http";
-  } else if (scheme == "socks" || scheme == "socks5" ||
-             scheme == "socks5h") {
-    normalized_scheme = "socks5h";
-  } else {
+  std::array<char, 32> normalized_scheme{};
+  int32_t parsed_port = 0;
+  if (!mocktail_rust_network_proxy_parse(
+          host.data(), host.size(), port.data(), port.size(), scheme.data(),
+          scheme.size(), username.data(), username.size(), password.data(),
+          password.size(), normalized_scheme.data(), normalized_scheme.size(),
+          &parsed_port)) {
     return std::nullopt;
   }
-  if ((username.empty() && !password.empty()) ||
-      username.find('\0') != std::string_view::npos ||
-      password.find('\0') != std::string_view::npos ||
-      (normalized_scheme == "socks5h" &&
-       (username.size() > 255 || password.size() > 255))) {
-    return std::nullopt;
-  }
-  if (host.empty() || port.empty() || host.find("://") != std::string::npos ||
-      std::any_of(host.begin(), host.end(), [](unsigned char character) {
-        return character <= 0x20 || character == 0x7f || character == '/' ||
-               character == '\\' || character == '@' || character == '[' ||
-               character == ']' || character == '?' || character == '#';
-      })) {
-    return std::nullopt;
-  }
-  int parsed_port = 0;
-  const auto conversion =
-      std::from_chars(port.data(), port.data() + port.size(), parsed_port);
-  if (conversion.ec != std::errc() ||
-      conversion.ptr != port.data() + port.size() || parsed_port <= 0 ||
-      parsed_port > 65535) {
-    return std::nullopt;
-  }
-  return NetworkProxyConfig{std::move(normalized_scheme), std::string(host),
-                            parsed_port, std::string(username),
-                            std::string(password)};
+  return NetworkProxyConfig{std::string(normalized_scheme.data()),
+                            std::string(host), parsed_port,
+                            std::string(username), std::string(password)};
 }
 
 std::string BuildNetworkProxyUrl(const NetworkProxyConfig& proxy,
                                  bool include_credentials) {
-  const bool ipv6 = proxy.host.find(':') != std::string::npos;
-  const std::string credentials =
-      include_credentials && !proxy.username.empty()
-          ? EncodeProxyCredential(proxy.username) + ":" +
-                EncodeProxyCredential(proxy.password) + "@"
-          : std::string();
-  return proxy.scheme + "://" + credentials + (ipv6 ? "[" : "") +
-         proxy.host + (ipv6 ? "]" : "") + ":" + std::to_string(proxy.port);
+  const std::size_t required = mocktail_rust_network_proxy_build_url(
+      proxy.scheme.data(), proxy.scheme.size(), proxy.host.data(),
+      proxy.host.size(), proxy.port, proxy.username.data(),
+      proxy.username.size(), proxy.password.data(), proxy.password.size(),
+      include_credentials, nullptr, 0);
+  std::string out(required + 1, '\0');
+  const std::size_t written = mocktail_rust_network_proxy_build_url(
+      proxy.scheme.data(), proxy.scheme.size(), proxy.host.data(),
+      proxy.host.size(), proxy.port, proxy.username.data(),
+      proxy.username.size(), proxy.password.data(), proxy.password.size(),
+      include_credentials, out.data(), out.size());
+  out.resize(written);
+  return out;
 }
 
 RuntimeConfig RuntimeConfig::FromEnvironment(const Environment& environment) {
@@ -411,22 +354,22 @@ RuntimeConfig RuntimeConfig::FromEnvironment(const Environment& environment) {
 }
 
 GraphicsBackend RuntimeConfig::ParseGraphicsBackend(std::string_view name) {
-  if (name.empty() || name == "auto") {
-    return GraphicsBackend::kAuto;
+  const int32_t value = mocktail_rust_runtime_config_parse_graphics_backend(
+      name.data(), name.size());
+  switch (value) {
+    case 0:
+      return GraphicsBackend::kAuto;
+    case 1:
+      return GraphicsBackend::kSystem;
+    case 2:
+      return GraphicsBackend::kVulkan;
+    case 3:
+      return GraphicsBackend::kAngleVulkan;
+    case 4:
+      return GraphicsBackend::kAngleSwiftShader;
+    default:
+      return GraphicsBackend::kUnknown;
   }
-  if (name == "system" || name == "gles" || name == "opengl") {
-    return GraphicsBackend::kSystem;
-  }
-  if (name == "vulkan" || name == "native-vulkan" || name == "direct-vulkan") {
-    return GraphicsBackend::kVulkan;
-  }
-  if (name == "angle-vulkan") {
-    return GraphicsBackend::kAngleVulkan;
-  }
-  if (name == "angle-swiftshader") {
-    return GraphicsBackend::kAngleSwiftShader;
-  }
-  return GraphicsBackend::kUnknown;
 }
 
 }  // namespace runtime

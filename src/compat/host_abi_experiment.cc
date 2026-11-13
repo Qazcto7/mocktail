@@ -1,13 +1,11 @@
 #include "compat/host_abi_experiment.h"
 
-#include <sys/mman.h>
-#include <unistd.h>
-
 #include <array>
 #include <cstdlib>
-#include <cstring>
 #include <iomanip>
 #include <iostream>
+
+#include "mocktail/mocktail_rust.h"
 
 namespace mocktail::compat {
 namespace {
@@ -34,43 +32,7 @@ void *TargetForKind(HostBridgeKind kind,
 }
 
 bool PatchAbsoluteJump(uintptr_t address, void *target) noexcept {
-  const long page_size = sysconf(_SC_PAGESIZE);
-  if (page_size <= 0 || address == 0 || target == nullptr) {
-    return false;
-  }
-
-#if defined(__aarch64__)
-  // ldr x16, #8 ; br x16 ; .quad target
-  // x16 is the intra-procedure-call scratch register, free to clobber.
-  unsigned char patch[] = {
-      0x50, 0x00, 0x00, 0x58, 0x00, 0x02, 0x1f, 0xd6,
-      0,    0,    0,    0,    0,    0,    0,    0,
-  };
-  const uintptr_t target_address = reinterpret_cast<uintptr_t>(target);
-  std::memcpy(patch + 8, &target_address, sizeof(target_address));
-#else
-  unsigned char patch[] = {
-      0x48, 0xb8,                               // movabs rax, imm64
-      0,    0,    0, 0, 0, 0, 0, 0, 0xff, 0xe0, // jmp rax
-  };
-  const uintptr_t target_address = reinterpret_cast<uintptr_t>(target);
-  std::memcpy(patch + 2, &target_address, sizeof(target_address));
-#endif
-
-  const uintptr_t page_mask = static_cast<uintptr_t>(page_size) - 1;
-  const uintptr_t page = address & ~page_mask;
-  const uintptr_t end = address + sizeof(patch);
-  const uintptr_t page_end = (end + page_mask) & ~page_mask;
-  const size_t protect_size = page_end - page;
-  if (mprotect(reinterpret_cast<void *>(page), protect_size,
-               PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
-    return false;
-  }
-  std::memcpy(reinterpret_cast<void *>(address), patch, sizeof(patch));
-  __builtin___clear_cache(reinterpret_cast<char *>(address),
-                          reinterpret_cast<char *>(address) + sizeof(patch));
-  return mprotect(reinterpret_cast<void *>(page), protect_size,
-                  PROT_READ | PROT_EXEC) == 0;
+  return mocktail_rust_host_abi_patch_absolute_jump(address, target);
 }
 
 bool SeedAllocatorObject(uintptr_t library_base,
@@ -159,31 +121,18 @@ bool InitializeArena(uintptr_t library_base,
 
 bool SeedJniSingleton(uintptr_t library_base,
                       const HostDataSeedProfile &seeds) noexcept {
-  if (seeds.jni_singleton_slot == 0 || seeds.jni_singleton_bytes == 0) {
-    return true;
-  }
-  auto **slot =
-      reinterpret_cast<void **>(library_base + seeds.jni_singleton_slot);
-  if (*slot != nullptr) {
-    return true;
-  }
-
-  auto *object =
-      static_cast<unsigned char *>(std::calloc(1, seeds.jni_singleton_bytes));
-  if (object == nullptr) {
+  void *object = nullptr;
+  if (!mocktail_rust_host_abi_seed_jni_singleton(
+          library_base, seeds.jni_singleton_slot, seeds.jni_singleton_bytes,
+          &object)) {
     return false;
   }
-  constexpr size_t kMapOffset = 0x30;
-  constexpr size_t kLoadFactorOffset = kMapOffset + 0x20;
-  if (seeds.jni_singleton_bytes >= kLoadFactorOffset + sizeof(float)) {
-    const float load_factor = 1.0F;
-    std::memcpy(object + kLoadFactorOffset, &load_factor, sizeof(load_factor));
+  if (object != nullptr) {
+    std::cout << "  [compat] seeded JNI singleton @+0x" << std::hex
+              << seeds.jni_singleton_slot << std::dec
+              << " bytes=" << seeds.jni_singleton_bytes << " ptr=" << object
+              << '\n';
   }
-  *slot = object;
-  std::cout << "  [compat] seeded JNI singleton @+0x" << std::hex
-            << seeds.jni_singleton_slot << std::dec
-            << " bytes=" << seeds.jni_singleton_bytes << " ptr=" << object
-            << '\n';
   return true;
 }
 
