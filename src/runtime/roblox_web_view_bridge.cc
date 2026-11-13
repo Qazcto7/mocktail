@@ -3,9 +3,9 @@
 
 #include <curl/curl.h>
 
+#include <array>
 #include <charconv>
 #include <cstdio>
-#include <nlohmann/json.hpp>
 #include <string>
 #include <utility>
 
@@ -111,50 +111,7 @@ Status EscapeCaptchaQueryValue(const std::string& value, std::string* escaped) {
   return Status::Ok();
 }
 
-Status ParseOptionalWebViewString(const nlohmann::json& document,
-                                  const char* key, std::size_t maximum_bytes,
-                                  std::optional<std::string>* value) {
-  if (key == nullptr || value == nullptr) {
-    return Invalid("WebView optional string output is null");
-  }
-  const auto found = document.find(key);
-  if (found == document.end()) {
-    value->reset();
-    return Status::Ok();
-  }
-  if (!found->is_string()) {
-    return Invalid(std::string("WebView mutation field ") + key +
-                   " must be a string");
-  }
-  const std::string& parsed = found->get_ref<const std::string&>();
-  if (parsed.size() > maximum_bytes || HasControlBytes(parsed)) {
-    return Invalid(std::string("WebView mutation field ") + key +
-                   " is invalid");
-  }
-  *value = parsed;
-  return Status::Ok();
-}
-
-Status ParseOptionalWebViewBoolean(const nlohmann::json& document,
-                                   const char* key,
-                                   std::optional<bool>* value) {
-  if (key == nullptr || value == nullptr) {
-    return Invalid("WebView optional boolean output is null");
-  }
-  const auto found = document.find(key);
-  if (found == document.end()) {
-    value->reset();
-    return Status::Ok();
-  }
-  if (!found->is_boolean()) {
-    return Invalid(std::string("WebView mutation field ") + key +
-                   " must be a boolean");
-  }
-  *value = found->get<bool>();
-  return Status::Ok();
-}
-
-} // namespace
+}  // namespace
 
 struct RobloxWebViewBridge::RawCallbackTarget {
   std::mutex mutex;
@@ -176,73 +133,49 @@ struct RobloxWebViewBridge::HostWindowExitContext {
   uint64_t generation = 0;
 };
 
-Status ParseRobloxWebViewOpenJson(const std::string &json,
-                                  RobloxWebViewOpenRequest *request) {
+Status ParseRobloxWebViewOpenJson(const std::string& json,
+                                  RobloxWebViewOpenRequest* request) {
   if (request == nullptr) {
     return Invalid("WebView open output is null");
   }
   *request = {};
-  if (json.empty() || json.size() > kMaximumRobloxWebViewJsonBytes) {
-    return Invalid("WebView open JSON size is invalid");
-  }
-
-  const nlohmann::json document =
-      nlohmann::json::parse(json.begin(), json.end(), nullptr, false);
-  if (document.is_discarded() || !document.is_object()) {
-    return Invalid("WebView open payload is not a JSON object");
-  }
-  const auto url = document.find("url");
-  if (url == document.end() || !url->is_string()) {
-    return Invalid("WebView open payload requires a string url");
-  }
-  const std::string &parsed_url = url->get_ref<const std::string &>();
-  if (parsed_url.empty() || parsed_url.size() > kMaximumRobloxWebViewUrlBytes) {
-    return Invalid("WebView open url size is invalid");
-  }
-
-  request->url = parsed_url;
-  const auto title = document.find("title");
-  if (title != document.end()) {
-    if (!title->is_string() ||
-        title->get_ref<const std::string&>().size() > 512 ||
-        HasControlBytes(title->get_ref<const std::string&>())) {
-      return Invalid("WebView open title is invalid");
-    }
-    request->title = title->get_ref<const std::string&>();
-  }
-  Status status =
-      ParseOptionalWebViewBoolean(document, "isVisible", &request->is_visible);
-  if (status.ok()) {
-    status = ParseOptionalWebViewString(document, "windowType", 512,
-                                        &request->window_type);
-  }
-  if (status.ok()) {
-    status = ParseOptionalWebViewBoolean(document, "showDomainAsTitle",
-                                         &request->show_domain_as_title);
-  }
-  if (status.ok()) {
-    status = ParseOptionalWebViewBoolean(document, "backButtonVisible",
-                                         &request->back_button_visible);
-  }
-  if (status.ok()) {
-    status = ParseOptionalWebViewBoolean(document, "hideHeader",
-                                         &request->hide_header);
-  }
-  if (status.ok()) {
-    const auto search_params = document.find("searchParams");
-    if (search_params != document.end()) {
-      if (!search_params->is_object()) {
-        status = Invalid("WebView open field searchParams must be an object");
-      } else {
-        status = ParseOptionalWebViewString(*search_params, "searchType", 512,
-                                            &request->search_type);
-      }
-    }
-  }
-  if (!status.ok()) {
+  std::array<char, 256> err_buf{};
+  const int32_t rc = mocktail_rust_webview_parse_open_json(
+      json.data(), json.size(),
+      [](void* ctx, const MocktailRustWebViewOpenView* view) {
+        auto* out = static_cast<RobloxWebViewOpenRequest*>(ctx);
+        out->url.assign(view->url.ptr, view->url.len);
+        if (view->has_title) {
+          out->title.assign(view->title.ptr, view->title.len);
+        }
+        if (view->has_is_visible) {
+          out->is_visible = view->is_visible;
+        }
+        if (view->has_window_type) {
+          out->window_type.emplace(view->window_type.ptr,
+                                   view->window_type.len);
+        }
+        if (view->has_show_domain_as_title) {
+          out->show_domain_as_title = view->show_domain_as_title;
+        }
+        if (view->has_back_button_visible) {
+          out->back_button_visible = view->back_button_visible;
+        }
+        if (view->has_hide_header) {
+          out->hide_header = view->hide_header;
+        }
+        if (view->has_search_type) {
+          out->search_type.emplace(view->search_type.ptr,
+                                   view->search_type.len);
+        }
+      },
+      request, err_buf.data(), err_buf.size());
+  if (rc != 0) {
     *request = {};
+    return Invalid(err_buf[0] != '\0' ? std::string(err_buf.data())
+                                      : "WebView open payload is invalid");
   }
-  return status;
+  return Status::Ok();
 }
 
 Status ParseRobloxWebViewMutationJson(const std::string& json,
@@ -251,50 +184,40 @@ Status ParseRobloxWebViewMutationJson(const std::string& json,
     return Invalid("WebView mutation output is null");
   }
   *request = {};
-  if (json.empty() || json.size() > kMaximumRobloxWebViewJsonBytes) {
-    return Invalid("WebView mutation JSON size is invalid");
-  }
-
-  const nlohmann::json document =
-      nlohmann::json::parse(json.begin(), json.end(), nullptr, false);
-  if (document.is_discarded() || !document.is_object()) {
-    return Invalid("WebView mutation payload is not a JSON object");
-  }
-
-  Status status = ParseOptionalWebViewString(
-      document, "url", kMaximumRobloxWebViewUrlBytes, &request->url);
-  if (status.ok()) {
-    status =
-        ParseOptionalWebViewString(document, "title", 512, &request->title);
-  }
-  if (status.ok()) {
-    status = ParseOptionalWebViewBoolean(document, "isVisible",
-                                         &request->is_visible);
-  }
-  if (status.ok()) {
-    status = ParseOptionalWebViewString(document, "windowType", 512,
-                                        &request->window_type);
-  }
-  if (status.ok()) {
-    status = ParseOptionalWebViewBoolean(document, "showDomainAsTitle",
-                                         &request->show_domain_as_title);
-  }
-  if (status.ok()) {
-    const auto search_params = document.find("searchParams");
-    if (search_params != document.end()) {
-      if (!search_params->is_object()) {
-        status =
-            Invalid("WebView mutation field searchParams must be an object");
-      } else {
-        status = ParseOptionalWebViewString(*search_params, "searchType", 512,
-                                            &request->search_type);
-      }
-    }
-  }
-  if (!status.ok()) {
+  std::array<char, 256> err_buf{};
+  const int32_t rc = mocktail_rust_webview_parse_mutation_json(
+      json.data(), json.size(),
+      [](void* ctx, const MocktailRustWebViewMutationView* view) {
+        auto* out = static_cast<RobloxWebViewMutationRequest*>(ctx);
+        if (view->has_url) {
+          out->url.emplace(view->url.ptr, view->url.len);
+        }
+        if (view->has_title) {
+          out->title.emplace(view->title.ptr, view->title.len);
+        }
+        if (view->has_is_visible) {
+          out->is_visible = view->is_visible;
+        }
+        if (view->has_window_type) {
+          out->window_type.emplace(view->window_type.ptr,
+                                   view->window_type.len);
+        }
+        if (view->has_show_domain_as_title) {
+          out->show_domain_as_title = view->show_domain_as_title;
+        }
+        if (view->has_search_type) {
+          out->search_type.emplace(view->search_type.ptr,
+                                   view->search_type.len);
+        }
+      },
+      request, err_buf.data(), err_buf.size());
+  if (rc != 0) {
     *request = {};
+    return Invalid(err_buf[0] != '\0'
+                       ? std::string(err_buf.data())
+                       : "WebView mutation payload is invalid");
   }
-  return status;
+  return Status::Ok();
 }
 
 Status ParseRobloxCaptchaOpenJson(const std::string& json,
@@ -303,50 +226,44 @@ Status ParseRobloxCaptchaOpenJson(const std::string& json,
     return Invalid("captcha open output is null");
   }
   *request = {};
-  if (json.empty() || json.size() > kMaximumRobloxWebViewJsonBytes) {
-    return Invalid("captcha open JSON size is invalid");
+  struct CaptchaParseContext {
+    RobloxWebViewOpenRequest* request = nullptr;
+    Status status = Status::Ok();
+  } parse_ctx{request, Status::Ok()};
+  std::array<char, 256> err_buf{};
+  const int32_t rc = mocktail_rust_webview_parse_captcha_open_json(
+      json.data(), json.size(),
+      [](void* ctx, bool is_login, const char* normalized_type,
+         std::size_t type_len, const char* credential_value,
+         std::size_t value_len) {
+        auto* state = static_cast<CaptchaParseContext*>(ctx);
+        state->request->title = "Roblox verification";
+        if (!is_login) {
+          state->request->url =
+              "https://www.roblox.com/captcha/app/signup?hybrid-return-token=1";
+          return;
+        }
+        std::string escaped_value;
+        state->status = EscapeCaptchaQueryValue(
+            std::string(credential_value, value_len), &escaped_value);
+        if (!state->status.ok()) {
+          return;
+        }
+        state->request->url =
+            "https://www.roblox.com/captcha/app/login?credentialsType=" +
+            std::string(normalized_type, type_len) +
+            "&credentialsValue=" + escaped_value + "&hybrid-return-token=1";
+      },
+      &parse_ctx, err_buf.data(), err_buf.size());
+  if (rc != 0) {
+    *request = {};
+    return Invalid(err_buf[0] != '\0' ? std::string(err_buf.data())
+                                      : "captcha open payload is invalid");
   }
-  const nlohmann::json document =
-      nlohmann::json::parse(json.begin(), json.end(), nullptr, false);
-  if (document.is_discarded() || !document.is_object()) {
-    return Invalid("captcha open payload is not a JSON object");
+  if (!parse_ctx.status.ok()) {
+    *request = {};
+    return parse_ctx.status;
   }
-  const auto captcha_type = document.find("captchaType");
-  if (captcha_type == document.end() || !captcha_type->is_string()) {
-    return Invalid("captcha open payload requires captchaType");
-  }
-
-  request->title = "Roblox verification";
-  if (captcha_type->get_ref<const std::string&>() != "login") {
-    request->url =
-        "https://www.roblox.com/captcha/app/signup?hybrid-return-token=1";
-    return Status::Ok();
-  }
-
-  const auto credential_type = document.find("cvalueType");
-  const auto credential_value = document.find("cvalue");
-  if (credential_type == document.end() || !credential_type->is_string() ||
-      credential_value == document.end() || !credential_value->is_string()) {
-    return Invalid("login captcha requires credential type and value");
-  }
-  std::string normalized_type = credential_type->get_ref<const std::string&>();
-  if (normalized_type == "phone_number") {
-    normalized_type = "phonenumber";
-  } else if (normalized_type != "username" && normalized_type != "email") {
-    return Invalid("login captcha credential type is unsupported");
-  }
-  const std::string& value = credential_value->get_ref<const std::string&>();
-  if (value.empty() || value.size() > 4096 || HasControlBytes(value)) {
-    return Invalid("login captcha credential value is invalid");
-  }
-  std::string escaped_value;
-  Status status = EscapeCaptchaQueryValue(value, &escaped_value);
-  if (!status.ok()) {
-    return status;
-  }
-  request->url = "https://www.roblox.com/captcha/app/login?credentialsType=" +
-                 normalized_type + "&credentialsValue=" + escaped_value +
-                 "&hybrid-return-token=1";
   return Status::Ok();
 }
 

@@ -1,6 +1,5 @@
 #include "update/host_abi_deriver.h"
 
-#define JSON_NOEXCEPTION 1
 #include <capstone.h>
 #include <elf.h>
 #include <fcntl.h>
@@ -12,13 +11,11 @@
 
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <iterator>
 #include <map>
-#include <nlohmann/json.hpp>
 #include <optional>
 #include <set>
 #include <string>
@@ -29,12 +26,11 @@
 #include "compat/elf_build_id.h"
 #include "compat/fmod_output_device_contract.h"
 #include "compat/guest_abi.h"
+#include "mocktail/mocktail_rust.h"
 #include "update/payload_integrity.h"
 
 namespace mocktail::update {
 namespace {
-
-using Json = nlohmann::json;
 
 constexpr std::uint64_t kMaximumElfBytes = 512ULL * 1024ULL * 1024ULL;
 constexpr std::uint64_t kMaximumJsonBytes = 1024ULL * 1024ULL;
@@ -111,18 +107,6 @@ std::string ReadSmallRegular(const std::filesystem::path& path,
   }
   close(descriptor);
   return contents;
-}
-
-std::optional<Json> ReadJson(const std::filesystem::path& path,
-                             std::string* error) {
-  const std::string contents = ReadSmallRegular(path, kMaximumJsonBytes, error);
-  if (!error->empty()) return std::nullopt;
-  Json document = Json::parse(contents, nullptr, false, true);
-  if (document.is_discarded() || !document.is_object()) {
-    *error = "JSON input must contain one object: " + path.string();
-    return std::nullopt;
-  }
-  return document;
 }
 
 bool WritePrivate(const std::filesystem::path& path, std::string_view contents,
@@ -701,47 +685,6 @@ std::optional<std::vector<std::uint64_t>> ElfImage::InitArray(
   return result;
 }
 
-std::optional<std::uint64_t> ParseRva(const Json& value,
-                                      std::string_view description,
-                                      std::string* error) {
-  if (!value.is_string()) {
-    *error = std::string(description) + " must be a nonzero hex RVA";
-    return std::nullopt;
-  }
-  const std::string encoded = value.get<std::string>();
-  if (encoded.size() < 3 || encoded.substr(0, 2) != "0x" || encoded[2] == '0' ||
-      !std::all_of(encoded.begin() + 2, encoded.end(),
-                   [](unsigned char character) {
-                     return (character >= '0' && character <= '9') ||
-                            (character >= 'a' && character <= 'f');
-                   })) {
-    *error = std::string(description) + " must be a canonical nonzero hex RVA";
-    return std::nullopt;
-  }
-  std::uint64_t result = 0;
-  for (const unsigned char character : std::string_view(encoded).substr(2)) {
-    const unsigned value =
-        character <= '9' ? character - '0' : character - 'a' + 10;
-    if (result > (UINT64_MAX - value) / 16U) {
-      *error = std::string(description) + " RVA exceeds 64 bits";
-      return std::nullopt;
-    }
-    result = result * 16U + value;
-  }
-  return result;
-}
-
-std::string FormatRva(std::uint64_t value) {
-  constexpr char kDigits[] = "0123456789abcdef";
-  std::string reversed;
-  while (value != 0) {
-    reversed.push_back(kDigits[value & 0xfU]);
-    value >>= 4U;
-  }
-  std::reverse(reversed.begin(), reversed.end());
-  return "0x" + reversed;
-}
-
 struct Operand {
   enum class Type { kRegister, kImmediate, kMemory };
   Type type = Type::kRegister;
@@ -1137,17 +1080,6 @@ struct FmodRuntimeAnchors {
 
   std::size_t current_index() const { return layout_version == 2 ? 8 : 7; }
   std::size_t select_index() const { return layout_version == 2 ? 19 : 17; }
-
-  bool operator==(const FmodRuntimeAnchors& other) const {
-    return vtable == other.vtable &&
-           string_constructor == other.string_constructor &&
-           count_method == other.count_method &&
-           info_method == other.info_method &&
-           current_method == other.current_method &&
-           select_method == other.select_method &&
-           layout_version == other.layout_version &&
-           input_methods == other.input_methods;
-  }
 };
 
 struct RuntimeCompatibilityAnchors {
@@ -1158,102 +1090,52 @@ struct RuntimeCompatibilityAnchors {
 std::optional<RuntimeCompatibilityAnchors> LoadRuntimeCompatibilityAnchors(
     const std::vector<std::filesystem::path>& paths,
     std::string_view reference_build_id, std::string* error) {
-  RuntimeCompatibilityAnchors result;
+  std::vector<std::string> contents;
+  std::vector<std::string> path_strings;
+  contents.reserve(paths.size());
+  path_strings.reserve(paths.size());
   for (const std::filesystem::path& path : paths) {
-    const auto document = ReadJson(path, error);
-    if (!document.has_value()) return std::nullopt;
-    if (document->value("schema_version", 0) != 1 ||
-        !document->contains("profiles") ||
-        !(*document)["profiles"].is_array()) {
-      *error = "reference compatibility manifest schema is unsupported";
-      return std::nullopt;
+    error->clear();
+    std::string raw = ReadSmallRegular(path, kMaximumJsonBytes, error);
+    if (!error->empty()) return std::nullopt;
+    contents.push_back(std::move(raw));
+    path_strings.push_back(path.string());
+  }
+  std::vector<MocktailRustStrSlice> json_slices;
+  std::vector<MocktailRustStrSlice> path_slices;
+  json_slices.reserve(contents.size());
+  path_slices.reserve(path_strings.size());
+  for (std::size_t i = 0; i < contents.size(); ++i) {
+    json_slices.push_back({contents[i].data(), contents[i].size()});
+    path_slices.push_back({path_strings[i].data(), path_strings[i].size()});
+  }
+  MocktailRustDeriverRuntimeAnchors raw_anchors{};
+  char err_buf[512] = {};
+  if (mocktail_rust_deriver_load_runtime_anchors(
+          json_slices.data(), path_slices.data(), contents.size(),
+          reference_build_id.data(), reference_build_id.size(), &raw_anchors,
+          err_buf, sizeof(err_buf)) != 0) {
+    *error = err_buf;
+    return std::nullopt;
+  }
+  RuntimeCompatibilityAnchors result;
+  if (raw_anchors.has_fullscreen_setter) {
+    result.fullscreen_setter = raw_anchors.fullscreen_setter_rva;
+  }
+  if (raw_anchors.has_fmod) {
+    FmodRuntimeAnchors fmod{
+        raw_anchors.fmod_vtable_rva,
+        raw_anchors.fmod_string_constructor_rva,
+        raw_anchors.fmod_count_method_rva,
+        raw_anchors.fmod_info_method_rva,
+        raw_anchors.fmod_current_method_rva,
+        raw_anchors.fmod_select_method_rva,
+        raw_anchors.fmod_layout_version,
+    };
+    for (std::size_t i = 0; i < 4; ++i) {
+      fmod.input_methods[i] = raw_anchors.fmod_input_methods[i];
     }
-    for (const Json& profile : (*document)["profiles"]) {
-      if (!profile.is_object() ||
-          profile.value("elf_build_id", "") != reference_build_id) {
-        continue;
-      }
-      if (profile.contains("user_game_settings_fullscreen_setter_rva")) {
-        const auto value = ParseRva(
-            profile["user_game_settings_fullscreen_setter_rva"],
-            "reference fullscreen setter", error);
-        if (!value.has_value()) return std::nullopt;
-        if (result.fullscreen_setter.has_value() &&
-            *result.fullscreen_setter != *value) {
-          *error = "reference compatibility manifests disagree on fullscreen "
-                   "setter";
-          return std::nullopt;
-        }
-        result.fullscreen_setter = *value;
-      }
-      if (!profile.contains("fmod_output_device_bridge")) continue;
-      const Json& bridge = profile["fmod_output_device_bridge"];
-      constexpr std::array<std::string_view, 6> kFields = {
-          "vtable_rva",       "string_constructor_rva", "count_method_rva",
-          "info_method_rva", "current_method_rva",     "select_method_rva",
-      };
-      constexpr std::array<std::string_view, 4> input_fields = {
-          "input_count_method_rva", "input_info_method_rva",
-          "input_current_method_rva", "input_select_method_rva"};
-      const bool has_input = bridge.contains(input_fields[0]);
-      const bool has_layout = bridge.contains("vtable_layout_version");
-      if (!bridge.is_object() ||
-          bridge.size() !=
-              kFields.size() + (has_layout ? 1U : 0U) + (has_input ? 4U : 0U) ||
-          !profile.value("allow_host_abi_bridges", false)) {
-        *error = "reference FMOD output-device profile is incomplete";
-        return std::nullopt;
-      }
-      std::array<std::uint64_t, kFields.size()> values{};
-      for (std::size_t index = 0; index < kFields.size(); ++index) {
-        if (!bridge.contains(kFields[index])) {
-          *error = "reference FMOD output-device profile is incomplete";
-          return std::nullopt;
-        }
-        const auto value =
-            ParseRva(bridge[kFields[index]], kFields[index], error);
-        if (!value.has_value()) return std::nullopt;
-        values[index] = *value;
-      }
-      int layout = 1;
-      if (has_layout) {
-        const Json& value = bridge["vtable_layout_version"];
-        if (!value.is_number_integer() || (value != 1 && value != 2)) {
-          *error = "reference FMOD vtable layout is unsupported";
-          return std::nullopt;
-        }
-        layout = value.get<int>();
-      }
-      FmodRuntimeAnchors discovered = {values[0], values[1], values[2],
-                                       values[3], values[4], values[5],
-                                       layout};
-      if (has_input) {
-        for (std::size_t i = 0; i < input_fields.size(); ++i) {
-          if (!bridge.contains(input_fields[i])) {
-            *error = "reference FMOD input profile is incomplete";
-            return std::nullopt;
-          }
-          auto value =
-              ParseRva(bridge[input_fields[i]], input_fields[i], error);
-          if (!value)
-            return std::nullopt;
-          discovered.input_methods[i] = *value;
-        }
-      }
-      auto previous = result.fmod;
-      if (previous) {
-        if (previous->input_methods[0] == 0)
-          previous->input_methods = discovered.input_methods;
-        if (discovered.input_methods[0] == 0)
-          discovered.input_methods = previous->input_methods;
-      }
-      if (previous.has_value() && !(*previous == discovered)) {
-        *error =
-            "reference compatibility manifests disagree on FMOD anchors";
-        return std::nullopt;
-      }
-      result.fmod = discovered;
-    }
+    result.fmod = fmod;
   }
   return result;
 }
@@ -1311,11 +1193,11 @@ bool HasFmodDeviceListsSelectContract(const ElfImage& image,
          local_error.empty();
 }
 
-std::optional<Json> DeriveRuntimeCompatibility(
+std::optional<RuntimeCompatibilityAnchors> DeriveRuntimeCompatibility(
     const ElfImage& reference, const ElfImage& candidate,
     const Disassembler& disassembler,
     const RuntimeCompatibilityAnchors& source, std::string* error) {
-  Json result = Json::object();
+  RuntimeCompatibilityAnchors result;
   if (source.fullscreen_setter.has_value()) {
     if (!HasFullscreenSetterContract(reference, *source.fullscreen_setter)) {
       *error = "reference fullscreen setter contract changed";
@@ -1330,8 +1212,7 @@ std::optional<Json> DeriveRuntimeCompatibility(
       *error = "candidate fullscreen setter contract changed";
       return std::nullopt;
     }
-    result["user_game_settings_fullscreen_setter_rva"] =
-        FormatRva(setter->rva);
+    result.fullscreen_setter = setter->rva;
   }
   if (!source.fmod.has_value()) return result;
 
@@ -1435,32 +1316,24 @@ std::optional<Json> DeriveRuntimeCompatibility(
              std::to_string(candidates.size()) + " candidate locations";
     return std::nullopt;
   }
-  const FmodRuntimeAnchors& derived = candidates.front();
+  FmodRuntimeAnchors output = candidates.front();
   if (!HasFmodStringConstructorContract(candidate,
-                                        derived.string_constructor)) {
+                                        output.string_constructor)) {
     *error = "candidate FMOD string constructor contract changed";
     return std::nullopt;
   }
-  result["fmod_output_device_bridge"] = {
-      {"vtable_rva", FormatRva(derived.vtable)},
-      {"string_constructor_rva", FormatRva(derived.string_constructor)},
-      {"count_method_rva", FormatRva(derived.count_method)},
-      {"info_method_rva", FormatRva(derived.info_method)},
-      {"current_method_rva", FormatRva(derived.current_method)},
-      {"select_method_rva", FormatRva(derived.select_method)},
-  };
   if (old.input_methods[0] != 0) {
     constexpr std::array<std::string_view, 4> fields = {
         "input_count_method_rva", "input_info_method_rva",
         "input_current_method_rva", "input_select_method_rva"};
     constexpr std::array<std::size_t, 4> lengths = {4, 16, 12, 16};
     const auto old_slots = old.input_indexes();
-    const auto new_slots = derived.input_indexes();
+    const auto new_slots = output.input_indexes();
     for (std::size_t i = 0; i < fields.size(); ++i) {
       const auto old_method =
           reference_relocations->find(old.vtable + old_slots[i] * 8);
       const auto new_method =
-          relocations->find(derived.vtable + new_slots[i] * 8);
+          relocations->find(output.vtable + new_slots[i] * 8);
       if (old_method == reference_relocations->end() ||
           old_method->second != old.input_methods[i] ||
           new_method == relocations->end()) {
@@ -1479,14 +1352,10 @@ std::optional<Json> DeriveRuntimeCompatibility(
           *error = "candidate FMOD input contract changed";
         return std::nullopt;
       }
-      result["fmod_output_device_bridge"][fields[i]] =
-          FormatRva(new_method->second);
+      output.input_methods[i] = new_method->second;
     }
   }
-  if (derived.layout_version != 1) {
-    result["fmod_output_device_bridge"]["vtable_layout_version"] =
-        derived.layout_version;
-  }
+  result.fmod = output;
   return result;
 }
 
@@ -1860,204 +1729,97 @@ std::optional<std::uint64_t> DeriveRegistrySlot(
   return stores[0];
 }
 
-std::optional<std::size_t> PositiveSize(const Json& value,
-                                        std::string_view description,
-                                        std::string* error) {
-  if (!value.is_number_unsigned()) {
-    *error = std::string(description) + " must be a positive integer";
-    return std::nullopt;
-  }
-  const std::uint64_t number = value.get<std::uint64_t>();
-  if (number == 0 || number > SIZE_MAX) {
-    *error = std::string(description) + " is outside native size bounds";
-    return std::nullopt;
-  }
-  return static_cast<std::size_t>(number);
+struct DeriverSpecCollectCtx {
+  std::vector<SignatureSpec>* specs;
+};
+
+void OnDeriverSpec(void* raw_ctx, const char* name, size_t name_len,
+                   uint64_t reference_rva, size_t instruction_count,
+                   bool registry_size_may_change, size_t minimum_anchor_bytes) {
+  auto* ctx = static_cast<DeriverSpecCollectCtx*>(raw_ctx);
+  SignatureSpec spec{};
+  spec.name.assign(name, name_len);
+  spec.reference_rva = reference_rva;
+  spec.instruction_count = instruction_count;
+  spec.registry_size_may_change = registry_size_may_change;
+  spec.minimum_anchor_bytes = minimum_anchor_bytes;
+  ctx->specs->push_back(std::move(spec));
 }
 
-std::optional<Json> AdjustRanges(const Json& ranges,
-                                 std::size_t reference_count,
-                                 std::size_t candidate_count,
-                                 std::string* error) {
-  if (!ranges.is_array() || ranges.empty()) {
-    *error = "constructor ranges are missing";
-    return std::nullopt;
-  }
-  Json result = Json::array();
-  std::size_t previous_end = 0;
-  for (const Json& range : ranges) {
-    if (!range.is_object() || !range.contains("begin") ||
-        !range.contains("end_exclusive") ||
-        !range["begin"].is_number_unsigned() ||
-        !range["end_exclusive"].is_number_unsigned()) {
-      *error = "constructor range is invalid";
-      return std::nullopt;
-    }
-    const std::size_t begin = range["begin"].get<std::size_t>();
-    std::size_t end = range["end_exclusive"].get<std::size_t>();
-    if (end == reference_count) end = candidate_count;
-    if (begin >= end || begin < previous_end || end > candidate_count) {
-      *error = "constructor range cannot fit candidate init-array";
-      return std::nullopt;
-    }
-    result.push_back({{"begin", begin}, {"end_exclusive", end}});
-    previous_end = end;
-  }
-  return result;
+struct DeriverDocumentsCaptureCtx {
+  std::string profile_json;
+  std::string compatibility_json;
+};
+
+void OnDerivedProfileJson(void* raw_ctx, const char* ptr, size_t len) {
+  auto* ctx = static_cast<DeriverDocumentsCaptureCtx*>(raw_ctx);
+  ctx->profile_json.assign(ptr, len);
 }
 
-std::optional<std::vector<SignatureSpec>> SignatureSpecs(const Json& sidecar,
-                                                         std::string* error) {
-  const Json& profile = sidecar["profile"];
-  const Json& anchors = sidecar["derivation_anchors"];
-  if (!profile.is_object() || !anchors.is_object() ||
-      !profile.contains("bridge_entries") ||
-      !profile["bridge_entries"].is_array() ||
-      !profile.contains("data_seeds") || !profile["data_seeds"].is_object() ||
-      !profile.contains("native_pre_jni_bootstrap") ||
-      !profile["native_pre_jni_bootstrap"].is_object() ||
-      !anchors.contains("constructor_rvas") ||
-      !anchors["constructor_rvas"].is_object()) {
-    *error = "reference HostAbi sidecar shape is incomplete";
-    return std::nullopt;
-  }
-  std::map<std::string, std::uint64_t> bridges;
-  for (const Json& entry : profile["bridge_entries"]) {
-    if (!entry.is_object() || !entry.contains("label") ||
-        !entry["label"].is_string() || !entry.contains("rva")) {
-      *error = "reference HostAbi bridge is incomplete";
-      return std::nullopt;
-    }
-    const std::string label = entry["label"].get<std::string>();
-    const auto rva = ParseRva(entry["rva"], "reference bridge", error);
-    if (!rva.has_value() || !bridges.emplace(label, *rva).second) {
-      if (error->empty()) *error = "reference HostAbi bridge is duplicated";
-      return std::nullopt;
-    }
-  }
-  const auto bridge =
-      [&](std::string_view label) -> std::optional<std::uint64_t> {
-    const auto found = bridges.find(std::string(label));
-    if (found == bridges.end()) {
-      *error = "reference HostAbi bridge is missing: " + std::string(label);
-      return std::nullopt;
-    }
-    return found->second;
-  };
-  const Json& seeds = profile["data_seeds"];
-  const Json& bootstrap = profile["native_pre_jni_bootstrap"];
-  const Json& constructors = anchors["constructor_rvas"];
+void OnDerivedCompatibilityJson(void* raw_ctx, const char* ptr, size_t len) {
+  auto* ctx = static_cast<DeriverDocumentsCaptureCtx*>(raw_ctx);
+  ctx->compatibility_json.assign(ptr, len);
+}
+
+std::optional<std::vector<SignatureSpec>> SignatureSpecs(
+    const std::string& sidecar_json, std::string* error) {
   std::vector<SignatureSpec> result;
-  const auto add = [&](std::string name, const Json& encoded, std::size_t count,
-                       bool registry = false, std::size_t minimum = 6) -> bool {
-    const auto rva = ParseRva(encoded, name, error);
-    if (!rva.has_value()) return false;
-    result.push_back({std::move(name), *rva, count, registry, minimum});
-    return true;
-  };
-  for (const auto& [label, count] :
-       std::array<std::pair<std::string_view, std::size_t>, 6>{
-           {{"small-allocate", 24},
-            // usable-size is an 18-instruction leaf. Do not include bytes from
-            // the adjacent function or alignment padding in its signature.
-            {"usable-size", 18},
-            {"reallocate", 24},
-            {"allocate", 24},
-            {"aligned-allocate-direct", 24},
-            {"free", 24}}}) {
-    const auto rva = bridge(label);
-    if (!rva.has_value()) return std::nullopt;
-    result.push_back({std::string(label), *rva, count, false, 6});
-  }
-  if (!add("arena-initializer", seeds["arena_initializer"], 24) ||
-      !add("allocator-thread-initializer",
-           seeds["allocator_thread_initializer"], 19) ||
-      !add("registry-initializer", bootstrap["registry_initializer"], 20,
-           true) ||
-      !add("allocator-object-initializer",
-           anchors["allocator_object_initializer_rva"], 19) ||
-      !add("empty-string-initializer", anchors["empty_string_initializer_rva"],
-           23) ||
-      !add("jni-singleton-initializer",
-           anchors["jni_singleton_initializer_rva"], 11) ||
-      !add("constructor-2", constructors["2"], 24) ||
-      !add("constructor-3", constructors["3"], 24) ||
-      !add("constructor-4", constructors["4"], 24, false, 3)) {
+  DeriverSpecCollectCtx ctx{&result};
+  char err_buf[512] = {};
+  if (mocktail_rust_deriver_extract_specs(
+          sidecar_json.data(), sidecar_json.size(), OnDeriverSpec, &ctx,
+          err_buf, sizeof(err_buf)) != 0) {
+    *error = err_buf;
     return std::nullopt;
   }
   return result;
 }
 
-bool ValidateReferenceIdentity(const Json& sidecar, const ElfImage& reference,
-                               std::string* error) {
-  if (sidecar.value("schema_version", 0) != 1 ||
-      sidecar.value("elf_build_id", "") != reference.build_id() ||
-      sidecar.value("payload_sha256", "") != reference.sha256() ||
-      !sidecar.contains("profile") || !sidecar["profile"].is_object() ||
-      sidecar["profile"].value("elf_build_id", "") != reference.build_id() ||
-      !sidecar.contains("derivation_anchors") ||
-      !sidecar["derivation_anchors"].is_object() ||
-      sidecar["derivation_anchors"].value("signature_version", 0) != 1) {
-    *error = "reference ELF bytes do not match exact HostAbi sidecar";
-    return false;
-  }
-  const std::string payload_id = sidecar.value("payload_id", "");
-  if (payload_id.empty() ||
-      sidecar.value("payload_path", "") != "payloads/" + payload_id ||
-      payload_id.size() <= 41 ||
-      payload_id.substr(payload_id.size() - 40) != reference.build_id()) {
-    *error = "reference HostAbi sidecar payload identity is inconsistent";
+bool ValidateReferenceIdentity(const std::string& sidecar_json,
+                               const ElfImage& reference, std::string* error) {
+  char err_buf[512] = {};
+  if (mocktail_rust_deriver_validate_reference_identity(
+          sidecar_json.data(), sidecar_json.size(), reference.build_id().data(),
+          reference.build_id().size(), reference.sha256().data(),
+          reference.sha256().size(), err_buf, sizeof(err_buf)) != 0) {
+    *error = err_buf;
     return false;
   }
   return true;
 }
 
-std::optional<Json> LoadCandidateMetadata(const std::filesystem::path& root,
-                                          const ElfImage& candidate,
-                                          std::string* error) {
-  const auto metadata = ReadJson(root / "roblox_payload.json", error);
-  if (!metadata.has_value()) return std::nullopt;
-  const std::string version_name = metadata->value("version_name", "");
-  const std::uint64_t version_code = metadata->value("version_code", 0ULL);
-  const Json* hashes =
-      metadata->contains("sha256") ? &(*metadata)["sha256"] : nullptr;
-  if (metadata->value("schema_version", 0) != 1 ||
-      metadata->value("package", "") != "com.roblox.client" ||
-      metadata->value("abi", "") != compat::kGuestAbi || version_name.empty() ||
-      version_code == 0 ||
-      metadata->value("elf_build_id", "") != candidate.build_id() ||
-      hashes == nullptr || !hashes->is_object() ||
-      hashes->value("libroblox", "") != candidate.sha256()) {
-    *error = "payload metadata does not match candidate ELF bytes";
+std::optional<std::string> LoadCandidateMetadata(
+    const std::filesystem::path& root, const ElfImage& candidate,
+    std::string* error) {
+  const std::filesystem::path metadata_path = root / "roblox_payload.json";
+  error->clear();
+  std::string metadata_json =
+      ReadSmallRegular(metadata_path, kMaximumJsonBytes, error);
+  if (!error->empty()) return std::nullopt;
+  const std::string path_str = metadata_path.string();
+  const std::string dir_name = root.filename().string();
+  char version_name_buf[256] = {};
+  std::uint64_t version_code = 0;
+  char err_buf[512] = {};
+  if (mocktail_rust_deriver_load_candidate_metadata(
+          metadata_json.data(), metadata_json.size(), path_str.data(),
+          path_str.size(), dir_name.data(), dir_name.size(),
+          candidate.build_id().data(), candidate.build_id().size(),
+          candidate.sha256().data(), candidate.sha256().size(),
+          compat::kGuestAbi.data(), compat::kGuestAbi.size(), version_name_buf,
+          sizeof(version_name_buf), &version_code, err_buf,
+          sizeof(err_buf)) != 0) {
+    *error = err_buf;
     return std::nullopt;
   }
-  const std::string payload_id =
-      std::to_string(version_code) + "-" + candidate.build_id();
-  if (root.filename() != payload_id) {
-    *error = "candidate ELF parent is not the canonical payload ID";
-    return std::nullopt;
-  }
-  return metadata;
+  return metadata_json;
 }
 
-std::optional<std::uint64_t> ProfileRva(const Json& object,
-                                        std::string_view field,
-                                        std::string* error) {
-  if (!object.contains(field)) {
-    *error = "reference profile is missing " + std::string(field);
-    return std::nullopt;
-  }
-  return ParseRva(object[field], field, error);
-}
-
-std::optional<std::pair<Json, Json>> DeriveDocuments(const ElfImage& reference,
-                                                     const ElfImage& candidate,
-                                                     const Json& sidecar,
-                                                     const Json& metadata,
-                                                     const RuntimeCompatibilityAnchors&
-                                                         runtime_source,
-                                                     std::string* error) {
-  if (!ValidateReferenceIdentity(sidecar, reference, error) ||
+std::optional<std::pair<std::string, std::string>> DeriveDocuments(
+    const ElfImage& reference, const ElfImage& candidate,
+    const std::string& sidecar_json, const std::string& metadata_json,
+    const RuntimeCompatibilityAnchors& runtime_source, std::string* error) {
+  if (!ValidateReferenceIdentity(sidecar_json, reference, error) ||
       reference.build_id() == candidate.build_id() ||
       reference.sha256() == candidate.sha256() ||
       !reference.ValidateToolchain(error) ||
@@ -2067,21 +1829,20 @@ std::optional<std::pair<Json, Json>> DeriveDocuments(const ElfImage& reference,
   }
   Disassembler disassembler;
   if (!disassembler.Open(error)) return std::nullopt;
-  const auto specs = SignatureSpecs(sidecar, error);
+  const auto specs = SignatureSpecs(sidecar_json, error);
   if (!specs.has_value()) return std::nullopt;
-  const Json& reference_profile = sidecar["profile"];
   const auto reference_init = reference.InitArray(error);
   const auto candidate_init = candidate.InitArray(error);
   if (!reference_init.has_value() || !candidate_init.has_value()) {
     return std::nullopt;
   }
-  const auto reference_count =
-      PositiveSize(reference_profile["init_array_count"],
-                   "reference init-array count", error);
-  if (!reference_count.has_value() ||
-      reference_init->size() != *reference_count ||
-      candidate_init->size() < 8) {
-    if (error->empty()) *error = "init-array shape is not derivable";
+  std::size_t reference_count = 0;
+  char err_buf[512] = {};
+  if (mocktail_rust_deriver_check_init_array(
+          sidecar_json.data(), sidecar_json.size(), reference_init->size(),
+          candidate_init->size(), &reference_count, err_buf,
+          sizeof(err_buf)) != 0) {
+    *error = err_buf;
     return std::nullopt;
   }
   std::map<std::string, SignatureMatch> matches;
@@ -2152,93 +1913,46 @@ std::optional<std::pair<Json, Json>> DeriveDocuments(const ElfImage& reference,
     return std::nullopt;
   }
   matches.emplace("allocate", std::move(*selected_allocate));
-  const Json& reference_anchors = sidecar["derivation_anchors"];
-  const Json& role_rvas = reference_anchors["constructor_rvas"];
-  const Json* reference_indices =
-      reference_anchors.contains("constructor_indices")
-          ? &reference_anchors["constructor_indices"]
-          : nullptr;
-  Json candidate_indices = Json::object();
-  Json candidate_constructor_rvas = Json::object();
-  for (const std::size_t role : {2U, 3U, 4U, 5U}) {
-    const std::string key = std::to_string(role);
-    std::size_t reference_index = role;
-    if (reference_indices != nullptr) {
-      if (!reference_indices->is_object() ||
-          !reference_indices->contains(key)) {
-        *error = "reference constructor indices are incomplete";
-        return std::nullopt;
-      }
-      const auto parsed =
-          PositiveSize((*reference_indices)[key], "constructor index", error);
-      if (!parsed) return std::nullopt;
-      reference_index = *parsed;
-    }
-    const auto reference_rva = ProfileRva(role_rvas, key, error);
-    const auto& match = matches.at(role == 5 ? "jni-singleton-initializer"
-                                             : "constructor-" + key);
-    const auto expected_rva =
-        role == 5
-            ? ProfileRva(reference_anchors, "jni_singleton_initializer_rva",
-                         error)
-            : std::optional<std::uint64_t>(match.reference.front().address);
-    if (!reference_rva || !expected_rva || *reference_rva != *expected_rva ||
-        reference_index < 2 || reference_index >= reference_init->size() ||
-        (*reference_init)[reference_index] != *reference_rva ||
-        std::count(reference_init->begin(), reference_init->end(),
-                   *reference_rva) != 1 ||
-        std::count(candidate_init->begin(), candidate_init->end(), match.rva) !=
-            1) {
-      *error = "constructor role has no unique verified init-array entry";
-      return std::nullopt;
-    }
-    const auto index = static_cast<std::size_t>(
-        std::find(candidate_init->begin(), candidate_init->end(), match.rva) -
-        candidate_init->begin());
-    if (index < 2) {
-      *error = "constructor role moved into reserved startup entries";
-      return std::nullopt;
-    }
-    if (role == 2 && reference_profile.value(
-                         "native_mimalloc_thread_initializer_after_constructor",
-                         SIZE_MAX) != reference_index) {
-      *error =
-          "reference allocator constructor disagrees with its TLS checkpoint";
-      return std::nullopt;
-    }
-    candidate_indices[key] = index;
-    candidate_constructor_rvas[key] = FormatRva(match.rva);
+  const auto& ctor2 = matches.at("constructor-2");
+  const auto& ctor3 = matches.at("constructor-3");
+  const auto& ctor4 = matches.at("constructor-4");
+  const auto& singleton = matches.at("jni-singleton-initializer");
+  if (ctor2.reference.empty() || ctor3.reference.empty() ||
+      ctor4.reference.empty()) {
+    *error = "constructor role signature has no reference instructions";
+    return std::nullopt;
   }
-  const SignatureMatch& singleton = matches.at("jni-singleton-initializer");
-
-  Json candidate_bridges = Json::array();
-  std::map<std::string, std::uint64_t> bridge_rvas;
-  for (const Json& entry : reference_profile["bridge_entries"]) {
-    const std::string label = entry.value("label", "");
-    const std::uint64_t rva = matches[label].rva;
-    candidate_bridges.push_back({{"rva", FormatRva(rva)},
-                                 {"kind", entry.value("kind", "")},
-                                 {"label", label}});
-    bridge_rvas[label] = rva;
+  const std::array<std::uint64_t, 4> ctor_cand_rvas{
+      ctor2.rva, ctor3.rva, ctor4.rva, singleton.rva};
+  const std::array<std::uint64_t, 3> ctor_ref_first_rvas{
+      ctor2.reference.front().address, ctor3.reference.front().address,
+      ctor4.reference.front().address};
+  MocktailRustDeriverPlan plan{};
+  if (mocktail_rust_deriver_resolve_constructors_and_seeds(
+          sidecar_json.data(), sidecar_json.size(), reference_init->data(),
+          reference_init->size(), candidate_init->data(),
+          candidate_init->size(), ctor_cand_rvas.data(),
+          ctor_ref_first_rvas.data(), &plan, err_buf, sizeof(err_buf)) != 0) {
+    *error = err_buf;
+    return std::nullopt;
   }
 
-  const Json& seeds = reference_profile["data_seeds"];
-  const auto mapped =
-      [&](const std::string& match_name,
-          std::string_view field) -> std::optional<std::uint64_t> {
-    const auto old_target = ProfileRva(seeds, field, error);
-    return old_target.has_value()
-               ? MappedRipTarget(matches[match_name], *old_target, field, error)
-               : std::nullopt;
+  const auto mapped = [&](const std::string& match_name,
+                          std::uint64_t old_target,
+                          std::string_view field) -> std::optional<std::uint64_t> {
+    return MappedRipTarget(matches.at(match_name), old_target, field, error);
   };
   const auto allocator_slot =
-      mapped("allocator-object-initializer", "allocator_object_slot");
-  const auto empty_slot =
-      mapped("empty-string-initializer", "empty_string_slot");
-  const auto jni_slot =
-      mapped("jni-singleton-initializer", "jni_singleton_slot");
-  const auto arena_guard = mapped("arena-initializer", "arena_guard_slot");
-  const auto arena_table = mapped("usable-size", "arena_table_slot");
+      mapped("allocator-object-initializer", plan.allocator_object_slot_rva,
+             "allocator_object_slot");
+  const auto empty_slot = mapped("empty-string-initializer",
+                                 plan.empty_string_slot_rva, "empty_string_slot");
+  const auto jni_slot = mapped("jni-singleton-initializer",
+                               plan.jni_singleton_slot_rva, "jni_singleton_slot");
+  const auto arena_guard =
+      mapped("arena-initializer", plan.arena_guard_slot_rva, "arena_guard_slot");
+  const auto arena_table =
+      mapped("usable-size", plan.arena_table_slot_rva, "arena_table_slot");
   if (!allocator_slot.has_value() || !empty_slot.has_value() ||
       !jni_slot.has_value() || !arena_guard.has_value() ||
       !arena_table.has_value()) {
@@ -2249,139 +1963,106 @@ std::optional<std::pair<Json, Json>> DeriveDocuments(const ElfImage& reference,
     if (!candidate.RequireWritable(slot, 8, error)) return std::nullopt;
   }
 
-  const Json& old_bootstrap = reference_profile["native_pre_jni_bootstrap"];
-  const auto old_registry_initializer =
-      ProfileRva(old_bootstrap, "registry_initializer", error);
-  const auto old_registry_slot =
-      ProfileRva(old_bootstrap, "registry_slot", error);
-  if (!old_registry_initializer.has_value() || !old_registry_slot.has_value()) {
-    return std::nullopt;
-  }
   const auto verified_old_slot = DeriveRegistrySlot(
-      reference, disassembler, *old_registry_initializer, error);
+      reference, disassembler, plan.old_registry_initializer_rva, error);
   if (!verified_old_slot.has_value() ||
-      *verified_old_slot != *old_registry_slot) {
+      *verified_old_slot != plan.old_registry_slot_rva) {
     if (error->empty()) *error = "reference registry slot does not match ELF";
     return std::nullopt;
   }
   const std::uint64_t registry_initializer =
-      matches["registry-initializer"].rva;
+      matches.at("registry-initializer").rva;
   const auto registry_slot =
       DeriveRegistrySlot(candidate, disassembler, registry_initializer, error);
   if (!registry_slot.has_value()) return std::nullopt;
   const Instruction& registry_call =
-      matches["registry-initializer"].candidate[9];
+      matches.at("registry-initializer").candidate[9];
+  const std::uint64_t allocate_rva = matches.at("allocate").rva;
   if (registry_call.operands.size() != 1 ||
       registry_call.operands[0].type != Operand::Type::kImmediate ||
       static_cast<std::uint64_t>(registry_call.operands[0].value) !=
-          bridge_rvas["allocate"]) {
+          allocate_rva) {
     *error = "registry initializer no longer calls native allocator";
     return std::nullopt;
   }
 
-  const auto native_ranges =
-      AdjustRanges(reference_profile["native_mimalloc_constructor_run_ranges"],
-                   *reference_count, candidate_init->size(), error);
-  if (!native_ranges.has_value() || native_ranges->size() != 1 ||
-      (*native_ranges)[0].value("begin", SIZE_MAX) != 2 ||
-      (*native_ranges)[0].value("end_exclusive", SIZE_MAX) !=
-          candidate_init->size()) {
-    *error = "native constructor replay must cover all non-reserved entries";
-    return std::nullopt;
-  }
-  const std::size_t thread_boundary = candidate_indices["2"].get<std::size_t>();
-  const auto singleton_bytes =
-      PositiveSize(seeds["jni_singleton_bytes"], "JNI singleton size", error);
-  const auto arena_slots = PositiveSize(seeds["arena_table_slot_count"],
-                                        "arena table slot count", error);
-  if (!singleton_bytes.has_value() || !arena_slots.has_value()) {
-    return std::nullopt;
-  }
   const Section* init_section = candidate.FindSection(".init_array");
   if (init_section == nullptr) {
     *error = "candidate init-array section is unavailable";
     return std::nullopt;
   }
-
-  Json profile = {
-      {"elf_build_id", candidate.build_id()},
-      {"bridge_entries", candidate_bridges},
-      {"data_seeds",
-       {{"allocator_object_slot", FormatRva(*allocator_slot)},
-        {"empty_string_slot", FormatRva(*empty_slot)},
-        {"jni_singleton_slot", FormatRva(*jni_slot)},
-        {"jni_singleton_bytes", *singleton_bytes},
-        {"arena_initializer", FormatRva(matches["arena-initializer"].rva)},
-        {"allocator_thread_initializer",
-         FormatRva(matches["allocator-thread-initializer"].rva)},
-        {"arena_guard_slot", FormatRva(*arena_guard)},
-        {"arena_table_slot", FormatRva(*arena_table)},
-        {"arena_table_slot_count", *arena_slots}}},
-      {"native_allocator",
-       {{"allocate", FormatRva(bridge_rvas["allocate"])},
-        {"deallocate", FormatRva(bridge_rvas["free"])}}},
-      {"init_array_offset", FormatRva(init_section->address)},
-      {"init_array_count", candidate_init->size()},
-      {"constructor_run_ranges", *native_ranges},
-      {"native_mimalloc_constructor_run_ranges", *native_ranges},
-      {"native_mimalloc_thread_initializer_after_constructor", thread_boundary},
-      {"native_pre_jni_bootstrap",
-       {{"registry_initializer", FormatRva(registry_initializer)},
-        {"registry_slot", FormatRva(*registry_slot)}}},
-      {"default_allocator_strategy", "native_mimalloc"},
-      {"host_allocator_bridges_supported", false},
-  };
-  Json anchors = {
-      {"signature_version", 1},
-      {"allocator_object_initializer_rva",
-       FormatRva(matches["allocator-object-initializer"].rva)},
-      {"empty_string_initializer_rva",
-       FormatRva(matches["empty-string-initializer"].rva)},
-      {"jni_singleton_initializer_rva", FormatRva(singleton.rva)},
-      {"constructor_rvas", candidate_constructor_rvas},
-      {"constructor_indices", candidate_indices},
-  };
-  const std::uint64_t version_code =
-      metadata["version_code"].get<std::uint64_t>();
-  const std::string payload_id =
-      std::to_string(version_code) + "-" + candidate.build_id();
   const auto runtime_compatibility = DeriveRuntimeCompatibility(
       reference, candidate, disassembler, runtime_source, error);
   if (!runtime_compatibility.has_value()) return std::nullopt;
-  Json derived = {
-      {"schema_version", 1},
-      {"elf_build_id", candidate.build_id()},
-      {"payload_sha256", candidate.sha256()},
-      {"payload_id", payload_id},
-      {"payload_path", "payloads/" + payload_id},
-      {"reference",
-       {{"elf_build_id", reference.build_id()},
-        {"payload_sha256", reference.sha256()}}},
-      {"profile", std::move(profile)},
-      {"derivation_anchors", std::move(anchors)},
-  };
-  Json compatibility_profile = {
-      {"version_name", metadata["version_name"]},
-      {"version_code", version_code},
-      {"elf_build_id", candidate.build_id()},
-      {"status", "experimental"},
-      {"default_allowed", true},
-      {"allow_legacy_binary_patches", false},
-      {"allow_host_abi_bridges", true},
-      {"allow_host_constructor_replay", true},
-      {"reason",
-       "Machine-derived exact-Build-ID profile for isolated probation only; "
-       "normal activation requires two successful no-recovery Tier C "
-       "canaries."},
-  };
-  for (const auto& [field, value] : runtime_compatibility->items()) {
-    compatibility_profile[field] = value;
+
+  MocktailRustDeriverBuildInputs inputs{};
+  inputs.ref_build_id = {reference.build_id().data(),
+                         reference.build_id().size()};
+  inputs.ref_sha256 = {reference.sha256().data(), reference.sha256().size()};
+  inputs.cand_build_id = {candidate.build_id().data(),
+                          candidate.build_id().size()};
+  inputs.cand_sha256 = {candidate.sha256().data(), candidate.sha256().size()};
+  inputs.reference_init_count = reference_count;
+  inputs.candidate_init_count = candidate_init->size();
+  inputs.init_array_offset = init_section->address;
+  inputs.bridge_rvas[0] = matches.at("small-allocate").rva;
+  inputs.bridge_rvas[1] = matches.at("usable-size").rva;
+  inputs.bridge_rvas[2] = matches.at("reallocate").rva;
+  inputs.bridge_rvas[3] = allocate_rva;
+  inputs.bridge_rvas[4] = matches.at("aligned-allocate-direct").rva;
+  inputs.bridge_rvas[5] = matches.at("free").rva;
+  inputs.arena_initializer_rva = matches.at("arena-initializer").rva;
+  inputs.allocator_thread_initializer_rva =
+      matches.at("allocator-thread-initializer").rva;
+  inputs.registry_initializer_rva = registry_initializer;
+  inputs.registry_slot_rva = *registry_slot;
+  inputs.allocator_object_initializer_rva =
+      matches.at("allocator-object-initializer").rva;
+  inputs.empty_string_initializer_rva =
+      matches.at("empty-string-initializer").rva;
+  inputs.jni_singleton_initializer_rva = singleton.rva;
+  inputs.allocator_object_slot_rva = *allocator_slot;
+  inputs.empty_string_slot_rva = *empty_slot;
+  inputs.jni_singleton_slot_rva = *jni_slot;
+  inputs.arena_guard_slot_rva = *arena_guard;
+  inputs.arena_table_slot_rva = *arena_table;
+  for (std::size_t i = 0; i < 4; ++i) {
+    inputs.candidate_constructor_rvas[i] = plan.candidate_constructor_rvas[i];
+    inputs.candidate_constructor_indices[i] =
+        plan.candidate_constructor_indices[i];
   }
-  Json compatibility = {
-      {"schema_version", 1},
-      {"profiles", Json::array({std::move(compatibility_profile)})},
-  };
-  return std::pair<Json, Json>{std::move(derived), std::move(compatibility)};
+  inputs.has_derived_fullscreen_setter =
+      runtime_compatibility->fullscreen_setter.has_value();
+  inputs.derived_fullscreen_setter_rva =
+      runtime_compatibility->fullscreen_setter.value_or(0);
+  if (runtime_compatibility->fmod.has_value()) {
+    const FmodRuntimeAnchors& fmod = *runtime_compatibility->fmod;
+    inputs.has_derived_fmod = true;
+    inputs.derived_fmod_vtable_rva = fmod.vtable;
+    inputs.derived_fmod_string_constructor_rva = fmod.string_constructor;
+    inputs.derived_fmod_count_method_rva = fmod.count_method;
+    inputs.derived_fmod_info_method_rva = fmod.info_method;
+    inputs.derived_fmod_current_method_rva = fmod.current_method;
+    inputs.derived_fmod_select_method_rva = fmod.select_method;
+    inputs.derived_fmod_layout_version = fmod.layout_version;
+    inputs.derived_fmod_has_input =
+        runtime_source.fmod.has_value() &&
+        runtime_source.fmod->input_methods[0] != 0;
+    for (std::size_t i = 0; i < 4; ++i) {
+      inputs.derived_fmod_input_methods[i] = fmod.input_methods[i];
+    }
+  }
+
+  DeriverDocumentsCaptureCtx docs{};
+  if (mocktail_rust_deriver_build_documents(
+          sidecar_json.data(), sidecar_json.size(), metadata_json.data(),
+          metadata_json.size(), &inputs, OnDerivedProfileJson,
+          OnDerivedCompatibilityJson, &docs, err_buf, sizeof(err_buf)) != 0) {
+    *error = err_buf;
+    return std::nullopt;
+  }
+  return std::pair<std::string, std::string>{
+      std::move(docs.profile_json), std::move(docs.compatibility_json)};
 }
 
 }  // namespace
@@ -2389,29 +2070,22 @@ std::optional<std::pair<Json, Json>> DeriveDocuments(const ElfImage& reference,
 HostAbiSidecarIdentity ReadHostAbiSidecarIdentity(
     const std::filesystem::path& sidecar) {
   HostAbiSidecarIdentity result;
-  const auto document = ReadJson(sidecar, &result.error);
-  if (!document.has_value()) return result;
-  if (document->value("schema_version", 0) != 1) {
-    result.error =
-        "HostAbi sidecar has an unsupported schema: " + sidecar.string();
+  std::string raw =
+      ReadSmallRegular(sidecar, kMaximumJsonBytes, &result.error);
+  if (!result.error.empty()) return result;
+  const std::string sidecar_path = sidecar.string();
+  char build_id_buf[64] = {};
+  char payload_id_buf[256] = {};
+  char err_buf[512] = {};
+  if (mocktail_rust_deriver_read_sidecar_identity(
+          raw.data(), raw.size(), sidecar_path.data(), sidecar_path.size(),
+          build_id_buf, sizeof(build_id_buf), payload_id_buf,
+          sizeof(payload_id_buf), err_buf, sizeof(err_buf)) != 0) {
+    result.error = err_buf;
     return result;
   }
-  std::string build_id = document->value("elf_build_id", "");
-  std::transform(build_id.begin(), build_id.end(), build_id.begin(),
-                 [](unsigned char value) {
-                   return static_cast<char>(std::tolower(value));
-                 });
-  const std::string payload_id = document->value("payload_id", "");
-  // What ValidateReferenceIdentity enforces, without opening the library.
-  if (build_id.size() != 40 || payload_id.size() <= 41 ||
-      payload_id.substr(payload_id.size() - 40) != build_id ||
-      document->value("payload_path", "") != "payloads/" + payload_id) {
-    result.error =
-        "HostAbi sidecar identity is inconsistent: " + sidecar.string();
-    return result;
-  }
-  result.elf_build_id = std::move(build_id);
-  result.payload_id = payload_id;
+  result.elf_build_id = build_id_buf;
+  result.payload_id = payload_id_buf;
   return result;
 }
 
@@ -2433,25 +2107,26 @@ HostAbiDerivationResult DeriveHostAbiProfile(
                       &result.error)) {
     return result;
   }
-  const auto sidecar = ReadJson(options.reference_profile, &result.error);
-  const auto metadata = LoadCandidateMetadata(
+  const std::string sidecar_json = ReadSmallRegular(
+      options.reference_profile, kMaximumJsonBytes, &result.error);
+  if (!result.error.empty()) return result;
+  const auto metadata_json = LoadCandidateMetadata(
       options.candidate_payload_directory, candidate, &result.error);
-  if (!sidecar.has_value() || !metadata.has_value()) return result;
+  if (!metadata_json.has_value()) return result;
   const auto runtime_source = LoadRuntimeCompatibilityAnchors(
       options.reference_compatibility_manifests, reference.build_id(),
       &result.error);
   if (!runtime_source.has_value()) return result;
-  const auto documents = DeriveDocuments(reference, candidate, *sidecar,
-                                         *metadata, *runtime_source,
-                                         &result.error);
+  const auto documents = DeriveDocuments(
+      reference, candidate, sidecar_json, *metadata_json, *runtime_source,
+      &result.error);
   if (!documents.has_value()) return result;
   result.profile = options.output_directory / "host_abi_profile.json";
   result.compatibility_manifest =
       options.output_directory / "compatibility.json";
-  if (!WritePrivate(result.profile, documents->first.dump(2) + "\n",
-                    &result.error) ||
-      !WritePrivate(result.compatibility_manifest,
-                    documents->second.dump(2) + "\n", &result.error)) {
+  if (!WritePrivate(result.profile, documents->first, &result.error) ||
+      !WritePrivate(result.compatibility_manifest, documents->second,
+                    &result.error)) {
     return result;
   }
   return result;

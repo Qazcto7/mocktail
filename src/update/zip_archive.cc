@@ -1,8 +1,6 @@
 #include "update/zip_archive.h"
 #include "mocktail/mocktail_rust.h"
 
-#define JSON_NOEXCEPTION 1
-#include <nlohmann/json.hpp>
 #include <string>
 #include <vector>
 #include <filesystem>
@@ -20,36 +18,26 @@ bool IsSafeArchivePath(std::string_view path) {
 ZipListResult ListZipEntries(const std::filesystem::path& archive,
                              std::size_t maximum_entries) {
   ZipListResult result;
-  std::size_t cap = 2 * 1024 * 1024;
-  std::vector<char> json_buf(cap);
   char err_buf[512] = {};
-  int rc = mocktail_rust_zip_list_entries(
-      archive.c_str(), maximum_entries, json_buf.data(), json_buf.size(),
-      err_buf, sizeof(err_buf));
-  if (rc == -9) {
-    cap = 16 * 1024 * 1024;
-    json_buf.resize(cap);
-    rc = mocktail_rust_zip_list_entries(
-        archive.c_str(), maximum_entries, json_buf.data(), json_buf.size(),
-        err_buf, sizeof(err_buf));
-  }
-  if (rc != 0) {
-    result.error = err_buf[0] != '\0' ? err_buf : "failed to list zip entries";
-    return result;
-  }
-  const auto parsed = nlohmann::json::parse(json_buf.data(), nullptr, false, true);
-  if (parsed.is_discarded() || !parsed.is_array()) {
-    result.error = "invalid zip entries metadata JSON";
-    return result;
-  }
-  result.entries.reserve(parsed.size());
-  for (const auto& item : parsed) {
+  const auto on_entry = [](void* ctx, const char* name, size_t name_len,
+                           uint64_t uncompressed_size, bool directory,
+                           bool symbolic_link) {
+    auto* entries = static_cast<std::vector<ZipEntry>*>(ctx);
     ZipEntry entry;
-    entry.name = item.value("name", "");
-    entry.uncompressed_size = item.value("uncompressed_size", 0ULL);
-    entry.directory = item.value("directory", false);
-    entry.symbolic_link = item.value("symbolic_link", false);
-    result.entries.push_back(std::move(entry));
+    if (name != nullptr && name_len > 0) {
+      entry.name.assign(name, name_len);
+    }
+    entry.uncompressed_size = uncompressed_size;
+    entry.directory = directory;
+    entry.symbolic_link = symbolic_link;
+    entries->push_back(std::move(entry));
+  };
+  const int rc = mocktail_rust_zip_list_entries_cb(
+      archive.c_str(), maximum_entries, on_entry, &result.entries, err_buf,
+      sizeof(err_buf));
+  if (rc != 0) {
+    result.entries.clear();
+    result.error = err_buf[0] != '\0' ? err_buf : "failed to list zip entries";
   }
   return result;
 }

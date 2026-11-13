@@ -1,15 +1,12 @@
 #include "update/compatibility_catalog.h"
 
-#define JSON_NOEXCEPTION 1
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <cerrno>
-#include <nlohmann/json.hpp>
 #include <string>
 #include <string_view>
 

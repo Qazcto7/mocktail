@@ -11,14 +11,20 @@ use zeroize::Zeroize;
 
 pub mod apk_signature_rs;
 pub use apk_signature_rs::*;
+pub mod deriver_json;
+pub use deriver_json::*;
 pub mod input_router;
 pub use input_router::*;
 pub mod runtime_bridges;
 pub use runtime_bridges::*;
+pub mod runtime_policies;
+pub use runtime_policies::*;
 pub mod storage_paths;
 pub use storage_paths::*;
 pub mod text_runtime;
 pub use text_runtime::*;
+pub mod update_json;
+pub use update_json::*;
 pub mod window_gates;
 pub use window_gates::*;
 
@@ -888,24 +894,21 @@ pub extern "C" fn mocktail_rust_is_valid_json(json_str: *const c_char) -> c_int 
     }
 }
 
+pub(crate) fn is_safe_url_bytes(bytes: &[u8], max_len: usize) -> bool {
+    !bytes.is_empty()
+        && bytes.len() <= max_len
+        && bytes.starts_with(b"https://")
+        && !bytes.iter().any(|&b| b < 0x20 || b == 0x7f)
+}
+
 /// Validates if a URL is safe (https scheme, max 2048 chars, valid ASCII without controls).
 #[no_mangle]
 pub extern "C" fn mocktail_rust_is_safe_url(url: *const c_char) -> c_int {
     if url.is_null() {
         return 0;
     }
-    let c_url = unsafe { CStr::from_ptr(url) };
-    let bytes = c_url.to_bytes();
-    if bytes.is_empty() || bytes.len() > 2048 {
-        return 0;
-    }
-    if !bytes.starts_with(b"https://") {
-        return 0;
-    }
-    if bytes.iter().any(|&b| b < 0x20 || b == 0x7f) {
-        return 0;
-    }
-    1
+    let bytes = unsafe { CStr::from_ptr(url) }.to_bytes();
+    i32::from(is_safe_url_bytes(bytes, 2048))
 }
 
 // ============================================================================
@@ -4362,6 +4365,40 @@ pub struct MocktailRustZipEntryInfo {
     pub symbolic_link: bool,
 }
 
+pub(crate) fn zip_list_entries_internal(
+    path: &str,
+    max_entries: usize,
+) -> Result<Vec<MocktailRustZipEntryInfo>, (c_int, String)> {
+    let file = std::fs::File::open(path)
+        .map_err(|e| (-3, format!("cannot open ZIP archive: {}: {}", path, e)))?;
+    let mut zip = zip::ZipArchive::new(file)
+        .map_err(|e| (-4, format!("cannot parse ZIP archive: {}", e)))?;
+    if zip.len() > max_entries {
+        return Err((-5, "ZIP archive has an invalid or excessive entry count".to_string()));
+    }
+    let mut entries = Vec::with_capacity(zip.len());
+    for i in 0..zip.len() {
+        let entry = zip
+            .by_index(i)
+            .map_err(|e| (-6, format!("cannot read ZIP entry metadata: {}", e)))?;
+        let name = entry.name().to_string();
+        if !is_safe_archive_path(&name) {
+            return Err((-7, "ZIP entry path is unsafe".to_string()));
+        }
+        let uncompressed_size = entry.size();
+        let directory = entry.is_dir() || name.ends_with('/');
+        let mode = entry.unix_mode().unwrap_or(0);
+        let symbolic_link = (mode & 0o170000) == 0o120000;
+        entries.push(MocktailRustZipEntryInfo {
+            name,
+            uncompressed_size,
+            directory,
+            symbolic_link,
+        });
+    }
+    Ok(entries)
+}
+
 #[no_mangle]
 pub extern "C" fn mocktail_rust_zip_list_entries(
     archive_path: *const c_char,
@@ -4385,49 +4422,13 @@ pub extern "C" fn mocktail_rust_zip_list_entries(
             return -2;
         }
     };
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(e) => {
-            set_err(&format!("cannot open ZIP archive: {}: {}", path, e));
-            return -3;
+    let entries = match zip_list_entries_internal(path, max_entries) {
+        Ok(e) => e,
+        Err((code, msg)) => {
+            set_err(&msg);
+            return code;
         }
     };
-    let mut zip = match zip::ZipArchive::new(file) {
-        Ok(z) => z,
-        Err(e) => {
-            set_err(&format!("cannot parse ZIP archive: {}", e));
-            return -4;
-        }
-    };
-    if zip.len() > max_entries {
-        set_err("ZIP archive has an invalid or excessive entry count");
-        return -5;
-    }
-    let mut entries = Vec::new();
-    for i in 0..zip.len() {
-        let entry = match zip.by_index(i) {
-            Ok(e) => e,
-            Err(e) => {
-                set_err(&format!("cannot read ZIP entry metadata: {}", e));
-                return -6;
-            }
-        };
-        let name = entry.name().to_string();
-        if !is_safe_archive_path(&name) {
-            set_err("ZIP entry path is unsafe");
-            return -7;
-        }
-        let uncompressed_size = entry.size();
-        let directory = entry.is_dir() || name.ends_with('/');
-        let mode = entry.unix_mode().unwrap_or(0);
-        let symbolic_link = (mode & 0o170000) == 0o120000;
-        entries.push(MocktailRustZipEntryInfo {
-            name,
-            uncompressed_size,
-            directory,
-            symbolic_link,
-        });
-    }
     let serialized = match serde_json::to_string(&entries) {
         Ok(s) => s,
         Err(e) => {
@@ -4908,7 +4909,7 @@ pub struct MocktailRustPayloadInfo {
     pub payload_id: String,
 }
 
-fn internal_inspect_payload(dir: &Path) -> Result<MocktailRustPayloadInfo, String> {
+pub(crate) fn internal_inspect_payload(dir: &Path) -> Result<MocktailRustPayloadInfo, String> {
     let sym = match std::fs::symlink_metadata(dir) {
         Ok(m) => m,
         Err(_) => return Err("payload root is not a real directory".to_string()),
@@ -5079,36 +5080,8 @@ pub extern "C" fn mocktail_rust_payload_inspect(
     }
 }
 
-#[no_mangle]
-pub extern "C" fn mocktail_rust_payload_verify(
-    dir_path: *const c_char,
-    out_json: *mut c_char,
-    json_cap: usize,
-    out_err: *mut c_char,
-    err_cap: usize,
-) -> c_int {
-    let set_err = |msg: &str| {
-        copy_error(out_err, err_cap, msg);
-    };
-    if dir_path.is_null() || out_json.is_null() || json_cap == 0 {
-        set_err("invalid arguments");
-        return -1;
-    }
-    let p_str = match unsafe { CStr::from_ptr(dir_path) }.to_str() {
-        Ok(s) => s,
-        Err(_) => {
-            set_err("invalid directory path encoding");
-            return -2;
-        }
-    };
-    let dir = Path::new(p_str);
-    let info = match internal_inspect_payload(dir) {
-        Ok(i) => i,
-        Err(e) => {
-            set_err(&e);
-            return -3;
-        }
-    };
+pub(crate) fn verify_payload_internal(dir: &Path) -> Result<MocktailRustPayloadInfo, (c_int, String)> {
+    let info = internal_inspect_payload(dir).map_err(|e| (-3, e))?;
 
     use sha2::{Digest, Sha256};
     let check_file_sha = |rel: &str, expected: &str| -> Result<(), String> {
@@ -5134,14 +5107,8 @@ pub extern "C" fn mocktail_rust_payload_verify(
         Ok(())
     };
 
-    if let Err(e) = check_file_sha("libroblox.so", &info.library_sha256) {
-        set_err(&e);
-        return -4;
-    }
-    if let Err(e) = check_file_sha("sober_apk/base.apk", &info.base_apk_sha256) {
-        set_err(&e);
-        return -5;
-    }
+    check_file_sha("libroblox.so", &info.library_sha256).map_err(|e| (-4, e))?;
+    check_file_sha("sober_apk/base.apk", &info.base_apk_sha256).map_err(|e| (-5, e))?;
     let split_file = if dir.join("sober_apk/split_config.arm64_v8a.apk").exists() {
         "sober_apk/split_config.arm64_v8a.apk"
     } else if cfg!(target_arch = "aarch64") {
@@ -5149,21 +5116,13 @@ pub extern "C" fn mocktail_rust_payload_verify(
     } else {
         "sober_apk/split_config.x86_64.apk"
     };
-    if let Err(e) = check_file_sha(split_file, &info.split_apk_sha256) {
-        set_err(&e);
-        return -6;
-    }
+    check_file_sha(split_file, &info.split_apk_sha256).map_err(|e| (-6, e))?;
 
     let mut actual_count = 0;
     let mut tree_hex = [0 as c_char; 65];
     let mut tree_err = [0 as c_char; 256];
-    let assets_cstr = match CString::new(dir.join("assets").to_string_lossy().as_bytes()) {
-        Ok(c) => c,
-        Err(_) => {
-            set_err("invalid assets path");
-            return -7;
-        }
-    };
+    let assets_cstr = CString::new(dir.join("assets").to_string_lossy().as_bytes())
+        .map_err(|_| (-7, "invalid assets path".to_string()))?;
     let rc = mocktail_rust_payload_hash_asset_tree(
         assets_cstr.as_ptr(),
         tree_hex.as_mut_ptr(),
@@ -5173,15 +5132,47 @@ pub extern "C" fn mocktail_rust_payload_verify(
         256,
     );
     if rc != 0 {
-        let err_msg = unsafe { CStr::from_ptr(tree_err.as_ptr()) }.to_str().unwrap_or("asset tree error");
-        set_err(err_msg);
-        return -8;
+        let err_msg = unsafe { CStr::from_ptr(tree_err.as_ptr()) }
+            .to_str()
+            .unwrap_or("asset tree error");
+        return Err((-8, err_msg.to_string()));
     }
     let actual_tree_hex = unsafe { CStr::from_ptr(tree_hex.as_ptr()) }.to_str().unwrap_or("");
     if actual_count != info.asset_file_count || actual_tree_hex != info.asset_tree_sha256 {
-        set_err("payload asset tree does not match metadata");
-        return -9;
+        return Err((-9, "payload asset tree does not match metadata".to_string()));
     }
+    Ok(info)
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_payload_verify(
+    dir_path: *const c_char,
+    out_json: *mut c_char,
+    json_cap: usize,
+    out_err: *mut c_char,
+    err_cap: usize,
+) -> c_int {
+    let set_err = |msg: &str| {
+        copy_error(out_err, err_cap, msg);
+    };
+    if dir_path.is_null() || out_json.is_null() || json_cap == 0 {
+        set_err("invalid arguments");
+        return -1;
+    }
+    let p_str = match unsafe { CStr::from_ptr(dir_path) }.to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_err("invalid directory path encoding");
+            return -2;
+        }
+    };
+    let info = match verify_payload_internal(Path::new(p_str)) {
+        Ok(i) => i,
+        Err((code, msg)) => {
+            set_err(&msg);
+            return code;
+        }
+    };
 
     let json = serde_json::to_string(&info).unwrap_or_default();
     if json.len() >= json_cap {
@@ -5546,6 +5537,40 @@ pub extern "C" fn mocktail_rust_apkpure_parse_latest(
     0
 }
 
+pub(crate) fn apkpure_collect_exact_urls(
+    data: &[u8],
+    ver_target: &str,
+    version_code: u64,
+) -> Result<Vec<String>, (c_int, &'static str)> {
+    if data.is_empty() {
+        return Err((-3, "APKPure does not offer the requested exact version"));
+    }
+    let markers = apkpure_version_markers(data);
+    let mut results = Vec::new();
+    for i in 0..markers.len() {
+        if markers[i].value != ver_target
+            || (version_code != 0 && apkpure_version_code(data, &markers[i]) != version_code)
+        {
+            continue;
+        }
+        let record_end = if i + 1 < markers.len() { markers[i + 1].begin } else { data.len() };
+        let record_slice = &data[markers[i].colon + 1..record_end];
+        let downloads = apkpure_downloads_in_record(record_slice);
+        if let Some(first) = downloads.first() {
+            if !results.contains(first) {
+                results.push(first.clone());
+            }
+        }
+    }
+    if results.is_empty() {
+        return Err((-3, "APKPure does not offer the requested exact version"));
+    }
+    if results.len() > 4 {
+        return Err((-4, "APKPure returned too many candidates"));
+    }
+    Ok(results)
+}
+
 #[no_mangle]
 pub extern "C" fn mocktail_rust_apkpure_parse_exact_urls(
     metadata: *const u8,
@@ -5571,36 +5596,18 @@ pub extern "C" fn mocktail_rust_apkpure_parse_exact_urls(
             return -2;
         }
     };
-    if meta_len == 0 {
-        set_err("APKPure does not offer the requested exact version");
-        return -3;
-    }
-    let data = unsafe { std::slice::from_raw_parts(metadata, meta_len) };
-    let markers = apkpure_version_markers(data);
-    let mut results = Vec::new();
-    for i in 0..markers.len() {
-        if markers[i].value != ver_target
-            || (version_code != 0 && apkpure_version_code(data, &markers[i]) != version_code)
-        {
-            continue;
+    let data = if meta_len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(metadata, meta_len) }
+    };
+    let results = match apkpure_collect_exact_urls(data, ver_target, version_code) {
+        Ok(r) => r,
+        Err((code, msg)) => {
+            set_err(msg);
+            return code;
         }
-        let record_end = if i + 1 < markers.len() { markers[i + 1].begin } else { data.len() };
-        let record_slice = &data[markers[i].colon + 1..record_end];
-        let downloads = apkpure_downloads_in_record(record_slice);
-        if let Some(first) = downloads.first() {
-            if !results.contains(first) {
-                results.push(first.clone());
-            }
-        }
-    }
-    if results.is_empty() {
-        set_err("APKPure does not offer the requested exact version");
-        return -3;
-    }
-    if results.len() > 4 {
-        set_err("APKPure returned too many candidates");
-        return -4;
-    }
+    };
     let json = match serde_json::to_string(&results) {
         Ok(j) => j,
         Err(_) => {
@@ -5700,25 +5707,22 @@ pub extern "C" fn mocktail_rust_browser_tracker_extract_id(
 // 32. Support Bundle & Log Redactor
 // ============================================================================
 
+pub(crate) fn is_diagnostic_token_str(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '+' | '-'))
+}
+
 #[no_mangle]
 pub extern "C" fn mocktail_rust_is_diagnostic_token(token: *const c_char) -> c_int {
     if token.is_null() {
         return 0;
     }
-    let s = match unsafe { CStr::from_ptr(token) }.to_str() {
-        Ok(v) => v,
-        Err(_) => return 0,
-    };
-    if s.is_empty() || s.len() > 64 {
-        return 0;
-    }
-    if !s.chars().next().map_or(false, |c| c.is_ascii_alphanumeric()) {
-        return 0;
-    }
-    if s.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == ':' || c == '+' || c == '-') {
-        1
-    } else {
-        0
+    match unsafe { CStr::from_ptr(token) }.to_str() {
+        Ok(v) if is_diagnostic_token_str(v) => 1,
+        _ => 0,
     }
 }
 
@@ -5878,6 +5882,44 @@ pub extern "C" fn mocktail_rust_client_settings_is_valid_json(
     }
 }
 
+pub(crate) fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<(), (c_int, String)> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    if let Err(e) = std::fs::create_dir_all(parent) {
+        return Err((-3, format!("could not create directory: {}", e)));
+    }
+
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp_path = parent.join(format!(
+        ".tmp_{}_{}",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+
+    let mut file = match std::fs::File::create(&tmp_path) {
+        Ok(f) => f,
+        Err(e) => return Err((-4, format!("cannot create temporary file: {}", e))),
+    };
+    use std::io::Write;
+    if let Err(e) = file.write_all(bytes) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err((-5, format!("cannot write temporary file: {}", e)));
+    }
+    if let Err(e) = file.sync_all() {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err((-6, format!("cannot sync temporary file: {}", e)));
+    }
+    drop(file);
+
+    if let Err(e) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err((-7, format!("cannot rename temporary file: {}", e)));
+    }
+    if let Ok(dir_file) = std::fs::File::open(parent) {
+        let _ = dir_file.sync_all();
+    }
+    Ok(())
+}
+
 #[no_mangle]
 pub extern "C" fn mocktail_rust_atomic_write_file(
     file_path: *const c_char,
@@ -5900,50 +5942,14 @@ pub extern "C" fn mocktail_rust_atomic_write_file(
             return -2;
         }
     };
-    let path = Path::new(path_str);
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    if let Err(e) = std::fs::create_dir_all(parent) {
-        set_err(&format!("could not create directory: {}", e));
-        return -3;
-    }
-
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let tmp_path = parent.join(format!(
-        ".tmp_{}_{}",
-        std::process::id(),
-        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-
     let bytes = if content_len > 0 && !content.is_null() {
         unsafe { std::slice::from_raw_parts(content as *const u8, content_len) }
     } else {
         &[]
     };
-
-    let mut file = match std::fs::File::create(&tmp_path) {
-        Ok(f) => f,
-        Err(e) => {
-            set_err(&format!("cannot create temporary file: {}", e));
-            return -4;
-        }
-    };
-    use std::io::Write;
-    if let Err(e) = file.write_all(bytes) {
-        let _ = std::fs::remove_file(&tmp_path);
-        set_err(&format!("cannot write temporary file: {}", e));
-        return -5;
-    }
-    if let Err(e) = file.sync_all() {
-        let _ = std::fs::remove_file(&tmp_path);
-        set_err(&format!("cannot sync temporary file: {}", e));
-        return -6;
-    }
-    drop(file);
-
-    if let Err(e) = std::fs::rename(&tmp_path, path) {
-        let _ = std::fs::remove_file(&tmp_path);
-        set_err(&format!("cannot rename temporary file: {}", e));
-        return -7;
+    if let Err((code, msg)) = write_atomic_bytes(Path::new(path_str), bytes) {
+        set_err(&msg);
+        return code;
     }
     0
 }
@@ -8224,6 +8230,22 @@ pub unsafe extern "C" fn mocktail_rust_discord_has_join_target(
     true
 }
 
+pub(crate) fn truncate_utf8_bytes(slice: &[u8], maximum: usize) -> usize {
+    if slice.len() <= maximum {
+        return slice.len();
+    }
+    let mut boundary = maximum;
+    while boundary > 0 && (slice[boundary] & 0xc0) == 0x80 {
+        boundary -= 1;
+    }
+    boundary
+}
+
+pub(crate) fn truncate_utf8_str(s: &str, maximum: usize) -> &str {
+    let end = truncate_utf8_bytes(s.as_bytes(), maximum);
+    &s[..end]
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn mocktail_rust_discord_truncate_utf8(
     src: *const c_char,
@@ -8233,15 +8255,8 @@ pub unsafe extern "C" fn mocktail_rust_discord_truncate_utf8(
     if src.is_null() || src_len == 0 {
         return 0;
     }
-    if src_len <= maximum {
-        return src_len;
-    }
     let slice = std::slice::from_raw_parts(src as *const u8, src_len);
-    let mut boundary = maximum;
-    while boundary > 0 && (slice[boundary] & 0xc0) == 0x80 {
-        boundary -= 1;
-    }
-    boundary
+    truncate_utf8_bytes(slice, maximum)
 }
 
 #[no_mangle]
@@ -9009,6 +9024,16 @@ pub unsafe extern "C" fn mocktail_rust_merge_desktop_app_policy_settings(
 // 57. Browser Tracker Service & Cookie Helpers
 // ============================================================================
 
+pub(crate) fn is_valid_browser_tracker_id_bytes(slice: &[u8]) -> bool {
+    if slice.is_empty() || slice.len() > 20 || slice[0] == b'0' {
+        return false;
+    }
+    std::str::from_utf8(slice)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .is_some_and(|n| n != 0)
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn mocktail_rust_browser_tracker_is_valid_id(
     value: *const c_char,
@@ -9018,16 +9043,7 @@ pub unsafe extern "C" fn mocktail_rust_browser_tracker_is_valid_id(
         return false;
     }
     let slice = std::slice::from_raw_parts(value as *const u8, len);
-    if slice[0] == b'0' {
-        return false;
-    }
-    match std::str::from_utf8(slice) {
-        Ok(s) => match s.parse::<u64>() {
-            Ok(n) => n != 0,
-            Err(_) => false,
-        },
-        Err(_) => false,
-    }
+    is_valid_browser_tracker_id_bytes(slice)
 }
 
 #[no_mangle]
@@ -9863,6 +9879,40 @@ pub unsafe extern "C" fn mocktail_rust_candidate_approval_fingerprint(
     0
 }
 
+pub(crate) fn compute_approval_generation_hex(
+    runtime_build_id: &str,
+    fingerprint: &str,
+    profile_sha256: &str,
+    compatibility_sha256: &str,
+    canary_1_sha256: &str,
+    canary_2_sha256: &str,
+) -> String {
+    let mut evidence = String::with_capacity(512);
+    evidence.push_str("runtime_build_id=");
+    evidence.push_str(runtime_build_id);
+    evidence.push('\n');
+    evidence.push_str("payload=");
+    evidence.push_str(fingerprint);
+    evidence.push('\n');
+    evidence.push_str("profile=");
+    evidence.push_str(profile_sha256);
+    evidence.push('\n');
+    evidence.push_str("compatibility=");
+    evidence.push_str(compatibility_sha256);
+    evidence.push('\n');
+    evidence.push_str("canary_1=");
+    evidence.push_str(canary_1_sha256);
+    evidence.push('\n');
+    evidence.push_str("canary_2=");
+    evidence.push_str(canary_2_sha256);
+    evidence.push('\n');
+
+    let digest = Sha256::digest(evidence.as_bytes());
+    let mut hex_str = hex::encode(digest);
+    hex_str.truncate(40);
+    hex_str
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn mocktail_rust_candidate_approval_generation(
     runtime_build_id: *const c_char,
@@ -9908,28 +9958,7 @@ pub unsafe extern "C" fn mocktail_rust_candidate_approval_generation(
         Err(_) => return -1,
     };
 
-    let mut evidence = String::with_capacity(512);
-    evidence.push_str("runtime_build_id=");
-    evidence.push_str(rbid);
-    evidence.push('\n');
-    evidence.push_str("payload=");
-    evidence.push_str(fp);
-    evidence.push('\n');
-    evidence.push_str("profile=");
-    evidence.push_str(prof);
-    evidence.push('\n');
-    evidence.push_str("compatibility=");
-    evidence.push_str(compat);
-    evidence.push('\n');
-    evidence.push_str("canary_1=");
-    evidence.push_str(c1);
-    evidence.push('\n');
-    evidence.push_str("canary_2=");
-    evidence.push_str(c2);
-    evidence.push('\n');
-
-    let digest = Sha256::digest(evidence.as_bytes());
-    let hex_str = hex::encode(digest);
+    let hex_str = compute_approval_generation_hex(rbid, fp, prof, compat, c1, c2);
     std::ptr::copy_nonoverlapping(hex_str.as_ptr(), out_generation_40 as *mut u8, 40);
     *out_generation_40.add(40) = 0;
     0
@@ -11630,9 +11659,9 @@ pub extern "C" fn mocktail_rust_validate_platform_cache_fingerprint(
         Ok(v) => v,
         Err(_) => return -2,
     };
-    let val: serde_json::Value = match serde_json::from_str(s) {
-        Ok(v) => v,
-        Err(_) => return -3,
+    let val: serde_json::Value = match runtime_policies::parse_json_value_str(s, true) {
+        Some(v) => v,
+        None => return -3,
     };
     if let serde_json::Value::Object(map) = val {
         if map.get("schema_version").and_then(|v| v.as_i64()) != Some(1) {
@@ -12040,18 +12069,38 @@ pub extern "C" fn mocktail_rust_normalize_build_id(
     0
 }
 
-#[no_mangle]
-pub extern "C" fn mocktail_rust_parse_status_string(status: *const c_char) -> i32 {
-    if status.is_null() {
-        return -1;
-    }
-    let s = unsafe { CStr::from_ptr(status) }.to_str().unwrap_or("");
+pub(crate) fn parse_status_str(s: &str) -> i32 {
     match s {
         "supported" => 0,
         "experimental" => 1,
         "legacy-researched" => 2,
         "unverified" => 3,
         _ => -1,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_parse_status_string(status: *const c_char) -> i32 {
+    if status.is_null() {
+        return -1;
+    }
+    let s = unsafe { CStr::from_ptr(status) }.to_str().unwrap_or("");
+    parse_status_str(s)
+}
+
+pub(crate) fn parse_hex_rva_str(s: &str) -> Result<usize, i32> {
+    let trimmed = s.trim();
+    if !trimmed.starts_with("0x") && !trimmed.starts_with("0X") {
+        return Err(-2);
+    }
+    let hex_part = &trimmed[2..];
+    if hex_part.is_empty() {
+        return Err(-3);
+    }
+    match usize::from_str_radix(hex_part, 16) {
+        Ok(0) => Err(-4),
+        Ok(val) => Ok(val),
+        Err(_) => Err(-5),
     }
 }
 
@@ -12063,25 +12112,15 @@ pub extern "C" fn mocktail_rust_parse_hex_rva(
     if hex_str.is_null() {
         return -1;
     }
-    let s = unsafe { CStr::from_ptr(hex_str) }.to_str().unwrap_or("").trim();
-    if !s.starts_with("0x") && !s.starts_with("0X") {
-        return -2;
-    }
-    let hex_part = &s[2..];
-    if hex_part.is_empty() {
-        return -3;
-    }
-    match usize::from_str_radix(hex_part, 16) {
+    let s = unsafe { CStr::from_ptr(hex_str) }.to_str().unwrap_or("");
+    match parse_hex_rva_str(s) {
         Ok(val) => {
-            if val == 0 {
-                return -4;
-            }
             if !out_rva.is_null() {
                 unsafe { *out_rva = val };
             }
             0
         }
-        Err(_) => -5,
+        Err(rc) => rc,
     }
 }
 
@@ -12089,20 +12128,23 @@ pub extern "C" fn mocktail_rust_parse_hex_rva(
 // 87. ELF Build ID Hex Validator
 // ============================================================================
 
+pub(crate) fn is_valid_build_id_bytes(slice: &[u8]) -> bool {
+    slice.len() >= 8
+        && slice.len() <= 128
+        && slice.len() % 2 == 0
+        && slice.iter().all(|&b| b.is_ascii_hexdigit())
+}
+
 #[no_mangle]
 pub extern "C" fn mocktail_rust_is_valid_build_id(
     build_id: *const c_char,
     len: usize,
 ) -> i32 {
-    if build_id.is_null() || len < 8 || len > 128 || len % 2 != 0 {
+    if build_id.is_null() || len == 0 {
         return 0;
     }
     let slice = unsafe { std::slice::from_raw_parts(build_id as *const u8, len) };
-    if slice.iter().all(|&b| b.is_ascii_hexdigit()) {
-        1
-    } else {
-        0
-    }
+    i32::from(is_valid_build_id_bytes(slice))
 }
 
 // ============================================================================
@@ -12705,7 +12747,13 @@ pub extern "C" fn mocktail_rust_format_permissions_reply(
     let upsell = method >= 3;
 
     let (body, code, outcome) = if support {
-        if mocktail_rust_validate_json_depth(request_json, 8) == 0 {
+        if request_json.is_null() || mocktail_rust_validate_json_depth(request_json, 8) == 0 {
+            return -1;
+        }
+        let req_bytes = unsafe { CStr::from_ptr(request_json) }.to_bytes();
+        if req_bytes.len() > 64 * 1024
+            || !matches!(serde_json::from_slice::<serde_json::Value>(req_bytes), Ok(v) if v.is_object())
+        {
             return -1;
         }
         (

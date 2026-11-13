@@ -6,12 +6,12 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <charconv>
 #include <fstream>
 #include <limits>
-#include <nlohmann/json.hpp>
 #include <random>
 #include <system_error>
 
@@ -26,10 +26,6 @@ constexpr std::size_t kMaximumStorageBytes = 4 * 1024 * 1024;
 constexpr std::size_t kMaximumCookieBytes = 64 * 1024;
 constexpr std::string_view kTrackerCookieName = "RBXEventTrackerV2";
 
-bool IsValidId(const std::string& value) {
-  return mocktail_rust_browser_tracker_is_valid_id(value.data(), value.size());
-}
-
 std::string SuggestedId() {
   char buf[32] = {};
   if (mocktail_rust_browser_tracker_generate_id(buf, sizeof(buf)) == 0) {
@@ -38,14 +34,14 @@ std::string SuggestedId() {
   return {};
 }
 
-bool ReadStorage(const std::filesystem::path& path, nlohmann::json* storage,
+bool ReadStorage(const std::filesystem::path& path, std::string* storage_json,
                  std::string* error) {
   std::error_code filesystem_error;
   if (!std::filesystem::exists(path, filesystem_error)) {
     if (filesystem_error) {
       *error = "appStorage is unavailable";
     }
-    *storage = nlohmann::json::object();
+    *storage_json = "{}";
     return !filesystem_error;
   }
   const auto size = std::filesystem::file_size(path, filesystem_error);
@@ -54,11 +50,18 @@ bool ReadStorage(const std::filesystem::path& path, nlohmann::json* storage,
     return false;
   }
   std::ifstream input(path);
-  if (!input ||
-      !(*storage = nlohmann::json::parse(input, nullptr, false)).is_object()) {
+  std::string raw;
+  if (input) {
+    raw.assign(std::istreambuf_iterator<char>(input),
+               std::istreambuf_iterator<char>());
+  }
+  if (!input || input.bad() ||
+      mocktail_rust_json_normalize_object(raw.data(), raw.size(), false, nullptr,
+                                          nullptr) != 0) {
     *error = "appStorage is not a valid JSON object";
     return false;
   }
+  *storage_json = std::move(raw);
   return true;
 }
 
@@ -366,8 +369,8 @@ bool AtomicWriteContents(const std::filesystem::path& path,
 }
 
 bool AtomicWrite(const std::filesystem::path& path,
-                 const nlohmann::json& storage, std::string* error) {
-  return AtomicWriteContents(path, storage.dump(),
+                 const std::string& storage_json, std::string* error) {
+  return AtomicWriteContents(path, storage_json,
                              "cannot create appStorage directory",
                              "cannot atomically replace appStorage", error);
 }
@@ -430,8 +433,8 @@ BrowserTrackerResult BrowserTrackerService::EnsureInitialized(
     return result;
   }
 
-  nlohmann::json storage;
-  if (!ReadStorage(app_storage_file, &storage, &result.error)) {
+  std::string storage_json;
+  if (!ReadStorage(app_storage_file, &storage_json, &result.error)) {
     close(lock);
     return result;
   }
@@ -450,25 +453,40 @@ BrowserTrackerResult BrowserTrackerService::EnsureInitialized(
     return result;
   }
 
-  const auto existing = storage.find("BrowserTrackerId");
-  std::string stored_id;
-  if (existing != storage.end() && existing->is_string() &&
-      IsValidId(existing->get_ref<const std::string&>())) {
-    stored_id = existing->get<std::string>();
-  } else if (existing != storage.end()) {
+  bool has_stored_id = false;
+  char stored_buf[32] = {};
+  if (mocktail_rust_browser_tracker_read_stored_id(
+          storage_json.data(), storage_json.size(), &has_stored_id, stored_buf,
+          sizeof(stored_buf)) != 0) {
     result.error = "appStorage BrowserTrackerId is invalid";
     close(lock);
     return result;
   }
+  const std::string stored_id = has_stored_id ? std::string(stored_buf) : "";
+  const auto set_storage_id = [](std::string* json_str,
+                                 std::string_view new_id) {
+    std::string updated;
+    const int32_t rc = mocktail_rust_browser_tracker_set_stored_id(
+        json_str->data(), json_str->size(), new_id.data(), new_id.size(),
+        [](void* ctx, const char* ptr, std::size_t len) {
+          static_cast<std::string*>(ctx)->assign(ptr, len);
+        },
+        &updated);
+    if (rc == 0) {
+      *json_str = std::move(updated);
+    }
+    return rc == 0;
+  };
   if (!authoritative_id.empty()) {
     result.browser_tracker_id = authoritative_id;
     if (stored_id == authoritative_id) {
       close(lock);
       return result;
     }
-    storage["BrowserTrackerId"] = authoritative_id;
-    if (AtomicWrite(app_storage_file, storage, &result.error))
+    if (set_storage_id(&storage_json, authoritative_id) &&
+        AtomicWrite(app_storage_file, storage_json, &result.error)) {
       result.status = BrowserTrackerStatus::kCreated;
+    }
     close(lock);
     return result;
   }
@@ -492,22 +510,15 @@ BrowserTrackerResult BrowserTrackerService::EnsureInitialized(
   } else if (response.status_code != 200) {
     result.error = "BrowserTracker initialization was rejected";
   } else {
-    const nlohmann::json body =
-        nlohmann::json::parse(response.body, nullptr, false);
-    std::string id;
-    if (body.is_number_unsigned()) {
-      id = std::to_string(body.get<std::uint64_t>());
-    } else if (body.is_string()) {
-      id = body.get<std::string>();
-    } else if (body.is_object() && body.contains("browserTrackerId")) {
-      const auto& value = body.at("browserTrackerId");
-      if (value.is_number_unsigned())
-        id = std::to_string(value.get<std::uint64_t>());
-      if (value.is_string()) id = value.get<std::string>();
-    }
+    char parsed_id_buf[32] = {};
+    const bool valid_body =
+        mocktail_rust_browser_tracker_parse_init_response(
+            response.body.data(), response.body.size(), parsed_id_buf,
+            sizeof(parsed_id_buf)) == 0;
+    const std::string id = valid_body ? std::string(parsed_id_buf) : "";
     tracker = TrackerFromResponse(response);
     authoritative_id = BrowserIdFromTracker(tracker);
-    if (!IsValidId(id) || authoritative_id.empty() || id != authoritative_id) {
+    if (id.empty() || authoritative_id.empty() || id != authoritative_id) {
       result.error =
           "BrowserTracker response does not contain a valid numeric ID";
     } else {
@@ -528,12 +539,12 @@ BrowserTrackerResult BrowserTrackerService::EnsureInitialized(
           result.error = "cookie file changed during BrowserTracker update";
         } else if (AtomicWriteText(cookie_file, cookie_contents,
                                    &result.error)) {
-          storage["BrowserTrackerId"] = authoritative_id;
+          (void)set_storage_id(&storage_json, authoritative_id);
         }
         close(cookie_writer_lock);
       }
       if (result.error.empty() &&
-          AtomicWrite(app_storage_file, storage, &result.error)) {
+          AtomicWrite(app_storage_file, storage_json, &result.error)) {
         result.status = BrowserTrackerStatus::kCreated;
         result.browser_tracker_id = std::move(authoritative_id);
       }

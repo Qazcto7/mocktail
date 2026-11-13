@@ -18,7 +18,6 @@
 #include <deque>
 #include <limits>
 #include <mutex>
-#include <nlohmann/json.hpp>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
@@ -30,8 +29,6 @@
 namespace mocktail {
 namespace runtime {
 namespace {
-
-using Json = nlohmann::json;
 
 constexpr std::size_t kMaximumDiscordFrameBytes = 1024U * 1024U;
 constexpr std::size_t kMaximumRobloxApiBytes = 512U * 1024U;
@@ -75,8 +72,8 @@ std::string TruncateUtf8(std::string value, std::size_t maximum) {
   return value;
 }
 
-std::string DumpJson(const Json& value) {
-  return value.dump(-1, ' ', false, Json::error_handler_t::replace);
+void AssignJsonString(void* ctx, const char* ptr, std::size_t len) {
+  static_cast<std::string*>(ctx)->assign(ptr, len);
 }
 
 std::string RenderPlaceTemplate(std::string text, std::string_view place_name) {
@@ -195,35 +192,15 @@ void LogDiscordRpcError(const DiscordFrame& frame) {
   if (frame.opcode != DiscordOpcode::kFrame) {
     return;
   }
-  const Json response = Json::parse(frame.payload, nullptr, false);
-  if (!response.is_object()) {
-    return;
-  }
-  const auto event = response.find("evt");
-  if (event == response.end() || !event->is_string() ||
-      event->get_ref<const std::string&>() != "ERROR") {
-    return;
-  }
   int64_t code = 0;
-  std::string message = "Discord rejected an RPC request";
-  const auto data = response.find("data");
-  if (data != response.end() && data->is_object()) {
-    const auto code_value = data->find("code");
-    if (code_value != data->end() && code_value->is_number_integer()) {
-      code = code_value->get<int64_t>();
-    }
-    const auto message_value = data->find("message");
-    if (message_value != data->end() && message_value->is_string()) {
-      message = TruncateUtf8(message_value->get<std::string>(), 256);
-      for (char& byte : message) {
-        if (static_cast<unsigned char>(byte) < 0x20U || byte == 0x7f) {
-          byte = ' ';
-        }
-      }
-    }
+  std::array<char, 257> message_buf{};
+  if (mocktail_rust_discord_parse_rpc_error(
+          frame.payload.data(), frame.payload.size(), &code,
+          message_buf.data(), message_buf.size()) != 0) {
+    return;
   }
   std::fprintf(stderr, "  [discord-rpc] request rejected code=%lld: %s\n",
-               static_cast<long long>(code), message.c_str());
+               static_cast<long long>(code), message_buf.data());
 }
 
 std::vector<std::string> DiscordSocketDirectories() {
@@ -294,8 +271,12 @@ int ConnectDiscord() {
 }
 
 bool HandshakeDiscord(int descriptor, std::string_view application_id) {
-  Json handshake = {{"v", 1}, {"client_id", application_id}};
-  if (!WriteFrame(descriptor, DiscordOpcode::kHandshake, DumpJson(handshake))) {
+  std::string handshake_json;
+  if (mocktail_rust_discord_build_handshake(application_id.data(),
+                                            application_id.size(),
+                                            AssignJsonString, &handshake_json) !=
+          0 ||
+      !WriteFrame(descriptor, DiscordOpcode::kHandshake, handshake_json)) {
     return false;
   }
   for (int attempt = 0; attempt < 3; ++attempt) {
@@ -312,45 +293,38 @@ bool HandshakeDiscord(int descriptor, std::string_view application_id) {
     if (frame.opcode != DiscordOpcode::kFrame) {
       return false;
     }
-    const Json response = Json::parse(frame.payload, nullptr, false);
-    const auto event =
-        response.is_object() ? response.find("evt") : response.end();
-    return event != response.end() && event->is_string() &&
-           event->get_ref<const std::string&>() == "READY";
+    return mocktail_rust_discord_is_ready_event(frame.payload.data(),
+                                                frame.payload.size());
   }
   return false;
 }
 
-Json ActivityJson(const DiscordRpcActivity& activity) {
-  Json result = {
-      {"type", 0}, {"details", activity.details}, {"instance", true}};
-  if (!activity.state.empty()) {
-    result["state"] = activity.state;
-  }
-  if (activity.start_timestamp.has_value()) {
-    result["timestamps"] = {{"start", *activity.start_timestamp}};
-  }
-  if (!activity.large_image.empty()) {
-    result["assets"] = {{"large_image", activity.large_image}};
-    if (!activity.large_text.empty()) {
-      result["assets"]["large_text"] = activity.large_text;
-    }
-  }
-  if (!activity.button_label.empty() && !activity.button_url.empty()) {
-    result["buttons"] = Json::array(
-        {{{"label", activity.button_label}, {"url", activity.button_url}}});
-  }
-  return result;
-}
-
 bool SetDiscordActivity(int descriptor, const DiscordRpcActivity* activity,
                         uint64_t nonce) {
-  Json args = {{"pid", getpid()}};
-  args["activity"] = activity != nullptr ? ActivityJson(*activity) : Json();
-  const Json request = {{"cmd", "SET_ACTIVITY"},
-                        {"args", std::move(args)},
-                        {"nonce", std::to_string(nonce)}};
-  return WriteFrame(descriptor, DiscordOpcode::kFrame, DumpJson(request));
+  MocktailRustDiscordActivity raw{};
+  if (activity != nullptr) {
+    raw.details = activity->details.data();
+    raw.details_len = activity->details.size();
+    raw.state = activity->state.data();
+    raw.state_len = activity->state.size();
+    raw.has_start_timestamp = activity->start_timestamp.has_value();
+    raw.start_timestamp = activity->start_timestamp.value_or(0);
+    raw.large_image = activity->large_image.data();
+    raw.large_image_len = activity->large_image.size();
+    raw.large_text = activity->large_text.data();
+    raw.large_text_len = activity->large_text.size();
+    raw.button_label = activity->button_label.data();
+    raw.button_label_len = activity->button_label.size();
+    raw.button_url = activity->button_url.data();
+    raw.button_url_len = activity->button_url.size();
+  }
+  std::string request_json;
+  if (mocktail_rust_discord_build_set_activity(
+          getpid(), activity != nullptr ? &raw : nullptr, nonce,
+          AssignJsonString, &request_json) != 0) {
+    return false;
+  }
+  return WriteFrame(descriptor, DiscordOpcode::kFrame, request_json);
 }
 
 struct BoundedResponse {
@@ -382,7 +356,7 @@ size_t WriteHttpResponse(char* data, size_t size, size_t count,
   return bytes;
 }
 
-std::optional<Json> GetRobloxJson(std::string url) {
+std::optional<std::string> GetRobloxHttpBody(std::string url) {
   std::call_once(g_curl_init_once, InitializeCurl);
   if (g_curl_init_status != CURLE_OK) {
     return std::nullopt;
@@ -428,11 +402,7 @@ std::optional<Json> GetRobloxJson(std::string url) {
   if (status != CURLE_OK || http_status != 200 || response.exceeded) {
     return std::nullopt;
   }
-  Json parsed = Json::parse(response.body, nullptr, false);
-  if (parsed.is_discarded()) {
-    return std::nullopt;
-  }
-  return parsed;
+  return std::move(response.body);
 }
 
 struct ResolvedPlaceMetadata {
@@ -451,53 +421,38 @@ ResolvedPlaceMetadata ResolvePlaceMetadata(int64_t place_id) {
   if (place_id <= 0) {
     return metadata;
   }
-  const std::optional<Json> universe =
-      GetRobloxJson("https://apis.roblox.com/universes/v1/places/" +
-                    std::to_string(place_id) + "/universe");
-  if (!universe.has_value() || !universe->contains("universeId")) {
-    return metadata;
-  }
-  const Json& identifier = (*universe)["universeId"];
+  const std::optional<std::string> universe =
+      GetRobloxHttpBody("https://apis.roblox.com/universes/v1/places/" +
+                        std::to_string(place_id) + "/universe");
   int64_t universe_id = 0;
-  if (identifier.is_number_unsigned()) {
-    const uint64_t unsigned_id = identifier.get<uint64_t>();
-    if (unsigned_id >
-        static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
-      return metadata;
-    }
-    universe_id = static_cast<int64_t>(unsigned_id);
-  } else if (identifier.is_number_integer()) {
-    universe_id = identifier.get<int64_t>();
-  } else {
+  if (!universe.has_value() ||
+      mocktail_rust_discord_parse_universe_id(universe->data(), universe->size(),
+                                              &universe_id) != 0 ||
+      universe_id <= 0) {
     return metadata;
   }
-  if (universe_id <= 0) {
-    return metadata;
-  }
-  const std::optional<Json> game =
-      GetRobloxJson("https://games.roblox.com/v1/games?universeIds=" +
-                    std::to_string(universe_id));
-  if (game.has_value() && game->contains("data") &&
-      (*game)["data"].is_array() && !(*game)["data"].empty()) {
-    const Json& first = (*game)["data"][0];
-    if (first.contains("name") && first["name"].is_string()) {
-      metadata.name =
-          TruncateUtf8(first["name"].get<std::string>(), 128);
+  const std::optional<std::string> game =
+      GetRobloxHttpBody("https://games.roblox.com/v1/games?universeIds=" +
+                        std::to_string(universe_id));
+  if (game.has_value()) {
+    std::array<char, 129> name_buf{};
+    if (mocktail_rust_discord_parse_game_name(game->data(), game->size(),
+                                            name_buf.data(),
+                                            name_buf.size()) == 0) {
+      metadata.name = name_buf.data();
     }
   }
 
-  const std::optional<Json> thumbnail = GetRobloxJson(
+  const std::optional<std::string> thumbnail = GetRobloxHttpBody(
       "https://thumbnails.roblox.com/v1/games/icons?universeIds=" +
       std::to_string(universe_id) +
       "&returnPolicy=PlaceHolder&size=512x512&format=Png&isCircular=false");
-  if (thumbnail.has_value() && thumbnail->contains("data") &&
-      (*thumbnail)["data"].is_array() && !(*thumbnail)["data"].empty()) {
-    const Json& first = (*thumbnail)["data"][0];
-    if (first.contains("imageUrl") && first["imageUrl"].is_string()) {
-      std::string icon_url = first["imageUrl"].get<std::string>();
-      if (IsSafeExternalImageUrl(icon_url)) {
-        metadata.icon_url = std::move(icon_url);
-      }
+  if (thumbnail.has_value()) {
+    std::array<char, 513> url_buf{};
+    if (mocktail_rust_discord_parse_icon_url(thumbnail->data(),
+                                           thumbnail->size(), url_buf.data(),
+                                           url_buf.size()) == 0) {
+      metadata.icon_url = url_buf.data();
     }
   }
   return metadata;

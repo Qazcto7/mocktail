@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
@@ -33,7 +34,6 @@
 #include "update/payload_store.h"
 #include "update/pinned_apk_provider.h"
 #include "update/readiness_canary.h"
-#include "update/state_file.h"
 #include "update/unsafe_latest_runner.h"
 #include "update/update_config.h"
 
@@ -153,15 +153,14 @@ std::filesystem::path UniqueDirectory(const std::filesystem::path& parent,
   return created;
 }
 
-ProviderVersion StoredVersion(const nlohmann::json& value) {
-  if (!value.is_object() || !value.contains("version_name") ||
-      !value["version_name"].is_string() || !value.contains("version_code") ||
-      !value["version_code"].is_number_unsigned())
-    return {};
-  return {value["version_name"].get<std::string>(),
-          value["version_code"].get<std::uint64_t>(),
-          {}};
-}
+struct UpdateStateGuard {
+  MocktailRustUpdateState* ptr = nullptr;
+  explicit UpdateStateGuard(const std::filesystem::path& path)
+      : ptr(mocktail_rust_update_state_new(path.c_str())) {}
+  ~UpdateStateGuard() { mocktail_rust_update_state_free(ptr); }
+  UpdateStateGuard(const UpdateStateGuard&) = delete;
+  UpdateStateGuard& operator=(const UpdateStateGuard&) = delete;
+};
 
 struct Candidate {
   PayloadStoreResult staged;
@@ -721,43 +720,23 @@ UpdateResult RunUpdate(const UpdatePaths& paths, const UpdateRequest& request,
   UpdateLock update_lock(paths.data_root, &result.error);
   if (!update_lock) return result;
 
-  auto state = ReadStateFile(paths.data_root / "update.json");
-  if (!state.is_object()) state = nlohmann::json::object();
-  state["schema_version"] = 1;
-  state["metadata_status"] = "unchecked";
+  UpdateStateGuard state(paths.data_root / "update.json");
   std::uint64_t supported_version_code = 0;
   const auto save_phase = [&](std::string_view phase) {
-    state["phase"] = phase;
-    state["updated_at"] = std::time(nullptr);
-    (void)WriteStateFile(paths.data_root / "update.json", state);
+    const std::string phase_str(phase);
+    mocktail_rust_update_state_save_phase(state.ptr, phase_str.c_str());
   };
   const auto finish = [&]() {
     PayloadStore store(paths.data_root, paths.compatibility_manifest,
                        paths.runtime_binary);
     const auto active = store.InspectCurrent();
-    state["active"] =
-        active ? nlohmann::json{{"payload_id", active.payload_id},
-                                {"version_name", active.version_name},
-                                {"version_code", active.version_code}}
-               : nlohmann::json(nullptr);
-    result.stale =
-        active &&
-        active.version_code < std::max(
-            supported_version_code, StoredVersion(state["latest_seen"]).version_code);
-    state["message"] = result.message;
-    state["error"] = result.error;
-    state["stale"] = result.stale;
-    if (!result)
-      save_phase("error");
-    else if (result.changed)
-      save_phase(result.stale ? "blocked" : "current");
-    else if (state["phase"] == "checking") {
-      save_phase(state["metadata_status"] == "unavailable"
-                     ? "metadata-unavailable"
-                 : result.stale ? "blocked"
-                                : "current");
-    } else
-      save_phase(state["phase"].get<std::string>());
+    bool stale = false;
+    mocktail_rust_update_state_finish_and_save(
+        state.ptr, static_cast<bool>(active), active.payload_id.c_str(),
+        active.version_name.c_str(), active.version_code,
+        supported_version_code, static_cast<bool>(result), result.changed,
+        result.message.c_str(), result.error.c_str(), &stale);
+    result.stale = stale;
     return result;
   };
   save_phase("checking");
@@ -823,29 +802,39 @@ UpdateResult RunUpdate(const UpdatePaths& paths, const UpdateRequest& request,
     return finish();
   }
   std::optional<ProviderVersion> latest_version;
-  if (request.startup_preflight) state["metadata_status"] = "deferred";
+  if (request.startup_preflight) {
+    mocktail_rust_update_state_set_metadata_status(state.ptr, "deferred");
+  }
   if (request.check_latest && !request.startup_preflight) {
     Progress(request.progress_fd, "Checking Roblox...");
     const ProviderVersion latest = [&] {
       StageTimer timer("check-latest");
       return provider.CheckLatest();
     }();
-    state["checked_at"] = std::time(nullptr);
     if (latest) {
-      state["metadata_status"] = "available";
       latest_version = latest;
-      if (StoredVersion(state["latest_seen"]).version_code <=
-          latest.version_code) {
-        state["latest_seen"] = {{"version_name", latest.version_name},
-                                {"version_code", latest.version_code}};
-      }
     } else {
-      state["metadata_status"] = "unavailable";
       result.warnings.push_back("update metadata is temporarily unavailable: " +
                                 latest.error);
     }
+    mocktail_rust_update_state_record_latest_check(
+        state.ptr, static_cast<bool>(latest), latest.version_name.c_str(),
+        latest.version_code);
   }
-  const ProviderVersion downloaded = StoredVersion(state["latest_downloaded"]);
+  ProviderVersion downloaded;
+  std::string downloaded_payload_id;
+  {
+    std::array<char, 256> ver_buf{};
+    std::array<char, 256> pid_buf{};
+    std::uint64_t dl_code = 0;
+    if (mocktail_rust_update_state_get_latest_downloaded(
+            state.ptr, ver_buf.data(), ver_buf.size(), &dl_code, pid_buf.data(),
+            pid_buf.size())) {
+      downloaded.version_name = ver_buf.data();
+      downloaded.version_code = dl_code;
+      downloaded_payload_id = pid_buf.data();
+    }
+  }
   if (downloaded && (!latest_version ||
                      downloaded.version_code > latest_version->version_code) &&
       (!request.startup_preflight || current ||
@@ -868,10 +857,8 @@ UpdateResult RunUpdate(const UpdatePaths& paths, const UpdateRequest& request,
     result.message = "Roblox " + current.version_name + " is installed";
     if (!request.download_only) {
       auto keep = ReferencePayloadIds(paths, catalog.profiles);
-      if (downloaded && state["latest_downloaded"].contains("payload_id") &&
-          state["latest_downloaded"]["payload_id"].is_string()) {
-        keep.push_back(
-            state["latest_downloaded"]["payload_id"].get<std::string>());
+      if (downloaded && !downloaded_payload_id.empty()) {
+        keep.push_back(downloaded_payload_id);
       }
       result.message += CollectSupersededPayloads(&store, keep);
     }
@@ -934,13 +921,9 @@ UpdateResult RunUpdate(const UpdatePaths& paths, const UpdateRequest& request,
       continue;
     }
     examined.push_back(candidate.staged.payload_id);
-    if (StoredVersion(state["latest_downloaded"]).version_code <=
-        candidate.staged.version_code) {
-      state["latest_downloaded"] = {
-          {"payload_id", candidate.staged.payload_id},
-          {"version_name", candidate.staged.version_name},
-          {"version_code", candidate.staged.version_code}};
-    }
+    mocktail_rust_update_state_record_latest_downloaded(
+        state.ptr, candidate.staged.payload_id.c_str(),
+        candidate.staged.version_name.c_str(), candidate.staged.version_code);
     if (request.download_only) {
       result.payload_id = current.payload_id;
       result.message = "Roblox " + candidate.staged.version_name +

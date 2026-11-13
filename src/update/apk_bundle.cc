@@ -1,7 +1,6 @@
 #include "update/apk_bundle.h"
 #include "mocktail/mocktail_rust.h"
 
-#define JSON_NOEXCEPTION 1
 #include <elf.h>
 #include <fcntl.h>
 #include <gelf.h>
@@ -21,7 +20,6 @@
 #include <fstream>
 #include <iomanip>
 #include <memory>
-#include <nlohmann/json.hpp>
 #include <set>
 #include <sstream>
 #include <string>
@@ -280,38 +278,20 @@ std::set<std::string> TrustedCertificates(const std::filesystem::path& path,
                                           std::string* error) {
   const std::string contents = ReadRegular(path, 1024U * 1024U, error);
   if (!error->empty()) return {};
-  const nlohmann::json document =
-      nlohmann::json::parse(contents, nullptr, false, true);
-  if (document.is_discarded() || !document.is_object() ||
-      document.value("schema_version", 0) != 1 ||
-      document.value("package", "") != "com.roblox.client" ||
-      !document.contains("trusted_sha256") ||
-      !document["trusted_sha256"].is_array()) {
-    *error = "Roblox signing trust manifest is invalid";
+  std::set<std::string> trusted;
+  char err_buf[256] = {};
+  const auto on_sha256 = [](void* ctx, const char* ptr, size_t len) {
+    if (ptr != nullptr && len > 0) {
+      static_cast<std::set<std::string>*>(ctx)->emplace(ptr, len);
+    }
+  };
+  if (mocktail_rust_apk_parse_trusted_certificates(
+          contents.data(), contents.size(), on_sha256, &trusted, err_buf,
+          sizeof(err_buf)) != 0) {
+    *error = err_buf[0] != '\0' ? err_buf
+                                : "Roblox signing trust manifest is invalid";
     return {};
   }
-  std::set<std::string> trusted;
-  for (const auto& value : document["trusted_sha256"]) {
-    if (!value.is_string()) {
-      *error = "Roblox signing trust manifest contains a non-string digest";
-      return {};
-    }
-    std::string digest = value.get<std::string>();
-    std::transform(digest.begin(), digest.end(), digest.begin(),
-                   [](unsigned char character) {
-                     return static_cast<char>(std::tolower(character));
-                   });
-    if (digest.size() != 64 ||
-        !std::all_of(digest.begin(), digest.end(), [](unsigned char character) {
-          return std::isdigit(character) ||
-                 (character >= 'a' && character <= 'f');
-        })) {
-      *error = "Roblox signing trust manifest contains an invalid digest";
-      return {};
-    }
-    trusted.insert(std::move(digest));
-  }
-  if (trusted.empty()) *error = "Roblox signing trust manifest is empty";
   return trusted;
 }
 
@@ -550,30 +530,45 @@ PreparedPayload PreparePayloadFromArchives(
     result.error = hash_error;
     return result;
   }
-  nlohmann::json metadata = {
-      {"schema_version", 1},
-      {"package", "com.roblox.client"},
-      {"version_name", expected.version_name},
-      {"version_code", expected.version_code},
-      {"abi", std::string(compat::kGuestAbi)},
-      {"elf_build_id", build_id},
-      {"sha256",
-       {{"libroblox", library_hash},
-        {"base_apk", base_hash},
-        {std::string(compat::kGuestSplitApkHashKey), split_hash}}},
-      {"signing_certificates_sha256", accepted},
-      {"assets",
-       {{"file_count", asset_count_verified},
-        {"sha256_tree", asset_tree_hash}}},
-      {"source", std::string(source)},
-      {"imported_at", UtcTimestamp()},
-      {"compatibility_status", expected.exact_build_id.has_value()
-                                   ? "exact-supported"
-                                   : "verified-candidate"},
-      {"apk_layout", base->path == split->path ? "monolithic" : "split"},
+  std::vector<const char*> cert_ptrs;
+  cert_ptrs.reserve(accepted.size());
+  for (const std::string& cert : accepted) {
+    cert_ptrs.push_back(cert.c_str());
+  }
+  const std::string split_hash_key(compat::kGuestSplitApkHashKey);
+  const std::string abi_str(compat::kGuestAbi);
+  const std::string source_str(source);
+  const std::string imported_at_str = UtcTimestamp();
+  MocktailRustApkMetadataRequest req{};
+  req.version_name = expected.version_name.c_str();
+  req.version_code = expected.version_code;
+  req.abi = abi_str.c_str();
+  req.elf_build_id = build_id.c_str();
+  req.library_sha256 = library_hash.c_str();
+  req.base_apk_sha256 = base_hash.c_str();
+  req.split_apk_hash_key = split_hash_key.c_str();
+  req.split_apk_sha256 = split_hash.c_str();
+  req.signing_certs = cert_ptrs.empty() ? nullptr : cert_ptrs.data();
+  req.signing_certs_count = cert_ptrs.size();
+  req.asset_file_count = asset_count_verified;
+  req.asset_tree_sha256 = asset_tree_hash.c_str();
+  req.source = source_str.c_str();
+  req.imported_at = imported_at_str.c_str();
+  req.exact_supported = expected.exact_build_id.has_value();
+  req.monolithic = base->path == split->path;
+  std::string serialized_metadata;
+  const auto on_json = [](void* ctx, const char* ptr, size_t len) {
+    if (ptr != nullptr && len > 0) {
+      static_cast<std::string*>(ctx)->assign(ptr, len);
+    }
   };
-  if (!WritePrivateFile(prepared / "roblox_payload.json",
-                        metadata.dump(2) + "\n", &result.error)) {
+  if (mocktail_rust_apk_build_payload_metadata(&req, on_json,
+                                               &serialized_metadata) != 0) {
+    result.error = "cannot serialize payload metadata";
+    return result;
+  }
+  if (!WritePrivateFile(prepared / "roblox_payload.json", serialized_metadata,
+                        &result.error)) {
     return result;
   }
   // The hashes above were computed from these exact bytes and written into

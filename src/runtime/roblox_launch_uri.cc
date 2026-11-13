@@ -1,23 +1,14 @@
 #include "runtime/roblox_launch_uri.h"
 
-#include <curl/curl.h>
-
 // [patch.py] RequestFollowUser support
 #include "runtime/roblox_presence_resolver.h"
 #include "mocktail/mocktail_rust.h"
 
-#include <algorithm>
 #include <array>
-#include <cctype>
-#include <charconv>
 #include <cstdint>
-#include <limits>
-#include <nlohmann/json.hpp>
-#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
-#include <vector>
 
 namespace mocktail {
 namespace runtime {

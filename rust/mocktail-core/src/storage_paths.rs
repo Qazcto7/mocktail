@@ -166,14 +166,14 @@ impl Default for MocktailRustParsedApprovalReceipt {
     }
 }
 
-fn c_str_opt<'a>(ptr: *const c_char) -> Option<&'a str> {
+pub(crate) fn c_str_opt<'a>(ptr: *const c_char) -> Option<&'a str> {
     if ptr.is_null() {
         return None;
     }
     unsafe { CStr::from_ptr(ptr) }.to_str().ok()
 }
 
-fn slice_to_str<'a>(ptr: *const c_char, len: usize) -> Option<&'a str> {
+pub(crate) fn slice_to_str<'a>(ptr: *const c_char, len: usize) -> Option<&'a str> {
     if len == 0 {
         return Some("");
     }
@@ -195,20 +195,20 @@ fn emit_field(
     }
 }
 
-fn emit_string(cb: MocktailPayloadStoreStringCallback, ctx: *mut c_void, value: &str) {
+pub(crate) fn emit_string(cb: MocktailPayloadStoreStringCallback, ctx: *mut c_void, value: &str) {
     if let Some(f) = cb {
         unsafe { f(ctx, value.as_ptr() as *const c_char, value.len()) };
     }
 }
 
-fn is_lower_hex(value: &str, expected_len: usize) -> bool {
+pub(crate) fn is_lower_hex(value: &str, expected_len: usize) -> bool {
     value.len() == expected_len
         && value
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-fn is_valid_lower_build_id(value: &str) -> bool {
+pub(crate) fn is_valid_lower_build_id(value: &str) -> bool {
     (8..=128).contains(&value.len())
         && value.len().is_multiple_of(2)
         && is_lower_hex(value, value.len())

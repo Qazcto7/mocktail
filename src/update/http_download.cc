@@ -19,7 +19,6 @@
 #include <string>
 
 #include "update/payload_integrity.h"
-#include "update/state_file.h"
 
 namespace mocktail::update {
 namespace {
@@ -248,8 +247,9 @@ std::size_t ReadDownloadHeaders(char* data, std::size_t size, std::size_t count,
       return 0;
     }
     if (headers->offset == 0 && StrongEtag(headers->etag) &&
-        !WriteStateFile(headers->state_path,
-                        {{"url", headers->url}, {"etag", headers->etag}})) {
+        mocktail_rust_http_write_resume_state(headers->state_path.c_str(),
+                                              headers->url.c_str(),
+                                              headers->etag.c_str()) != 0) {
       headers->failed = true;
       return 0;
     }
@@ -467,12 +467,12 @@ HttpDownloadResult DownloadFileAttempt(const HttpTransferRequest& request,
   HttpDownloadResult result;
   std::error_code filesystem_error;
   const std::filesystem::path state_path = temporary.string() + ".json";
-  const auto state = ReadStateFile(state_path);
   std::string etag;
-  if (state.is_object() && state.contains("url") &&
-      state["url"] == request.url && state.contains("etag") &&
-      state["etag"].is_string()) {
-    etag = state["etag"].get<std::string>();
+  std::array<char, 4096> etag_buf{};
+  if (mocktail_rust_http_read_resume_etag(
+          state_path.c_str(), request.url.c_str(), etag_buf.data(),
+          etag_buf.size()) == 0) {
+    etag = etag_buf.data();
   }
   std::uintmax_t existing =
       std::filesystem::file_size(temporary, filesystem_error);

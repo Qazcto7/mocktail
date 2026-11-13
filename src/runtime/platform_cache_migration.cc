@@ -1,18 +1,17 @@
 #include "runtime/platform_cache_migration.h"
 
-#define JSON_NOEXCEPTION 1
 #include <fcntl.h>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
-#include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -56,7 +55,7 @@ enum class ReadStatus { kMissing, kReady, kInvalid };
 
 struct JsonReadResult {
   ReadStatus status = ReadStatus::kMissing;
-  nlohmann::json value;
+  std::string value;
   std::string error;
 };
 
@@ -132,18 +131,19 @@ JsonReadResult ReadJson(const std::filesystem::path& path) {
     }
     offset += static_cast<std::size_t>(count);
   }
-  nlohmann::json parsed = nlohmann::json::parse(bytes, nullptr, false, true);
-  std::fill(bytes.begin(), bytes.end(), '\0');
-  if (parsed.is_discarded() || !parsed.is_object()) {
+  const bool valid = mocktail_rust_json_normalize_object(
+                         bytes.data(), bytes.size(), true, nullptr, nullptr) == 0;
+  if (!valid) {
+    std::fill(bytes.begin(), bytes.end(), '\0');
     return {ReadStatus::kInvalid,
             {},
             "platform cache metadata is not a JSON object"};
   }
-  return {ReadStatus::kReady, std::move(parsed), {}};
+  return {ReadStatus::kReady, std::move(bytes), {}};
 }
 
-bool AtomicWriteJson(const std::filesystem::path& path,
-                     const nlohmann::json& value, std::string* error) {
+bool AtomicWriteBytes(const std::filesystem::path& path,
+                      std::string_view bytes, std::string* error) {
   std::error_code filesystem_error;
   if (!RuntimePaths::EnsureDirectory(path.parent_path(), &filesystem_error)) {
     *error = "cannot create platform cache metadata directory";
@@ -175,7 +175,6 @@ bool AtomicWriteJson(const std::filesystem::path& path,
   bool stored = false;
   {
     const ScopedFileDescriptor file(descriptor);
-    const std::string bytes = value.dump();
     stored = fchmod(file.get(), S_IRUSR | S_IWUSR) == 0 &&
              WriteAll(file.get(), bytes) && fsync(file.get()) == 0;
   }
@@ -200,14 +199,18 @@ bool AtomicWriteJson(const std::filesystem::path& path,
   return true;
 }
 
-std::string FingerprintRevision(const nlohmann::json& fingerprint) {
-  const std::string json_str = fingerprint.dump();
+std::string FingerprintRevision(std::string_view json_str) {
   char rev_buf[128];
   if (mocktail_rust_validate_platform_cache_fingerprint(
-          json_str.c_str(), json_str.size(), rev_buf, sizeof(rev_buf)) == 0) {
+          json_str.data(), json_str.size(), rev_buf, sizeof(rev_buf)) == 0) {
     return std::string(rev_buf);
   }
   return {};
+}
+
+void ZeroAndClear(std::string* value) {
+  std::fill(value->begin(), value->end(), '\0');
+  value->clear();
 }
 
 }  // namespace
@@ -307,25 +310,38 @@ PlatformCacheMigrationResult MigratePlatformProfileCaches(
   }
   if (app_storage.status == ReadStatus::kReady) {
     result.app_storage_found = true;
-    const std::size_t removed =
-        app_storage.value.erase("PlayerHydrationBlob") +
-        app_storage.value.erase("PlayerHydrationSignature") +
-        app_storage.value.erase("AppConfiguration");
-    if (removed != 0) {
-      if (!AtomicWriteJson(result.app_storage_file, app_storage.value,
-                           &result.error)) {
+    bool removed = false;
+    std::string updated_storage;
+    const int32_t rc = mocktail_rust_platform_cache_strip_hydration_keys(
+        app_storage.value.data(), app_storage.value.size(), &removed,
+        [](void* ctx, const char* ptr, std::size_t len) {
+          static_cast<std::string*>(ctx)->assign(ptr, len);
+        },
+        &updated_storage);
+    ZeroAndClear(&app_storage.value);
+    if (rc == 0 && removed) {
+      const bool wrote = AtomicWriteBytes(result.app_storage_file,
+                                          updated_storage, &result.error);
+      ZeroAndClear(&updated_storage);
+      if (!wrote) {
         return result;
       }
       result.app_storage_updated = true;
+    } else {
+      ZeroAndClear(&updated_storage);
     }
   }
 
-  nlohmann::json updated_fingerprint = {
-      {"schema_version", kFingerprintSchemaVersion},
-      {"profile_revision", std::string(desired_revision)},
-  };
-  if (!AtomicWriteJson(result.fingerprint_file, updated_fingerprint,
-                       &result.error)) {
+  std::string updated_fingerprint;
+  mocktail_rust_platform_cache_build_fingerprint(
+      kFingerprintSchemaVersion, desired_revision.data(),
+      desired_revision.size(),
+      [](void* ctx, const char* ptr, std::size_t len) {
+        static_cast<std::string*>(ctx)->assign(ptr, len);
+      },
+      &updated_fingerprint);
+  if (!AtomicWriteBytes(result.fingerprint_file, updated_fingerprint,
+                        &result.error)) {
     return result;
   }
   return result;
@@ -340,7 +356,7 @@ RobloxThemeCacheResult ReadRobloxThemeCache(
     return result;
   }
 
-  const JsonReadResult storage = ReadJson(app_storage_file);
+  JsonReadResult storage = ReadJson(app_storage_file);
   if (storage.status == ReadStatus::kInvalid) {
     result.error = storage.error;
     return result;
@@ -349,43 +365,14 @@ RobloxThemeCacheResult ReadRobloxThemeCache(
     return result;
   }
 
-  const auto read_theme = [](const nlohmann::json& value) -> std::optional<bool> {
-    if (!value.is_string()) {
-      return std::nullopt;
-    }
-    const std::string& theme = value.get_ref<const std::string&>();
-    if (theme == "dark") {
-      return true;
-    }
-    if (theme == "light") {
-      return false;
-    }
-    return std::nullopt;
-  };
-
-  if (authenticated_user_id >= 0) {
-    const auto encoded_device_themes = storage.value.find("DeviceLevelTheme");
-    if (encoded_device_themes != storage.value.end() &&
-        encoded_device_themes->is_string()) {
-      const nlohmann::json device_themes = nlohmann::json::parse(
-          encoded_device_themes->get_ref<const std::string&>(), nullptr, false,
-          true);
-      if (device_themes.is_object()) {
-        const auto account_theme =
-            device_themes.find(std::to_string(authenticated_user_id));
-        if (account_theme != device_themes.end()) {
-          result.dark_theme = read_theme(*account_theme);
-          if (result.dark_theme.has_value()) {
-            return result;
-          }
-        }
-      }
-    }
-  }
-
-  const auto authenticated_theme = storage.value.find("AuthenticatedTheme");
-  if (authenticated_theme != storage.value.end()) {
-    result.dark_theme = read_theme(*authenticated_theme);
+  bool has_theme = false;
+  bool dark_theme = false;
+  mocktail_rust_platform_cache_read_theme(
+      storage.value.data(), storage.value.size(), authenticated_user_id,
+      &has_theme, &dark_theme);
+  ZeroAndClear(&storage.value);
+  if (has_theme) {
+    result.dark_theme = dark_theme;
   }
   return result;
 }
@@ -406,38 +393,31 @@ bool ApplyRobloxThemeCacheOverride(
     *error = storage.error;
     return false;
   }
-  if (storage.status == ReadStatus::kMissing) {
-    storage.value = nlohmann::json::object();
+  const bool has_storage = (storage.status == ReadStatus::kReady);
+  bool changed = false;
+  std::string updated_storage;
+  std::array<char, 256> err_buf{};
+  const int32_t rc = mocktail_rust_platform_cache_apply_theme(
+      storage.value.data(), storage.value.size(), has_storage,
+      authenticated_user_id, dark_theme, &changed,
+      [](void* ctx, const char* ptr, std::size_t len) {
+        static_cast<std::string*>(ctx)->assign(ptr, len);
+      },
+      &updated_storage, err_buf.data(), err_buf.size());
+  ZeroAndClear(&storage.value);
+  if (rc != 0) {
+    ZeroAndClear(&updated_storage);
+    *error = err_buf[0] != '\0' ? std::string(err_buf.data())
+                                : "platform cache metadata update failed";
+    return false;
   }
-
-  const std::string desired_theme = dark_theme ? "dark" : "light";
-  const nlohmann::json original = storage.value;
-  storage.value["AuthenticatedTheme"] = desired_theme;
-
-  if (authenticated_user_id >= 0) {
-    nlohmann::json device_themes = nlohmann::json::object();
-    const auto encoded_device_themes = storage.value.find("DeviceLevelTheme");
-    if (encoded_device_themes != storage.value.end()) {
-      if (!encoded_device_themes->is_string()) {
-        *error = "Roblox DeviceLevelTheme is not an encoded object";
-        return false;
-      }
-      device_themes = nlohmann::json::parse(
-          encoded_device_themes->get_ref<const std::string&>(), nullptr, false,
-          true);
-      if (device_themes.is_discarded() || !device_themes.is_object()) {
-        *error = "Roblox DeviceLevelTheme encoding is invalid";
-        return false;
-      }
-    }
-    device_themes[std::to_string(authenticated_user_id)] = desired_theme;
-    storage.value["DeviceLevelTheme"] = device_themes.dump();
-  }
-
-  if (storage.value == original) {
+  if (!changed) {
+    ZeroAndClear(&updated_storage);
     return true;
   }
-  return AtomicWriteJson(app_storage_file, storage.value, error);
+  const bool wrote = AtomicWriteBytes(app_storage_file, updated_storage, error);
+  ZeroAndClear(&updated_storage);
+  return wrote;
 }
 
 }  // namespace runtime

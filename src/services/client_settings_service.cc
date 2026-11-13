@@ -1,18 +1,9 @@
 #include "services/client_settings_service.h"
 #include "mocktail/mocktail_rust.h"
 
-#define JSON_NOEXCEPTION 1
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
-#include <array>
-#include <cerrno>
 #include <cstdint>
 #include <fstream>
-#include <nlohmann/json.hpp>
 #include <string>
-#include <system_error>
 #include <utility>
 
 #include "runtime/runtime_paths.h"

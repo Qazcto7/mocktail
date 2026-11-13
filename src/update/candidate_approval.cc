@@ -1,7 +1,6 @@
 #include "update/candidate_approval.h"
 #include "mocktail/mocktail_rust.h"
 
-#define JSON_NOEXCEPTION 1
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -14,7 +13,6 @@
 #include <cstdint>
 #include <ctime>
 #include <filesystem>
-#include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -25,8 +23,6 @@
 
 namespace mocktail::update {
 namespace {
-
-using Json = nlohmann::json;
 
 constexpr std::size_t kMaximumApprovalBytes = 1024U * 1024U;
 
@@ -67,15 +63,6 @@ std::string ReadRegular(const std::filesystem::path& path,
   }
   close(descriptor);
   return contents;
-}
-
-std::optional<Json> ParseJson(std::string_view contents, std::string* error) {
-  Json document = Json::parse(contents, nullptr, false, true);
-  if (document.is_discarded() || !document.is_object()) {
-    *error = "approval artifact is not a JSON object";
-    return std::nullopt;
-  }
-  return document;
 }
 
 bool WriteExclusive(const std::filesystem::path& path,
@@ -149,23 +136,6 @@ std::string UtcTimestamp() {
   std::array<char, 32> value{};
   std::strftime(value.data(), value.size(), "%Y-%m-%dT%H:%M:%SZ", &utc);
   return value.data();
-}
-
-std::optional<std::string> ExtractGeneration(std::string_view relative,
-                                             std::string_view directory,
-                                             std::string_view payload_id,
-                                             std::string_view suffix) {
-  const std::string prefix =
-      std::string(directory) + "/" + std::string(payload_id) + "-";
-  if (relative.size() != prefix.size() + 40 + suffix.size() ||
-      relative.substr(0, prefix.size()) != prefix ||
-      relative.substr(relative.size() - suffix.size()) != suffix) {
-    return std::nullopt;
-  }
-  const std::string generation =
-      std::string(relative.substr(prefix.size(), 40));
-  return IsLowerHex(generation, 40) ? std::optional<std::string>(generation)
-                                    : std::nullopt;
 }
 
 bool ValidateRelativeApprovalPath(const std::filesystem::path& root,
@@ -442,34 +412,42 @@ bool ValidateCandidateApproval(const std::filesystem::path& store_root,
                                const PayloadIntegrityResult& payload,
                                CandidateApprovalResult* approval,
                                std::string* error) {
-  const auto activation = ParseJson(activation_json, error);
-  if (!activation.has_value()) return false;
-  const std::string approval_ref = activation->value("approval_path", "");
-  const std::string profile_ref =
-      activation->value("host_abi_profile_path", "");
-  const std::string compatibility_ref =
-      activation->value("compatibility_manifest_path", "");
-  const auto generation =
-      ExtractGeneration(approval_ref, "approvals", payload.payload_id, ".json");
-  if (!generation.has_value() ||
-      profile_ref != "host_abi_profiles/" + payload.payload_id + "-" +
-                         *generation + ".json" ||
-      compatibility_ref != "compatibility_profiles/" + payload.payload_id +
-                               "-" + *generation + ".json") {
-    *error = "approved payload manifest has invalid approval references";
+  struct ParsedRefs {
+    std::string generation;
+    std::string approval_ref;
+    std::string profile_ref;
+    std::string compatibility_ref;
+  } refs;
+  char err_buf[256] = {};
+  const auto on_parsed = [](void* ctx, const char* gen_ptr, size_t gen_len,
+                            const char* app_ptr, size_t app_len,
+                            const char* prof_ptr, size_t prof_len,
+                            const char* comp_ptr, size_t comp_len) {
+    auto* out = static_cast<ParsedRefs*>(ctx);
+    if (gen_ptr != nullptr && gen_len > 0) out->generation.assign(gen_ptr, gen_len);
+    if (app_ptr != nullptr && app_len > 0) out->approval_ref.assign(app_ptr, app_len);
+    if (prof_ptr != nullptr && prof_len > 0) out->profile_ref.assign(prof_ptr, prof_len);
+    if (comp_ptr != nullptr && comp_len > 0) out->compatibility_ref.assign(comp_ptr, comp_len);
+  };
+  if (mocktail_rust_candidate_approval_parse_activation(
+          activation_json.data(), activation_json.size(),
+          payload.payload_id.c_str(), on_parsed, &refs, err_buf,
+          sizeof(err_buf)) != 0) {
+    *error = err_buf[0] != '\0' ? err_buf
+                                : "approval artifact is not a JSON object";
     return false;
   }
-  approval->generation = *generation;
-  if (!ValidateRelativeApprovalPath(store_root, approval_ref, "approvals",
-                                    payload.payload_id, *generation,
+  approval->generation = refs.generation;
+  if (!ValidateRelativeApprovalPath(store_root, refs.approval_ref, "approvals",
+                                    payload.payload_id, refs.generation,
                                     &approval->receipt, error) ||
-      !ValidateRelativeApprovalPath(store_root, profile_ref,
+      !ValidateRelativeApprovalPath(store_root, refs.profile_ref,
                                     "host_abi_profiles", payload.payload_id,
-                                    *generation, &approval->profile, error) ||
-      !ValidateRelativeApprovalPath(store_root, compatibility_ref,
-                                    "compatibility_profiles",
-                                    payload.payload_id, *generation,
-                                    &approval->compatibility_manifest, error)) {
+                                    refs.generation, &approval->profile, error) ||
+      !ValidateRelativeApprovalPath(
+          store_root, refs.compatibility_ref, "compatibility_profiles",
+          payload.payload_id, refs.generation,
+          &approval->compatibility_manifest, error)) {
     return false;
   }
   const std::string receipt_bytes = ReadRegular(approval->receipt, true, error);
@@ -477,9 +455,7 @@ bool ValidateCandidateApproval(const std::filesystem::path& store_root,
   const std::string compatibility_bytes =
       ReadRegular(approval->compatibility_manifest, true, error);
   if (!error->empty()) return false;
-  const auto receipt = ParseJson(receipt_bytes, error);
-  if (!error->empty() || !receipt.has_value() ||
-      !ValidateProfileBinding(profile_bytes, compatibility_bytes, payload,
+  if (!ValidateProfileBinding(profile_bytes, compatibility_bytes, payload,
                               error)) {
     return false;
   }
@@ -489,11 +465,6 @@ bool ValidateCandidateApproval(const std::filesystem::path& store_root,
   const std::string compatibility_sha256 =
       HashText(compatibility_bytes, error);
   if (!error->empty()) return false;
-  const std::string canary_runtime_sha256 =
-      receipt->value("canary_runtime_sha256", "");
-  const std::string runtime_sha256 = receipt->value("runtime_sha256", "");
-  const std::string runtime_build_id =
-      receipt->value("runtime_build_id", "");
   std::error_code filesystem_error;
   const std::filesystem::path canonical_library = std::filesystem::canonical(
       store_root / "payloads" / payload.payload_id / "libroblox.so",
@@ -502,76 +473,35 @@ bool ValidateCandidateApproval(const std::filesystem::path& store_root,
     *error = "cannot canonicalize approved payload library";
     return false;
   }
-  if (receipt->value("schema_version", 0) != 1 ||
-      receipt->value("status", "") != "approved" ||
-      receipt->value("payload_id", "") != payload.payload_id ||
-      receipt->value("generation", "") != *generation ||
-      receipt->value("payload_path", "") != canonical_library.string() ||
-      receipt->value("elf_build_id", "") != payload.metadata.build_id ||
-      receipt->value("payload_sha256", "") != payload.metadata.library_sha256 ||
-      receipt->value("payload_fingerprint", "") != fingerprint ||
-      receipt->value("profile_sha256", "") != profile_sha256 ||
-      receipt->value("compatibility_manifest_sha256", "") !=
-          compatibility_sha256 ||
-      !IsLowerHex(canary_runtime_sha256, 64) ||
-      runtime_sha256 != canary_runtime_sha256 ||
-      !IsLowerHex(runtime_build_id, 40) ||
-      receipt->value("canary_tier", "") != "C" ||
-      receipt->value("successful_runs", 0) != 2 ||
-      !receipt->contains("canary_attestation_sha256") ||
-      !(*receipt)["canary_attestation_sha256"].is_array() ||
-      (*receipt)["canary_attestation_sha256"].size() != 2) {
-    *error = "approval receipt does not authorize exact payload evidence";
-    return false;
-  }
-  std::array<std::string, 2> attestation_hashes;
-  std::array<std::string, 2> run_ids;
+  std::array<std::string, 2> canary_bytes;
   for (std::size_t index = 0; index < 2; ++index) {
     const std::filesystem::path attestation_path =
         store_root / "approvals" /
-        (payload.payload_id + "-" + *generation + ".canary-" +
+        (payload.payload_id + "-" + refs.generation + ".canary-" +
          std::to_string(index + 1) + ".json");
-    const std::string bytes = ReadRegular(attestation_path, true, error);
-    const auto attestation = ParseJson(bytes, error);
-    if (!error->empty() || !attestation.has_value()) return false;
-    attestation_hashes[index] = HashText(bytes, error);
+    canary_bytes[index] = ReadRegular(attestation_path, true, error);
     if (!error->empty()) return false;
-    run_ids[index] = attestation->value("run_id", "");
-    if (attestation->value("schema_version", 0) != 1 ||
-        attestation->value("status", "") != "passed" ||
-        attestation->value("canary_tier", "") != "C" ||
-        attestation->value("run", 0U) != index + 1 ||
-        attestation->value("payload_id", "") != payload.payload_id ||
-        attestation->value("payload_fingerprint", "") != fingerprint ||
-        attestation->value("profile_sha256", "") != profile_sha256 ||
-        attestation->value("compatibility_manifest_sha256", "") !=
-            compatibility_sha256 ||
-        attestation->value("runtime_sha256", "") !=
-            canary_runtime_sha256 ||
-        attestation->value("runtime_build_id", "") != runtime_build_id ||
-        !IsLowerHex(attestation->value("readiness_log_sha256", ""), 64) ||
-        !(*receipt)["canary_attestation_sha256"][index].is_string() ||
-        (*receipt)["canary_attestation_sha256"][index]
-                .get_ref<const std::string&>() != attestation_hashes[index]) {
-      *error = "canary attestation does not match approval evidence";
-      return false;
-    }
   }
-  if (run_ids[0].empty() || run_ids[0] == run_ids[1]) {
-    *error = "approval canaries do not have distinct run identities";
-    return false;
-  }
-  std::array<char, 41> computed_generation{};
-  if (mocktail_rust_candidate_approval_generation(
-          runtime_build_id.data(), runtime_build_id.size(),
-          fingerprint.data(), fingerprint.size(),
-          profile_sha256.data(), profile_sha256.size(),
-          compatibility_sha256.data(), compatibility_sha256.size(),
-          attestation_hashes[0].data(), attestation_hashes[0].size(),
-          attestation_hashes[1].data(), attestation_hashes[1].size(),
-          computed_generation.data(), computed_generation.size()) != 0 ||
-      std::string_view(computed_generation.data(), 40) != *generation) {
-    if (error->empty()) *error = "approval evidence generation does not match";
+  MocktailRustCandidateEvidenceRequest evidence_req{};
+  evidence_req.receipt_ptr = receipt_bytes.data();
+  evidence_req.receipt_len = receipt_bytes.size();
+  evidence_req.canary1_ptr = canary_bytes[0].data();
+  evidence_req.canary1_len = canary_bytes[0].size();
+  evidence_req.canary2_ptr = canary_bytes[1].data();
+  evidence_req.canary2_len = canary_bytes[1].size();
+  evidence_req.payload_id = payload.payload_id.c_str();
+  evidence_req.generation = refs.generation.c_str();
+  evidence_req.canonical_library_path = canonical_library.c_str();
+  evidence_req.elf_build_id = payload.metadata.build_id.c_str();
+  evidence_req.library_sha256 = payload.metadata.library_sha256.c_str();
+  evidence_req.fingerprint = fingerprint.c_str();
+  evidence_req.profile_sha256 = profile_sha256.c_str();
+  evidence_req.compatibility_sha256 = compatibility_sha256.c_str();
+  if (mocktail_rust_candidate_approval_verify_evidence(
+          &evidence_req, err_buf, sizeof(err_buf)) != 0) {
+    *error = err_buf[0] != '\0'
+                 ? err_buf
+                 : "approval receipt does not authorize exact payload evidence";
     return false;
   }
   return true;

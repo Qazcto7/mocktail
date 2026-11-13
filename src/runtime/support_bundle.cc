@@ -1,7 +1,6 @@
 #include "runtime/support_bundle.h"
 #include "mocktail/mocktail_rust.h"
 
-#define JSON_NOEXCEPTION 1
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/utsname.h>
@@ -15,7 +14,6 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -113,20 +111,14 @@ std::string SanitizeLog(std::string_view raw) {
 std::string PayloadSummary(const RuntimePaths& paths) {
   const std::string manifest =
       ReadTail(paths.active_payload_manifest(), 1024U * 1024U);
-  const nlohmann::json document =
-      nlohmann::json::parse(manifest, nullptr, false, true);
-  if (document.is_discarded() || !document.is_object()) {
-    return "status=unavailable\n";
-  }
-  const std::string payload_id = document.value("payload_id", "");
-  const std::string version_name = document.value("version_name", "");
-  const std::string build_id = document.value("elf_build_id", "");
-  if (!IsDiagnosticToken(payload_id) || !IsDiagnosticToken(version_name) ||
-      build_id.size() != 40) {
-    return "status=unavailable\n";
-  }
-  return "status=active\npayload_id=" + payload_id +
-         "\nversion_name=" + version_name + "\nelf_build_id=" + build_id + "\n";
+  std::string summary;
+  mocktail_rust_support_bundle_format_payload_summary(
+      manifest.data(), manifest.size(),
+      [](void* ctx, const char* ptr, std::size_t len) {
+        static_cast<std::string*>(ctx)->assign(ptr, len);
+      },
+      &summary);
+  return summary;
 }
 
 std::size_t MaximumLogBytes(const Environment& environment) {

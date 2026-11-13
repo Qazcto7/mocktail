@@ -3,13 +3,13 @@
 
 #include <sched.h>
 
-#define JSON_NOEXCEPTION 1
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <limits>
-#include <nlohmann/json.hpp>
 #include <set>
 #include <string>
 #include <thread>
@@ -22,29 +22,6 @@
 namespace mocktail {
 namespace runtime {
 namespace {
-
-struct ClientSetting {
-  std::string_view name;
-  std::string_view value;
-};
-
-bool SetCompatibleValue(nlohmann::json* object, const ClientSetting& setting,
-                        std::string* error) {
-  const std::string name(setting.name);
-  const std::string value(setting.value);
-  const auto existing = object->find(name);
-  if (existing != object->end()) {
-    if (!existing->is_string() || existing->get<std::string>() != value) {
-      if (error != nullptr) {
-        *error = std::string("performance policy conflicts with ") + name;
-      }
-      return false;
-    }
-    return true;
-  }
-  (*object)[name] = value;
-  return true;
-}
 
 bool ReadTopologyValue(int logical_cpu, std::string_view name, int* value) {
   const std::string path = "/sys/devices/system/cpu/cpu" +
@@ -153,162 +130,43 @@ bool MergePerformanceClientSettingsOverrides(const PerformancePolicy& policy,
     }
     return false;
   }
-  nlohmann::json overrides = nlohmann::json::parse(
-      base_json.empty() ? "{}" : base_json, nullptr, false, true);
-  if (overrides.is_discarded() || !overrides.is_object()) {
-    if (error != nullptr) {
-      *error = "client-settings overrides must be a JSON object";
-    }
-    return false;
-  }
-  if (!policy.physics_worker_mode_valid) {
-    if (error != nullptr) {
-      *error = "physics worker mode is invalid";
-    }
-    return false;
-  }
-  if (!policy.multithreaded_rendering &&
-      policy.physics_worker_mode == PhysicsWorkerMode::kAuto) {
-    *merged_json = overrides.dump();
-    return true;
-  }
-  const auto apply_settings = [&overrides,
-                               error](const auto& settings) -> bool {
-    for (const ClientSetting& setting : settings) {
-      if (!SetCompatibleValue(&overrides, setting, error)) {
-        return false;
-      }
-    }
-    return true;
-  };
   const bool throughput_mode =
       policy.physics_worker_mode == PhysicsWorkerMode::kThroughput;
-  if (policy.physics_worker_mode == PhysicsWorkerMode::kLatency) {
-    const std::array<ClientSetting, 1> physics_settings = {{
-        {"DFIntSimMidPhaseContactPipelineBatchSize", "128"},
-    }};
-    if (!apply_settings(physics_settings)) {
-      return false;
+  const bool latency_mode =
+      policy.physics_worker_mode == PhysicsWorkerMode::kLatency;
+  int available_workers = 0;
+  if (throughput_mode || (policy.multithreaded_rendering && !latency_mode)) {
+    available_workers = policy.physical_core_count > 0
+                            ? policy.physical_core_count
+                            : DetectAvailablePhysicalCoreCount();
+  }
+  const char* custom_quality = nullptr;
+  std::size_t custom_quality_len = 0;
+  if ((policy.multithreaded_rendering || throughput_mode) && !latency_mode) {
+    custom_quality = std::getenv("MOCKTAIL_GRAPHICS_QUALITY");
+    if (custom_quality != nullptr) {
+      custom_quality_len = std::strlen(custom_quality);
     }
   }
-  int render_worker_count = 0;
-  if (throughput_mode ||
-      (policy.multithreaded_rendering &&
-       policy.physics_worker_mode != PhysicsWorkerMode::kLatency)) {
-    const int available_workers = policy.physical_core_count > 0
-                                      ? policy.physical_core_count
-                                      : DetectAvailablePhysicalCoreCount();
-    render_worker_count = std::max(1, available_workers);
-  }
-  if (throughput_mode) {
-    constexpr int kMaximumAsyncMinimum = 3;
-    render_worker_count = CalculateThroughputWorkerCount(render_worker_count);
-    const std::string workers = std::to_string(render_worker_count);
-    const std::string async_minimum =
-        std::to_string(std::min(render_worker_count, kMaximumAsyncMinimum));
-    const std::array<ClientSetting, 4> physics_settings = {{
-        {"FIntTaskSchedulerThreadMin", "0"},
-        {"FIntTaskSchedulerAsyncTasksMinimumThreadCount", async_minimum},
-        {"FIntTaskSchedulerAutoThreadLimit", workers},
-        {"DFIntSimMidPhaseContactPipelineBatchSize", "128"},
-    }};
-    if (!apply_settings(physics_settings)) {
-      return false;
+  std::array<char, 256> err_buf{};
+  std::string output;
+  const int32_t rc = mocktail_rust_performance_merge_overrides(
+      policy.multithreaded_rendering,
+      static_cast<int32_t>(policy.physics_worker_mode),
+      policy.physics_worker_mode_valid, available_workers, custom_quality,
+      custom_quality_len, base_json.data(), base_json.size(),
+      [](void* ctx, const char* ptr, std::size_t len) {
+        static_cast<std::string*>(ctx)->assign(ptr, len);
+      },
+      &output, err_buf.data(), err_buf.size());
+  if (rc != 0) {
+    if (error != nullptr) {
+      *error = err_buf[0] != '\0' ? std::string(err_buf.data())
+                                  : "performance client-settings merge failed";
     }
-  } else if (policy.multithreaded_rendering &&
-             policy.physics_worker_mode != PhysicsWorkerMode::kLatency) {
-    const std::string workers = std::to_string(render_worker_count);
-    const std::array<ClientSetting, 2> scheduler_settings = {{
-        {"FIntTaskSchedulerThreadMin", workers},
-        {"FIntTaskSchedulerAsyncTasksMinimumThreadCount", workers},
-    }};
-    if (!apply_settings(scheduler_settings)) {
-      return false;
-    }
+    return false;
   }
-  if ((policy.multithreaded_rendering || throughput_mode) &&
-      policy.physics_worker_mode != PhysicsWorkerMode::kLatency) {
-    const std::string workers = std::to_string(render_worker_count);
-    const std::string occlusion_workers =
-        std::to_string(std::max(1, render_worker_count / 2));
-    const char* custom_quality = std::getenv("MOCKTAIL_GRAPHICS_QUALITY");
-    const std::string quality_str =
-        (custom_quality != nullptr && custom_quality[0] != '\0')
-            ? custom_quality
-            : "auto";
-
-    // ForceCacheSize settings are byte counts. Let Roblox size its mesh and
-    // SLIM content caches; values like 256/128 would cap them to a few bytes.
-    // Leave MSAA selection to Roblox or explicit client-settings overrides.
-    // Forcing one sample disables anti-aliasing even at maximum quality.
-    const std::array<ClientSetting, 61> rendering_settings = {{
-        {"FIntSmoothClusterTaskQueueMaxParallelTasks", workers},
-        {"FIntOcclusionWorkerThreadCount", occlusion_workers},
-        {"FFlagMovePrerenderV2", "True"},
-        {"FFlagGcInParallelWithRenderPrepare3", "True"},
-        {"FIntRenderTextureMipBias", quality_str == "1" ? "2" : "1"},
-        {"FFlagSimRuntimeContentTranscodeBlockingCall", "False"},
-        {"FFlagRenderEnableLowEndLOD", "True"},
-        {"FIntTerrainArraySliceSize", "4"},
-        {"FFlagRenderFixParticlesCulling", "True"},
-        {"FFlagLuauIncrementalGC", "True"},
-        {"FIntLuauGcStepMultiplier", "100"},
-        {"FIntLuauGcGoalRatio", "200"},
-        {"FIntAssetProviderThreads", "2"},
-        {"FFlagUITextureCompressionDesktop", "True"},
-        {"FFlagTCTextureCompressionDesktop", "True"},
-        {"FFlagUITextureUncompressed", "False"},
-        {"FFlagMeshCompression", "True"},
-        {"FFlagPhysicsMeshCompression", "True"},
-        {"FFlagSupportMeshLOD", "True"},
-        {"FFlagMeshLOD", "True"},
-        {"FFlagMeshLodApplyGeomMeshOptimizer", "False"},
-        {"FFlagAdaptiveMeshCacheSizeForAndroid", "True"},
-        {"FIntDefaultMeshCacheSizeMB", "64"},
-        {"FIntRenderMeshOrphanBudgetMB", "8"},
-        {"FIntTerrainGpuMeshMemoryTargetMib", "32"},
-        {"FIntAvatarMeshMemoryMax", "33554432"},
-        {"FIntSmoothTerrainPhysicsCacheSize", "32"},
-        {"FIntRenderTextureTotalBudgetMB", "128"},
-        {"FIntRenderTextureOrphanBudgetMB", "8"},
-        {"FFlagDebugTerrainVTCompressedTextures", "True"},
-        {"FFlagStreamingObserverMemoryOptimization", "True"},
-        {"FIntNetworkStreamingGCMaxMicroSecondLimit", "5000"},
-        {"FFlagfeatureFastClusterCacheEnabled", "True"},
-        {"FFlagEnableMultiVETextureManagerSharing", "True"},
-        {"FFlagVulkanCompressedTextureAliasing", "True"},
-        {"FFlagCSGPublishDedupSolidMesh", "True"},
-        {"FFlagDeduplicateLodRemovalRegions", "True"},
-        {"FFlagCurlUsePools", "True"},
-        {"FIntRenderTextureCompositorBudget", "32"},
-        {"FIntTextureCompositorActiveJobs", "1"},
-        {"FIntTextureCompositorLowResFactor", "2"},
-        {"FIntTextureCompositorMeshCache", "16"},
-        {"FFlagContentProviderMmapAssets", "True"},
-        {"FIntAssetProviderAssetCacheReadThreadCount", "1"},
-        {"FIntAssetProviderAssetCacheWriteThreadCount", "1"},
-        {"FIntInitialAudioAssetCacheSize", "32"},
-        {"FIntAvatarTextureMemoryMax", "33554432"},
-        {"FFlagEnableSLIMAvatars", "True"},
-        {"FFlagEnableSlimAvatarsDefaultEnabled", "True"},
-        {"FFlagLayeredClothingCacheOptimizations", "True"},
-        {"FFlagLuauStartupGcSuppression", "False"},
-        {"FIntLuauGcStepMul", "300"},
-        {"FIntLuauGcGoalCore", "120"},
-        {"FIntLuauGcStartupWorkingSetMb", "64"},
-        {"FIntLuaGcMaxKb", "262144"},
-        {"FIntTaskSchedulerMaxTempArenaSizeBytes", "16777216"},
-        {"FFlagLocalStorageArenaOptimization", "True"},
-        {"FIntProjectedMaxBytesUsedForSoundsMB", "32"},
-        {"FIntAudioMetadataCacheSizeKB", "2048"},
-        {"FIntDefaultAudioDecodeBufferSizeMs", "50"},
-        {"FIntMaxAudibleSoundChannels", "32"},
-    }};
-    if (!apply_settings(rendering_settings)) {
-      return false;
-    }
-  }
-  *merged_json = overrides.dump();
+  *merged_json = std::move(output);
   return true;
 }
 

@@ -3483,6 +3483,426 @@ int32_t mocktail_rust_host_abi_verify_receipt_evidence(
     const char* canary_sha_0, const char* run_id_0, const char* canary_sha_1,
     const char* run_id_1, char* err_buf, size_t err_cap);
 
+// ============================================================================
+// 138. Updater JSON Migration Helpers (Zip, Payload, APKPure, Pinned, State)
+// ============================================================================
+
+typedef void (*MocktailZipEntryCallback)(
+    void* ctx, const char* name, size_t name_len, uint64_t uncompressed_size,
+    bool directory, bool symbolic_link);
+
+struct MocktailRustStrSlice {
+  const char* ptr;
+  size_t len;
+};
+
+struct MocktailRustPayloadInfoView {
+  struct MocktailRustStrSlice package_name;
+  struct MocktailRustStrSlice version_name;
+  uint64_t version_code;
+  struct MocktailRustStrSlice build_id;
+  struct MocktailRustStrSlice library_sha256;
+  struct MocktailRustStrSlice base_apk_sha256;
+  struct MocktailRustStrSlice split_apk_sha256;
+  size_t asset_file_count;
+  struct MocktailRustStrSlice asset_tree_sha256;
+  struct MocktailRustStrSlice payload_id;
+};
+
+typedef void (*MocktailPayloadInfoCallback)(
+    void* ctx, const struct MocktailRustPayloadInfoView* info);
+
+struct MocktailRustApkMetadataRequest {
+  const char* version_name;
+  uint64_t version_code;
+  const char* abi;
+  const char* elf_build_id;
+  const char* library_sha256;
+  const char* base_apk_sha256;
+  const char* split_apk_hash_key;
+  const char* split_apk_sha256;
+  const char* const* signing_certs;
+  size_t signing_certs_count;
+  size_t asset_file_count;
+  const char* asset_tree_sha256;
+  const char* source;
+  const char* imported_at;
+  bool exact_supported;
+  bool monolithic;
+};
+
+typedef void (*MocktailCandidateActivationCallback)(
+    void* ctx, const char* generation, size_t gen_len,
+    const char* approval_ref, size_t approval_len, const char* profile_ref,
+    size_t profile_len, const char* compat_ref, size_t compat_len);
+
+struct MocktailRustCandidateEvidenceRequest {
+  const char* receipt_ptr;
+  size_t receipt_len;
+  const char* canary1_ptr;
+  size_t canary1_len;
+  const char* canary2_ptr;
+  size_t canary2_len;
+  const char* payload_id;
+  const char* generation;
+  const char* canonical_library_path;
+  const char* elf_build_id;
+  const char* library_sha256;
+  const char* fingerprint;
+  const char* profile_sha256;
+  const char* compatibility_sha256;
+};
+
+typedef bool (*MocktailTrustedUrlCallback)(void* ctx, const char* url,
+                                           size_t url_len);
+
+typedef void (*MocktailPinnedArchiveCallback)(
+    void* ctx, const char* filename, size_t filename_len, const char* url,
+    size_t url_len, const char* sha256, size_t sha256_len, uint64_t size);
+
+struct MocktailRustUpdateState;
+
+int mocktail_rust_zip_list_entries_cb(const char* archive_path,
+                                      size_t max_entries,
+                                      MocktailZipEntryCallback on_entry,
+                                      void* ctx, char* out_err, size_t err_cap);
+int mocktail_rust_payload_inspect_cb(const char* payload_dir,
+                                     MocktailPayloadInfoCallback on_info,
+                                     void* ctx, char* out_err, size_t err_cap);
+int mocktail_rust_payload_verify_cb(const char* payload_dir,
+                                    MocktailPayloadInfoCallback on_info,
+                                    void* ctx, char* out_err, size_t err_cap);
+int mocktail_rust_apkpure_parse_exact_urls_cb(
+    const uint8_t* metadata, size_t meta_len, const char* version,
+    uint64_t version_code, MocktailPayloadStoreStringCallback on_url, void* ctx,
+    char* out_err, size_t err_cap);
+int32_t mocktail_rust_apk_parse_trusted_certificates(
+    const char* json_ptr, size_t json_len,
+    MocktailPayloadStoreStringCallback on_sha256, void* ctx, char* out_err,
+    size_t err_cap);
+int32_t mocktail_rust_apk_build_payload_metadata(
+    const struct MocktailRustApkMetadataRequest* req,
+    MocktailPayloadStoreStringCallback on_json, void* ctx);
+int32_t mocktail_rust_candidate_approval_parse_activation(
+    const char* activation_ptr, size_t activation_len, const char* payload_id,
+    MocktailCandidateActivationCallback on_parsed, void* ctx, char* out_err,
+    size_t err_cap);
+int32_t mocktail_rust_candidate_approval_verify_evidence(
+    const struct MocktailRustCandidateEvidenceRequest* req, char* out_err,
+    size_t err_cap);
+int32_t mocktail_rust_pinned_apk_find_source(
+    const char* manifest_path, const char* version_name, uint64_t version_code,
+    const char* abi, uint64_t max_archive_bytes,
+    MocktailTrustedUrlCallback is_trusted_url,
+    MocktailPayloadStoreStringCallback on_build_id,
+    MocktailPinnedArchiveCallback on_archive, void* ctx, char* out_err,
+    size_t err_cap);
+int32_t mocktail_rust_http_read_resume_etag(const char* state_path,
+                                            const char* expected_url,
+                                            char* out_etag, size_t etag_cap);
+int32_t mocktail_rust_http_write_resume_state(const char* state_path,
+                                              const char* url,
+                                              const char* etag);
+
+struct MocktailRustUpdateState* mocktail_rust_update_state_new(
+    const char* state_path);
+void mocktail_rust_update_state_free(struct MocktailRustUpdateState* state);
+void mocktail_rust_update_state_save_phase(
+    struct MocktailRustUpdateState* state, const char* phase);
+void mocktail_rust_update_state_set_metadata_status(
+    struct MocktailRustUpdateState* state, const char* status);
+void mocktail_rust_update_state_record_latest_check(
+    struct MocktailRustUpdateState* state, bool available,
+    const char* version_name, uint64_t version_code);
+bool mocktail_rust_update_state_get_latest_downloaded(
+    const struct MocktailRustUpdateState* state, char* out_version_name,
+    size_t ver_cap, uint64_t* out_version_code, char* out_payload_id,
+    size_t pid_cap);
+void mocktail_rust_update_state_record_latest_downloaded(
+    struct MocktailRustUpdateState* state, const char* payload_id,
+    const char* version_name, uint64_t version_code);
+void mocktail_rust_update_state_finish_and_save(
+    struct MocktailRustUpdateState* state, bool active_valid,
+    const char* active_payload_id, const char* active_version_name,
+    uint64_t active_version_code, uint64_t supported_version_code,
+    bool succeeded, bool changed, const char* message, const char* error,
+    bool* out_stale);
+
+// 139. Runtime Policies, Compat Build Profile & WebView/Discord JSON Helpers
+typedef struct MocktailRustBuildProfileView {
+  struct MocktailRustStrSlice version_name;
+  int32_t version_code;
+  struct MocktailRustStrSlice elf_build_id;
+  int32_t status;
+  bool default_allowed;
+  bool allow_legacy_binary_patches;
+  bool allow_host_abi_bridges;
+  bool allow_host_constructor_replay;
+  bool has_fullscreen_setter_rva;
+  uintptr_t fullscreen_setter_rva;
+  bool has_fmod_bridge;
+  uintptr_t fmod_vtable_rva;
+  uintptr_t fmod_string_constructor_rva;
+  uintptr_t fmod_count_method_rva;
+  uintptr_t fmod_info_method_rva;
+  uintptr_t fmod_current_method_rva;
+  uintptr_t fmod_select_method_rva;
+  uint8_t fmod_vtable_layout_version;
+  uintptr_t fmod_input_method_rvas[4];
+  struct MocktailRustStrSlice reason;
+} MocktailRustBuildProfileView;
+
+typedef void (*MocktailBuildProfileCallback)(
+    void* ctx, const MocktailRustBuildProfileView* profile);
+
+typedef struct MocktailRustDiscordActivity {
+  const char* details;
+  size_t details_len;
+  const char* state;
+  size_t state_len;
+  bool has_start_timestamp;
+  int64_t start_timestamp;
+  const char* large_image;
+  size_t large_image_len;
+  const char* large_text;
+  size_t large_text_len;
+  const char* button_label;
+  size_t button_label_len;
+  const char* button_url;
+  size_t button_url_len;
+} MocktailRustDiscordActivity;
+
+typedef struct MocktailRustWebViewOpenView {
+  struct MocktailRustStrSlice url;
+  bool has_title;
+  struct MocktailRustStrSlice title;
+  bool has_is_visible;
+  bool is_visible;
+  bool has_window_type;
+  struct MocktailRustStrSlice window_type;
+  bool has_show_domain_as_title;
+  bool show_domain_as_title;
+  bool has_back_button_visible;
+  bool back_button_visible;
+  bool has_hide_header;
+  bool hide_header;
+  bool has_search_type;
+  struct MocktailRustStrSlice search_type;
+} MocktailRustWebViewOpenView;
+
+typedef void (*MocktailWebViewOpenCallback)(
+    void* ctx, const MocktailRustWebViewOpenView* view);
+
+typedef struct MocktailRustWebViewMutationView {
+  bool has_url;
+  struct MocktailRustStrSlice url;
+  bool has_title;
+  struct MocktailRustStrSlice title;
+  bool has_is_visible;
+  bool is_visible;
+  bool has_window_type;
+  struct MocktailRustStrSlice window_type;
+  bool has_show_domain_as_title;
+  bool show_domain_as_title;
+  bool has_search_type;
+  struct MocktailRustStrSlice search_type;
+} MocktailRustWebViewMutationView;
+
+typedef void (*MocktailWebViewMutationCallback)(
+    void* ctx, const MocktailRustWebViewMutationView* view);
+
+typedef void (*MocktailCaptchaOpenCallback)(
+    void* ctx, bool is_login, const char* normalized_type, size_t type_len,
+    const char* credential_value, size_t value_len);
+
+int32_t mocktail_rust_json_normalize_object(
+    const char* json_ptr, size_t json_len, bool allow_comments,
+    MocktailPayloadStoreStringCallback on_json, void* ctx);
+void mocktail_rust_support_bundle_format_payload_summary(
+    const char* manifest_ptr, size_t manifest_len,
+    MocktailPayloadStoreStringCallback on_summary, void* ctx);
+int32_t mocktail_rust_find_build_profile(
+    const char* manifest_path, const char* build_id, size_t build_id_len,
+    MocktailBuildProfileCallback on_profile, void* ctx, char* out_err,
+    size_t err_cap);
+int32_t mocktail_rust_performance_merge_overrides(
+    bool multithreaded_rendering, int32_t physics_worker_mode,
+    bool physics_worker_mode_valid, int32_t available_physical_cores,
+    const char* graphics_quality_ptr, size_t graphics_quality_len,
+    const char* base_json_ptr, size_t base_json_len,
+    MocktailPayloadStoreStringCallback on_json, void* ctx, char* out_err,
+    size_t err_cap);
+int32_t mocktail_rust_platform_cache_strip_hydration_keys(
+    const char* json_ptr, size_t json_len, bool* out_changed,
+    MocktailPayloadStoreStringCallback on_json, void* ctx);
+int32_t mocktail_rust_platform_cache_build_fingerprint(
+    int32_t schema_version, const char* revision_ptr, size_t revision_len,
+    MocktailPayloadStoreStringCallback on_json, void* ctx);
+int32_t mocktail_rust_platform_cache_read_theme(
+    const char* json_ptr, size_t json_len, int64_t authenticated_user_id,
+    bool* out_has_theme, bool* out_dark_theme);
+int32_t mocktail_rust_platform_cache_apply_theme(
+    const char* json_ptr, size_t json_len, bool has_storage,
+    int64_t authenticated_user_id, bool dark_theme, bool* out_changed,
+    MocktailPayloadStoreStringCallback on_json, void* ctx, char* out_err,
+    size_t err_cap);
+int32_t mocktail_rust_browser_tracker_read_stored_id(
+    const char* json_ptr, size_t json_len, bool* out_has_id, char* out_id,
+    size_t id_cap);
+int32_t mocktail_rust_browser_tracker_set_stored_id(
+    const char* json_ptr, size_t json_len, const char* id_ptr, size_t id_len,
+    MocktailPayloadStoreStringCallback on_json, void* ctx);
+int32_t mocktail_rust_browser_tracker_parse_init_response(
+    const char* body_ptr, size_t body_len, char* out_id, size_t id_cap);
+int32_t mocktail_rust_discord_parse_rpc_error(
+    const char* payload_ptr, size_t payload_len, int64_t* out_code,
+    char* out_msg, size_t msg_cap);
+int32_t mocktail_rust_discord_build_handshake(
+    const char* app_id_ptr, size_t app_id_len,
+    MocktailPayloadStoreStringCallback on_json, void* ctx);
+bool mocktail_rust_discord_is_ready_event(const char* payload_ptr,
+                                          size_t payload_len);
+int32_t mocktail_rust_discord_build_set_activity(
+    int32_t pid, const struct MocktailRustDiscordActivity* activity,
+    uint64_t nonce, MocktailPayloadStoreStringCallback on_json, void* ctx);
+int32_t mocktail_rust_discord_parse_universe_id(const char* json_ptr,
+                                                size_t json_len,
+                                                int64_t* out_universe_id);
+int32_t mocktail_rust_discord_parse_game_name(const char* json_ptr,
+                                              size_t json_len, char* out_name,
+                                              size_t name_cap);
+int32_t mocktail_rust_discord_parse_icon_url(const char* json_ptr,
+                                             size_t json_len, char* out_url,
+                                             size_t url_cap);
+int32_t mocktail_rust_webview_parse_open_json(
+    const char* json_ptr, size_t json_len, MocktailWebViewOpenCallback on_parsed,
+    void* ctx, char* out_err, size_t err_cap);
+int32_t mocktail_rust_webview_parse_mutation_json(
+    const char* json_ptr, size_t json_len,
+    MocktailWebViewMutationCallback on_parsed, void* ctx, char* out_err,
+    size_t err_cap);
+int32_t mocktail_rust_webview_parse_captcha_open_json(
+    const char* json_ptr, size_t json_len,
+    MocktailCaptchaOpenCallback on_parsed, void* ctx, char* out_err,
+    size_t err_cap);
+
+// 140. HostAbi Deriver JSON Helpers
+typedef void (*MocktailDeriverSpecCallback)(void* ctx, const char* name,
+                                            size_t name_len,
+                                            uint64_t reference_rva,
+                                            size_t instruction_count,
+                                            bool registry_size_may_change,
+                                            size_t minimum_anchor_bytes);
+
+typedef struct MocktailRustDeriverRuntimeAnchors {
+  bool has_fullscreen_setter;
+  uint64_t fullscreen_setter_rva;
+  bool has_fmod;
+  uint64_t fmod_vtable_rva;
+  uint64_t fmod_string_constructor_rva;
+  uint64_t fmod_count_method_rva;
+  uint64_t fmod_info_method_rva;
+  uint64_t fmod_current_method_rva;
+  uint64_t fmod_select_method_rva;
+  int32_t fmod_layout_version;
+  uint64_t fmod_input_methods[4];
+} MocktailRustDeriverRuntimeAnchors;
+
+typedef struct MocktailRustDeriverPlan {
+  size_t candidate_constructor_indices[4];
+  uint64_t candidate_constructor_rvas[4];
+  uint64_t allocator_object_slot_rva;
+  uint64_t empty_string_slot_rva;
+  uint64_t jni_singleton_slot_rva;
+  uint64_t arena_guard_slot_rva;
+  uint64_t arena_table_slot_rva;
+  uint64_t old_registry_initializer_rva;
+  uint64_t old_registry_slot_rva;
+} MocktailRustDeriverPlan;
+
+typedef struct MocktailRustDeriverBuildInputs {
+  struct MocktailRustStrSlice ref_build_id;
+  struct MocktailRustStrSlice ref_sha256;
+  struct MocktailRustStrSlice cand_build_id;
+  struct MocktailRustStrSlice cand_sha256;
+  size_t reference_init_count;
+  size_t candidate_init_count;
+  uint64_t init_array_offset;
+  uint64_t bridge_rvas[6];
+  uint64_t arena_initializer_rva;
+  uint64_t allocator_thread_initializer_rva;
+  uint64_t registry_initializer_rva;
+  uint64_t registry_slot_rva;
+  uint64_t allocator_object_initializer_rva;
+  uint64_t empty_string_initializer_rva;
+  uint64_t jni_singleton_initializer_rva;
+  uint64_t allocator_object_slot_rva;
+  uint64_t empty_string_slot_rva;
+  uint64_t jni_singleton_slot_rva;
+  uint64_t arena_guard_slot_rva;
+  uint64_t arena_table_slot_rva;
+  uint64_t candidate_constructor_rvas[4];
+  size_t candidate_constructor_indices[4];
+  bool has_derived_fullscreen_setter;
+  uint64_t derived_fullscreen_setter_rva;
+  bool has_derived_fmod;
+  uint64_t derived_fmod_vtable_rva;
+  uint64_t derived_fmod_string_constructor_rva;
+  uint64_t derived_fmod_count_method_rva;
+  uint64_t derived_fmod_info_method_rva;
+  uint64_t derived_fmod_current_method_rva;
+  uint64_t derived_fmod_select_method_rva;
+  int32_t derived_fmod_layout_version;
+  bool derived_fmod_has_input;
+  uint64_t derived_fmod_input_methods[4];
+} MocktailRustDeriverBuildInputs;
+
+int32_t mocktail_rust_deriver_read_sidecar_identity(
+    const char* json_ptr, size_t json_len, const char* sidecar_path_ptr,
+    size_t sidecar_path_len, char* out_build_id, size_t build_id_cap,
+    char* out_payload_id, size_t payload_id_cap, char* out_err, size_t err_cap);
+int32_t mocktail_rust_deriver_load_candidate_metadata(
+    const char* json_ptr, size_t json_len, const char* metadata_path_ptr,
+    size_t metadata_path_len, const char* dir_filename_ptr,
+    size_t dir_filename_len, const char* candidate_build_id_ptr,
+    size_t candidate_build_id_len, const char* candidate_sha256_ptr,
+    size_t candidate_sha256_len, const char* guest_abi_ptr,
+    size_t guest_abi_len, char* out_version_name, size_t version_name_cap,
+    uint64_t* out_version_code, char* out_err, size_t err_cap);
+int32_t mocktail_rust_deriver_load_runtime_anchors(
+    const struct MocktailRustStrSlice* manifest_jsons_ptr,
+    const struct MocktailRustStrSlice* manifest_paths_ptr,
+    size_t manifest_count, const char* reference_build_id_ptr,
+    size_t reference_build_id_len,
+    MocktailRustDeriverRuntimeAnchors* out_anchors, char* out_err,
+    size_t err_cap);
+int32_t mocktail_rust_deriver_validate_reference_identity(
+    const char* sidecar_ptr, size_t sidecar_len,
+    const char* ref_build_id_ptr, size_t ref_build_id_len,
+    const char* ref_sha256_ptr, size_t ref_sha256_len, char* out_err,
+    size_t err_cap);
+int32_t mocktail_rust_deriver_extract_specs(
+    const char* sidecar_ptr, size_t sidecar_len,
+    MocktailDeriverSpecCallback on_spec, void* ctx, char* out_err,
+    size_t err_cap);
+int32_t mocktail_rust_deriver_check_init_array(
+    const char* sidecar_ptr, size_t sidecar_len, size_t reference_init_len,
+    size_t candidate_init_len, size_t* out_reference_count, char* out_err,
+    size_t err_cap);
+int32_t mocktail_rust_deriver_resolve_constructors_and_seeds(
+    const char* sidecar_ptr, size_t sidecar_len,
+    const uint64_t* reference_init_ptr, size_t reference_init_len,
+    const uint64_t* candidate_init_ptr, size_t candidate_init_len,
+    const uint64_t* ctor_candidate_rvas_ptr,
+    const uint64_t* ctor_ref_first_insn_rvas_ptr,
+    MocktailRustDeriverPlan* out_plan, char* out_err, size_t err_cap);
+int32_t mocktail_rust_deriver_build_documents(
+    const char* sidecar_ptr, size_t sidecar_len, const char* metadata_ptr,
+    size_t metadata_len, const MocktailRustDeriverBuildInputs* inputs,
+    MocktailPayloadStoreStringCallback on_profile_json,
+    MocktailPayloadStoreStringCallback on_compatibility_json, void* ctx,
+    char* out_err, size_t err_cap);
+
 #ifdef __cplusplus
 }
 #endif

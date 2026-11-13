@@ -4,7 +4,6 @@
 
 #include <array>
 #include <filesystem>
-#include <nlohmann/json.hpp>
 #include <string>
 #include <utility>
 
@@ -73,31 +72,24 @@ std::vector<std::string> ParseApkPureExactDownloadUrls(
   if (error != nullptr) error->clear();
   std::vector<std::string> result;
   const std::string version_str(version);
-  std::string urls_json(8192, '\0');
   std::array<char, 512> err_buf{};
-  const int rc = mocktail_rust_apkpure_parse_exact_urls(
+  const auto on_url = [](void* ctx, const char* ptr, size_t len) {
+    if (ptr != nullptr && len > 0) {
+      static_cast<std::vector<std::string>*>(ctx)->emplace_back(ptr, len);
+    }
+  };
+  const int rc = mocktail_rust_apkpure_parse_exact_urls_cb(
       reinterpret_cast<const uint8_t*>(metadata.data()), metadata.size(),
-      version_str.c_str(), version_code, urls_json.data(), urls_json.size(),
-      err_buf.data(), err_buf.size());
+      version_str.c_str(), version_code, on_url, &result, err_buf.data(),
+      err_buf.size());
   if (rc != 0) {
+    result.clear();
     if (error != nullptr) {
       *error = err_buf[0] != '\0'
                    ? std::string(err_buf.data())
                    : "APKPure does not offer the requested exact version";
     }
     return result;
-  }
-  const auto parsed = nlohmann::json::parse(urls_json.c_str(), nullptr, false);
-  if (parsed.is_discarded() || !parsed.is_array()) {
-    if (error != nullptr) {
-      *error = "APKPure does not offer the requested exact version";
-    }
-    return result;
-  }
-  for (const auto& entry : parsed) {
-    if (entry.is_string()) {
-      result.push_back(entry.get<std::string>());
-    }
   }
   if (result.empty() && error != nullptr) {
     *error = "APKPure does not offer the requested exact version";

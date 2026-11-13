@@ -1,15 +1,13 @@
 #include "runtime/roblox_permissions_bridge.h"
 #include "mocktail/mocktail_rust.h"
 
+#include <string>
 #include <string_view>
-
-#include <nlohmann/json.hpp>
 
 namespace mocktail {
 namespace runtime {
 namespace {
 constexpr std::size_t kMaximumJsonBytes = 64 * 1024;
-constexpr char kMicrophone[] = "MICROPHONE_ACCESS";
 
 const char* StaticOutcomeLiteral(std::string_view value) {
   if (value == "supported") return "supported";
@@ -19,23 +17,15 @@ const char* StaticOutcomeLiteral(std::string_view value) {
   return "invalid_request";
 }
 
-struct Response {
-  nlohmann::json body;
-  jint code = 0;
-  const char* outcome = "DENIED";
-};
-
-Response Answer(JNIEnv* env, jstring message, std::size_t method,
-                bool microphone_enabled) {
+RobloxMessageBusReply Answer(JNIEnv* env, jstring message, std::size_t method,
+                             bool microphone_enabled) {
   const bool support = method == 0;
   const bool upsell = method >= 3;
-  Response rejected{
-      support  ? nlohmann::json{{"permissions", nlohmann::json::array()}}
-      : upsell ? nlohmann::json{{"upsellStatus", "HIDE"},
-                                {"hiddenUpsellPermissions", {kMicrophone}}}
-               : nlohmann::json{{"status", "DENIED"},
-                                {"missingPermissions", {kMicrophone}}},
-      13, "invalid_request"};
+  const char* rejected_body =
+      support  ? "{\"permissions\":[]}"
+      : upsell ? "{\"hiddenUpsellPermissions\":[\"MICROPHONE_ACCESS\"],\"upsellStatus\":\"HIDE\"}"
+               : "{\"missingPermissions\":[\"MICROPHONE_ACCESS\"],\"status\":\"DENIED\"}";
+  RobloxMessageBusReply rejected{rejected_body, 13, "invalid_request"};
   if (!message)
     return rejected;
   const jsize size = env->GetStringUTFLength(message);
@@ -48,23 +38,17 @@ Response Answer(JNIEnv* env, jstring message, std::size_t method,
   const std::string owned(bytes, static_cast<std::size_t>(size));
   env->ReleaseStringUTFChars(message, bytes);
 
-  const auto request = nlohmann::json::parse(owned, nullptr, false);
-  if (!request.is_object())
-    return rejected;
-
-  char body[kMaximumJsonBytes];
+  std::string body(kMaximumJsonBytes, '\0');
   size_t body_len = 0;
   int32_t code = 0;
-  char outcome[64];
+  char outcome[64] = {};
   if (mocktail_rust_format_permissions_reply(
           method, microphone_enabled ? 1 : 0, owned.c_str(),
-          body, sizeof(body), &body_len,
-          &code, outcome, sizeof(outcome)) == 0) {
-    auto parsed_body =
-        nlohmann::json::parse(std::string_view(body, body_len), nullptr, false);
-    if (!parsed_body.is_discarded()) {
-      return {std::move(parsed_body), code, StaticOutcomeLiteral(outcome)};
-    }
+          body.data(), body.size(), &body_len,
+          &code, outcome, sizeof(outcome)) == 0 &&
+      body_len <= body.size()) {
+    body.resize(body_len);
+    return {std::move(body), code, StaticOutcomeLiteral(outcome)};
   }
   return rejected;
 }
@@ -83,9 +67,7 @@ RobloxPermissionsBridge::RobloxPermissionsBridge(
                                    "ShouldShowRequestPermissionRationale"},
           [microphone_enabled](JNIEnv* env, jstring message,
                                std::size_t method) {
-            auto response = Answer(env, message, method, microphone_enabled);
-            return RobloxMessageBusReply{response.body.dump(), response.code,
-                                         response.outcome};
+            return Answer(env, message, method, microphone_enabled);
           })) {}
 
 RobloxPermissionsBridge::~RobloxPermissionsBridge() = default;

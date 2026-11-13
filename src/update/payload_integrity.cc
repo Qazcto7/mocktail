@@ -1,6 +1,5 @@
 #include "update/payload_integrity.h"
 
-#define JSON_NOEXCEPTION 1
 #include <fcntl.h>
 #include <openssl/evp.h>
 #include <sys/stat.h>
@@ -13,7 +12,6 @@
 #include <cerrno>
 #include <filesystem>
 #include <mutex>
-#include <nlohmann/json.hpp>
 #include <string>
 #include <thread>
 #include <vector>
@@ -128,62 +126,56 @@ std::string HashAssetTree(const std::filesystem::path& root,
   return std::string(hex_buf);
 }
 
+namespace {
+
+using PayloadInfoQueryFn = int (*)(const char*, MocktailPayloadInfoCallback,
+                                   void*, char*, size_t);
+
+PayloadIntegrityResult RunPayloadInfoQuery(
+    const std::filesystem::path& directory, PayloadInfoQueryFn query_fn,
+    const char* fallback_error) {
+  PayloadIntegrityResult result;
+  char err_buf[512] = {};
+  const auto on_info = [](void* ctx,
+                          const MocktailRustPayloadInfoView* view) {
+    auto* out = static_cast<PayloadIntegrityResult*>(ctx);
+    auto assign_slice = [](const MocktailRustStrSlice& s, std::string* dst) {
+      if (s.ptr != nullptr && s.len > 0) {
+        dst->assign(s.ptr, s.len);
+      } else {
+        dst->clear();
+      }
+    };
+    assign_slice(view->package_name, &out->metadata.package_name);
+    assign_slice(view->version_name, &out->metadata.version_name);
+    out->metadata.version_code = view->version_code;
+    assign_slice(view->build_id, &out->metadata.build_id);
+    assign_slice(view->library_sha256, &out->metadata.library_sha256);
+    assign_slice(view->base_apk_sha256, &out->metadata.base_apk_sha256);
+    assign_slice(view->split_apk_sha256, &out->metadata.split_apk_sha256);
+    out->metadata.asset_file_count = view->asset_file_count;
+    assign_slice(view->asset_tree_sha256, &out->metadata.asset_tree_sha256);
+    assign_slice(view->payload_id, &out->payload_id);
+  };
+  if (query_fn(directory.c_str(), on_info, &result, err_buf, sizeof(err_buf)) !=
+      0) {
+    result.error = err_buf[0] != '\0' ? err_buf : fallback_error;
+  }
+  return result;
+}
+
+}  // namespace
+
 PayloadIntegrityResult InspectPreparedPayload(
     const std::filesystem::path& directory) {
-  PayloadIntegrityResult result;
-  std::vector<char> json_buf(8192);
-  char err_buf[512] = {};
-  int rc = mocktail_rust_payload_inspect(
-      directory.c_str(), json_buf.data(), json_buf.size(), err_buf, sizeof(err_buf));
-  if (rc != 0) {
-    result.error = err_buf[0] != '\0' ? err_buf : "failed to inspect payload";
-    return result;
-  }
-  const auto doc = nlohmann::json::parse(json_buf.data(), nullptr, false, true);
-  if (doc.is_discarded() || !doc.is_object()) {
-    result.error = "invalid payload inspection JSON";
-    return result;
-  }
-  result.metadata.package_name = doc.value("package_name", "");
-  result.metadata.version_name = doc.value("version_name", "");
-  result.metadata.version_code = doc.value("version_code", 0ULL);
-  result.metadata.build_id = doc.value("build_id", "");
-  result.metadata.library_sha256 = doc.value("library_sha256", "");
-  result.metadata.base_apk_sha256 = doc.value("base_apk_sha256", "");
-  result.metadata.split_apk_sha256 = doc.value("split_apk_sha256", "");
-  result.metadata.asset_file_count = doc.value("asset_file_count", 0ULL);
-  result.metadata.asset_tree_sha256 = doc.value("asset_tree_sha256", "");
-  result.payload_id = doc.value("payload_id", "");
-  return result;
+  return RunPayloadInfoQuery(directory, mocktail_rust_payload_inspect_cb,
+                             "failed to inspect payload");
 }
 
 PayloadIntegrityResult VerifyPreparedPayload(
     const std::filesystem::path& directory) {
-  PayloadIntegrityResult result;
-  std::vector<char> json_buf(8192);
-  char err_buf[512] = {};
-  int rc = mocktail_rust_payload_verify(
-      directory.c_str(), json_buf.data(), json_buf.size(), err_buf, sizeof(err_buf));
-  if (rc != 0) {
-    result.error = err_buf[0] != '\0' ? err_buf : "failed to verify payload";
-    return result;
-  }
-  const auto doc = nlohmann::json::parse(json_buf.data(), nullptr, false, true);
-  if (doc.is_discarded() || !doc.is_object()) {
-    result.error = "invalid payload verification JSON";
-    return result;
-  }
-  result.metadata.package_name = doc.value("package_name", "");
-  result.metadata.version_name = doc.value("version_name", "");
-  result.metadata.version_code = doc.value("version_code", 0ULL);
-  result.metadata.build_id = doc.value("build_id", "");
-  result.metadata.library_sha256 = doc.value("library_sha256", "");
-  result.metadata.base_apk_sha256 = doc.value("base_apk_sha256", "");
-  result.metadata.split_apk_sha256 = doc.value("split_apk_sha256", "");
-  result.metadata.asset_file_count = doc.value("asset_file_count", 0ULL);
-  result.metadata.asset_tree_sha256 = doc.value("asset_tree_sha256", "");
-  result.payload_id = doc.value("payload_id", "");
-  return result;
+  return RunPayloadInfoQuery(directory, mocktail_rust_payload_verify_cb,
+                             "failed to verify payload");
 }
 
 }  // namespace mocktail::update

@@ -2,19 +2,19 @@
 
 #include "mocktail/mocktail_rust.h"
 
-#define JSON_NOEXCEPTION 1
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <cstdint>
 #include <filesystem>
-#include <nlohmann/json.hpp>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "runtime/runtime_paths.h"
 
@@ -51,7 +51,7 @@ enum class ReadStatus { kMissing, kReady, kInvalid };
 
 struct JsonReadResult {
   ReadStatus status = ReadStatus::kMissing;
-  nlohmann::json value;
+  std::string value;
   std::string error;
 };
 
@@ -112,16 +112,22 @@ JsonReadResult ReadJsonObject(const std::filesystem::path& path,
     }
     offset += static_cast<std::size_t>(count);
   }
-  nlohmann::json parsed = nlohmann::json::parse(bytes, nullptr, false, true);
-  if (parsed.is_discarded() || !parsed.is_object()) {
+  std::string normalized;
+  const int32_t ok = mocktail_rust_json_normalize_object(
+      bytes.data(), bytes.size(), true,
+      [](void* ctx, const char* ptr, std::size_t len) {
+        static_cast<std::string*>(ctx)->assign(ptr, len);
+      },
+      &normalized);
+  if (ok != 0) {
     return {
         ReadStatus::kInvalid, {}, std::string(label) + " is not a JSON object"};
   }
-  return {ReadStatus::kReady, std::move(parsed), {}};
+  return {ReadStatus::kReady, std::move(normalized), {}};
 }
 
-bool AtomicWriteJson(const std::filesystem::path& path,
-                     const nlohmann::json& value, std::string* error) {
+bool AtomicWriteBytes(const std::filesystem::path& path,
+                      std::string_view bytes, std::string* error) {
   std::error_code filesystem_error;
   if (!RuntimePaths::EnsureDirectory(path.parent_path(), &filesystem_error)) {
     *error = "cannot create desktop app-policy directory";
@@ -153,7 +159,6 @@ bool AtomicWriteJson(const std::filesystem::path& path,
   bool stored = false;
   {
     const ScopedFileDescriptor file(descriptor);
-    const std::string bytes = value.dump();
     stored = fchmod(file.get(), S_IRUSR | S_IWUSR) == 0 &&
              WriteAll(file.get(), bytes) && fsync(file.get()) == 0;
   }
@@ -203,13 +208,13 @@ DesktopAppPolicyResult ApplyDesktopAppPolicy(
     result.app_storage_created = true;
   }
 
-  const std::string storage_str = has_storage ? storage.value.dump() : std::string();
+  const std::string storage_str = has_storage ? storage.value : std::string();
 
   std::string default_policy_str;
   const JsonReadResult default_read =
       ReadJsonObject(default_policy_file, "Roblox default app-policy");
   if (default_read.status == ReadStatus::kReady) {
-    default_policy_str = default_read.value.dump();
+    default_policy_str = default_read.value;
   }
 
   std::vector<char> out_storage(storage_str.size() + 16384);
@@ -257,9 +262,10 @@ DesktopAppPolicyResult ApplyDesktopAppPolicy(
   result.updated = updated;
 
   if (updated) {
-    nlohmann::json new_storage_val = nlohmann::json::parse(
-        std::string_view(out_storage.data(), out_storage_len), nullptr, false, true);
-    if (!AtomicWriteJson(app_storage_file, new_storage_val, &result.error)) {
+    if (!AtomicWriteBytes(
+            app_storage_file,
+            std::string_view(out_storage.data(), out_storage_len),
+            &result.error)) {
       return result;
     }
   }

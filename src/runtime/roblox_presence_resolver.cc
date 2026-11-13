@@ -4,7 +4,6 @@
 
 #include <array>
 #include <cstdlib>
-#include <nlohmann/json.hpp>
 #include <string>
 #include <string_view>
 
@@ -74,8 +73,8 @@ Status ResolveFollowUserPlace(int64_t user_id, const std::string& auth_cookie,
     return Invalid("Roblox presence lookup could not initialize a request");
   }
 
-  const nlohmann::json body = {{"userIds", {user_id}}};
-  const std::string payload = body.dump();
+  const std::string payload =
+      "{\"userIds\":[" + std::to_string(user_id) + "]}";
   std::string response;
 
   struct curl_slist* headers = nullptr;

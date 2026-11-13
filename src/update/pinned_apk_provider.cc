@@ -1,15 +1,10 @@
 #include "update/pinned_apk_provider.h"
 
-#define JSON_NOEXCEPTION 1
-#include <algorithm>
-#include <cctype>
-#include <unordered_set>
 #include <utility>
 
 #include "compat/guest_abi.h"
 #include "mocktail/mocktail_rust.h"
 #include "update/payload_integrity.h"
-#include "update/state_file.h"
 
 namespace mocktail::update {
 namespace {
@@ -18,10 +13,6 @@ constexpr std::size_t kMaximumArchiveBytes = 1024ULL * 1024ULL * 1024ULL;
 const std::vector<std::string> kDownloadHosts = {
     "github.com", "release-assets.githubusercontent.com",
     "objects.githubusercontent.com"};
-
-bool HexDigest(const std::string& value, std::size_t size) {
-  return mocktail_rust_pinned_apk_hex_digest(value.data(), value.size(), size) == 1;
-}
 
 bool MatchesArchive(const std::filesystem::path& path,
                     const PinnedApkArchive& archive) {
@@ -42,66 +33,45 @@ PinnedApkSource LoadPinnedApkSource(const std::filesystem::path& manifest,
     result.error = "invalid pinned APK version";
     return result;
   }
-  const auto document = ReadStateFile(manifest);
-  if (!document.is_object() || !document.contains("schema_version") ||
-      !document["schema_version"].is_number_integer() ||
-      document["schema_version"] != 1 || !document.contains("sources") ||
-      !document["sources"].is_array()) {
-    result.error = "pinned APK source manifest is unavailable or invalid";
-    return result;
+  const std::string abi_str(abi);
+  char err_buf[512] = {};
+  const auto is_trusted = [](void*, const char* url_ptr, size_t url_len) -> bool {
+    if (url_ptr == nullptr) return false;
+    return IsTrustedHttpsUrl(std::string_view(url_ptr, url_len),
+                             kDownloadHosts);
+  };
+  const auto on_build_id = [](void* ctx, const char* ptr, size_t len) {
+    auto* out = static_cast<PinnedApkSource*>(ctx);
+    if (ptr != nullptr && len > 0) out->build_id.assign(ptr, len);
+  };
+  const auto on_archive = [](void* ctx, const char* filename_ptr,
+                             size_t filename_len, const char* url_ptr,
+                             size_t url_len, const char* sha_ptr,
+                             size_t sha_len, uint64_t size) {
+    auto* out = static_cast<PinnedApkSource*>(ctx);
+    PinnedApkArchive archive;
+    if (filename_ptr != nullptr && filename_len > 0) {
+      archive.filename.assign(filename_ptr, filename_len);
+    }
+    if (url_ptr != nullptr && url_len > 0) {
+      archive.url.assign(url_ptr, url_len);
+    }
+    if (sha_ptr != nullptr && sha_len > 0) {
+      archive.sha256.assign(sha_ptr, sha_len);
+    }
+    archive.size = size;
+    out->archives.push_back(std::move(archive));
+  };
+  if (mocktail_rust_pinned_apk_find_source(
+          manifest.c_str(), version.version_name.c_str(), version.version_code,
+          abi_str.c_str(), kMaximumArchiveBytes, is_trusted, on_build_id,
+          on_archive, &result, err_buf, sizeof(err_buf)) != 0) {
+    result.build_id.clear();
+    result.archives.clear();
+    result.error = err_buf[0] != '\0'
+                       ? err_buf
+                       : "pinned APK source manifest is unavailable or invalid";
   }
-  for (const auto& source : document["sources"]) {
-    if (!source.is_object() || !source.contains("abi") ||
-        source["abi"] != abi || !source.contains("version_name") ||
-        source["version_name"] != version.version_name ||
-        !source.contains("version_code") ||
-        source["version_code"] != version.version_code)
-      continue;
-    if (!result.archives.empty()) {
-      result.error = "pinned APK source is duplicated";
-      return result;
-    }
-    if (!source.contains("package") || source["package"] != "com.roblox.client" ||
-        !source.contains("elf_build_id") ||
-        !source["elf_build_id"].is_string() ||
-        !HexDigest(source["elf_build_id"].get<std::string>(), 40) ||
-        !source.contains("archives") || !source["archives"].is_array() ||
-        source["archives"].empty() || source["archives"].size() > 4) {
-      result.error = "pinned APK source has invalid identity or archives";
-      return result;
-    }
-    result.build_id = source["elf_build_id"].get<std::string>();
-    std::unordered_set<std::string> filenames;
-    for (const auto& entry : source["archives"]) {
-      if (!entry.is_object() || !entry.contains("filename") ||
-          !entry["filename"].is_string() || !entry.contains("url") ||
-          !entry["url"].is_string() || !entry.contains("sha256") ||
-          !entry["sha256"].is_string() || !entry.contains("size") ||
-          !entry["size"].is_number_unsigned()) {
-        result.error = "pinned APK archive is incomplete";
-        return result;
-      }
-      PinnedApkArchive archive{entry["filename"].get<std::string>(),
-                               entry["url"].get<std::string>(),
-                               entry["sha256"].get<std::string>(),
-                               entry["size"].get<std::size_t>()};
-      if (archive.filename.empty() ||
-          !mocktail_rust_pinned_apk_archive_filename_valid(
-              archive.filename.data(), archive.filename.size()) ||
-          !filenames.insert(archive.filename).second ||
-          !mocktail_rust_pinned_apk_archive_limits_valid(
-              archive.size, kMaximumArchiveBytes) ||
-          !HexDigest(archive.sha256, 64) ||
-          !IsTrustedHttpsUrl(archive.url, kDownloadHosts)) {
-        result.error = "pinned APK archive has an invalid name, URL, or digest";
-        return result;
-      }
-      result.archives.push_back(std::move(archive));
-    }
-  }
-  if (result.archives.empty())
-    result.error = "no pinned APK source for Roblox " + version.version_name +
-                   " (" + std::string(abi) + ")";
   return result;
 }
 
