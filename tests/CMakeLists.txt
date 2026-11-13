@@ -608,6 +608,7 @@ add_executable(window_fullscreen_request_gate_test
 target_link_libraries(window_fullscreen_request_gate_test PRIVATE
   mocktail_window
   GTest::gtest_main
+  Threads::Threads
 )
 mocktail_apply_compile_options(window_fullscreen_request_gate_test)
 

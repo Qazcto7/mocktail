@@ -1,7 +1,5 @@
 #include "runtime/roblox_fresh_game_launch_controller.h"
 
-#include <utf8proc.h>
-
 #include <cstddef>
 #include <limits>
 #include <utility>

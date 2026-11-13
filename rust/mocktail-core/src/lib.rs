@@ -9,6 +9,11 @@ use std::slice;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
+pub mod text_runtime;
+pub use text_runtime::*;
+pub mod window_gates;
+pub use window_gates::*;
+
 /// Returns the mocktail-core Rust library version string.
 #[no_mangle]
 pub extern "C" fn mocktail_rust_version() -> *const c_char {

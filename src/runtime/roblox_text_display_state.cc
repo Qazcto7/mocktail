@@ -1,13 +1,8 @@
 #include "runtime/roblox_text_display_state.h"
 #include "mocktail/mocktail_rust.h"
 
-#include <utf8proc.h>
-
-#include <algorithm>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <limits>
 #include <string>
 #include <utility>
 
@@ -15,70 +10,27 @@ namespace mocktail {
 namespace runtime {
 namespace {
 
-constexpr char kPasswordBullet[] = "\xE2\x80\xA2";
-
 void SecureClear(std::string* value) {
   if (value == nullptr) {
     return;
   }
-  volatile char* bytes = value->empty() ? nullptr : value->data();
-  for (std::size_t index = 0; index < value->size(); ++index) {
-    bytes[index] = 0;
+  if (!value->empty()) {
+    mocktail_rust_secure_zero(&(*value)[0], value->size());
   }
   value->clear();
-}
-
-std::size_t Utf8ByteForUtf16Cursor(const char* text, std::size_t size,
-                                   int32_t requested_utf16,
-                                   std::size_t* codepoints_before_cursor) {
-  return mocktail_rust_utf8_byte_for_utf16_cursor(
-      text, size, requested_utf16, codepoints_before_cursor);
-}
-
-bool ValidateAndCountUtf8(const char* text, std::size_t size,
-                          std::size_t* codepoints) {
-  std::size_t offset = 0;
-  std::size_t count = 0;
-  while (offset < size) {
-    utf8proc_int32_t codepoint = 0;
-    const utf8proc_ssize_t length = utf8proc_iterate(
-        reinterpret_cast<const utf8proc_uint8_t*>(text + offset),
-        static_cast<utf8proc_ssize_t>(size - offset), &codepoint);
-    if (length <= 0) {
-      return false;
-    }
-    offset += static_cast<std::size_t>(length);
-    ++count;
-  }
-  if (codepoints != nullptr) {
-    *codepoints = count;
-  }
-  return true;
-}
-
-bool NativeGeometryIntersectsViewport(
-    const RobloxTextDisplayUpdate& update,
-    const RobloxTextOverlayViewport& viewport) {
-  if (!viewport.valid()) {
-    return false;
-  }
-  return mocktail_rust_text_geometry_intersects_viewport(
-             update.area_x, update.area_y, update.area_width,
-             update.area_height, viewport.coordinate_width(),
-             viewport.coordinate_height()) == 1;
 }
 
 }  // namespace
 
 int RobloxTextOverlayViewport::coordinate_width() const {
-  return valid() ? static_cast<int>(
-                       std::lround(static_cast<float>(width) / density_scale))
+  return valid() ? mocktail_rust_text_overlay_viewport_coordinate_size(
+                       width, density_scale)
                  : 0;
 }
 
 int RobloxTextOverlayViewport::coordinate_height() const {
-  return valid() ? static_cast<int>(
-                       std::lround(static_cast<float>(height) / density_scale))
+  return valid() ? mocktail_rust_text_overlay_viewport_coordinate_size(
+                       height, density_scale)
                  : 0;
 }
 
@@ -150,13 +102,16 @@ void RobloxTextOverlayPresentation::ClearSensitive() {
 }
 
 bool IsRobloxPasswordTextInputType(int32_t text_input_type) {
-  return text_input_type == 5 || text_input_type == 9 || text_input_type == 10;
+  return mocktail_rust_text_is_password_input(text_input_type) != 0;
 }
 
 RobloxTextOverlayGeometry ResolveRobloxTextOverlayGeometry(
     const RobloxTextDisplayUpdate& update,
     const RobloxTextOverlayViewport& viewport) {
-  if (!NativeGeometryIntersectsViewport(update, viewport)) {
+  MocktailRustTextOverlayGeometryResult resolved{};
+  if (!mocktail_rust_text_overlay_resolve_geometry(
+          update.area_x, update.area_y, update.area_width, update.area_height,
+          viewport.width, viewport.height, viewport.density_scale, &resolved)) {
     // A guessed bottom-screen editor is visibly detached from Roblox's
     // TextBox. Missing native geometry stays fail-closed until a later focus
     // snapshot supplies a real rectangle.
@@ -167,8 +122,8 @@ RobloxTextOverlayGeometry ResolveRobloxTextOverlayGeometry(
   // against the swapchain and advances the source rectangle by the matching
   // amount. Cropping here would shrink the layout box and incorrectly
   // re-align text that is only partially outside the viewport.
-  return {update.area_x, update.area_y, update.area_width, update.area_height,
-          false};
+  return {resolved.x, resolved.y, resolved.width, resolved.height,
+          resolved.used_fallback};
 }
 
 Status BuildRobloxTextOverlayPresentation(
@@ -179,23 +134,33 @@ Status BuildRobloxTextOverlayPresentation(
     return Status::Error(StatusCode::kInvalidArgument,
                          "text overlay presentation output is required");
   }
-  if (update.generation == 0) {
-    return Status::Error(StatusCode::kInvalidArgument,
-                         "text overlay generation must be nonzero");
-  }
-  if (!viewport.valid()) {
-    return Status::Error(StatusCode::kInvalidArgument,
-                         "text overlay viewport must be positive");
-  }
-  if (update.utf8_size != 0 && update.utf8 == nullptr) {
-    return Status::Error(StatusCode::kInvalidArgument,
-                         "text overlay UTF-8 buffer is unavailable");
-  }
-  const char* text = update.utf8 != nullptr ? update.utf8 : "";
-  std::size_t codepoint_count = 0;
-  if (!ValidateAndCountUtf8(text, update.utf8_size, &codepoint_count)) {
-    return Status::Error(StatusCode::kInvalidArgument,
-                         "text overlay received invalid UTF-8");
+  MocktailRustTextPresentationMetrics metrics{};
+  const int32_t prep_status = mocktail_rust_text_display_prepare_presentation(
+      update.generation, viewport.width, viewport.height,
+      viewport.density_scale, update.text_input_type, update.utf8,
+      update.utf8_size, update.cursor_utf16, update.selection_begin_utf16,
+      update.selection_end_utf16, &metrics);
+  switch (prep_status) {
+    case MOCKTAIL_RUST_TEXT_DISPLAY_BUILD_OK:
+      break;
+    case MOCKTAIL_RUST_TEXT_DISPLAY_BUILD_INVALID_GENERATION:
+      return Status::Error(StatusCode::kInvalidArgument,
+                           "text overlay generation must be nonzero");
+    case MOCKTAIL_RUST_TEXT_DISPLAY_BUILD_INVALID_VIEWPORT:
+      return Status::Error(StatusCode::kInvalidArgument,
+                           "text overlay viewport must be positive");
+    case MOCKTAIL_RUST_TEXT_DISPLAY_BUILD_INVALID_UTF8_PTR:
+      return Status::Error(StatusCode::kInvalidArgument,
+                           "text overlay UTF-8 buffer is unavailable");
+    case MOCKTAIL_RUST_TEXT_DISPLAY_BUILD_INVALID_UTF8:
+      return Status::Error(StatusCode::kInvalidArgument,
+                           "text overlay received invalid UTF-8");
+    case MOCKTAIL_RUST_TEXT_DISPLAY_BUILD_PASSWORD_OVERFLOW:
+      return Status::Error(StatusCode::kUnavailable,
+                           "text overlay password mask is too large");
+    default:
+      return Status::Error(StatusCode::kInvalidArgument,
+                           "text overlay presentation preparation failed");
   }
 
   RobloxTextOverlayPresentation candidate;
@@ -210,47 +175,23 @@ Status BuildRobloxTextOverlayPresentation(
   candidate.font = update.font;
   candidate.text_input_type = update.text_input_type;
   candidate.text_wrapped = update.text_wrapped;
+  candidate.caret_utf8_byte = metrics.caret_utf8_byte;
+  candidate.selection_begin_utf8_byte = metrics.selection_begin_utf8_byte;
+  candidate.selection_end_utf8_byte = metrics.selection_end_utf8_byte;
 
-  std::size_t codepoints_before_cursor = 0;
-  const std::size_t caret_source_byte = Utf8ByteForUtf16Cursor(
-      text, update.utf8_size, update.cursor_utf16, &codepoints_before_cursor);
-  std::size_t codepoints_before_selection_begin = 0;
-  std::size_t codepoints_before_selection_end = 0;
-  const std::size_t selection_begin_source_byte = Utf8ByteForUtf16Cursor(
-      text, update.utf8_size, update.selection_begin_utf16,
-      &codepoints_before_selection_begin);
-  const std::size_t selection_end_source_byte = Utf8ByteForUtf16Cursor(
-      text, update.utf8_size, update.selection_end_utf16,
-      &codepoints_before_selection_end);
-  if (IsRobloxPasswordTextInputType(update.text_input_type)) {
-    if (codepoint_count > std::numeric_limits<std::size_t>::max() /
-                              (sizeof(kPasswordBullet) - 1)) {
+  if (metrics.is_password) {
+    candidate.display_utf8.resize(metrics.display_bytes, '\0');
+    if (metrics.codepoint_count > 0 &&
+        mocktail_rust_text_display_write_password_bullets(
+            metrics.codepoint_count,
+            reinterpret_cast<uint8_t*>(&candidate.display_utf8[0]),
+            candidate.display_utf8.size()) !=
+            MOCKTAIL_RUST_TEXT_DISPLAY_BUILD_OK) {
       return Status::Error(StatusCode::kUnavailable,
                            "text overlay password mask is too large");
     }
-    candidate.display_utf8.reserve(codepoint_count *
-                                   (sizeof(kPasswordBullet) - 1));
-    for (std::size_t index = 0; index < codepoint_count; ++index) {
-      candidate.display_utf8.append(kPasswordBullet,
-                                    sizeof(kPasswordBullet) - 1);
-    }
-    candidate.caret_utf8_byte =
-        codepoints_before_cursor * (sizeof(kPasswordBullet) - 1);
-    candidate.selection_begin_utf8_byte =
-        std::min(codepoints_before_selection_begin,
-                 codepoints_before_selection_end) *
-        (sizeof(kPasswordBullet) - 1);
-    candidate.selection_end_utf8_byte =
-        std::max(codepoints_before_selection_begin,
-                 codepoints_before_selection_end) *
-        (sizeof(kPasswordBullet) - 1);
-  } else {
-    candidate.display_utf8.assign(text, update.utf8_size);
-    candidate.caret_utf8_byte = caret_source_byte;
-    candidate.selection_begin_utf8_byte =
-        std::min(selection_begin_source_byte, selection_end_source_byte);
-    candidate.selection_end_utf8_byte =
-        std::max(selection_begin_source_byte, selection_end_source_byte);
+  } else if (update.utf8_size > 0 && update.utf8 != nullptr) {
+    candidate.display_utf8.assign(update.utf8, update.utf8_size);
   }
 
   *presentation = std::move(candidate);
@@ -266,35 +207,31 @@ Status RobloxTextDisplayState::Apply(const RobloxTextDisplayUpdate& update,
   }
   *changed = false;
 
-  if (update.event == RobloxTextDisplayEvent::kHide) {
-    if (!presentation_.visible ||
-        update.generation != presentation_.generation) {
+  const int32_t action = mocktail_rust_text_display_decide_apply(
+      static_cast<int32_t>(update.event), update.generation,
+      presentation_.visible, presentation_.generation);
+  switch (action) {
+    case MOCKTAIL_RUST_TEXT_DISPLAY_APPLY_NOOP:
+      return Status::Ok();
+    case MOCKTAIL_RUST_TEXT_DISPLAY_APPLY_HIDE_CLEAR:
+      presentation_.ClearSensitive();
+      *changed = true;
+      return Status::Ok();
+    case MOCKTAIL_RUST_TEXT_DISPLAY_APPLY_BUILD_PRESENTATION: {
+      RobloxTextOverlayPresentation candidate;
+      Status status =
+          BuildRobloxTextOverlayPresentation(update, viewport, &candidate);
+      if (!status.ok()) {
+        return status;
+      }
+      presentation_ = std::move(candidate);
+      *changed = true;
       return Status::Ok();
     }
-    presentation_.ClearSensitive();
-    *changed = true;
-    return Status::Ok();
+    default:
+      return Status::Error(StatusCode::kInvalidArgument,
+                           "text overlay event is invalid");
   }
-
-  if (update.event == RobloxTextDisplayEvent::kUpdate &&
-      (!presentation_.visible ||
-       update.generation != presentation_.generation)) {
-    return Status::Ok();
-  }
-  if (update.event == RobloxTextDisplayEvent::kShow && presentation_.visible &&
-      update.generation < presentation_.generation) {
-    return Status::Ok();
-  }
-
-  RobloxTextOverlayPresentation candidate;
-  Status status =
-      BuildRobloxTextOverlayPresentation(update, viewport, &candidate);
-  if (!status.ok()) {
-    return status;
-  }
-  presentation_ = std::move(candidate);
-  *changed = true;
-  return Status::Ok();
 }
 
 void RobloxTextDisplayState::Reset() { presentation_.ClearSensitive(); }

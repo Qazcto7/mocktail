@@ -4,6 +4,9 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -243,6 +246,90 @@ TEST(MainThreadCommandGateTest, DefaultPathAndRegistrationAreDeterministic) {
   gate.Clear();
   EXPECT_TRUE(gate.Invoke());
   EXPECT_EQ(calls, 1);
+  gate.Deactivate();
+}
+
+struct ReentrantCommandState {
+  MainThreadCommandGate* gate = nullptr;
+  int calls = 0;
+  bool return_value = false;
+};
+
+bool ReentrantClearCommand(void* context) {
+  auto* state = static_cast<ReentrantCommandState*>(context);
+  ++state->calls;
+  state->gate->Clear();
+  return state->return_value;
+}
+
+struct BlockingCommandState {
+  std::mutex mutex;
+  std::condition_variable cv;
+  bool entered = false;
+  bool release = false;
+  int calls = 0;
+};
+
+bool BlockingCommand(void* context) {
+  auto* state = static_cast<BlockingCommandState*>(context);
+  std::unique_lock<std::mutex> lock(state->mutex);
+  state->entered = true;
+  state->cv.notify_all();
+  state->cv.wait(lock, [state] { return state->release; });
+  ++state->calls;
+  return true;
+}
+
+TEST(MainThreadCommandGateTest,
+     ClearWaitsForConcurrentInvokeAndAllowsReentrantClear) {
+  MainThreadCommandGate gate;
+  gate.Activate();
+
+  ReentrantCommandState reentrant{&gate, 0, false};
+  ASSERT_TRUE(gate.Register(&ReentrantClearCommand, &reentrant));
+  EXPECT_FALSE(gate.Invoke());
+  EXPECT_EQ(reentrant.calls, 1);
+  EXPECT_TRUE(gate.Invoke());
+  EXPECT_EQ(reentrant.calls, 1);
+
+  BlockingCommandState blocking;
+  ASSERT_TRUE(gate.Register(&BlockingCommand, &blocking));
+
+  std::atomic<bool> clear_started{false};
+  std::atomic<bool> clear_finished{false};
+
+  std::thread invoke_thread([&] { EXPECT_TRUE(gate.Invoke()); });
+
+  {
+    std::unique_lock<std::mutex> lock(blocking.mutex);
+    blocking.cv.wait(lock, [&] { return blocking.entered; });
+  }
+
+  std::thread clear_thread([&] {
+    clear_started.store(true, std::memory_order_release);
+    gate.Clear();
+    clear_finished.store(true, std::memory_order_release);
+  });
+
+  while (!clear_started.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  EXPECT_FALSE(clear_finished.load(std::memory_order_acquire));
+
+  {
+    std::lock_guard<std::mutex> lock(blocking.mutex);
+    blocking.release = true;
+    blocking.cv.notify_all();
+  }
+
+  invoke_thread.join();
+  clear_thread.join();
+
+  EXPECT_TRUE(clear_finished.load(std::memory_order_acquire));
+  EXPECT_EQ(blocking.calls, 1);
+  EXPECT_TRUE(gate.Invoke());
+  EXPECT_EQ(blocking.calls, 1);
   gate.Deactivate();
 }
 

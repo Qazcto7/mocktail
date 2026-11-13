@@ -2,7 +2,7 @@
 #define MOCKTAIL_WINDOW_INPUT_PUMP_PACER_H_
 
 #include <cstdint>
-#include <limits>
+#include <memory>
 
 namespace mocktail {
 namespace window {
@@ -17,36 +17,16 @@ inline constexpr uint64_t kProductionInputPumpIntervalNs =
 class InputPumpPacer final {
  public:
   explicit InputPumpPacer(
-      uint64_t interval_ns = kProductionInputPumpIntervalNs)
-      : interval_ns_(interval_ns) {}
+      uint64_t interval_ns = kProductionInputPumpIntervalNs);
+  ~InputPumpPacer();
+  InputPumpPacer(const InputPumpPacer&) = delete;
+  InputPumpPacer& operator=(const InputPumpPacer&) = delete;
 
-  uint64_t DelayBeforeNextPump(uint64_t now_ns) {
-    if (interval_ns_ == 0) {
-      return 0;
-    }
-    // A tick that already missed (or met) the deadline must not sleep. Sleeping
-    // a full interval after a late engine/present frame adds 4ms on top of
-    // vsync and caps gameplay below refresh. Rebase so the next idle spin is
-    // still limited to 240 Hz.
-    if (next_deadline_ns_ == 0 || now_ns >= next_deadline_ns_) {
-      next_deadline_ns_ = AddSaturating(now_ns, interval_ns_);
-      return 0;
-    }
-    const uint64_t delay_ns = next_deadline_ns_ - now_ns;
-    next_deadline_ns_ = AddSaturating(next_deadline_ns_, interval_ns_);
-    return delay_ns;
-  }
-
-  void Reset() { next_deadline_ns_ = 0; }
+  uint64_t DelayBeforeNextPump(uint64_t now_ns);
+  void Reset();
 
  private:
-  static uint64_t AddSaturating(uint64_t value, uint64_t increment) {
-    const uint64_t maximum = std::numeric_limits<uint64_t>::max();
-    return value > maximum - increment ? maximum : value + increment;
-  }
-
-  const uint64_t interval_ns_;
-  uint64_t next_deadline_ns_ = 0;
+  std::unique_ptr<void, void (*)(void*)> engine_;
 };
 
 }  // namespace window

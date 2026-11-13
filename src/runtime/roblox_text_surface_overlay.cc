@@ -18,6 +18,7 @@
 #include <utility>
 #include <vector>
 
+#include "mocktail/mocktail_rust.h"
 #include "runtime/roblox_text_font_resolver.h"
 
 namespace mocktail {
@@ -36,9 +37,8 @@ void SecureClear(std::string* value) {
   if (value == nullptr) {
     return;
   }
-  volatile char* bytes = value->empty() ? nullptr : value->data();
-  for (std::size_t index = 0; index < value->size(); ++index) {
-    bytes[index] = 0;
+  if (!value->empty()) {
+    mocktail_rust_secure_zero(&(*value)[0], value->size());
   }
   value->clear();
 }
@@ -47,9 +47,8 @@ void SecureClear(std::vector<std::uint8_t>* value) {
   if (value == nullptr) {
     return;
   }
-  volatile std::uint8_t* bytes = value->empty() ? nullptr : value->data();
-  for (std::size_t index = 0; index < value->size(); ++index) {
-    bytes[index] = 0;
+  if (!value->empty()) {
+    mocktail_rust_secure_zero(value->data(), value->size());
   }
   value->clear();
 }
@@ -59,56 +58,29 @@ struct SensitiveString {
   std::string value;
 };
 
-bool IsUtf8Continuation(unsigned char value) {
-  return (value & 0xC0U) == 0x80U;
-}
-
 SensitiveString VisibleTextWindow(
     const RobloxTextOverlayPresentation& presentation, std::size_t* caret_byte,
     std::size_t* selection_begin_byte, std::size_t* selection_end_byte) {
   SensitiveString result;
   const std::string& text = presentation.display_utf8;
-  const std::size_t caret = std::min(presentation.caret_utf8_byte, text.size());
-  const std::size_t selection_begin =
-      std::min(presentation.selection_begin_utf8_byte, text.size());
-  const std::size_t selection_end =
-      std::min(presentation.selection_end_utf8_byte, text.size());
-  if (text.size() <= kMaximumRasterTextBytes) {
-    result.value = text;
-    *caret_byte = caret;
-    *selection_begin_byte = std::min(selection_begin, selection_end);
-    *selection_end_byte = std::max(selection_begin, selection_end);
+  MocktailRustVisibleTextWindow window{};
+  if (mocktail_rust_text_visible_window(
+          reinterpret_cast<const uint8_t*>(text.data()), text.size(),
+          presentation.caret_utf8_byte,
+          presentation.selection_begin_utf8_byte,
+          presentation.selection_end_utf8_byte, kMaximumRasterTextBytes,
+          &window) != 0) {
+    *caret_byte = 0;
+    *selection_begin_byte = 0;
+    *selection_end_byte = 0;
     return result;
   }
-
-  const std::size_t half = kMaximumRasterTextBytes / 2;
-  std::size_t begin = caret > half ? caret - half : 0;
-  std::size_t end = std::min(text.size(), begin + kMaximumRasterTextBytes);
-  if (end - begin < kMaximumRasterTextBytes && begin != 0) {
-    begin = end - kMaximumRasterTextBytes;
+  if (window.end > window.begin && window.end <= text.size()) {
+    result.value.assign(text.data() + window.begin, window.end - window.begin);
   }
-  while (begin < text.size() &&
-         IsUtf8Continuation(static_cast<unsigned char>(text[begin]))) {
-    ++begin;
-  }
-  while (end > begin && end < text.size() &&
-         IsUtf8Continuation(static_cast<unsigned char>(text[end]))) {
-    --end;
-  }
-  result.value.assign(text.data() + begin, end - begin);
-  *caret_byte = std::min(caret - begin, result.value.size());
-  const auto map_to_window = [begin, end](std::size_t byte) {
-    if (byte <= begin) {
-      return std::size_t{0};
-    }
-    if (byte >= end) {
-      return end - begin;
-    }
-    return byte - begin;
-  };
-  *selection_begin_byte =
-      map_to_window(std::min(selection_begin, selection_end));
-  *selection_end_byte = map_to_window(std::max(selection_begin, selection_end));
+  *caret_byte = window.caret_byte;
+  *selection_begin_byte = window.selection_begin_byte;
+  *selection_end_byte = window.selection_end_byte;
   return result;
 }
 

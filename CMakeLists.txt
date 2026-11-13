@@ -154,6 +154,8 @@ add_custom_command(
   WORKING_DIRECTORY "${MOCKTAIL_RUST_CORE_DIR}"
   DEPENDS
     "${MOCKTAIL_RUST_CORE_DIR}/src/lib.rs"
+    "${MOCKTAIL_RUST_CORE_DIR}/src/text_runtime.rs"
+    "${MOCKTAIL_RUST_CORE_DIR}/src/window_gates.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/Cargo.toml"
   COMMENT "Building mocktail-core Rust library"
   VERBATIM
@@ -511,11 +513,18 @@ foreach(stub_target IN ITEMS
 endforeach()
 
 add_library(mocktail_window STATIC
+  src/window/input_pump_pacer.cc
+  src/window/main_thread_command_gate.cc
+  src/window/platform_event_observer.cc
+  src/window/present_observer.cc
   src/window/roblox_fullscreen_menu_request_gate.cc
   src/window/video_driver_policy.cc
+  src/window/vulkan_present_progress_gate.cc
+  src/window/vulkan_surface_recovery_gate.cc
   src/window/window.cc
   src/window/window_creation_policy.cc
   src/window/window_fullscreen_request_gate.cc
+  src/window/window_fullscreen_state_sync.cc
   src/window/window_game_surface_bridge.cc
   src/window/window_pointer_capture_owner.cc
   src/window/window_resize_readiness_gate.cc

@@ -3,7 +3,6 @@
 
 #include <SDL3/SDL_keycode.h>
 #include <SDL3/SDL_scancode.h>
-#include <utf8proc.h>
 
 #include <algorithm>
 #include <limits>

@@ -2728,6 +2728,302 @@ void mocktail_rust_game_surface_bridge_record_event(
     bool changed,
     MocktailRustGameSurfaceBridgeSnapshot* io_snapshot);
 
+// ============================================================================
+// 124. Input Pump Pacer
+// ============================================================================
+
+void* mocktail_rust_input_pump_pacer_new(uint64_t interval_ns);
+void mocktail_rust_input_pump_pacer_free(void* ptr);
+uint64_t mocktail_rust_input_pump_pacer_delay_before_next_pump(
+    void* ptr,
+    uint64_t now_ns);
+void mocktail_rust_input_pump_pacer_reset(void* ptr);
+
+// ============================================================================
+// 125. Vulkan Surface Recovery Gate
+// ============================================================================
+
+typedef struct MocktailRustVulkanSurfaceRecoveryRequest {
+    uint64_t observed_error_count;
+    uint64_t coalesced_error_count;
+    bool retry;
+} MocktailRustVulkanSurfaceRecoveryRequest;
+
+void* mocktail_rust_vulkan_surface_recovery_gate_new(void);
+void mocktail_rust_vulkan_surface_recovery_gate_free(void* ptr);
+bool mocktail_rust_vulkan_surface_recovery_gate_activate(void* ptr);
+void mocktail_rust_vulkan_surface_recovery_gate_deactivate(void* ptr);
+void mocktail_rust_vulkan_surface_recovery_gate_notify_out_of_date(void* ptr);
+void mocktail_rust_vulkan_surface_recovery_gate_notify_present(void* ptr);
+bool mocktail_rust_vulkan_surface_recovery_gate_take_rebind_request(
+    void* ptr,
+    uint64_t now_ticks_ns,
+    MocktailRustVulkanSurfaceRecoveryRequest* out_request);
+
+// ============================================================================
+// 126. Vulkan Present Progress Gate
+// ============================================================================
+
+typedef struct MocktailRustVulkanPresentStallReport {
+    int32_t stage;
+    const char* call_name;
+    uint64_t call_sequence;
+    uint64_t thread_id;
+    uint64_t elapsed_ns;
+    uint64_t frame_count;
+    uint64_t host_present_count;
+    uint64_t last_present_thread_id;
+    bool last_completed_call_snapshot_coherent;
+    const char* last_completed_call_name;
+    uint64_t last_completed_call_sequence;
+    uint64_t last_completed_call_thread_id;
+    uint64_t last_completed_call_started_ns;
+    uint64_t last_completed_call_completed_ns;
+    int32_t last_completed_call_result;
+    const char* oldest_active_call_name;
+    uint64_t oldest_active_call_sequence;
+    uint64_t oldest_active_call_thread_id;
+    uint64_t oldest_active_call_elapsed_ns;
+} MocktailRustVulkanPresentStallReport;
+
+void* mocktail_rust_vulkan_present_progress_gate_new(void);
+void mocktail_rust_vulkan_present_progress_gate_free(void* ptr);
+bool mocktail_rust_vulkan_present_progress_gate_activate(void* ptr);
+void mocktail_rust_vulkan_present_progress_gate_deactivate(void* ptr);
+uint64_t mocktail_rust_vulkan_present_progress_gate_notify_host_present_begin(
+    void* ptr,
+    uint64_t now_ticks_ns,
+    uint64_t thread_id);
+void mocktail_rust_vulkan_present_progress_gate_notify_host_present_end(
+    void* ptr,
+    uint64_t sequence);
+uint64_t mocktail_rust_vulkan_present_progress_gate_notify_call_begin(
+    void* ptr,
+    const char* call_name,
+    uint64_t now_ticks_ns,
+    uint64_t thread_id);
+void mocktail_rust_vulkan_present_progress_gate_notify_call_end(
+    void* ptr,
+    uint64_t sequence,
+    int32_t result,
+    uint64_t now_ticks_ns,
+    uint64_t thread_id);
+void mocktail_rust_vulkan_present_progress_gate_notify_frame_presented(
+    void* ptr,
+    uint64_t now_ticks_ns,
+    uint64_t frame_count,
+    uint64_t thread_id);
+bool mocktail_rust_vulkan_present_progress_gate_poll(
+    void* ptr,
+    uint64_t now_ticks_ns,
+    bool window_can_present,
+    MocktailRustVulkanPresentStallReport* out_report);
+
+// ============================================================================
+// 127. Window Fullscreen State Sync Gate
+// ============================================================================
+
+typedef bool (*MocktailRustFullscreenStateSyncCb)(void* context, bool fullscreen);
+
+void* mocktail_rust_window_fullscreen_state_sync_new(void);
+void mocktail_rust_window_fullscreen_state_sync_free(void* ptr);
+bool mocktail_rust_window_fullscreen_state_sync_register(
+    void* ptr,
+    MocktailRustFullscreenStateSyncCb callback,
+    void* context);
+bool mocktail_rust_window_fullscreen_state_sync_notify(
+    void* ptr,
+    bool fullscreen);
+void mocktail_rust_window_fullscreen_state_sync_clear(void* ptr);
+
+// ============================================================================
+// 128. Main Thread Command Gate
+// ============================================================================
+
+typedef bool (*MocktailRustMainThreadCommandCb)(void* context);
+
+void* mocktail_rust_main_thread_command_gate_new(void);
+void mocktail_rust_main_thread_command_gate_free(void* ptr);
+void mocktail_rust_main_thread_command_gate_activate(void* ptr);
+bool mocktail_rust_main_thread_command_gate_register(
+    void* ptr,
+    MocktailRustMainThreadCommandCb callback,
+    void* context);
+bool mocktail_rust_main_thread_command_gate_invoke(void* ptr);
+void mocktail_rust_main_thread_command_gate_clear(void* ptr);
+void mocktail_rust_main_thread_command_gate_deactivate(void* ptr);
+
+// ============================================================================
+// 129. Platform Event Observer Gate
+// ============================================================================
+
+typedef void (*MocktailRustPlatformEventDispatchFn)(
+    void* target_box,
+    const void* event_ptr);
+typedef void (*MocktailRustDestroyTargetFn)(void* target_box);
+
+void* mocktail_rust_platform_event_observer_gate_new(void);
+void mocktail_rust_platform_event_observer_gate_free(void* ptr);
+bool mocktail_rust_platform_event_observer_gate_activate(void* ptr);
+void mocktail_rust_platform_event_observer_gate_deactivate(void* ptr);
+// Takes ownership of target_box only when returning true.
+bool mocktail_rust_platform_event_observer_gate_register(
+    void* ptr,
+    MocktailRustPlatformEventDispatchFn dispatch,
+    void* target_box,
+    MocktailRustDestroyTargetFn destroy_target);
+void mocktail_rust_platform_event_observer_gate_clear(void* ptr);
+bool mocktail_rust_platform_event_observer_gate_has_observer(void* ptr);
+void mocktail_rust_platform_event_observer_gate_notify(
+    void* ptr,
+    const void* event_ptr);
+
+// ============================================================================
+// 130. Present Observer Registry & Present Lifecycle Gate
+// ============================================================================
+
+typedef void (*MocktailRustPresentObserverCb)(
+    void* context,
+    uint64_t frame_serial);
+
+void* mocktail_rust_present_observer_registry_new(void);
+void mocktail_rust_present_observer_registry_free(void* ptr);
+bool mocktail_rust_present_observer_registry_register(
+    void* ptr,
+    MocktailRustPresentObserverCb observer,
+    void* context);
+void mocktail_rust_present_observer_registry_clear(void* ptr);
+void mocktail_rust_present_observer_registry_notify(
+    void* ptr,
+    uint64_t frame_serial);
+
+void* mocktail_rust_present_lifecycle_gate_new(void);
+void mocktail_rust_present_lifecycle_gate_free(void* ptr);
+bool mocktail_rust_present_lifecycle_gate_activate(void* ptr);
+void mocktail_rust_present_lifecycle_gate_deactivate(void* ptr);
+bool mocktail_rust_present_lifecycle_gate_register(
+    void* ptr,
+    MocktailRustPresentObserverCb observer,
+    void* context);
+void mocktail_rust_present_lifecycle_gate_clear(void* ptr);
+bool mocktail_rust_present_lifecycle_gate_enter_present(void* ptr);
+void mocktail_rust_present_lifecycle_gate_notify_observer(
+    void* ptr,
+    uint64_t frame_serial);
+void mocktail_rust_present_lifecycle_gate_exit_present(void* ptr);
+
+// ============================================================================
+// 131. Roblox Text Display State & Password Masking
+// ============================================================================
+
+enum {
+    MOCKTAIL_RUST_TEXT_DISPLAY_EVENT_SHOW = 0,
+    MOCKTAIL_RUST_TEXT_DISPLAY_EVENT_UPDATE = 1,
+    MOCKTAIL_RUST_TEXT_DISPLAY_EVENT_HIDE = 2,
+};
+
+enum {
+    MOCKTAIL_RUST_TEXT_DISPLAY_APPLY_INVALID_EVENT = -1,
+    MOCKTAIL_RUST_TEXT_DISPLAY_APPLY_NOOP = 0,
+    MOCKTAIL_RUST_TEXT_DISPLAY_APPLY_HIDE_CLEAR = 1,
+    MOCKTAIL_RUST_TEXT_DISPLAY_APPLY_BUILD_PRESENTATION = 2,
+};
+
+enum {
+    MOCKTAIL_RUST_TEXT_DISPLAY_BUILD_NULL_OUT = -1,
+    MOCKTAIL_RUST_TEXT_DISPLAY_BUILD_OK = 0,
+    MOCKTAIL_RUST_TEXT_DISPLAY_BUILD_INVALID_GENERATION = 1,
+    MOCKTAIL_RUST_TEXT_DISPLAY_BUILD_INVALID_VIEWPORT = 2,
+    MOCKTAIL_RUST_TEXT_DISPLAY_BUILD_INVALID_UTF8_PTR = 3,
+    MOCKTAIL_RUST_TEXT_DISPLAY_BUILD_INVALID_UTF8 = 4,
+    MOCKTAIL_RUST_TEXT_DISPLAY_BUILD_PASSWORD_OVERFLOW = 5,
+    MOCKTAIL_RUST_TEXT_DISPLAY_BUILD_BUFFER_TOO_SMALL = 6,
+};
+
+typedef struct MocktailRustTextOverlayGeometryResult {
+    int32_t x;
+    int32_t y;
+    int32_t width;
+    int32_t height;
+    bool used_fallback;
+} MocktailRustTextOverlayGeometryResult;
+
+typedef struct MocktailRustTextPresentationMetrics {
+    size_t codepoint_count;
+    size_t display_bytes;
+    size_t caret_utf8_byte;
+    size_t selection_begin_utf8_byte;
+    size_t selection_end_utf8_byte;
+    bool is_password;
+} MocktailRustTextPresentationMetrics;
+
+int32_t mocktail_rust_text_overlay_viewport_coordinate_size(
+    int32_t extent,
+    float density_scale);
+bool mocktail_rust_text_overlay_resolve_geometry(
+    int32_t area_x,
+    int32_t area_y,
+    int32_t area_w,
+    int32_t area_h,
+    int32_t vp_w,
+    int32_t vp_h,
+    float density_scale,
+    MocktailRustTextOverlayGeometryResult* out_geom);
+int32_t mocktail_rust_text_display_decide_apply(
+    int32_t event,
+    uint64_t update_generation,
+    bool current_visible,
+    uint64_t current_generation);
+int32_t mocktail_rust_text_display_prepare_presentation(
+    uint64_t generation,
+    int32_t vp_w,
+    int32_t vp_h,
+    float density_scale,
+    int32_t text_input_type,
+    const char* utf8,
+    size_t utf8_size,
+    int32_t cursor_utf16,
+    int32_t selection_begin_utf16,
+    int32_t selection_end_utf16,
+    MocktailRustTextPresentationMetrics* out_metrics);
+int32_t mocktail_rust_text_display_write_password_bullets(
+    size_t codepoint_count,
+    uint8_t* out_buf,
+    size_t out_cap);
+
+// ============================================================================
+// 132. Visible Text Window Slicing
+// ============================================================================
+
+typedef struct MocktailRustVisibleTextWindow {
+    size_t begin;
+    size_t end;
+    size_t caret_byte;
+    size_t selection_begin_byte;
+    size_t selection_end_byte;
+} MocktailRustVisibleTextWindow;
+
+int mocktail_rust_text_visible_window(
+    const uint8_t* text,
+    size_t text_len,
+    size_t caret_byte,
+    size_t selection_begin_byte,
+    size_t selection_end_byte,
+    size_t max_window_bytes,
+    MocktailRustVisibleTextWindow* out_window);
+
+// ============================================================================
+// 133. General Bounded UTF-8 -> UTF-16 Surrogate Encoder
+// ============================================================================
+
+int32_t mocktail_rust_utf8_to_utf16_bounded(
+    const char* utf8_str,
+    size_t utf8_len,
+    size_t max_bytes,
+    uint16_t* out_utf16,
+    size_t out_cap,
+    size_t* out_len);
+
 #ifdef __cplusplus
 }
 #endif

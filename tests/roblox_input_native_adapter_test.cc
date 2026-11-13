@@ -479,6 +479,55 @@ TEST_F(RobloxInputNativeAdapterTest,
   EXPECT_EQ(snapshot.native_errors, 0u);
 }
 
+TEST_F(RobloxInputNativeAdapterTest,
+       SyncAndPassHandleEmptyLargeAndInvalidUtf8Text) {
+  RobloxInputNativeAdapter adapter(Environment(), Symbols());
+  ASSERT_TRUE(adapter.Initialize().ok());
+  const auto text_sink = adapter.Sink().text;
+
+  ASSERT_TRUE(text_sink.sync(text_sink.context, nullptr, 0, 0).ok());
+  ASSERT_TRUE(text_sink.pass_text(text_sink.context, 9, nullptr, 0, false, 0).ok());
+  ASSERT_EQ(probe_.calls.size(), 2U);
+  EXPECT_EQ(probe_.calls[0].name, "sync-text");
+  EXPECT_TRUE(probe_.calls[0].text.empty());
+  EXPECT_EQ(probe_.calls[1].name, "pass-text");
+  EXPECT_TRUE(probe_.calls[1].text.empty());
+
+  std::string large_utf8;
+  std::u16string expected_utf16;
+  large_utf8.reserve(4000 * 5);
+  expected_utf16.reserve(4000 * 3);
+  for (int i = 0; i < 4000; ++i) {
+    large_utf8.append("a\xF0\x9F\x98\x80");
+    expected_utf16.append(u"a\U0001F600");
+  }
+  ASSERT_GT(large_utf8.size(), 16384U);
+
+  ASSERT_TRUE(
+      text_sink
+          .sync(text_sink.context, large_utf8.data(), large_utf8.size(), 12000)
+          .ok());
+  ASSERT_TRUE(text_sink
+                  .pass_text(text_sink.context, 77, large_utf8.data(),
+                             large_utf8.size(), true, 12000)
+                  .ok());
+  ASSERT_EQ(probe_.calls.size(), 4U);
+  EXPECT_EQ(probe_.calls[2].text, expected_utf16);
+  EXPECT_EQ(probe_.calls[3].text, expected_utf16);
+
+  const char invalid_utf8[] = {'\xff', '\xfe'};
+  const Status bad_sync =
+      text_sink.sync(text_sink.context, invalid_utf8, sizeof(invalid_utf8), 0);
+  EXPECT_FALSE(bad_sync.ok());
+  EXPECT_EQ(bad_sync.code(), StatusCode::kUnavailable);
+  const Status bad_pass = text_sink.pass_text(
+      text_sink.context, 77, invalid_utf8, sizeof(invalid_utf8), false, 0);
+  EXPECT_FALSE(bad_pass.ok());
+  EXPECT_EQ(bad_pass.code(), StatusCode::kUnavailable);
+  EXPECT_EQ(probe_.calls.size(), 4U);
+  EXPECT_TRUE(adapter.Release().ok());
+}
+
 }  // namespace
 }  // namespace runtime
 }  // namespace mocktail

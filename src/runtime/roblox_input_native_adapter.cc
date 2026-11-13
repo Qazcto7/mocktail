@@ -1,11 +1,14 @@
 #include "runtime/roblox_input_native_adapter.h"
 
-#include <utf8proc.h>
-
+#include <algorithm>
+#include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
+
+#include "mocktail/mocktail_rust.h"
 
 namespace mocktail {
 namespace runtime {
@@ -32,30 +35,25 @@ Status Unsupported(const char* message) {
 }
 
 jstring NewJavaString(JNIEnv* env, const char* utf8, std::size_t size) {
-  if (env == nullptr || (utf8 == nullptr && size != 0)) {
+  if (env == nullptr || (utf8 == nullptr && size != 0) ||
+      size > static_cast<std::size_t>(std::numeric_limits<jsize>::max())) {
     return nullptr;
   }
-  std::vector<jchar> utf16;
-  utf16.reserve(size);
-  std::size_t offset = 0;
-  while (offset < size) {
-    utf8proc_int32_t codepoint = 0;
-    const utf8proc_ssize_t count = utf8proc_iterate(
-        reinterpret_cast<const utf8proc_uint8_t*>(utf8 + offset),
-        static_cast<utf8proc_ssize_t>(size - offset), &codepoint);
-    if (count <= 0) {
-      return nullptr;
-    }
-    if (codepoint <= 0xffff) {
-      utf16.push_back(static_cast<jchar>(codepoint));
-    } else {
-      codepoint -= 0x10000;
-      utf16.push_back(static_cast<jchar>(0xd800 + (codepoint >> 10)));
-      utf16.push_back(static_cast<jchar>(0xdc00 + (codepoint & 0x3ff)));
-    }
-    offset += static_cast<std::size_t>(count);
+  if (size == 0) {
+    jchar empty = 0;
+    return env->NewString(&empty, 0);
   }
-  return env->NewString(utf16.data(), static_cast<jsize>(utf16.size()));
+  std::vector<jchar> utf16(size);
+  size_t out_len = 0;
+  if (mocktail_rust_utf8_to_utf16_bounded(
+          utf8, size, 0, reinterpret_cast<uint16_t*>(utf16.data()),
+          utf16.size(), &out_len) != 0) {
+    return nullptr;
+  }
+  if (out_len > static_cast<std::size_t>(std::numeric_limits<jsize>::max())) {
+    return nullptr;
+  }
+  return env->NewString(utf16.data(), static_cast<jsize>(out_len));
 }
 
 }  // namespace

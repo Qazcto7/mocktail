@@ -663,6 +663,74 @@ TEST(RobloxTextDisplayStateTest, AlignsWrappedGlyphsWithTrailingSpaces) {
   EXPECT_TRUE(overlay.Shutdown().ok());
 }
 
+TEST(RobloxTextDisplayStateTest, RejectsInvalidUtf8AndEmptyPointerContracts) {
+  RobloxTextOverlayPresentation presentation;
+
+  const char invalid_utf8[] = {'\xff', '\xfe'};
+  RobloxTextDisplayUpdate invalid = Show(1, "", 0);
+  invalid.utf8 = invalid_utf8;
+  invalid.utf8_size = sizeof(invalid_utf8);
+  EXPECT_EQ(
+      BuildRobloxTextOverlayPresentation(invalid, {800, 600}, &presentation)
+          .code(),
+      StatusCode::kInvalidArgument);
+
+  RobloxTextDisplayUpdate null_nonzero = Show(1, "", 0);
+  null_nonzero.utf8 = nullptr;
+  null_nonzero.utf8_size = 3;
+  EXPECT_EQ(
+      BuildRobloxTextOverlayPresentation(null_nonzero, {800, 600}, &presentation)
+          .code(),
+      StatusCode::kInvalidArgument);
+
+  RobloxTextDisplayUpdate null_empty = Show(1, "", 0);
+  null_empty.utf8 = nullptr;
+  null_empty.utf8_size = 0;
+  ASSERT_TRUE(
+      BuildRobloxTextOverlayPresentation(null_empty, {800, 600}, &presentation)
+          .ok());
+  EXPECT_TRUE(presentation.display_utf8.empty());
+
+  RobloxTextDisplayUpdate zero_gen = Show(0, "abc", 0);
+  EXPECT_EQ(
+      BuildRobloxTextOverlayPresentation(zero_gen, {800, 600}, &presentation)
+          .code(),
+      StatusCode::kInvalidArgument);
+
+  EXPECT_EQ(
+      BuildRobloxTextOverlayPresentation(Show(1, "abc", 0), {0, 600}, &presentation)
+          .code(),
+      StatusCode::kInvalidArgument);
+}
+
+TEST(RobloxTextDisplayStateTest,
+     VisibleTextWindowSlicesLargeUtf8OnCodepointBoundaries) {
+  std::string large;
+  large.reserve(1500 * 4);
+  for (int i = 0; i < 1500; ++i) {
+    large.append("a\xE2\x82\xAC");  // 4 bytes (2 UTF-16 units) per pair -> 6000 bytes
+  }
+  RobloxTextDisplayUpdate show = Show(1, large, 1500);
+  show.area_width = 600;
+  show.area_height = 44;
+  show.font_size = 18.0F;
+  show.selection_begin_utf16 = 1400;
+  show.selection_end_utf16 = 1600;
+
+  RobloxTextSurfaceOverlay overlay;
+  ASSERT_TRUE(overlay.Initialize({1280, 720}).ok());
+  RobloxTextDisplaySink sink = overlay.sink();
+  sink.update(sink.context, show);
+
+  MocktailTextOverlayFrameInfo frame{};
+  ASSERT_TRUE(overlay.QueryFrame(&frame));
+  EXPECT_EQ(frame.visible, 1U);
+  std::vector<std::uint8_t> rgba(frame.rgba_bytes);
+  ASSERT_TRUE(overlay.CopyFrame(frame.revision, rgba.data(), rgba.size()));
+  EXPECT_TRUE(FindAlphaBounds(frame, rgba).valid());
+  EXPECT_TRUE(overlay.Shutdown().ok());
+}
+
 }  // namespace
 }  // namespace runtime
 }  // namespace mocktail
