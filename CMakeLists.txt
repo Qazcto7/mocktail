@@ -153,7 +153,11 @@ add_custom_command(
   COMMAND "${CARGO_EXECUTABLE}" build --release --manifest-path "${MOCKTAIL_RUST_CORE_DIR}/Cargo.toml" --target-dir "${CMAKE_BINARY_DIR}/cargo-target"
   WORKING_DIRECTORY "${MOCKTAIL_RUST_CORE_DIR}"
   DEPENDS
+    "${MOCKTAIL_RUST_CORE_DIR}/src/apk_signature_rs.rs"
+    "${MOCKTAIL_RUST_CORE_DIR}/src/input_router.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/lib.rs"
+    "${MOCKTAIL_RUST_CORE_DIR}/src/runtime_bridges.rs"
+    "${MOCKTAIL_RUST_CORE_DIR}/src/storage_paths.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/text_runtime.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/window_gates.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/Cargo.toml"

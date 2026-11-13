@@ -3,7 +3,6 @@
 
 #include <cstdio>
 #include <iterator>
-#include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
 #include <utility>
@@ -17,7 +16,6 @@ constexpr char kMemStorageClass[] =
     "com/roblox/engine/jni/memstorage/MemStorage";
 constexpr char kMemStorageConnectionClass[] =
     "com/roblox/engine/jni/memstorage/Connection";
-constexpr std::size_t kMaximumBrowserWindowTitleBytes = 512;
 
 Status Invalid(std::string message) {
   return Status::Error(StatusCode::kInvalidArgument, std::move(message));
@@ -35,68 +33,27 @@ Status FailedPrecondition(std::string message) {
   return Status::Error(StatusCode::kFailedPrecondition, std::move(message));
 }
 
-bool HasControlByte(const std::string& value) {
-  return mocktail_rust_browser_has_control_byte(
-      reinterpret_cast<const uint8_t*>(value.data()), value.size());
-}
-
 bool HasEmbeddedNul(const std::string& value) {
   return mocktail_rust_browser_has_embedded_nul(
       reinterpret_cast<const uint8_t*>(value.data()), value.size());
 }
 
-Status ParseOptionalString(const nlohmann::json& document, const char* key,
-                           std::optional<std::string>* value) {
-  const auto found = document.find(key);
-  if (found == document.end()) {
-    value->reset();
-    return Status::Ok();
-  }
-  if (!found->is_string()) {
-    return Invalid(std::string("BrowserService command field ") + key +
-                   " must be a string");
-  }
-  const std::string& parsed = found->get_ref<const std::string&>();
-  if (parsed.size() > kMaximumBrowserWindowTitleBytes ||
-      HasControlByte(parsed)) {
-    return Invalid(std::string("BrowserService command field ") + key +
-                   " is invalid");
-  }
-  *value = parsed;
-  return Status::Ok();
-}
+struct BrowserCommandStrings {
+  std::string url;
+  std::string title;
+};
 
-Status ParseOptionalBoolean(const nlohmann::json& document, const char* key,
-                            std::optional<bool>* value) {
-  const auto found = document.find(key);
-  if (found == document.end()) {
-    value->reset();
-    return Status::Ok();
+void CollectBrowserCommandString(void* ctx, uint32_t field_kind,
+                                 const char* ptr, size_t len) {
+  auto* strings = static_cast<BrowserCommandStrings*>(ctx);
+  if (strings == nullptr || ptr == nullptr) {
+    return;
   }
-  if (!found->is_boolean()) {
-    return Invalid(std::string("BrowserService command field ") + key +
-                   " must be a boolean");
+  if (field_kind == 0) {
+    strings->url.assign(ptr, len);
+  } else if (field_kind == 1) {
+    strings->title.assign(ptr, len);
   }
-  *value = found->get<bool>();
-  return Status::Ok();
-}
-
-
-Status ParseConfigCommand(const nlohmann::json& document,
-                          RobloxBrowserServiceConfigRequest* request) {
-  *request = {};
-  Status status = ParseOptionalString(document, "title", &request->title);
-  if (status.ok()) {
-    status = ParseOptionalBoolean(document, "visible", &request->visible);
-  }
-  if (status.ok()) {
-    status = ParseOptionalBoolean(document, "backNavigationDisabled",
-                                  &request->back_navigation_disabled);
-  }
-  if (!status.ok()) {
-    *request = {};
-  }
-  return status;
 }
 
 } // namespace
@@ -124,10 +81,11 @@ Status ParseRobloxBrowserServiceOpenWindow(
     return Invalid("BrowserService open output is null");
   }
   *request = {};
-  if (payload.empty() ||
-      payload.size() > kMaximumRobloxBrowserServiceUrlBytes ||
-      HasControlByte(payload)) {
-    return Invalid("BrowserService open URL is invalid");
+  char err_buf[256]{};
+  if (mocktail_rust_validate_browser_service_open_url(
+          payload.data(), payload.size(), err_buf, sizeof(err_buf)) != 0) {
+    return Invalid(err_buf[0] != '\0' ? err_buf
+                                      : "BrowserService open URL is invalid");
   }
   request->url = payload;
   return Status::Ok();
@@ -139,11 +97,12 @@ Status ParseRobloxBrowserServiceSendCommand(
     return Invalid("BrowserService command output is null");
   }
   *command = RobloxBrowserServiceOpenRequest{};
-  int32_t cmd_type = 0;
-  MocktailRustBrowserServiceOpenCommand out_cmd{};
+  MocktailRustBrowserServiceCommandHeader hdr{};
+  BrowserCommandStrings strings;
   char err_buf[256]{};
-  const int32_t rc = mocktail_rust_parse_browser_service_command(
-      json.data(), json.size(), &cmd_type, &out_cmd, err_buf, sizeof(err_buf));
+  const int32_t rc = mocktail_rust_parse_browser_service_command_full(
+      json.data(), json.size(), &hdr, &strings, &CollectBrowserCommandString,
+      err_buf, sizeof(err_buf));
   if (rc != 0) {
     if (rc == -6) {
       return Unsupported("BrowserService command is unsupported");
@@ -152,26 +111,30 @@ Status ParseRobloxBrowserServiceSendCommand(
                                       : "BrowserService command parsing failed");
   }
 
-  if (cmd_type == 1) {
+  if (hdr.command_type == 1) {
     RobloxBrowserServiceOpenRequest request;
-    request.url = out_cmd.url;
-    request.title = out_cmd.title;
-    request.visible = out_cmd.visible != 0;
-    request.modal = out_cmd.modal != 0;
-    request.back_navigation_disabled = out_cmd.back_navigation_disabled != 0;
-    request.show_domain_as_title = out_cmd.show_domain_as_title != 0;
+    request.url = std::move(strings.url);
+    request.title = std::move(strings.title);
+    request.visible = hdr.visible != 0;
+    request.modal = hdr.modal != 0;
+    request.back_navigation_disabled = hdr.back_navigation_disabled != 0;
+    request.show_domain_as_title = hdr.show_domain_as_title != 0;
     *command = std::move(request);
     return Status::Ok();
   }
-  if (cmd_type == 2) {
-    const nlohmann::json document =
-        nlohmann::json::parse(json.begin(), json.end(), nullptr, false);
+  if (hdr.command_type == 2) {
     RobloxBrowserServiceConfigRequest request;
-    const Status status = ParseConfigCommand(document, &request);
-    if (status.ok()) {
-      *command = std::move(request);
+    if (hdr.has_title != 0) {
+      request.title = std::move(strings.title);
     }
-    return status;
+    if (hdr.has_visible != 0) {
+      request.visible = hdr.visible != 0;
+    }
+    if (hdr.has_back_navigation_disabled != 0) {
+      request.back_navigation_disabled = hdr.back_navigation_disabled != 0;
+    }
+    *command = std::move(request);
+    return Status::Ok();
   }
   return Unsupported("BrowserService command is unsupported");
 }
@@ -745,12 +708,10 @@ Status RobloxBrowserServiceBridge::QueueOutgoingEvent(OutgoingEventKind kind,
     return FailedPrecondition(
         "BrowserService bridge is not accepting outgoing events");
   }
-  const std::size_t total_events =
-      outgoing_events_.size() + outgoing_drain_events_;
-  const std::size_t total_bytes = outgoing_event_bytes_ + outgoing_drain_bytes_;
-  if (total_events >= kMaximumRobloxBrowserServiceQueuedEvents ||
-      total_bytes > kMaximumRobloxBrowserServiceQueuedBytes ||
-      payload.size() > kMaximumRobloxBrowserServiceQueuedBytes - total_bytes) {
+  if (mocktail_rust_browser_service_can_queue_outgoing(
+          outgoing_events_.size(), outgoing_event_bytes_,
+          outgoing_drain_events_, outgoing_drain_bytes_,
+          payload.size()) == 0) {
     return Unavailable("BrowserService outgoing event queue is full");
   }
   outgoing_event_bytes_ += payload.size();

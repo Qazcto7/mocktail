@@ -10,12 +10,10 @@
 #include <charconv>
 #include <cstdlib>
 #include <fstream>
-#include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
-#include <unordered_set>
 
 #include "mocktail/mocktail_rust.h"
 
@@ -79,6 +77,54 @@ bool UnsetEnvironmentValue(const char* name, std::string* error) {
   return false;
 }
 
+void CollectYamlEnvKv(void* ctx, const char* key, size_t key_len,
+                      const char* val, size_t val_len) {
+  auto* map = static_cast<ValueMap*>(ctx);
+  if (map != nullptr && key != nullptr && val != nullptr) {
+    (*map)[std::string(key, key_len)] = std::string(val, val_len);
+  }
+}
+
+bool ValidateRuntimeConfigPolicy(const RuntimeConfig& config, bool for_export,
+                                 std::string* error) {
+  const MocktailRustRuntimeConfigPolicyFlags flags{
+      config.frame_rate().valid() ? 1 : 0,
+      config.device_profile_valid() ? 1 : 0,
+      (config.input_capabilities().touch_enabled ||
+       config.input_capabilities().mouse_enabled ||
+       config.input_capabilities().keyboard_enabled)
+          ? 1
+          : 0,
+      config.graphics_backend() != GraphicsBackend::kUnknown ? 1 : 0,
+      config.theme_mode_valid() ? 1 : 0,
+      config.window().high_dpi_valid ? 1 : 0,
+      (config.vsync_mode() == "auto" || config.vsync_mode() == "on" ||
+       config.vsync_mode() == "off")
+          ? 1
+          : 0,
+      RuntimeConfig::IsValidPresentMode(config.present_mode()) ? 1 : 0,
+      config.audio_output_device_valid() ? 1 : 0,
+      config.audio_input_device_valid() ? 1 : 0,
+      config.performance().memory_limit_valid ? 1 : 0,
+      config.performance().game_mode_valid ? 1 : 0,
+      config.performance().physics_worker_mode_valid ? 1 : 0,
+      config.fleasion_valid() ? 1 : 0,
+      config.ca_bundle_valid() ? 1 : 0,
+      config.discord_rpc_valid() ? 1 : 0,
+  };
+  std::array<char, 256> err_buf{};
+  const int32_t rc = mocktail_rust_validate_runtime_config_policy(
+      &flags, for_export ? 1 : 0, err_buf.data(), err_buf.size());
+  if (rc == 0) {
+    return true;
+  }
+  if (error != nullptr) {
+    *error = err_buf[0] != '\0' ? err_buf.data()
+                                : "runtime configuration policy is invalid";
+  }
+  return false;
+}
+
 }  // namespace
 
 RuntimeConfigLoadResult LoadRuntimeConfig(
@@ -120,23 +166,15 @@ RuntimeConfigLoadResult LoadRuntimeConfig(
     result.file_loaded = true;
 
     ValueMap fallback;
-    std::array<char, 16384> out_env{};
     std::array<char, 256> out_err{};
-    const int rc = mocktail_rust_parse_runtime_config_yaml(
+    const int rc = mocktail_rust_parse_runtime_config_yaml_kv(
         reinterpret_cast<const uint8_t*>(contents.data()), contents.size(),
-        out_env.data(), out_env.size(), out_err.data(), out_err.size());
+        &fallback, &CollectYamlEnvKv, out_err.data(), out_err.size());
     if (rc != 0) {
       result.error = out_err[0] != '\0'
                          ? out_err.data()
                          : "runtime configuration contains invalid YAML";
       return result;
-    }
-    const auto env_json =
-        nlohmann::json::parse(out_env.data(), nullptr, false, true);
-    if (env_json.is_object()) {
-      for (const auto& [k, v] : env_json.items()) {
-        fallback[k] = v.get<std::string>();
-      }
     }
     const LayeredEnvironment layered(environment, std::move(fallback));
     result.config = RuntimeConfig::FromEnvironment(layered);
@@ -145,104 +183,13 @@ RuntimeConfigLoadResult LoadRuntimeConfig(
   if (!result.file_loaded) {
     result.config = RuntimeConfig::FromEnvironment(environment);
   }
-  if (!result.config.frame_rate().valid()) {
-    result.error = "frame-rate policy is invalid";
-  } else if (!result.config.device_profile_valid()) {
-    result.error = "device profile is invalid";
-  } else if (!result.config.input_capabilities().touch_enabled &&
-             !result.config.input_capabilities().mouse_enabled &&
-             !result.config.input_capabilities().keyboard_enabled) {
-    result.error = "device must expose at least one usable input capability";
-  } else if (result.config.graphics_backend() == GraphicsBackend::kUnknown) {
-    result.error = "graphics backend is invalid";
-  } else if (!result.config.theme_mode_valid()) {
-    result.error = "theme mode is invalid";
-  } else if (!result.config.window().high_dpi_valid) {
-    result.error = "window high-DPI policy is invalid";
-  } else if (result.config.vsync_mode() != "auto" &&
-             result.config.vsync_mode() != "on" &&
-             result.config.vsync_mode() != "off") {
-    result.error = "VSync policy is invalid";
-  } else if (!RuntimeConfig::IsValidPresentMode(result.config.present_mode())) {
-    result.error = "graphics.present_mode must be auto, fifo, mailbox, or immediate";
-  } else if (!result.config.audio_output_device_valid()) {
-    result.error = "audio output device is invalid";
-  } else if (!result.config.audio_input_device_valid()) {
-    result.error = "audio input device is invalid";
-  } else if (!result.config.performance().memory_limit_valid) {
-    result.error = "memory-limit policy is invalid";
-  } else if (!result.config.performance().game_mode_valid) {
-    result.error = "GameMode policy is invalid";
-  } else if (!result.config.performance().physics_worker_mode_valid) {
-    result.error = "physics worker policy is invalid";
-  } else if (!result.config.fleasion_valid()) {
-    result.error = "Fleasion configuration is invalid: use proxy_mode env or hosts, "
-                   "a port from 1 to 65535, an absolute CA certificate path, and "
-                   "no conflicting system/fixed proxy";
-  } else if (!result.config.ca_bundle_valid()) {
-    result.error = "CA bundle path is invalid";
-  } else if (!result.config.discord_rpc_valid()) {
-    result.error = "Discord Rich Presence configuration is invalid";
-  }
+  ValidateRuntimeConfigPolicy(result.config, false, &result.error);
   return result;
 }
 
 bool ExportRuntimeConfigEnvironment(const RuntimeConfig& config,
                                     std::string* error) {
-  if (!RuntimeConfig::IsValidPresentMode(config.present_mode())) {
-    if (error != nullptr) *error = "cannot export an invalid present mode";
-    return false;
-  }
-  if (!config.fleasion_valid()) {
-    if (error != nullptr) *error = "cannot export invalid Fleasion configuration";
-    return false;
-  }
-  if (!config.device_profile_valid()) {
-    if (error != nullptr) {
-      *error = "cannot export an invalid device profile";
-    }
-    return false;
-  }
-  if (!config.audio_output_device_valid()) {
-    if (error != nullptr) {
-      *error = "cannot export an invalid audio output device";
-    }
-    return false;
-  }
-  if (!config.audio_input_device_valid()) {
-    if (error != nullptr) {
-      *error = "cannot export an invalid audio input device";
-    }
-    return false;
-  }
-  if (!config.performance().memory_limit_valid) {
-    if (error != nullptr) {
-      *error = "cannot export an invalid memory-limit policy";
-    }
-    return false;
-  }
-  if (!config.performance().game_mode_valid) {
-    if (error != nullptr) {
-      *error = "cannot export an invalid GameMode policy";
-    }
-    return false;
-  }
-  if (!config.performance().physics_worker_mode_valid) {
-    if (error != nullptr) {
-      *error = "cannot export an invalid physics worker policy";
-    }
-    return false;
-  }
-  if (!config.ca_bundle_valid()) {
-    if (error != nullptr) {
-      *error = "cannot export an invalid CA bundle path";
-    }
-    return false;
-  }
-  if (!config.discord_rpc_valid()) {
-    if (error != nullptr) {
-      *error = "cannot export an invalid Discord Rich Presence policy";
-    }
+  if (!ValidateRuntimeConfigPolicy(config, true, error)) {
     return false;
   }
   const DeviceProfile& device = config.device_profile();

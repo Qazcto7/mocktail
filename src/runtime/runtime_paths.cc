@@ -2,14 +2,13 @@
 #include "runtime/runtime_paths.h"
 #include "mocktail/mocktail_rust.h"
 
-#define JSON_NOEXCEPTION 1
 #include <array>
 #include <atomic>
 #include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
-#include <nlohmann/json.hpp>
+#include <iterator>
 #include <optional>
 #include <string>
 #include <unistd.h>
@@ -33,38 +32,46 @@ std::filesystem::path XdgHome(const Environment& environment,
   return configured.is_absolute() ? configured : fallback;
 }
 
-bool IsLowerHexBuildId(std::string_view value) {
-  std::string null_term(value);
-  return mocktail_rust_runtime_paths_is_lower_hex_build_id(null_term.c_str()) == 1;
+struct ActiveManifestParseContext {
+  std::string payload_id;
+  std::filesystem::path payload_relative;
+  std::filesystem::path compatibility_relative;
+  std::filesystem::path profile_relative;
+  std::filesystem::path receipt_relative;
+  std::string generation;
+};
+
+void AssignActiveManifestField(void* raw_ctx, uint32_t field_id, const char* ptr,
+                               size_t len) {
+  auto* ctx = static_cast<ActiveManifestParseContext*>(raw_ctx);
+  std::string_view val(ptr, len);
+  switch (field_id) {
+    case MOCKTAIL_RUNTIME_PATH_FIELD_PAYLOAD_ID:
+      ctx->payload_id.assign(val);
+      break;
+    case MOCKTAIL_RUNTIME_PATH_FIELD_PAYLOAD_REL:
+      ctx->payload_relative = std::string(val);
+      break;
+    case MOCKTAIL_RUNTIME_PATH_FIELD_COMPATIBILITY_REL:
+      ctx->compatibility_relative = std::string(val);
+      break;
+    case MOCKTAIL_RUNTIME_PATH_FIELD_PROFILE_REL:
+      ctx->profile_relative = std::string(val);
+      break;
+    case MOCKTAIL_RUNTIME_PATH_FIELD_RECEIPT_REL:
+      ctx->receipt_relative = std::string(val);
+      break;
+    case MOCKTAIL_RUNTIME_PATH_FIELD_GENERATION:
+      ctx->generation.assign(val);
+      break;
+    default:
+      break;
+  }
 }
 
-std::optional<std::string> ApprovalGeneration(
-    const std::filesystem::path& relative, std::string_view directory_name,
-    std::string_view payload_id, std::string* error) {
-  const std::filesystem::path expected_directory = std::string(directory_name);
-  const std::string filename = relative.filename().string();
-  const std::string prefix = std::string(payload_id) + "-";
-  constexpr std::string_view kJsonSuffix = ".json";
-  if (relative.is_absolute() || relative != relative.lexically_normal() ||
-      relative.parent_path() != expected_directory ||
-      filename.size() != prefix.size() + 40 + kJsonSuffix.size() ||
-      filename.compare(0, prefix.size(), prefix) != 0 ||
-      filename.compare(filename.size() - kJsonSuffix.size(), kJsonSuffix.size(),
-                       kJsonSuffix) != 0) {
-    if (error != nullptr) {
-      *error = "active payload approval path is not a generated direct " +
-               std::string(directory_name) + " child";
-    }
-    return std::nullopt;
-  }
-  const std::string generation = filename.substr(prefix.size(), 40);
-  if (!IsLowerHexBuildId(generation)) {
-    if (error != nullptr) {
-      *error = "active payload approval generation is invalid";
-    }
-    return std::nullopt;
-  }
-  return generation;
+void AssignRuntimeString(void* raw_ctx, const char* ptr, size_t len) {
+  auto* out = static_cast<std::string*>(raw_ctx);
+  out->assign(ptr, len);
 }
 
 bool ResolveApprovalFile(const std::filesystem::path& data_root,
@@ -76,9 +83,7 @@ bool ResolveApprovalFile(const std::filesystem::path& data_root,
   const std::filesystem::path expected_filename =
       std::string(payload_id) + "-" + std::string(generation) + ".json";
   const std::filesystem::path expected_directory = std::string(directory_name);
-  if (relative.is_absolute() || relative != relative.lexically_normal() ||
-      relative.parent_path() != expected_directory ||
-      relative.filename() != expected_filename) {
+  if (relative != (expected_directory / expected_filename)) {
     if (error != nullptr) {
       *error = "active payload approval path is not a direct " +
                std::string(directory_name) + " child";
@@ -373,42 +378,25 @@ ActivePayloadPaths RuntimePaths::ResolveActivePayload() const {
     return result;
   }
 
-  std::ifstream input(active_payload_manifest_);
-  const nlohmann::json manifest =
-      nlohmann::json::parse(input, nullptr, false, true);
-  if (manifest.is_discarded() || !manifest.is_object()) {
-    result.error = "active payload manifest is not valid JSON";
-    return result;
+  std::ifstream input(active_payload_manifest_, std::ios::binary);
+  std::string manifest_contents;
+  if (input) {
+    manifest_contents.assign(std::istreambuf_iterator<char>(input),
+                             std::istreambuf_iterator<char>());
   }
-  const auto schema = manifest.find("schema_version");
-  const auto payload_id = manifest.find("payload_id");
-  const auto payload_path = manifest.find("payload_path");
-  const auto version_name = manifest.find("version_name");
-  const auto version_code = manifest.find("version_code");
-  const auto build_id = manifest.find("elf_build_id");
-  if (schema == manifest.end() || !schema->is_number_integer() ||
-      schema->get<int>() != 1 || payload_id == manifest.end() ||
-      !payload_id->is_string() || payload_path == manifest.end() ||
-      !payload_path->is_string() || version_name == manifest.end() ||
-      !version_name->is_string() || version_name->get<std::string>().empty() ||
-      version_code == manifest.end() || !version_code->is_number_integer() ||
-      version_code->get<std::int64_t>() < 0 || build_id == manifest.end() ||
-      !build_id->is_string()) {
-    result.error = "active payload manifest has an unsupported schema";
+  ActiveManifestParseContext parsed_manifest;
+  char err_buf[256] = {};
+  if (mocktail_rust_runtime_paths_parse_active_manifest(
+          manifest_contents.data(), manifest_contents.size(),
+          AssignActiveManifestField, &parsed_manifest, err_buf,
+          sizeof(err_buf)) != 0) {
+    result.error = err_buf[0] != '\0' ? err_buf
+                                      : "active payload manifest is not valid JSON";
     return result;
   }
 
-  const std::filesystem::path relative = payload_path->get<std::string>();
-  const std::string id = payload_id->get<std::string>();
-  const std::string elf_build_id = build_id->get<std::string>();
-  const std::string expected_id =
-      std::to_string(version_code->get<std::int64_t>()) + "-" + elf_build_id;
-  if (relative.is_absolute() || relative != relative.lexically_normal() ||
-      relative.parent_path() != "payloads" || relative.filename() != id ||
-      id != expected_id || !IsLowerHexBuildId(elf_build_id)) {
-    result.error = "active payload path is not a direct payloads child";
-    return result;
-  }
+  const std::filesystem::path& relative = parsed_manifest.payload_relative;
+  const std::string& id = parsed_manifest.payload_id;
 
   const std::filesystem::path root = data_root_ / relative;
   const std::filesystem::file_status root_status =
@@ -489,58 +477,30 @@ ActivePayloadPaths RuntimePaths::ResolveActivePayload() const {
   result.arch_split_apk = arch_split_apk;
   result.assets_content = assets;
 
-  const auto compatibility_manifest =
-      manifest.find("compatibility_manifest_path");
-  const auto host_abi_profile = manifest.find("host_abi_profile_path");
-  const auto approval_receipt = manifest.find("approval_path");
-  const bool has_compatibility_manifest =
-      compatibility_manifest != manifest.end();
-  const bool has_host_abi_profile = host_abi_profile != manifest.end();
-  const bool has_approval_receipt = approval_receipt != manifest.end();
-  if (has_compatibility_manifest || has_host_abi_profile ||
-      has_approval_receipt) {
-    if (!has_compatibility_manifest || !has_host_abi_profile ||
-        !has_approval_receipt || !compatibility_manifest->is_string() ||
-        !host_abi_profile->is_string() || !approval_receipt->is_string()) {
-      result.error =
-          "active payload approval references must be a complete string set";
-      result.active = false;
-      return result;
-    }
-    const std::filesystem::path compatibility_path =
-        compatibility_manifest->get<std::string>();
-    const std::filesystem::path profile_path =
-        host_abi_profile->get<std::string>();
-    const std::filesystem::path receipt_path =
-        approval_receipt->get<std::string>();
-    const std::optional<std::string> compatibility_generation =
-        ApprovalGeneration(compatibility_path, "compatibility_profiles", id,
-                           &result.error);
-    const std::optional<std::string> profile_generation = ApprovalGeneration(
-        profile_path, "host_abi_profiles", id, &result.error);
-    const std::optional<std::string> receipt_generation =
-        ApprovalGeneration(receipt_path, "approvals", id, &result.error);
-    if (!compatibility_generation.has_value() ||
-        !profile_generation.has_value() || !receipt_generation.has_value() ||
-        *compatibility_generation != *profile_generation ||
-        *compatibility_generation != *receipt_generation) {
-      if (result.error.empty()) {
-        result.error =
-            "active payload approval references use different generations";
-      }
-      result.active = false;
-      return result;
-    }
-    if (!ResolveApprovalFile(data_root_, compatibility_path,
+  uint8_t has_approval = 0;
+  if (mocktail_rust_runtime_paths_parse_active_approval_refs(
+          manifest_contents.data(), manifest_contents.size(), id.c_str(),
+          AssignActiveManifestField, &parsed_manifest, &has_approval, err_buf,
+          sizeof(err_buf)) != 0) {
+    result.error = err_buf[0] != '\0'
+                       ? err_buf
+                       : "active payload approval references must be a complete string set";
+    result.active = false;
+    return result;
+  }
+  if (has_approval != 0) {
+    if (!ResolveApprovalFile(data_root_, parsed_manifest.compatibility_relative,
                              "compatibility_profiles", id,
-                             *compatibility_generation,
+                             parsed_manifest.generation,
                              &result.compatibility_manifest, &result.error) ||
-        !ResolveApprovalFile(data_root_, profile_path, "host_abi_profiles", id,
-                             *profile_generation, &result.host_abi_profile,
-                             &result.error) ||
-        !ResolveApprovalFile(
-            data_root_, receipt_path, "approvals", id, *receipt_generation,
-            &result.host_abi_approval_receipt, &result.error)) {
+        !ResolveApprovalFile(data_root_, parsed_manifest.profile_relative,
+                             "host_abi_profiles", id,
+                             parsed_manifest.generation,
+                             &result.host_abi_profile, &result.error) ||
+        !ResolveApprovalFile(data_root_, parsed_manifest.receipt_relative,
+                             "approvals", id, parsed_manifest.generation,
+                             &result.host_abi_approval_receipt,
+                             &result.error)) {
       result.active = false;
       return result;
     }
@@ -665,18 +625,11 @@ bool PrepareManagedPayloadWorkingDirectory(const RuntimePaths& paths,
 std::filesystem::path ResolveAdjacentRobloxAssetPath(
     const std::filesystem::path& roblox_library,
     const std::filesystem::path& working_directory) {
-  if (roblox_library.empty() || working_directory.empty()) {
-    return {};
-  }
-  std::filesystem::path resolved_library = roblox_library;
-  if (!resolved_library.is_absolute()) {
-    resolved_library = working_directory / resolved_library;
-  }
-  resolved_library = resolved_library.lexically_normal();
-  if (!resolved_library.is_absolute() || !resolved_library.has_parent_path()) {
-    return {};
-  }
-  return (resolved_library.parent_path() / "assets/content").lexically_normal();
+  std::string out;
+  mocktail_rust_runtime_paths_resolve_adjacent_roblox_asset_path(
+      roblox_library.c_str(), working_directory.c_str(), AssignRuntimeString,
+      &out);
+  return out.empty() ? std::filesystem::path() : std::filesystem::path(out);
 }
 
 }  // namespace runtime

@@ -1,7 +1,6 @@
 #include "update/apk_signature.h"
 
 #include <fcntl.h>
-#include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/rsa.h>
 #include <openssl/x509.h>
@@ -11,67 +10,17 @@
 
 #include "mocktail/mocktail_rust.h"
 
-#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
+#include <cstdio>
 #include <limits>
 #include <memory>
-#include <optional>
 #include <string>
-#include <utility>
 #include <vector>
 
 namespace mocktail::update {
 namespace {
-
-constexpr std::size_t kChunkBytes = 1024U * 1024U;
-
-std::uint32_t U32(const unsigned char* value) {
-  return value[0] | static_cast<std::uint32_t>(value[1]) << 8U |
-         static_cast<std::uint32_t>(value[2]) << 16U |
-         static_cast<std::uint32_t>(value[3]) << 24U;
-}
-
-void PutU32(std::uint32_t value, unsigned char* output) {
-  output[0] = static_cast<unsigned char>(value);
-  output[1] = static_cast<unsigned char>(value >> 8U);
-  output[2] = static_cast<unsigned char>(value >> 16U);
-  output[3] = static_cast<unsigned char>(value >> 24U);
-}
-
-struct Span {
-  const unsigned char* data = nullptr;
-  std::size_t size = 0;
-};
-
-class Reader final {
- public:
-  explicit Reader(Span span) : span_(span) {}
-
-  bool U32Value(std::uint32_t* value) {
-    if (remaining() < 4) return false;
-    *value = U32(span_.data + position_);
-    position_ += 4;
-    return true;
-  }
-
-  bool LengthPrefixed(Span* value) {
-    std::uint32_t size = 0;
-    if (!U32Value(&size) || size > remaining()) return false;
-    value->data = span_.data + position_;
-    value->size = size;
-    position_ += size;
-    return true;
-  }
-
-  std::size_t remaining() const { return span_.size - position_; }
-
- private:
-  Span span_;
-  std::size_t position_ = 0;
-};
 
 struct Mapping final {
   int descriptor = -1;
@@ -128,407 +77,84 @@ bool MapFile(const std::filesystem::path& path, Mapping* mapping,
   return true;
 }
 
-struct SigningBlock {
-  Span v2;
-  Span v3;
-  Span v31;
-  std::size_t begin = 0;
-  std::size_t central_directory = 0;
-  std::size_t eocd = 0;
+void WriteErr(char* err_buf, size_t err_cap, const char* msg) {
+  if (err_buf != nullptr && err_cap > 0) {
+    std::snprintf(err_buf, err_cap, "%s", msg);
+  }
+}
+
+struct OpenSslVerifyState {
+  EvpKey current_pubkey;
+  std::vector<std::string> certificates;
 };
 
-bool ParseSigningBlock(const Mapping& mapping, SigningBlock* block,
-                       std::string* error) {
-  MocktailRustApkSigningBlockInfo info{};
-  std::array<char, 256> out_err{};
-  const int rc = mocktail_rust_find_apk_signing_block(
-      mapping.bytes, mapping.size, &info, out_err.data(), out_err.size());
-  if (rc != 0) {
-    *error = out_err[0] != '\0' ? out_err.data()
-                                : "APK signing block parsing failed";
-    return false;
+int32_t VerifySignatureCallback(
+    void* ctx, const uint8_t* pubkey, size_t pubkey_len,
+    const uint8_t* signed_data, size_t signed_data_len,
+    const uint8_t* signature, size_t signature_len, int32_t digest_kind,
+    int32_t is_pss, char* err_buf, size_t err_cap) {
+  auto* state = static_cast<OpenSslVerifyState*>(ctx);
+  const unsigned char* public_cursor = pubkey;
+  EvpKey key(d2i_PUBKEY(nullptr, &public_cursor, static_cast<long>(pubkey_len)));
+  if (!key || public_cursor != pubkey + pubkey_len) {
+    WriteErr(err_buf, err_cap, "APK signer public key is malformed");
+    return -1;
   }
-  block->begin = static_cast<std::size_t>(info.block_begin);
-  block->central_directory = static_cast<std::size_t>(info.central_directory);
-  block->eocd = static_cast<std::size_t>(info.eocd);
-  if (info.v2_len > 0) {
-    block->v2 = {mapping.bytes + info.v2_offset,
-                 static_cast<std::size_t>(info.v2_len)};
-  }
-  if (info.v3_len > 0) {
-    block->v3 = {mapping.bytes + info.v3_offset,
-                 static_cast<std::size_t>(info.v3_len)};
-  }
-  if (info.v31_len > 0) {
-    block->v31 = {mapping.bytes + info.v31_offset,
-                  static_cast<std::size_t>(info.v31_len)};
-  }
-  return true;
-}
 
-struct SignatureAlgorithm {
-  std::uint32_t id = 0;
-  const EVP_MD* digest = nullptr;
-  bool pss = false;
-};
-
-std::optional<SignatureAlgorithm> SupportedAlgorithm(std::uint32_t id) {
-  switch (id) {
-    case 0x0101:
-      return SignatureAlgorithm{id, EVP_sha256(), true};
-    case 0x0102:
-      return SignatureAlgorithm{id, EVP_sha512(), true};
-    case 0x0103:
-      return SignatureAlgorithm{id, EVP_sha256(), false};
-    case 0x0104:
-      return SignatureAlgorithm{id, EVP_sha512(), false};
-    case 0x0201:
-      return SignatureAlgorithm{id, EVP_sha256(), false};
-    case 0x0202:
-      return SignatureAlgorithm{id, EVP_sha512(), false};
-    case 0x0301:
-      return SignatureAlgorithm{id, EVP_sha256(), false};
-    default:
-      return std::nullopt;
-  }
-}
-
-struct IdBytes {
-  std::uint32_t id = 0;
-  Span bytes;
-};
-
-bool ParseIdSequence(Span sequence, std::vector<IdBytes>* values,
-                     std::string* error) {
-  Reader records(sequence);
-  while (records.remaining() > 0) {
-    Span record;
-    if (!records.LengthPrefixed(&record)) {
-      *error = "APK signer record is malformed";
-      return false;
-    }
-    Reader fields(record);
-    IdBytes value;
-    if (!fields.U32Value(&value.id) || !fields.LengthPrefixed(&value.bytes) ||
-        fields.remaining() != 0) {
-      *error = "APK signer algorithm record is malformed";
-      return false;
-    }
-    values->push_back(value);
-  }
-  return !values->empty();
-}
-
-std::string Hex(const unsigned char* bytes, std::size_t size) {
-  constexpr char kHex[] = "0123456789abcdef";
-  std::string output(size * 2U, '0');
-  for (std::size_t index = 0; index < size; ++index) {
-    output[index * 2U] = kHex[bytes[index] >> 4U];
-    output[index * 2U + 1U] = kHex[bytes[index] & 0x0fU];
-  }
-  return output;
-}
-
-bool DigestParts(const EVP_MD* digest, const std::vector<Span>& parts,
-                 std::vector<unsigned char>* output) {
-  DigestContext context(EVP_MD_CTX_new());
-  if (!context || EVP_DigestInit_ex(context.get(), digest, nullptr) != 1) {
-    return false;
-  }
-  for (const Span& part : parts) {
-    if (part.size > 0 &&
-        EVP_DigestUpdate(context.get(), part.data, part.size) != 1) {
-      return false;
-    }
-  }
-  output->resize(static_cast<std::size_t>(EVP_MD_get_size(digest)));
-  unsigned int size = 0;
-  return EVP_DigestFinal_ex(context.get(), output->data(), &size) == 1 &&
-         size == output->size();
-}
-
-bool ComputeContentDigest(const Mapping& mapping, const SigningBlock& block,
-                          const EVP_MD* digest,
-                          std::vector<unsigned char>* output,
-                          std::string* error) {
-  std::vector<unsigned char> patched_eocd(mapping.bytes + block.eocd,
-                                          mapping.bytes + mapping.size);
-  if (patched_eocd.size() < 20U || block.begin > 0xffffffffU) {
-    *error = "APK is too large for Signature Scheme v2/v3";
-    return false;
-  }
-  PutU32(static_cast<std::uint32_t>(block.begin), patched_eocd.data() + 16U);
-  const std::vector<Span> sections = {
-      {mapping.bytes, block.begin},
-      {mapping.bytes + block.central_directory,
-       block.eocd - block.central_directory},
-      {patched_eocd.data(), patched_eocd.size()},
-  };
-  std::size_t chunk_count = 0;
-  for (const Span& section : sections) {
-    chunk_count += (section.size + kChunkBytes - 1U) / kChunkBytes;
-  }
-  if (chunk_count == 0 || chunk_count > 0xffffffffU) {
-    *error = "APK content chunk count is invalid";
-    return false;
-  }
-  const std::size_t digest_size =
-      static_cast<std::size_t>(EVP_MD_get_size(digest));
-  std::vector<unsigned char> chunk_digests;
-  chunk_digests.reserve(chunk_count * digest_size);
-  for (const Span& section : sections) {
-    for (std::size_t offset = 0; offset < section.size; offset += kChunkBytes) {
-      const std::size_t bytes = std::min(kChunkBytes, section.size - offset);
-      std::array<unsigned char, 5> prefix{};
-      prefix[0] = 0xa5;
-      PutU32(static_cast<std::uint32_t>(bytes), prefix.data() + 1U);
-      std::vector<unsigned char> chunk;
-      if (!DigestParts(
-              digest,
-              {{prefix.data(), prefix.size()}, {section.data + offset, bytes}},
-              &chunk)) {
-        *error = "cannot hash APK content chunk";
-        return false;
-      }
-      chunk_digests.insert(chunk_digests.end(), chunk.begin(), chunk.end());
-    }
-  }
-  std::array<unsigned char, 5> prefix{};
-  prefix[0] = 0x5a;
-  PutU32(static_cast<std::uint32_t>(chunk_count), prefix.data() + 1U);
-  if (!DigestParts(digest,
-                   {{prefix.data(), prefix.size()},
-                    {chunk_digests.data(), chunk_digests.size()}},
-                   output)) {
-    *error = "cannot hash APK content digest list";
-    return false;
-  }
-  return true;
-}
-
-bool VerifySignedData(Span signed_data, Span signature,
-                      const SignatureAlgorithm& algorithm, EVP_PKEY* key,
-                      std::string* error) {
+  const EVP_MD* md = digest_kind == 1 ? EVP_sha512() : EVP_sha256();
   DigestContext context(EVP_MD_CTX_new());
   EVP_PKEY_CTX* key_context = nullptr;
-  if (!context || EVP_DigestVerifyInit(context.get(), &key_context,
-                                       algorithm.digest, nullptr, key) != 1) {
-    *error = "cannot initialise APK signer verification";
-    return false;
+  if (!context || EVP_DigestVerifyInit(context.get(), &key_context, md, nullptr,
+                                       key.get()) != 1) {
+    WriteErr(err_buf, err_cap, "cannot initialise APK signer verification");
+    return -1;
   }
-  if (algorithm.pss &&
+  if (is_pss != 0 &&
       (EVP_PKEY_CTX_set_rsa_padding(key_context, RSA_PKCS1_PSS_PADDING) <= 0 ||
-       EVP_PKEY_CTX_set_rsa_pss_saltlen(
-           key_context, EVP_MD_get_size(algorithm.digest)) <= 0 ||
-       EVP_PKEY_CTX_set_rsa_mgf1_md(key_context, algorithm.digest) <= 0)) {
-    *error = "cannot configure APK RSA-PSS verification";
-    return false;
+       EVP_PKEY_CTX_set_rsa_pss_saltlen(key_context, EVP_MD_get_size(md)) <=
+           0 ||
+       EVP_PKEY_CTX_set_rsa_mgf1_md(key_context, md) <= 0)) {
+    WriteErr(err_buf, err_cap, "cannot configure APK RSA-PSS verification");
+    return -1;
   }
-  if (EVP_DigestVerify(context.get(), signature.data, signature.size,
-                       signed_data.data, signed_data.size) != 1) {
-    *error = "APK signer signature verification failed";
-    return false;
+  if (EVP_DigestVerify(context.get(), signature, signature_len, signed_data,
+                       signed_data_len) != 1) {
+    WriteErr(err_buf, err_cap, "APK signer signature verification failed");
+    return -1;
   }
-  return true;
+
+  state->current_pubkey = std::move(key);
+  return 0;
 }
 
-bool VerifySigner(const Mapping& mapping, const SigningBlock& block,
-                  Span signer, bool v3, std::vector<std::string>* certificates,
-                  std::string* error) {
-  Reader signer_reader(signer);
-  Span signed_data;
-  Span signatures;
-  Span public_key_bytes;
-  std::uint32_t minimum_sdk = 0;
-  std::uint32_t maximum_sdk = 0;
-  if (!signer_reader.LengthPrefixed(&signed_data)) {
-    *error = "APK signer has no signed data";
-    return false;
+int32_t VerifyCertificateCallback(void* ctx, const uint8_t* encoded_cert,
+                                  size_t encoded_cert_len, int32_t is_leaf,
+                                  char* err_buf, size_t err_cap) {
+  auto* state = static_cast<OpenSslVerifyState*>(ctx);
+  const unsigned char* cert_cursor = encoded_cert;
+  X509Certificate certificate(
+      d2i_X509(nullptr, &cert_cursor, static_cast<long>(encoded_cert_len)));
+  if (!certificate || cert_cursor != encoded_cert + encoded_cert_len) {
+    WriteErr(err_buf, err_cap, "APK signer certificate is malformed");
+    return -1;
   }
-  if (v3 &&
-      (!signer_reader.U32Value(&minimum_sdk) ||
-       !signer_reader.U32Value(&maximum_sdk) || minimum_sdk > maximum_sdk)) {
-    *error = "APK v3 signer SDK range is invalid";
-    return false;
-  }
-  if (!signer_reader.LengthPrefixed(&signatures) ||
-      !signer_reader.LengthPrefixed(&public_key_bytes) ||
-      signer_reader.remaining() != 0) {
-    *error = "APK signer fields are malformed (signer=" +
-             std::to_string(signer.size) +
-             ", signed=" + std::to_string(signed_data.size) +
-             ", remaining=" + std::to_string(signer_reader.remaining()) + ")";
-    return false;
-  }
-
-  Reader signed_reader(signed_data);
-  Span digests;
-  Span certificate_sequence;
-  Span attributes;
-  std::uint32_t signed_minimum_sdk = 0;
-  std::uint32_t signed_maximum_sdk = 0;
-  if (!signed_reader.LengthPrefixed(&digests)) {
-    *error = "APK signed-data digest list is malformed";
-    return false;
-  }
-  if (!signed_reader.LengthPrefixed(&certificate_sequence)) {
-    *error = "APK signed-data certificate list is malformed";
-    return false;
-  }
-  if (v3 && (!signed_reader.U32Value(&signed_minimum_sdk) ||
-             !signed_reader.U32Value(&signed_maximum_sdk))) {
-    *error = "APK v3 signed-data SDK range is malformed";
-    return false;
-  }
-  if (!signed_reader.LengthPrefixed(&attributes)) {
-    *error = "APK signed-data attributes are malformed";
-    return false;
-  }
-  if (!v3 && signed_reader.remaining() != 0) {
-    // Current AOSP apksig appends one reserved empty length-prefixed field to
-    // v2 signed-data. Android's verifier ignores it after parsing attributes;
-    // accept only that exact representation instead of arbitrary trailing data.
-    Span reserved;
-    if (!signed_reader.LengthPrefixed(&reserved) || reserved.size != 0) {
-      *error = "APK v2 signed-data reserved field is malformed";
-      return false;
+  if (is_leaf != 0) {
+    EvpKey certificate_key(X509_get_pubkey(certificate.get()));
+    if (!certificate_key ||
+        EVP_PKEY_eq(certificate_key.get(), state->current_pubkey.get()) != 1) {
+      WriteErr(err_buf, err_cap,
+               "APK signer public key does not match its certificate");
+      return -1;
     }
   }
-  if (signed_reader.remaining() != 0) {
-    *error = "APK signed-data has trailing fields: " +
-             std::to_string(signed_reader.remaining());
-    return false;
-  }
-  if (v3 && (minimum_sdk != signed_minimum_sdk ||
-             maximum_sdk != signed_maximum_sdk)) {
-    *error = "APK signed-data has a mismatched SDK range";
-    return false;
-  }
-
-  std::vector<IdBytes> digest_records;
-  std::vector<IdBytes> signature_records;
-  if (!ParseIdSequence(digests, &digest_records, error) ||
-      !ParseIdSequence(signatures, &signature_records, error)) {
-    return false;
-  }
-  if (digest_records.size() != signature_records.size() ||
-      !std::equal(digest_records.begin(), digest_records.end(),
-                  signature_records.begin(),
-                  [](const IdBytes& digest, const IdBytes& signature) {
-                    return digest.id == signature.id;
-                  })) {
-    *error = "APK signer digest and signature algorithms disagree";
-    return false;
-  }
-  std::optional<SignatureAlgorithm> selected;
-  Span selected_signature;
-  Span selected_digest;
-  for (const IdBytes& signature_record : signature_records) {
-    const auto algorithm = SupportedAlgorithm(signature_record.id);
-    if (!algorithm.has_value()) continue;
-    const auto digest_record = std::find_if(
-        digest_records.begin(), digest_records.end(),
-        [&](const auto& record) { return record.id == algorithm->id; });
-    if (digest_record == digest_records.end()) continue;
-    selected = algorithm;
-    selected_signature = signature_record.bytes;
-    selected_digest = digest_record->bytes;
-    break;
-  }
-  if (!selected.has_value()) {
-    *error = "APK signer has no supported matching signature and digest";
-    return false;
-  }
-
-  const unsigned char* public_cursor = public_key_bytes.data;
-  EvpKey public_key(d2i_PUBKEY(nullptr, &public_cursor, public_key_bytes.size));
-  if (!public_key ||
-      public_cursor != public_key_bytes.data + public_key_bytes.size) {
-    *error = "APK signer public key is malformed";
-    return false;
-  }
-  if (!VerifySignedData(signed_data, selected_signature, *selected,
-                        public_key.get(), error)) {
-    return false;
-  }
-
-  std::vector<unsigned char> calculated_digest;
-  if (!ComputeContentDigest(mapping, block, selected->digest,
-                            &calculated_digest, error) ||
-      selected_digest.size != calculated_digest.size() ||
-      CRYPTO_memcmp(selected_digest.data, calculated_digest.data(),
-                    calculated_digest.size()) != 0) {
-    if (error->empty()) *error = "APK content digest verification failed";
-    return false;
-  }
-
-  Reader certificate_reader(certificate_sequence);
-  bool first = true;
-  while (certificate_reader.remaining() > 0) {
-    Span encoded;
-    if (!certificate_reader.LengthPrefixed(&encoded) || encoded.size == 0) {
-      *error = "APK signer certificate sequence is malformed";
-      return false;
-    }
-    const unsigned char* certificate_cursor = encoded.data;
-    X509Certificate certificate(
-        d2i_X509(nullptr, &certificate_cursor, encoded.size));
-    if (!certificate || certificate_cursor != encoded.data + encoded.size) {
-      *error = "APK signer certificate is malformed";
-      return false;
-    }
-    const bool leaf = first;
-    if (leaf) {
-      EvpKey certificate_key(X509_get_pubkey(certificate.get()));
-      if (!certificate_key ||
-          EVP_PKEY_eq(certificate_key.get(), public_key.get()) != 1) {
-        *error = "APK signer public key does not match its certificate";
-        return false;
-      }
-      first = false;
-    }
-    std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
-    unsigned int digest_size = 0;
-    if (EVP_Digest(encoded.data, encoded.size, digest.data(), &digest_size,
-                   EVP_sha256(), nullptr) != 1 ||
-        digest_size != 32) {
-      *error = "cannot hash APK signing certificate";
-      return false;
-    }
-    if (leaf) certificates->push_back(Hex(digest.data(), digest_size));
-  }
-  if (first) {
-    *error = "APK signer has no certificate";
-    return false;
-  }
-  return true;
+  return 0;
 }
 
-bool VerifyScheme(const Mapping& mapping, const SigningBlock& block,
-                  Span scheme, bool v3, std::vector<std::string>* certificates,
-                  std::string* error) {
-  Reader scheme_reader(scheme);
-  Span signer_sequence;
-  if (!scheme_reader.LengthPrefixed(&signer_sequence) ||
-      scheme_reader.remaining() != 0) {
-    *error = "APK signature scheme signer container is malformed";
-    return false;
+void EmitFingerprintCallback(void* ctx, const char* hex_ptr, size_t hex_len) {
+  auto* state = static_cast<OpenSslVerifyState*>(ctx);
+  if (state != nullptr && hex_ptr != nullptr) {
+    state->certificates.emplace_back(hex_ptr, hex_len);
   }
-  Reader signers(signer_sequence);
-  std::size_t signer_count = 0;
-  while (signers.remaining() > 0) {
-    Span signer;
-    if (!signers.LengthPrefixed(&signer) || signer.size == 0 ||
-        !VerifySigner(mapping, block, signer, v3, certificates, error)) {
-      if (error->empty()) *error = "APK signer sequence is malformed";
-      return false;
-    }
-    if (++signer_count > 16) {
-      *error = "APK contains too many signers";
-      return false;
-    }
-  }
-  return signer_count > 0;
 }
 
 }  // namespace
@@ -537,24 +163,19 @@ ApkSignatureResult VerifyApkSignature(const std::filesystem::path& apk_path) {
   ApkSignatureResult result;
   Mapping mapping;
   if (!MapFile(apk_path, &mapping, &result.error)) return result;
-  SigningBlock block;
-  if (!ParseSigningBlock(mapping, &block, &result.error)) return result;
 
-  // V2 is preferred because Roblox targets Android versions below 28 and its
-  // APKs must carry this scheme. V3 is accepted for future exact profiles.
-  const Span scheme = block.v2.data != nullptr
-                          ? block.v2
-                          : (block.v31.data != nullptr ? block.v31 : block.v3);
-  const bool v3 = block.v2.data == nullptr;
-  if (!VerifyScheme(mapping, block, scheme, v3, &result.certificate_sha256,
-                    &result.error)) {
-    result.certificate_sha256.clear();
+  OpenSslVerifyState state;
+  std::array<char, 256> err_buf{};
+  const int32_t rc = mocktail_rust_verify_apk_signature_container(
+      mapping.bytes, mapping.size, &state, &VerifySignatureCallback,
+      &VerifyCertificateCallback, &EmitFingerprintCallback, err_buf.data(),
+      err_buf.size());
+  if (rc != 0) {
+    result.error = err_buf[0] != '\0' ? err_buf.data()
+                                      : "APK signature verification failed";
     return result;
   }
-  std::sort(result.certificate_sha256.begin(), result.certificate_sha256.end());
-  result.certificate_sha256.erase(std::unique(result.certificate_sha256.begin(),
-                                              result.certificate_sha256.end()),
-                                  result.certificate_sha256.end());
+  result.certificate_sha256 = std::move(state.certificates);
   return result;
 }
 

@@ -9,6 +9,14 @@ use std::slice;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
+pub mod apk_signature_rs;
+pub use apk_signature_rs::*;
+pub mod input_router;
+pub use input_router::*;
+pub mod runtime_bridges;
+pub use runtime_bridges::*;
+pub mod storage_paths;
+pub use storage_paths::*;
 pub mod text_runtime;
 pub use text_runtime::*;
 pub mod window_gates;
@@ -2783,77 +2791,41 @@ fn parse_yaml_bool(v: &str) -> Option<bool> {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn mocktail_rust_parse_runtime_config_yaml(
-    yaml_bytes: *const u8,
-    yaml_len: usize,
-    out_env_json: *mut c_char,
-    out_cap: usize,
-    out_error: *mut c_char,
-    error_cap: usize,
-) -> c_int {
-    let set_error = |msg: &str| {
-        copy_error(out_error, error_cap, msg);
-    };
-    if yaml_bytes.is_null() || out_env_json.is_null() || out_cap == 0 {
-        set_error("invalid argument");
-        return -1;
+pub(crate) fn build_runtime_config_yaml_env_map(
+    slice: &[u8],
+) -> Result<serde_json::Map<String, serde_json::Value>, (c_int, String)> {
+    if slice.len() > 1024 * 1024 {
+        return Err((-2, "runtime configuration file exceeds maximum allowed size".to_string()));
     }
-    if yaml_len > 1024 * 1024 {
-        set_error("runtime configuration file exceeds maximum allowed size");
-        return -2;
-    }
-    let slice = unsafe { slice::from_raw_parts(yaml_bytes, yaml_len) };
-    let parsed_val: serde_yaml::Value = match serde_yaml::from_slice(slice) {
-        Ok(v) => v,
-        Err(e) => {
-            set_error(&format!("runtime configuration contains invalid YAML: {}", e));
-            return -3;
-        }
-    };
-    let root_map = match parsed_val.as_mapping() {
-        Some(m) => m,
-        None => {
-            set_error("root must be a mapping");
-            return -4;
-        }
-    };
+    let parsed_val: serde_yaml::Value = serde_yaml::from_slice(slice)
+        .map_err(|e| (-3, format!("runtime configuration contains invalid YAML: {}", e)))?;
+    let root_map = parsed_val
+        .as_mapping()
+        .ok_or_else(|| (-4, "root must be a mapping".to_string()))?;
 
     let mut values = std::collections::HashMap::new();
     for (k, v) in root_map {
-        let key_str = match k.as_str() {
-            Some(s) => s,
-            None => {
-                set_error("root contains non-scalar key");
-                return -5;
-            }
-        };
+        let key_str = k
+            .as_str()
+            .ok_or_else(|| (-5, "root contains non-scalar key".to_string()))?;
         if key_str == "device" {
             if let Some(s) = v.as_str() {
                 values.insert("device".to_string(), s.to_string());
             } else if v.is_mapping() {
                 values.insert("device.__mapping".to_string(), "1".to_string());
-                if let Err(e) = flatten_yaml_node("device", v, 1, 1, &mut values) {
-                    set_error(&e);
-                    return -6;
-                }
+                flatten_yaml_node("device", v, 1, 1, &mut values).map_err(|e| (-6, e))?;
             } else {
-                set_error("device must be a preset scalar or detailed mapping");
-                return -7;
+                return Err((-7, "device must be a preset scalar or detailed mapping".to_string()));
             }
         } else if [
             "runtime", "appearance", "auth", "graphics", "performance",
             "audio", "window", "input", "compatibility", "network",
-        ].contains(&key_str) {
-            if let Err(e) = flatten_yaml_node(key_str, v, 1, 1, &mut values) {
-                set_error(&e);
-                return -8;
-            }
+        ]
+        .contains(&key_str)
+        {
+            flatten_yaml_node(key_str, v, 1, 1, &mut values).map_err(|e| (-8, e))?;
         } else if key_str == "integrations" {
-            if let Err(e) = flatten_yaml_node("integrations", v, 1, 3, &mut values) {
-                set_error(&e);
-                return -9;
-            }
+            flatten_yaml_node("integrations", v, 1, 3, &mut values).map_err(|e| (-9, e))?;
         } else if key_str == "version" {
             if let Some(s) = v.as_str() {
                 values.insert("version".to_string(), s.to_string());
@@ -2888,15 +2860,13 @@ pub extern "C" fn mocktail_rust_parse_runtime_config_yaml(
 
     for (k, _) in &values {
         if !SUPPORTED.contains(&k.as_str()) {
-            set_error(&format!("unknown runtime configuration key: {}", k));
-            return -10;
+            return Err((-10, format!("unknown runtime configuration key: {}", k)));
         }
     }
 
     if let Some(v) = values.get("version") {
         if v != "1" {
-            set_error(&format!("unsupported runtime configuration version: {}", v));
-            return -11;
+            return Err((-11, format!("unsupported runtime configuration version: {}", v)));
         }
     }
 
@@ -2906,8 +2876,7 @@ pub extern "C" fn mocktail_rust_parse_runtime_config_yaml(
     let detailed_device = values.contains_key("device.__mapping");
     let detailed_type = values.get("device.type").cloned();
     if detailed_device && detailed_type.is_none() {
-        set_error("device.type is required for detailed device configuration");
-        return -12;
+        return Err((-12, "device.type is required for detailed device configuration".to_string()));
     }
     let selected_device = scalar_device.or(detailed_type);
     if let Some(ref dev) = selected_device {
@@ -2915,12 +2884,10 @@ pub extern "C" fn mocktail_rust_parse_runtime_config_yaml(
             "pc", "mobile", "console", "pc-windows-11", "mobile-pixel-7", "console-ps5",
         ];
         if !VALID_DEVS.contains(&dev.as_str()) {
-            set_error("device must be pc, mobile, console, pc-windows-11, mobile-pixel-7, or console-ps5");
-            return -13;
+            return Err((-13, "device must be pc, mobile, console, pc-windows-11, mobile-pixel-7, or console-ps5".to_string()));
         }
         if values.contains_key("input.touch_enabled") || values.contains_key("compatibility.desktop_playability") {
-            set_error("device cannot be combined with input.touch_enabled or compatibility.desktop_playability");
-            return -14;
+            return Err((-14, "device cannot be combined with input.touch_enabled or compatibility.desktop_playability".to_string()));
         }
         env.insert("MOCKTAIL_DEVICE_PROFILE".to_string(), serde_json::json!(dev));
     }
@@ -2939,8 +2906,7 @@ pub extern "C" fn mocktail_rust_parse_runtime_config_yaml(
         for (yaml_key, env_key, max_len) in string_fields {
             if let Some(val) = values.get(yaml_key) {
                 if val.is_empty() || val.len() > max_len || val.bytes().any(|b| b < 0x20 || b == 0x7F) {
-                    set_error(&format!("{} must be non-empty, bounded, and contain no control bytes", yaml_key));
-                    return -15;
+                    return Err((-15, format!("{} must be non-empty, bounded, and contain no control bytes", yaml_key)));
                 }
                 env.insert(env_key.to_string(), serde_json::json!(val));
             }
@@ -2954,49 +2920,37 @@ pub extern "C" fn mocktail_rust_parse_runtime_config_yaml(
                 let parsed = match parse_yaml_bool(val) {
                     Some(true) => "on",
                     Some(false) => "off",
-                    None => {
-                        set_error(&format!("{} must be true or false", yaml_key));
-                        return -16;
-                    }
+                    None => return Err((-16, format!("{} must be true or false", yaml_key))),
                 };
                 env.insert(env_key.to_string(), serde_json::json!(parsed));
             }
         }
     }
 
-    // Runtime section
     if let Some(h) = values.get("runtime.headless") {
         match parse_yaml_bool(h) {
             Some(true) => { env.insert("MOCKTAIL_HEADLESS".to_string(), serde_json::json!("1")); }
             Some(false) => { env.insert("MOCKTAIL_HEADLESS".to_string(), serde_json::json!("0")); }
-            None => {
-                set_error("runtime.headless must be true or false");
-                return -17;
-            }
+            None => return Err((-17, "runtime.headless must be true or false".to_string())),
         }
     }
     if let Some(lib) = values.get("runtime.roblox_library") {
         if lib.is_empty() {
-            set_error("runtime.roblox_library must not be empty");
-            return -18;
+            return Err((-18, "runtime.roblox_library must not be empty".to_string()));
         }
         env.insert("ROBLOX_LIB_PATH".to_string(), serde_json::json!(lib));
     }
 
-    // Appearance section
     if let Some(theme) = values.get("appearance.theme") {
         if !["roblox", "system", "light", "dark"].contains(&theme.as_str()) {
-            set_error("appearance.theme must be roblox, system, light, or dark");
-            return -19;
+            return Err((-19, "appearance.theme must be roblox, system, light, or dark".to_string()));
         }
         env.insert("MOCKTAIL_THEME".to_string(), serde_json::json!(theme));
     }
 
-    // Graphics section
     if let Some(backend) = values.get("graphics.backend") {
         if !["direct-vulkan", "vulkan", "native-vulkan", "opengl", "gles", "system", "angle-vulkan", "angle-swiftshader", "auto"].contains(&backend.as_str()) {
-            set_error(&format!("graphics.backend is not supported: {}", backend));
-            return -20;
+            return Err((-20, format!("graphics.backend is not supported: {}", backend)));
         }
         let mapped_backend = if backend == "vulkan" || backend == "native-vulkan" {
             "direct-vulkan"
@@ -3012,104 +2966,82 @@ pub extern "C" fn mocktail_rust_parse_runtime_config_yaml(
         let mut fps_val = 0i32;
         let c_fps = std::ffi::CString::new(fps.as_str()).unwrap_or_default();
         mocktail_rust_frame_rate_parse(c_fps.as_ptr(), &mut mode, &mut fps_val);
-        if mode == 4 { // kInvalid
-            set_error(&format!("graphics.frame_rate_limit is not supported: {}", fps));
-            return -21;
+        if mode == 4 {
+            return Err((-21, format!("graphics.frame_rate_limit is not supported: {}", fps)));
         }
         env.insert("MOCKTAIL_FRAME_RATE_LIMIT".to_string(), serde_json::json!(fps));
     }
     if let Some(vsync) = values.get("graphics.vsync") {
         if !["auto", "on", "off"].contains(&vsync.as_str()) {
-            set_error("graphics.vsync must be auto, on, or off");
-            return -21;
+            return Err((-21, "graphics.vsync must be auto, on, or off".to_string()));
         }
         env.insert("MOCKTAIL_VSYNC".to_string(), serde_json::json!(vsync));
     }
     if let Some(pm) = values.get("graphics.present_mode") {
         if !["auto", "fifo", "mailbox", "immediate"].contains(&pm.as_str()) {
-            set_error("graphics.present_mode must be auto, fifo, mailbox, or immediate");
-            return -22;
+            return Err((-22, "graphics.present_mode must be auto, fifo, mailbox, or immediate".to_string()));
         }
         env.insert("MOCKTAIL_PRESENT_MODE".to_string(), serde_json::json!(pm));
     }
 
-    // Performance section
     if let Some(mr) = values.get("performance.multithreaded_rendering") {
         match parse_yaml_bool(mr) {
             Some(true) => { env.insert("MOCKTAIL_MULTITHREADED_RENDERING".to_string(), serde_json::json!("1")); }
             Some(false) => { env.insert("MOCKTAIL_MULTITHREADED_RENDERING".to_string(), serde_json::json!("0")); }
-            None => {
-                set_error("performance.multithreaded_rendering must be true or false");
-                return -23;
-            }
+            None => return Err((-23, "performance.multithreaded_rendering must be true or false".to_string())),
         }
     }
     if let Some(pwm) = values.get("performance.physics_worker_mode") {
         if !["auto", "latency", "throughput"].contains(&pwm.as_str()) {
-            set_error("performance.physics_worker_mode must be auto, latency, or throughput");
-            return -24;
+            return Err((-24, "performance.physics_worker_mode must be auto, latency, or throughput".to_string()));
         }
         env.insert("MOCKTAIL_PHYSICS_WORKER_MODE".to_string(), serde_json::json!(pwm));
     }
     if let Some(mem) = values.get("performance.memory_limit_mb") {
-        let n: u64 = match mem.parse() {
-            Ok(v) => v,
-            Err(_) => {
-                set_error("performance.memory_limit_mb must be a non-negative integer");
-                return -25;
-            }
-        };
+        let n: u64 = mem
+            .parse()
+            .map_err(|_| (-25, "performance.memory_limit_mb must be a non-negative integer".to_string()))?;
         env.insert("MOCKTAIL_MEMORY_LIMIT_MB".to_string(), serde_json::json!(n.to_string()));
     }
     if let Some(gm) = values.get("performance.gamemode") {
         if !["auto", "on", "off"].contains(&gm.as_str()) {
-            set_error("performance.gamemode must be auto, on, or off");
-            return -26;
+            return Err((-26, "performance.gamemode must be auto, on, or off".to_string()));
         }
         env.insert("MOCKTAIL_GAMEMODE".to_string(), serde_json::json!(gm));
     }
 
-    // Audio section
     if let Some(out_dev) = values.get("audio.output_device") {
         if out_dev.is_empty() || out_dev.len() > 512 || out_dev.bytes().any(|b| b < 0x20 || b == 0x7F) {
-            set_error("audio.output_device must be non-empty, bounded, and contain no control bytes");
-            return -27;
+            return Err((-27, "audio.output_device must be non-empty, bounded, and contain no control bytes".to_string()));
         }
         env.insert("MOCKTAIL_AUDIO_OUTPUT_DEVICE".to_string(), serde_json::json!(out_dev));
     }
     if let Some(in_dev) = values.get("audio.input_device") {
         if in_dev.is_empty() || in_dev.len() > 512 || in_dev.bytes().any(|b| b < 0x20 || b == 0x7F) {
-            set_error("audio.input_device must be non-empty, bounded, and contain no control bytes");
-            return -28;
+            return Err((-28, "audio.input_device must be non-empty, bounded, and contain no control bytes".to_string()));
         }
         env.insert("MOCKTAIL_AUDIO_INPUT_DEVICE".to_string(), serde_json::json!(in_dev));
     }
 
-    // Window section
     if let Some(w) = values.get("window.width") {
-        let n: u32 = match w.parse() {
-            Ok(v) if v > 0 => v,
-            _ => {
-                set_error("window.width must be a positive integer");
-                return -29;
-            }
-        };
+        let n: u32 = w
+            .parse()
+            .ok()
+            .filter(|v| *v > 0)
+            .ok_or_else(|| (-29, "window.width must be a positive integer".to_string()))?;
         env.insert("MOCKTAIL_WIN_WIDTH".to_string(), serde_json::json!(n.to_string()));
     }
     if let Some(h) = values.get("window.height") {
-        let n: u32 = match h.parse() {
-            Ok(v) if v > 0 => v,
-            _ => {
-                set_error("window.height must be a positive integer");
-                return -30;
-            }
-        };
+        let n: u32 = h
+            .parse()
+            .ok()
+            .filter(|v| *v > 0)
+            .ok_or_else(|| (-30, "window.height must be a positive integer".to_string()))?;
         env.insert("MOCKTAIL_WIN_HEIGHT".to_string(), serde_json::json!(n.to_string()));
     }
     if let Some(title) = values.get("window.title") {
         if title.is_empty() {
-            set_error("window.title must not be empty");
-            return -31;
+            return Err((-31, "window.title must not be empty".to_string()));
         }
         env.insert("MOCKTAIL_WIN_TITLE".to_string(), serde_json::json!(title));
     }
@@ -3117,46 +3049,31 @@ pub extern "C" fn mocktail_rust_parse_runtime_config_yaml(
         match parse_yaml_bool(hdpi) {
             Some(true) => { env.insert("MOCKTAIL_WIN_HIGH_DPI".to_string(), serde_json::json!("1")); }
             Some(false) => { env.insert("MOCKTAIL_WIN_HIGH_DPI".to_string(), serde_json::json!("0")); }
-            None => {
-                set_error("window.high_dpi must be true or false");
-                return -32;
-            }
+            None => return Err((-32, "window.high_dpi must be true or false".to_string())),
         }
     }
 
-    // Input section
     if let Some(touch) = values.get("input.touch_enabled") {
         match parse_yaml_bool(touch) {
             Some(true) => { env.insert("MOCKTAIL_TOUCH_MODE".to_string(), serde_json::json!("on")); }
             Some(false) => { env.insert("MOCKTAIL_TOUCH_MODE".to_string(), serde_json::json!("off")); }
-            None => {
-                set_error("input.touch_enabled must be true or false");
-                return -33;
-            }
+            None => return Err((-33, "input.touch_enabled must be true or false".to_string())),
         }
     }
 
-    // Compatibility section
     if let Some(dp) = values.get("compatibility.desktop_playability") {
         match parse_yaml_bool(dp) {
             Some(true) => { env.insert("MOCKTAIL_DESKTOP_PLAYABILITY".to_string(), serde_json::json!("1")); }
             Some(false) => { env.insert("MOCKTAIL_DESKTOP_PLAYABILITY".to_string(), serde_json::json!("0")); }
-            None => {
-                set_error("compatibility.desktop_playability must be true or false");
-                return -34;
-            }
+            None => return Err((-34, "compatibility.desktop_playability must be true or false".to_string())),
         }
     }
 
-    // Network section
     if let Some(sys_prox) = values.get("network.use_system_proxy") {
         match parse_yaml_bool(sys_prox) {
             Some(true) => { env.insert("MOCKTAIL_USE_SYSTEM_PROXY".to_string(), serde_json::json!("1")); }
             Some(false) => { env.insert("MOCKTAIL_USE_SYSTEM_PROXY".to_string(), serde_json::json!("0")); }
-            None => {
-                set_error("network.use_system_proxy must be true or false");
-                return -35;
-            }
+            None => return Err((-35, "network.use_system_proxy must be true or false".to_string())),
         }
     }
     let proxy_host = values.get("network.proxy_host");
@@ -3167,26 +3084,27 @@ pub extern "C" fn mocktail_rust_parse_runtime_config_yaml(
     if proxy_host.is_some() != proxy_port.is_some()
         || (proxy_scheme.is_some() && proxy_host.is_none())
         || (proxy_username.is_some() && proxy_host.is_none())
-        || (proxy_password.is_some() && proxy_host.is_none()) {
-        set_error("network.proxy_host and network.proxy_port must be configured together");
-        return -36;
+        || (proxy_password.is_some() && proxy_host.is_none())
+    {
+        return Err((-36, "network.proxy_host and network.proxy_port must be configured together".to_string()));
     }
     if let Some(host) = proxy_host {
         let port_str = proxy_port.unwrap();
         let port_num = port_str.parse::<u32>().unwrap_or(0);
         if host.contains("://") || host.contains('/') || port_num == 0 || port_num > 65535 {
-            set_error("network proxy must use a valid host without a scheme, a port from 1 to 65535, an HTTP or SOCKS5 scheme, and valid credentials");
-            return -38;
+            return Err((-38, "network proxy must use a valid host without a scheme, a port from 1 to 65535, an HTTP or SOCKS5 scheme, and valid credentials".to_string()));
         }
         if let Some(scheme) = proxy_scheme {
             if !["http", "https", "socks5"].contains(&scheme.as_str()) {
-                set_error("network proxy must use a valid host without a scheme, a port from 1 to 65535, an HTTP or SOCKS5 scheme, and valid credentials");
-                return -39;
+                return Err((-39, "network proxy must use a valid host without a scheme, a port from 1 to 65535, an HTTP or SOCKS5 scheme, and valid credentials".to_string()));
             }
         }
         env.insert("MOCKTAIL_HTTP_PROXY_HOST".to_string(), serde_json::json!(host));
         env.insert("MOCKTAIL_HTTP_PROXY_PORT".to_string(), serde_json::json!(port_str));
-        env.insert("MOCKTAIL_HTTP_PROXY_SCHEME".to_string(), serde_json::json!(proxy_scheme.map(|s| s.as_str()).unwrap_or("http")));
+        env.insert(
+            "MOCKTAIL_HTTP_PROXY_SCHEME".to_string(),
+            serde_json::json!(proxy_scheme.map(|s| s.as_str()).unwrap_or("http")),
+        );
         if let Some(u) = proxy_username {
             env.insert("MOCKTAIL_HTTP_PROXY_USERNAME".to_string(), serde_json::json!(u));
         }
@@ -3196,33 +3114,24 @@ pub extern "C" fn mocktail_rust_parse_runtime_config_yaml(
     }
     if let Some(ca) = values.get("network.ca_bundle") {
         if ca.is_empty() || !ca.starts_with('/') {
-            set_error("network.ca_bundle must be an absolute file path");
-            return -37;
+            return Err((-37, "network.ca_bundle must be an absolute file path".to_string()));
         }
         env.insert("MOCKTAIL_CA_BUNDLE".to_string(), serde_json::json!(ca));
     }
 
-    // Auth section
     if let Some(sec) = values.get("auth.use_libsecret") {
         match parse_yaml_bool(sec) {
             Some(true) => { env.insert("MOCKTAIL_USE_LIBSECRET".to_string(), serde_json::json!("1")); }
             Some(false) => { env.insert("MOCKTAIL_USE_LIBSECRET".to_string(), serde_json::json!("0")); }
-            None => {
-                set_error("auth.use_libsecret must be true or false");
-                return -38;
-            }
+            None => return Err((-38, "auth.use_libsecret must be true or false".to_string())),
         }
     }
 
-    // Integrations - Fleasion
     if let Some(fl) = values.get("integrations.fleasion.enabled") {
         match parse_yaml_bool(fl) {
             Some(true) => { env.insert("MOCKTAIL_FLEASION_ENABLED".to_string(), serde_json::json!("1")); }
             Some(false) => { env.insert("MOCKTAIL_FLEASION_ENABLED".to_string(), serde_json::json!("0")); }
-            None => {
-                set_error("integrations.fleasion.enabled must be true or false");
-                return -39;
-            }
+            None => return Err((-39, "integrations.fleasion.enabled must be true or false".to_string())),
         }
     }
     if let Some(pm) = values.get("integrations.fleasion.proxy_mode") {
@@ -3235,7 +3144,6 @@ pub extern "C" fn mocktail_rust_parse_runtime_config_yaml(
         env.insert("MOCKTAIL_FLEASION_CA_CERTIFICATE".to_string(), serde_json::json!(ca));
     }
 
-    // Integrations - Discord RPC
     let bool_discord_fields = [
         ("integrations.discord_rpc.enabled", "MOCKTAIL_DISCORD_RPC_ENABLED"),
         ("integrations.discord_rpc.show_place_name", "MOCKTAIL_DISCORD_RPC_SHOW_PLACE_NAME"),
@@ -3248,18 +3156,14 @@ pub extern "C" fn mocktail_rust_parse_runtime_config_yaml(
             match parse_yaml_bool(val) {
                 Some(true) => { env.insert(env_k.to_string(), serde_json::json!("1")); }
                 Some(false) => { env.insert(env_k.to_string(), serde_json::json!("0")); }
-                None => {
-                    set_error(&format!("{} must be true or false", k));
-                    return -40;
-                }
+                None => return Err((-40, format!("{} must be true or false", k))),
             }
         }
     }
 
     if let Some(app_id) = values.get("integrations.discord_rpc.application_id") {
         if app_id.len() < 17 || app_id.len() > 20 || !app_id.chars().all(|c| c.is_ascii_digit()) {
-            set_error("integrations.discord_rpc.application_id must be a Discord snowflake");
-            return -41;
+            return Err((-41, "integrations.discord_rpc.application_id must be a Discord snowflake".to_string()));
         }
         env.insert("MOCKTAIL_DISCORD_APPLICATION_ID".to_string(), serde_json::json!(app_id));
     }
@@ -3275,12 +3179,39 @@ pub extern "C" fn mocktail_rust_parse_runtime_config_yaml(
     for (yaml_key, env_key, max_len) in string_discord_fields {
         if let Some(val) = values.get(yaml_key) {
             if val.is_empty() || val.len() > max_len || val.bytes().any(|b| b < 0x20 || b == 0x7F) {
-                set_error(&format!("{} must be non-empty, bounded, and contain no control bytes", yaml_key));
-                return -42;
+                return Err((-42, format!("{} must be non-empty, bounded, and contain no control bytes", yaml_key)));
             }
             env.insert(env_key.to_string(), serde_json::json!(val));
         }
     }
+
+    Ok(env)
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_parse_runtime_config_yaml(
+    yaml_bytes: *const u8,
+    yaml_len: usize,
+    out_env_json: *mut c_char,
+    out_cap: usize,
+    out_error: *mut c_char,
+    error_cap: usize,
+) -> c_int {
+    let set_error = |msg: &str| {
+        copy_error(out_error, error_cap, msg);
+    };
+    if yaml_bytes.is_null() || out_env_json.is_null() || out_cap == 0 {
+        set_error("invalid argument");
+        return -1;
+    }
+    let slice = unsafe { slice::from_raw_parts(yaml_bytes, yaml_len) };
+    let env = match build_runtime_config_yaml_env_map(slice) {
+        Ok(m) => m,
+        Err((code, msg)) => {
+            set_error(&msg);
+            return code;
+        }
+    };
 
     let dumped = serde_json::Value::Object(env).to_string();
     if dumped.len() + 1 > out_cap {
@@ -3946,34 +3877,25 @@ pub struct MocktailRustApkSigningBlockInfo {
 }
 
 #[inline]
-fn read_u32_le(slice: &[u8]) -> u32 {
+pub(crate) fn read_u32_le(slice: &[u8]) -> u32 {
     u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]])
 }
 
 #[inline]
-fn read_u64_le(slice: &[u8]) -> u64 {
+pub(crate) fn read_u64_le(slice: &[u8]) -> u64 {
     u64::from_le_bytes([
         slice[0], slice[1], slice[2], slice[3],
         slice[4], slice[5], slice[6], slice[7],
     ])
 }
 
-#[no_mangle]
-pub extern "C" fn mocktail_rust_find_apk_signing_block(
-    file_bytes: *const u8,
-    file_size: usize,
-    out_info: *mut MocktailRustApkSigningBlockInfo,
-    out_error: *mut c_char,
-    error_cap: usize,
-) -> c_int {
-    let set_error = |msg: &str| {
-        copy_error(out_error, error_cap, msg);
-    };
-    if file_bytes.is_null() || out_info.is_null() || file_size < 32 {
-        set_error("invalid argument");
-        return -1;
+pub(crate) fn find_apk_signing_block_internal(
+    slice: &[u8],
+) -> Result<MocktailRustApkSigningBlockInfo, (c_int, &'static str)> {
+    let file_size = slice.len();
+    if file_size < 32 {
+        return Err((-1, "invalid argument"));
     }
-    let slice = unsafe { slice::from_raw_parts(file_bytes, file_size) };
 
     let min_search = if file_size > 65557 { file_size - 65557 } else { 0 };
     let mut eocd_pos = None;
@@ -3986,33 +3908,26 @@ pub extern "C" fn mocktail_rust_find_apk_signing_block(
             }
         }
     }
-    let eocd = match eocd_pos {
-        Some(p) => p,
-        None => {
-            set_error("APK has no valid ZIP end record");
-            return -2;
-        }
-    };
+    let eocd = eocd_pos.ok_or((-2, "APK has no valid ZIP end record"))?;
 
     let cd_offset = read_u32_le(&slice[eocd + 16..eocd + 20]) as usize;
     if cd_offset < 32 || cd_offset > eocd {
-        set_error("APK has no Signature Scheme v2/v3 block");
-        return -3;
+        return Err((-3, "APK has no Signature Scheme v2/v3 block"));
     }
     if &slice[cd_offset - 16..cd_offset] != b"APK Sig Block 42" {
-        set_error("APK has no Signature Scheme v2/v3 block");
-        return -4;
+        return Err((-4, "APK has no Signature Scheme v2/v3 block"));
     }
-    let footer_size = read_u64_le(&slice[cd_offset - 24..cd_offset - 16]) as usize;
+    let footer_size = usize::try_from(read_u64_le(&slice[cd_offset - 24..cd_offset - 16]))
+        .map_err(|_| (-5, "APK signing block size is invalid"))?;
     if footer_size < 24 || footer_size > cd_offset - 8 {
-        set_error("APK signing block size is invalid");
-        return -5;
+        return Err((-5, "APK signing block size is invalid"));
     }
     let total_size = footer_size + 8;
     let block_begin = cd_offset - total_size;
-    if read_u64_le(&slice[block_begin..block_begin + 8]) as usize != footer_size {
-        set_error("APK signing block size headers disagree");
-        return -6;
+    let header_size = usize::try_from(read_u64_le(&slice[block_begin..block_begin + 8]))
+        .map_err(|_| (-6, "APK signing block size headers disagree"))?;
+    if header_size != footer_size {
+        return Err((-6, "APK signing block size headers disagree"));
     }
 
     let mut info = MocktailRustApkSigningBlockInfo {
@@ -4031,14 +3946,13 @@ pub extern "C" fn mocktail_rust_find_apk_signing_block(
     let pairs_end = cd_offset - 24;
     while cursor < pairs_end {
         if pairs_end - cursor < 12 {
-            set_error("APK signing block pair is truncated");
-            return -7;
+            return Err((-7, "APK signing block pair is truncated"));
         }
-        let pair_size = read_u64_le(&slice[cursor..cursor + 8]) as usize;
+        let pair_size = usize::try_from(read_u64_le(&slice[cursor..cursor + 8]))
+            .map_err(|_| (-8, "APK signing block pair is malformed"))?;
         cursor += 8;
         if pair_size < 4 || pair_size > pairs_end - cursor {
-            set_error("APK signing block pair is malformed");
-            return -8;
+            return Err((-8, "APK signing block pair is malformed"));
         }
         let id = read_u32_le(&slice[cursor..cursor + 4]);
         let val_offset = (cursor + 4) as u64;
@@ -4061,10 +3975,37 @@ pub extern "C" fn mocktail_rust_find_apk_signing_block(
         cursor += pair_size;
     }
 
-    unsafe {
-        *out_info = info;
+    Ok(info)
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_find_apk_signing_block(
+    file_bytes: *const u8,
+    file_size: usize,
+    out_info: *mut MocktailRustApkSigningBlockInfo,
+    out_error: *mut c_char,
+    error_cap: usize,
+) -> c_int {
+    let set_error = |msg: &str| {
+        copy_error(out_error, error_cap, msg);
+    };
+    if file_bytes.is_null() || out_info.is_null() || file_size < 32 {
+        set_error("invalid argument");
+        return -1;
     }
-    0
+    let slice = unsafe { slice::from_raw_parts(file_bytes, file_size) };
+    match find_apk_signing_block_internal(slice) {
+        Ok(info) => {
+            unsafe {
+                *out_info = info;
+            }
+            0
+        }
+        Err((code, msg)) => {
+            set_error(msg);
+            code
+        }
+    }
 }
 
 // ============================================================================
@@ -6612,7 +6553,7 @@ pub extern "C" fn mocktail_rust_audio_convert_f32_to_i16(
 // 38. Present Mode Policy & Swapchain (Group 1)
 // ============================================================================
 
-fn copy_to_c_buffer(src: &str, dst: *mut c_char, cap: usize) -> c_int {
+pub(crate) fn copy_to_c_buffer(src: &str, dst: *mut c_char, cap: usize) -> c_int {
     if dst.is_null() || cap == 0 {
         return -1;
     }
@@ -10671,7 +10612,7 @@ pub unsafe extern "C" fn mocktail_rust_audio_capture_merge_overrides(
 // 67. Texture Memory Policy Engine
 // ============================================================================
 
-fn copy_error(dst: *mut c_char, cap: usize, msg: &str) {
+pub(crate) fn copy_error(dst: *mut c_char, cap: usize, msg: &str) {
     if dst.is_null() || cap == 0 {
         return;
     }
@@ -14680,6 +14621,32 @@ pub extern "C" fn mocktail_rust_presence_parse_follow_response(
 // 115. Bounded JSON State File Reader/Validator
 // ============================================================================
 
+pub(crate) fn read_update_state_json_string(path_str: &str) -> Option<(String, serde_json::Value)> {
+    const MAX_STATE_BYTES: u64 = 65536;
+    if path_str.is_empty() {
+        return None;
+    }
+    let meta = std::fs::symlink_metadata(path_str).ok()?;
+    if meta.file_type().is_symlink() || !meta.file_type().is_file() || meta.len() > MAX_STATE_BYTES {
+        return None;
+    }
+    let file = File::open(path_str).ok()?;
+    let mut buf = String::new();
+    if file
+        .take(MAX_STATE_BYTES + 1)
+        .read_to_string(&mut buf)
+        .is_err()
+        || buf.len() as u64 > MAX_STATE_BYTES
+    {
+        return None;
+    }
+    let doc: serde_json::Value = serde_json::from_str(&buf).ok()?;
+    if !doc.is_object() {
+        return None;
+    }
+    Some((buf, doc))
+}
+
 #[no_mangle]
 pub extern "C" fn mocktail_rust_update_state_read_json_file(
     path_ptr: *const c_char,
@@ -14687,7 +14654,6 @@ pub extern "C" fn mocktail_rust_update_state_read_json_file(
     out_cap: usize,
     out_len: *mut usize,
 ) -> i32 {
-    const MAX_STATE_BYTES: u64 = 65536;
     if !out_len.is_null() {
         unsafe { *out_len = 0 };
     }
@@ -14698,36 +14664,12 @@ pub extern "C" fn mocktail_rust_update_state_read_json_file(
         return -1;
     }
     let path_str = match unsafe { CStr::from_ptr(path_ptr) }.to_str() {
-        Ok(s) if !s.is_empty() => s,
+        Ok(s) => s,
         _ => return -1,
     };
-    let meta = match std::fs::symlink_metadata(path_str) {
-        Ok(m) => m,
-        Err(_) => return -1,
-    };
-    if meta.file_type().is_symlink() || !meta.file_type().is_file() || meta.len() > MAX_STATE_BYTES {
+    let Some((buf, _)) = read_update_state_json_string(path_str) else {
         return -1;
-    }
-    let file = match File::open(path_str) {
-        Ok(f) => f,
-        Err(_) => return -1,
     };
-    let mut buf = String::new();
-    if file
-        .take(MAX_STATE_BYTES + 1)
-        .read_to_string(&mut buf)
-        .is_err()
-        || buf.len() as u64 > MAX_STATE_BYTES
-    {
-        return -1;
-    }
-    let doc: serde_json::Value = match serde_json::from_str(&buf) {
-        Ok(v) => v,
-        Err(_) => return -1,
-    };
-    if !doc.is_object() {
-        return -1;
-    }
     let rc = copy_to_c_buffer(&buf, out_buf, out_cap);
     if rc == 0 && !out_len.is_null() {
         unsafe { *out_len = buf.len() };
@@ -15819,7 +15761,7 @@ pub extern "C" fn mocktail_rust_host_usable_size(pointer: *mut std::ffi::c_void)
 // ============================================================================
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MocktailRustConstructorRange {
     pub begin: usize,
     pub end_exclusive: usize,

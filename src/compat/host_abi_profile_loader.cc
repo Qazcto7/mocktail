@@ -8,12 +8,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define JSON_NOEXCEPTION 1
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <cerrno>
-#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -23,14 +20,11 @@
 #include <limits>
 #include <memory>
 #include <mutex>
-#include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
-
-#include <openssl/evp.h>
 
 #include "compat/elf_build_id.h"
 #include "compat/guest_abi.h"
@@ -38,45 +32,28 @@
 namespace mocktail::compat {
 namespace {
 
-using Json = nlohmann::json;
-
-std::atomic<bool> g_hashing_fault_for_testing{false};
-
-std::string FormatHex(const unsigned char* data, std::size_t size,
-                      std::size_t max_chars = 0) {
-  static constexpr char kHex[] = "0123456789abcdef";
-  const std::size_t limit =
-      (max_chars > 0 && max_chars < size * 2U) ? max_chars : size * 2U;
-  std::string hex;
-  hex.reserve(limit);
-  for (std::size_t i = 0; i < size && hex.size() < limit; ++i) {
-    hex.push_back(kHex[(data[i] >> 4) & 0x0f]);
-    if (hex.size() < limit) {
-      hex.push_back(kHex[data[i] & 0x0f]);
-    }
-  }
-  return hex;
-}
+static_assert(static_cast<int>(HostBridgeKind::kAllocate) == 0);
+static_assert(static_cast<int>(HostBridgeKind::kReallocate) == 1);
+static_assert(static_cast<int>(HostBridgeKind::kAlignedAllocate) == 2);
+static_assert(static_cast<int>(HostBridgeKind::kFree) == 3);
+static_assert(static_cast<int>(HostBridgeKind::kUsableSize) == 4);
+static_assert(static_cast<int>(HostAllocatorStrategy::kNativeMimalloc) == 1);
+static_assert(kMaxHostBridgeEntries == 8);
+static_assert(kMaxConstructorRunRanges == 26);
 
 std::string ComputeSha256Hex(std::string_view bytes,
                              std::size_t max_chars = 0) {
-  if (g_hashing_fault_for_testing.load(std::memory_order_acquire)) {
+  char hex_buf[65] = {};
+  if (mocktail_rust_host_abi_sha256_hex(
+          reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size(),
+          max_chars, hex_buf, sizeof(hex_buf)) != 0) {
     return {};
   }
-  unsigned char digest[EVP_MAX_MD_SIZE];
-  unsigned int len = 0;
-  if (EVP_Digest(bytes.data(), bytes.size(), digest, &len, EVP_sha256(),
-                 nullptr) != 1) {
-    return {};
-  }
-  return FormatHex(digest, len, max_chars);
+  return std::string(hex_buf);
 }
 
 constexpr std::size_t kMaximumProfileBytes = 1024 * 1024;
 constexpr std::size_t kMaximumReceiptBytes = 64 * 1024;
-constexpr std::size_t kMaximumInitArrayEntries = 1024 * 1024;
-constexpr std::size_t kMaximumSeedAllocationBytes = 16 * 1024 * 1024;
-constexpr std::size_t kMaximumArenaTableSlots = 16 * 1024 * 1024;
 
 class FileDescriptor {
  public:
@@ -134,28 +111,6 @@ ExternalHostAbiProfileResult Failure(std::string error) {
   ExternalHostAbiProfileResult result;
   result.error = std::move(error);
   return result;
-}
-
-std::string Lowercase(std::string_view value) {
-  std::string result(value);
-  std::transform(result.begin(), result.end(), result.begin(),
-                 [](unsigned char character) {
-                   if (character >= 'A' && character <= 'F') {
-                     return static_cast<char>(character - 'A' + 'a');
-                   }
-                   return static_cast<char>(character);
-                 });
-  return result;
-}
-
-bool IsLowerHex(std::string_view value, std::size_t size) {
-  if (value.size() != size) {
-    return false;
-  }
-  return std::all_of(value.begin(), value.end(), [](char character) {
-    return (character >= '0' && character <= '9') ||
-           (character >= 'a' && character <= 'f');
-  });
 }
 
 bool ReadSmallRegularFile(const std::string& path, std::size_t maximum_bytes,
@@ -232,455 +187,90 @@ std::optional<std::string> CanonicalRegularPath(const std::string& path,
   return canonical.string();
 }
 
-const Json* RequiredField(const Json& object, const char* name) {
-  const auto field = object.find(name);
-  return field != object.end() ? &*field : nullptr;
-}
-
-bool ReadRequiredString(const Json& object, const char* name,
-                        std::string* value) {
-  const Json* field = RequiredField(object, name);
-  if (field == nullptr || !field->is_string()) {
-    return false;
+std::unique_ptr<OwnedHostAbiProfile> ParseProfileBytes(
+    const std::string& path, std::string_view bytes, std::string* error) {
+  MocktailRustParsedHostAbiProfile parsed{};
+  char err_buf[256] = {};
+  const int rc = mocktail_rust_host_abi_parse_profile_json(
+      bytes.data(), bytes.size(), kGuestElfMachine == EM_X86_64,
+      alignof(void*), std::numeric_limits<std::uintptr_t>::max(), &parsed,
+      err_buf, sizeof(err_buf));
+  if (rc == -2) {
+    *error = "invalid JSON object: " + path;
+    return nullptr;
   }
-  *value = field->get_ref<const std::string&>();
-  return true;
-}
-
-bool ReadSize(const Json& value, std::size_t maximum, std::size_t* result) {
-  std::uint64_t parsed = 0;
-  if (value.is_number_unsigned()) {
-    parsed = value.get<std::uint64_t>();
-  } else if (value.is_number_integer()) {
-    const std::int64_t signed_value = value.get<std::int64_t>();
-    if (signed_value < 0) {
-      return false;
-    }
-    parsed = static_cast<std::uint64_t>(signed_value);
-  } else {
-    return false;
-  }
-  if (parsed > maximum || parsed > std::numeric_limits<std::size_t>::max()) {
-    return false;
-  }
-  *result = static_cast<std::size_t>(parsed);
-  return true;
-}
-
-bool ReadRequiredSize(const Json& object, const char* name, std::size_t maximum,
-                      std::size_t* result) {
-  const Json* field = RequiredField(object, name);
-  return field != nullptr && ReadSize(*field, maximum, result);
-}
-
-bool ReadHexValue(const Json& object, const char* name, std::uint64_t maximum,
-                  std::uint64_t* result) {
-  const Json* field = RequiredField(object, name);
-  if (field == nullptr || !field->is_string()) {
-    return false;
-  }
-  const std::string& encoded = field->get_ref<const std::string&>();
-  if (encoded.size() <= 2 || encoded[0] != '0' || encoded[1] != 'x') {
-    return false;
-  }
-  std::uint64_t value = 0;
-  const std::from_chars_result parsed = std::from_chars(
-      encoded.data() + 2, encoded.data() + encoded.size(), value, 16);
-  if (parsed.ec != std::errc() ||
-      parsed.ptr != encoded.data() + encoded.size() || value == 0 ||
-      value > maximum) {
-    return false;
-  }
-  *result = value;
-  return true;
-}
-
-bool ReadRva(const Json& object, const char* name, uintptr_t* result) {
-  std::uint64_t value = 0;
-  if (!ReadHexValue(object, name, std::numeric_limits<std::uintptr_t>::max(),
-                    &value)) {
-    return false;
-  }
-  *result = static_cast<std::uintptr_t>(value);
-  return true;
-}
-
-std::optional<HostBridgeKind> ParseBridgeKind(std::string_view kind) {
-  if (kind == "allocate") {
-    return HostBridgeKind::kAllocate;
-  }
-  if (kind == "reallocate") {
-    return HostBridgeKind::kReallocate;
-  }
-  if (kind == "aligned_allocate") {
-    return HostBridgeKind::kAlignedAllocate;
-  }
-  if (kind == "free") {
-    return HostBridgeKind::kFree;
-  }
-  if (kind == "usable_size") {
-    return HostBridgeKind::kUsableSize;
-  }
-  return std::nullopt;
-}
-
-std::optional<HostBridgeKind> ExpectedKindForLabel(std::string_view label) {
-  if (label == "small-allocate" || label == "allocate") {
-    return HostBridgeKind::kAllocate;
-  }
-  if (label == "usable-size") {
-    return HostBridgeKind::kUsableSize;
-  }
-  if (label == "reallocate") {
-    return HostBridgeKind::kReallocate;
-  }
-  if (label == "aligned-allocate-direct") {
-    return HostBridgeKind::kAlignedAllocate;
-  }
-  if (label == "free") {
-    return HostBridgeKind::kFree;
-  }
-  return std::nullopt;
-}
-
-bool IsSafeLabel(std::string_view label) {
-  return !label.empty() && label.size() <= 64 &&
-         std::all_of(label.begin(), label.end(), [](char character) {
-           return (character >= 'a' && character <= 'z') ||
-                  (character >= 'A' && character <= 'Z') ||
-                  (character >= '0' && character <= '9') || character == '-' ||
-                  character == '_';
-         });
-}
-
-bool ParseRanges(const Json& object, const char* name, std::size_t init_count,
-                 std::array<ConstructorRange, kMaxConstructorRunRanges>* ranges,
-                 std::size_t* count) {
-  const Json* encoded = RequiredField(object, name);
-  if (encoded == nullptr || !encoded->is_array() || encoded->empty() ||
-      encoded->size() > ranges->size()) {
-    return false;
-  }
-  *count = 0;
-  for (const Json& item : *encoded) {
-    if (!item.is_object()) {
-      return false;
-    }
-    ConstructorRange range;
-    if (!ReadRequiredSize(item, "begin", init_count, &range.begin) ||
-        !ReadRequiredSize(item, "end_exclusive", init_count,
-                          &range.end_exclusive)) {
-      return false;
-    }
-    (*ranges)[(*count)++] = range;
-  }
-  return true;
-}
-
-std::unique_ptr<OwnedHostAbiProfile> ParseProfile(const Json& root,
-                                                  std::string* error) {
-  const Json* schema = RequiredField(root, "schema_version");
-  const Json* reference = RequiredField(root, "reference");
-  const Json* derivation = RequiredField(root, "derivation_anchors");
-  const Json* profile_json = RequiredField(root, "profile");
-  std::size_t schema_version = 0;
-  if (!root.is_object() || schema == nullptr ||
-      !ReadSize(*schema, 1, &schema_version) || schema_version != 1 ||
-      reference == nullptr || !reference->is_object() || reference->empty() ||
-      derivation == nullptr || !derivation->is_object() ||
-      derivation->empty() || profile_json == nullptr ||
-      !profile_json->is_object()) {
-    *error = "unsupported external host ABI profile schema";
+  if (rc != 0) {
+    *error = err_buf[0] != '\0' ? err_buf
+                                : "unsupported external host ABI profile schema";
     return nullptr;
   }
 
   auto owned = std::make_unique<OwnedHostAbiProfile>();
-  std::string nested_build_id;
-  if (!ReadRequiredString(root, "elf_build_id", &owned->build_id) ||
-      !ReadRequiredString(*profile_json, "elf_build_id", &nested_build_id) ||
-      !IsValidBuildId(owned->build_id) ||
-      owned->build_id != Lowercase(owned->build_id) ||
-      nested_build_id != owned->build_id) {
-    *error = "external host ABI profile has an invalid exact Build ID";
-    return nullptr;
+  owned->build_id = parsed.build_id;
+  owned->reference_build_id = parsed.reference_build_id;
+  owned->reference_payload_sha256 = parsed.reference_payload_sha256;
+  owned->profile.bridge_entry_count = parsed.bridge_entry_count;
+  for (std::size_t i = 0; i < parsed.bridge_entry_count; ++i) {
+    owned->labels[i] = parsed.bridge_entries[i].label;
+    owned->profile.bridge_entries[i].rva =
+        static_cast<uintptr_t>(parsed.bridge_entries[i].rva);
+    owned->profile.bridge_entries[i].kind =
+        static_cast<HostBridgeKind>(parsed.bridge_entries[i].kind);
+    owned->profile.bridge_entries[i].label = {};
   }
-
-  if (!ReadRequiredString(*reference, "elf_build_id",
-                          &owned->reference_build_id) ||
-      !ReadRequiredString(*reference, "payload_sha256",
-                          &owned->reference_payload_sha256) ||
-      !IsValidBuildId(owned->reference_build_id) ||
-      owned->reference_build_id != Lowercase(owned->reference_build_id) ||
-      !IsLowerHex(owned->reference_payload_sha256, 64)) {
-    *error = "external host ABI profile has invalid reference identity";
-    return nullptr;
+  owned->profile.data_seeds.allocator_object_slot =
+      static_cast<uintptr_t>(parsed.allocator_object_slot);
+  owned->profile.data_seeds.empty_string_slot =
+      static_cast<uintptr_t>(parsed.empty_string_slot);
+  owned->profile.data_seeds.jni_singleton_slot =
+      static_cast<uintptr_t>(parsed.jni_singleton_slot);
+  owned->profile.data_seeds.jni_singleton_bytes = parsed.jni_singleton_bytes;
+  owned->profile.data_seeds.arena_initializer =
+      static_cast<uintptr_t>(parsed.arena_initializer);
+  owned->profile.data_seeds.allocator_thread_initializer =
+      static_cast<uintptr_t>(parsed.allocator_thread_initializer);
+  owned->profile.data_seeds.arena_guard_slot =
+      static_cast<uintptr_t>(parsed.arena_guard_slot);
+  owned->profile.data_seeds.arena_table_slot =
+      static_cast<uintptr_t>(parsed.arena_table_slot);
+  owned->profile.data_seeds.arena_table_slot_count =
+      parsed.arena_table_slot_count;
+  owned->profile.native_allocator.allocate =
+      static_cast<uintptr_t>(parsed.native_allocator_allocate);
+  owned->profile.native_allocator.deallocate =
+      static_cast<uintptr_t>(parsed.native_allocator_deallocate);
+  owned->profile.init_array_offset =
+      static_cast<uintptr_t>(parsed.init_array_offset);
+  owned->profile.init_array_count = parsed.init_array_count;
+  owned->profile.constructor_run_range_count =
+      parsed.constructor_run_range_count;
+  for (std::size_t i = 0; i < parsed.constructor_run_range_count; ++i) {
+    owned->profile.constructor_run_ranges[i] = {
+        parsed.constructor_run_ranges[i].begin,
+        parsed.constructor_run_ranges[i].end_exclusive};
   }
-  std::size_t signature_version = 0;
-  const Json* encoded_signature_version =
-      RequiredField(*derivation, "signature_version");
-  if (encoded_signature_version == nullptr ||
-      !ReadSize(*encoded_signature_version, 1, &signature_version) ||
-      signature_version != 1) {
-    *error = "external host ABI profile has unsupported derivation anchors";
-    return nullptr;
+  owned->profile.native_mimalloc_constructor_run_range_count =
+      parsed.native_mimalloc_constructor_run_range_count;
+  for (std::size_t i = 0;
+       i < parsed.native_mimalloc_constructor_run_range_count; ++i) {
+    owned->profile.native_mimalloc_constructor_run_ranges[i] = {
+        parsed.native_mimalloc_constructor_run_ranges[i].begin,
+        parsed.native_mimalloc_constructor_run_ranges[i].end_exclusive};
   }
-  for (const char* name :
-       {"allocator_object_initializer_rva", "empty_string_initializer_rva",
-        "jni_singleton_initializer_rva"}) {
-    uintptr_t rva = 0;
-    if (!ReadRva(*derivation, name, &rva)) {
-      *error = "external host ABI profile is missing a derivation anchor";
-      return nullptr;
-    }
-    owned->derivation_code_rvas.push_back(rva);
-  }
-  if (profile_json->contains("host_allocator_bridges_supported")) {
-    const auto& supported = (*profile_json)["host_allocator_bridges_supported"];
-    if (!supported.is_boolean()) {
-      *error = "host allocator bridge support must be boolean";
-      return nullptr;
-    }
-    owned->profile.host_allocator_bridges_supported = supported.get<bool>();
-  }
-  std::array<std::size_t, 4> constructor_indices = {2, 3, 4, 5};
-  const Json* indices = RequiredField(*derivation, "constructor_indices");
-  if (indices != nullptr || !owned->profile.host_allocator_bridges_supported) {
-    if (indices == nullptr || !indices->is_object() || indices->size() != 4) {
-      *error = "external host ABI profile has invalid constructor indices";
-      return nullptr;
-    }
-    for (std::size_t role = 0; role < constructor_indices.size(); ++role) {
-      if (!ReadRequiredSize(*indices, std::to_string(role + 2).c_str(),
-                            kMaximumInitArrayEntries - 1,
-                            &constructor_indices[role])) {
-        *error = "external host ABI profile has invalid constructor indices";
-        return nullptr;
-      }
-    }
-  }
-  const Json* constructor_anchors =
-      RequiredField(*derivation, "constructor_rvas");
-  if (constructor_anchors == nullptr || !constructor_anchors->is_object()) {
-    *error = "external host ABI profile has invalid constructor anchors";
-    return nullptr;
-  }
-  for (const char* index : {"2", "3", "4", "5"}) {
-    uintptr_t rva = 0;
-    if (!ReadRva(*constructor_anchors, index, &rva)) {
-      *error = "external host ABI profile is missing a constructor anchor";
-      return nullptr;
-    }
-    owned->derivation_code_rvas.push_back(rva);
-  }
-
-  const Json* bridge_entries = RequiredField(*profile_json, "bridge_entries");
-  if (bridge_entries == nullptr || !bridge_entries->is_array() ||
-      bridge_entries->size() != 6) {
-    *error = "external host ABI profile has an invalid bridge table";
-    return nullptr;
-  }
-  std::array<bool, 5> observed_kinds{};
-  std::vector<uintptr_t> observed_rvas;
-  std::vector<std::string> observed_labels;
-  uintptr_t primary_allocate_rva = 0;
-  uintptr_t free_rva = 0;
-  for (const Json& entry : *bridge_entries) {
-    std::string kind_name;
-    std::string label;
-    uintptr_t rva = 0;
-    if (!entry.is_object() || !ReadRva(entry, "rva", &rva) ||
-        !ReadRequiredString(entry, "kind", &kind_name) ||
-        !ReadRequiredString(entry, "label", &label) || !IsSafeLabel(label)) {
-      *error = "external host ABI profile has an invalid bridge entry";
-      return nullptr;
-    }
-    const std::optional<HostBridgeKind> kind = ParseBridgeKind(kind_name);
-    const std::optional<HostBridgeKind> expected_kind =
-        ExpectedKindForLabel(label);
-    if (!kind.has_value() || !expected_kind.has_value() ||
-        *kind != *expected_kind ||
-        std::find(observed_rvas.begin(), observed_rvas.end(), rva) !=
-            observed_rvas.end() ||
-        std::find(observed_labels.begin(), observed_labels.end(), label) !=
-            observed_labels.end()) {
-      *error = "external host ABI profile has an unknown or duplicate bridge";
-      return nullptr;
-    }
-    const std::size_t index = owned->profile.bridge_entry_count++;
-    owned->labels[index] = std::move(label);
-    owned->profile.bridge_entries[index] = {rva, *kind, {}};
-    observed_rvas.push_back(rva);
-    observed_labels.push_back(owned->labels[index]);
-    observed_kinds[static_cast<std::size_t>(*kind)] = true;
-    if (owned->labels[index] == "allocate") {
-      primary_allocate_rva = rva;
-    } else if (owned->labels[index] == "free") {
-      free_rva = rva;
-    }
-  }
-  if (!std::all_of(observed_kinds.begin(), observed_kinds.end(),
-                   [](bool observed) { return observed; })) {
-    *error = "external host ABI profile is missing a required bridge kind";
-    return nullptr;
-  }
-
-  const Json* seeds = RequiredField(*profile_json, "data_seeds");
-  if (seeds == nullptr || !seeds->is_object() ||
-      !ReadRva(*seeds, "allocator_object_slot",
-               &owned->profile.data_seeds.allocator_object_slot) ||
-      !ReadRva(*seeds, "empty_string_slot",
-               &owned->profile.data_seeds.empty_string_slot) ||
-      !ReadRva(*seeds, "jni_singleton_slot",
-               &owned->profile.data_seeds.jni_singleton_slot) ||
-      !ReadRequiredSize(*seeds, "jni_singleton_bytes",
-                        kMaximumSeedAllocationBytes,
-                        &owned->profile.data_seeds.jni_singleton_bytes) ||
-      !ReadRva(*seeds, "arena_initializer",
-               &owned->profile.data_seeds.arena_initializer) ||
-      !ReadRva(*seeds, "allocator_thread_initializer",
-               &owned->profile.data_seeds.allocator_thread_initializer) ||
-      !ReadRva(*seeds, "arena_guard_slot",
-               &owned->profile.data_seeds.arena_guard_slot) ||
-      !ReadRva(*seeds, "arena_table_slot",
-               &owned->profile.data_seeds.arena_table_slot) ||
-      !ReadRequiredSize(*seeds, "arena_table_slot_count",
-                        kMaximumArenaTableSlots,
-                        &owned->profile.data_seeds.arena_table_slot_count)) {
-    *error = "external host ABI profile has invalid data seeds";
-    return nullptr;
-  }
-  if (owned->profile.data_seeds.jni_singleton_bytes != 0x400 ||
-      owned->profile.data_seeds.arena_table_slot_count != 0x400000) {
-    *error = "external host ABI profile changed fixed seed allocation sizes";
-    return nullptr;
-  }
-
-  const Json* allocator = RequiredField(*profile_json, "native_allocator");
-  const Json* bootstrap =
-      RequiredField(*profile_json, "native_pre_jni_bootstrap");
-  if (allocator == nullptr || !allocator->is_object() ||
-      !ReadRva(*allocator, "allocate",
-               &owned->profile.native_allocator.allocate) ||
-      !ReadRva(*allocator, "deallocate",
-               &owned->profile.native_allocator.deallocate) ||
-      bootstrap == nullptr || !bootstrap->is_object() ||
-      !ReadRva(*bootstrap, "registry_initializer",
-               &owned->profile.native_pre_jni_bootstrap.registry_initializer) ||
-      !ReadRva(*bootstrap, "registry_slot",
-               &owned->profile.native_pre_jni_bootstrap.registry_slot) ||
-      !ReadRva(*profile_json, "init_array_offset",
-               &owned->profile.init_array_offset) ||
-      !ReadRequiredSize(*profile_json, "init_array_count",
-                        kMaximumInitArrayEntries,
-                        &owned->profile.init_array_count) ||
-      owned->profile.init_array_count == 0 ||
-      !ParseRanges(*profile_json, "constructor_run_ranges",
-                   owned->profile.init_array_count,
-                   &owned->profile.constructor_run_ranges,
-                   &owned->profile.constructor_run_range_count) ||
-      !ParseRanges(
-          *profile_json, "native_mimalloc_constructor_run_ranges",
-          owned->profile.init_array_count,
-          &owned->profile.native_mimalloc_constructor_run_ranges,
-          &owned->profile.native_mimalloc_constructor_run_range_count) ||
-      !ReadRequiredSize(
-          *profile_json, "native_mimalloc_thread_initializer_after_constructor",
-          owned->profile.init_array_count - 1,
-          &owned->profile
-               .native_mimalloc_thread_initializer_after_constructor)) {
-    *error = "external host ABI profile has invalid native bootstrap fields";
-    return nullptr;
-  }
-  if (owned->profile.native_allocator.allocate != primary_allocate_rva ||
-      owned->profile.native_allocator.deallocate != free_rva) {
-    *error =
-        "external host ABI profile native allocator disagrees with bridges";
-    return nullptr;
-  }
-  std::array<uintptr_t, 6> writable_slots = {
-      owned->profile.data_seeds.allocator_object_slot,
-      owned->profile.data_seeds.empty_string_slot,
-      owned->profile.data_seeds.jni_singleton_slot,
-      owned->profile.data_seeds.arena_guard_slot,
-      owned->profile.data_seeds.arena_table_slot,
-      owned->profile.native_pre_jni_bootstrap.registry_slot,
-  };
-  if (std::any_of(writable_slots.begin(), writable_slots.end(),
-                  [](uintptr_t rva) { return rva % alignof(void*) != 0; })) {
-    *error = "external host ABI profile contains an unaligned writable slot";
-    return nullptr;
-  }
-  std::sort(writable_slots.begin(), writable_slots.end());
-  if (std::adjacent_find(writable_slots.begin(), writable_slots.end()) !=
-      writable_slots.end()) {
-    *error = "external host ABI profile aliases writable state slots";
-    return nullptr;
-  }
-
-  std::string strategy;
-  if (!ReadRequiredString(*profile_json, "default_allocator_strategy",
-                          &strategy) ||
-      strategy != "native_mimalloc") {
-    *error = "external host ABI profile must retain native mimalloc";
-    return nullptr;
-  }
+  owned->profile.native_mimalloc_thread_initializer_after_constructor =
+      parsed.native_mimalloc_thread_initializer_after_constructor;
+  owned->profile.native_pre_jni_bootstrap.registry_initializer =
+      static_cast<uintptr_t>(parsed.native_pre_jni_registry_initializer);
+  owned->profile.native_pre_jni_bootstrap.registry_slot =
+      static_cast<uintptr_t>(parsed.native_pre_jni_registry_slot);
+  owned->profile.host_allocator_bridges_supported =
+      parsed.host_allocator_bridges_supported != 0;
   owned->profile.default_allocator_strategy =
-      HostAllocatorStrategy::kNativeMimalloc;
+      static_cast<HostAllocatorStrategy>(parsed.default_allocator_strategy);
+  owned->derivation_code_rvas.assign(
+      parsed.derivation_code_rvas,
+      parsed.derivation_code_rvas + parsed.derivation_code_rva_count);
   owned->BindViews();
-  if (!owned->profile.native_allocator.IsValid() ||
-      !owned->profile.HasValidConstructorRanges() ||
-      !owned->profile.HasValidNativeMimallocConstructorRanges() ||
-      !owned->profile.HasValidNativePreJniBootstrap() ||
-      !owned->profile.ShouldInitializeNativeMimallocThreadAfterConstructor(
-          owned->profile
-              .native_mimalloc_thread_initializer_after_constructor)) {
-    *error = "external host ABI profile has inconsistent constructor policy";
-    return nullptr;
-  }
-  const std::size_t checkpoint =
-      owned->profile.native_mimalloc_thread_initializer_after_constructor;
-  if (owned->profile.host_allocator_bridges_supported &&
-      (owned->profile.init_array_count <= checkpoint + 3 ||
-       owned->profile.constructor_run_range_count != 2 ||
-       owned->profile.constructor_run_ranges[0].begin != checkpoint ||
-       owned->profile.constructor_run_ranges[0].end_exclusive !=
-           checkpoint + 1 ||
-       owned->profile.constructor_run_ranges[1].begin != checkpoint + 3 ||
-       owned->profile.constructor_run_ranges[1].end_exclusive !=
-           owned->profile.init_array_count ||
-       owned->profile.native_mimalloc_constructor_run_range_count != 1 ||
-       owned->profile.native_mimalloc_constructor_run_ranges[0].begin !=
-           checkpoint ||
-       owned->profile.native_mimalloc_constructor_run_ranges[0].end_exclusive !=
-           owned->profile.init_array_count ||
-       (kGuestElfMachine == EM_X86_64 && checkpoint != 2) ||
-       (indices != nullptr &&
-        constructor_indices !=
-            std::array<std::size_t, 4>{checkpoint, checkpoint + 1,
-                                       checkpoint + 2, checkpoint + 3}))) {
-    *error =
-        "external host ABI profile changed the verified constructor policy";
-    return nullptr;
-  }
-  if (!owned->profile.host_allocator_bridges_supported) {
-    auto sorted = constructor_indices;
-    std::sort(sorted.begin(), sorted.end());
-    const auto count = owned->profile.init_array_count;
-    if (sorted.front() < 2 || sorted.back() >= count ||
-        std::adjacent_find(sorted.begin(), sorted.end()) != sorted.end() ||
-        checkpoint != constructor_indices[0] ||
-        owned->profile.native_mimalloc_constructor_run_range_count != 1 ||
-        owned->profile.native_mimalloc_constructor_run_ranges[0].begin != 2 ||
-        owned->profile.native_mimalloc_constructor_run_ranges[0]
-                .end_exclusive != count ||
-        owned->profile.constructor_run_range_count != 1 ||
-        owned->profile.constructor_run_ranges[0].begin != 2 ||
-        owned->profile.constructor_run_ranges[0].end_exclusive != count) {
-      *error =
-          "external native-only profile has inconsistent constructor roles";
-      return nullptr;
-    }
-  }
   return owned;
 }
 
@@ -820,67 +410,9 @@ bool ValidateProfileAgainstElf(const std::string& payload_path,
   return true;
 }
 
-bool ParseJsonFile(const std::string& path, std::size_t maximum_bytes,
-                   bool require_immutable, Json* json, std::string* bytes,
-                   std::string* error) {
-  if (!ReadSmallRegularFile(path, maximum_bytes, require_immutable, bytes,
-                            error)) {
-    return false;
-  }
-  *json = Json::parse(*bytes, nullptr, false);
-  if (json->is_discarded() || !json->is_object()) {
-    *error = "invalid JSON object: " + path;
-    return false;
-  }
-  return true;
-}
-
-bool ValidatePayloadId(std::string_view payload_id, std::string_view build_id) {
-  const std::size_t separator = payload_id.find('-');
-  if (!IsLowerHex(build_id, 40) || separator == 0 ||
-      separator == std::string_view::npos ||
-      payload_id.substr(separator + 1) != build_id) {
-    return false;
-  }
-  return std::all_of(
-      payload_id.begin(), payload_id.begin() + separator,
-      [](char character) { return character >= '0' && character <= '9'; });
-}
-
-bool ValidateStoredPayloadPath(std::string_view encoded_path,
-                               std::string_view payload_id,
-                               const std::filesystem::path& canonical_library) {
-  if (encoded_path != "payloads/" + std::string(payload_id) ||
-      canonical_library.filename() != "libroblox.so") {
-    return false;
-  }
-  const std::filesystem::path payload_directory =
-      canonical_library.parent_path();
-  return payload_directory.filename() == std::string(payload_id) &&
-         payload_directory.parent_path().filename() == "payloads";
-}
-
-bool IsDecimal(std::string_view value) {
-  return !value.empty() &&
-         std::all_of(value.begin(), value.end(), [](char character) {
-           return character >= '0' && character <= '9';
-         });
-}
-
-bool ValidateCanaryRunId(std::string_view run_id, std::string_view payload_id,
-                         std::size_t run) {
-  const std::string prefix =
-      std::string(payload_id) + "-" + std::to_string(run) + "-";
-  if (run_id.size() <= prefix.size() ||
-      run_id.substr(0, prefix.size()) != prefix) {
-    return false;
-  }
-  const std::string_view suffix = run_id.substr(prefix.size());
-  const std::size_t separator = suffix.find('-');
-  return separator != std::string_view::npos &&
-         suffix.find('-', separator + 1) == std::string_view::npos &&
-         IsDecimal(suffix.substr(0, separator)) &&
-         IsDecimal(suffix.substr(separator + 1));
+void AssignHostAbiString(void* raw_ctx, const char* ptr, size_t len) {
+  auto* out = static_cast<std::string*>(raw_ctx);
+  out->assign(ptr, len);
 }
 
 struct CanaryEvidence {
@@ -897,64 +429,33 @@ bool ValidateCanaryAttestation(const std::string& attestation_path,
                                std::string_view runtime_sha256,
                                std::string_view runtime_build_id,
                                CanaryEvidence* evidence, std::string* error) {
-  Json attestation;
   std::string attestation_bytes;
-  if (!ParseJsonFile(attestation_path, kMaximumReceiptBytes, true, &attestation,
-                     &attestation_bytes, error)) {
+  if (!ReadSmallRegularFile(attestation_path, kMaximumReceiptBytes, true,
+                            &attestation_bytes, error)) {
     return false;
   }
-
-  std::size_t schema_version = 0;
-  std::size_t run = 0;
-  std::string status;
-  std::string canary_tier;
+  char sha_buf[65] = {};
+  char err_buf[256] = {};
   std::string run_id;
-  std::string attestation_payload_id;
-  std::string attestation_payload_fingerprint;
-  std::string attestation_profile_sha256;
-  std::string attestation_manifest_sha256;
-  std::string attestation_runtime_sha256;
-  std::string attestation_runtime_build_id;
-  std::string readiness_log_sha256;
-  const Json* schema = RequiredField(attestation, "schema_version");
-  if (schema == nullptr || !ReadSize(*schema, 1, &schema_version) ||
-      schema_version != 1 ||
-      !ReadRequiredString(attestation, "status", &status) ||
-      status != "passed" ||
-      !ReadRequiredString(attestation, "canary_tier", &canary_tier) ||
-      canary_tier != "C" || !ReadRequiredSize(attestation, "run", 2, &run) ||
-      run != expected_run ||
-      !ReadRequiredString(attestation, "run_id", &run_id) ||
-      !ValidateCanaryRunId(run_id, payload_id, expected_run) ||
-      !ReadRequiredString(attestation, "payload_id", &attestation_payload_id) ||
-      attestation_payload_id != payload_id ||
-      !ReadRequiredString(attestation, "payload_fingerprint",
-                          &attestation_payload_fingerprint) ||
-      attestation_payload_fingerprint != payload_fingerprint ||
-      !ReadRequiredString(attestation, "profile_sha256",
-                          &attestation_profile_sha256) ||
-      attestation_profile_sha256 != profile_sha256 ||
-      !ReadRequiredString(attestation, "compatibility_manifest_sha256",
-                          &attestation_manifest_sha256) ||
-      attestation_manifest_sha256 != compatibility_manifest_sha256 ||
-      !ReadRequiredString(attestation, "runtime_sha256",
-                          &attestation_runtime_sha256) ||
-      attestation_runtime_sha256 != runtime_sha256 ||
-      !ReadRequiredString(attestation, "runtime_build_id",
-                          &attestation_runtime_build_id) ||
-      attestation_runtime_build_id != runtime_build_id ||
-      !ReadRequiredString(attestation, "readiness_log_sha256",
-                          &readiness_log_sha256) ||
-      !IsLowerHex(readiness_log_sha256, 64)) {
-    *error = "canary attestation does not match the exact approval evidence";
+  const int rc = mocktail_rust_host_abi_validate_canary_attestation_json(
+      attestation_bytes.data(), attestation_bytes.size(), expected_run,
+      std::string(payload_id).c_str(), std::string(payload_fingerprint).c_str(),
+      std::string(profile_sha256).c_str(),
+      std::string(compatibility_manifest_sha256).c_str(),
+      std::string(runtime_sha256).c_str(), std::string(runtime_build_id).c_str(),
+      sha_buf, sizeof(sha_buf), AssignHostAbiString, &run_id, err_buf,
+      sizeof(err_buf));
+  if (rc == -2) {
+    *error = "invalid JSON object: " + attestation_path;
     return false;
   }
-
-  evidence->sha256 = ComputeSha256Hex(attestation_bytes);
-  if (evidence->sha256.empty()) {
-    *error = "cannot compute canary attestation SHA-256";
+  if (rc != 0) {
+    *error = err_buf[0] != '\0'
+                 ? err_buf
+                 : "canary attestation does not match the exact approval evidence";
     return false;
   }
+  evidence->sha256 = sha_buf;
   evidence->run_id = std::move(run_id);
   return true;
 }
@@ -966,68 +467,26 @@ bool ValidateReceipt(const std::string& receipt_path,
                      const std::string& payload_id, const std::string& build_id,
                      const std::string& compatibility_manifest_path,
                      std::string* error) {
-  Json receipt;
   std::string receipt_bytes;
-  if (!ParseJsonFile(receipt_path, kMaximumReceiptBytes, true, &receipt,
-                     &receipt_bytes, error)) {
+  if (!ReadSmallRegularFile(receipt_path, kMaximumReceiptBytes, true,
+                            &receipt_bytes, error)) {
     return false;
   }
-  std::size_t schema_version = 0;
-  std::size_t successful_runs = 0;
-  std::string status;
-  std::string receipt_payload_id;
-  std::string generation;
-  std::string receipt_build_id;
-  std::string receipt_payload_path;
-  std::string receipt_payload_sha256;
-  std::string receipt_profile_sha256;
-  std::string receipt_runtime_build_id;
-  std::string canary_runtime_sha256;
-  std::string receipt_runtime_sha256;
-  std::string receipt_manifest_sha256;
-  std::string payload_fingerprint;
-  std::string canary_tier;
-  const Json* schema = RequiredField(receipt, "schema_version");
-  if (schema == nullptr || !ReadSize(*schema, 1, &schema_version) ||
-      schema_version != 1 || !ReadRequiredString(receipt, "status", &status) ||
-      status != "approved" ||
-      !ReadRequiredString(receipt, "payload_id", &receipt_payload_id) ||
-      receipt_payload_id != payload_id ||
-      !ReadRequiredString(receipt, "generation", &generation) ||
-      !IsLowerHex(generation, 40) ||
-      !ReadRequiredString(receipt, "elf_build_id", &receipt_build_id) ||
-      !ReadRequiredString(receipt, "payload_path", &receipt_payload_path) ||
-      !ReadRequiredString(receipt, "payload_sha256", &receipt_payload_sha256) ||
-      !ReadRequiredString(receipt, "profile_sha256", &receipt_profile_sha256) ||
-      !ReadRequiredString(receipt, "runtime_build_id",
-                          &receipt_runtime_build_id) ||
-      !ReadRequiredString(receipt, "canary_runtime_sha256",
-                          &canary_runtime_sha256) ||
-      !ReadRequiredString(receipt, "runtime_sha256", &receipt_runtime_sha256) ||
-      !ReadRequiredString(receipt, "compatibility_manifest_sha256",
-                          &receipt_manifest_sha256) ||
-      !ReadRequiredString(receipt, "payload_fingerprint",
-                          &payload_fingerprint) ||
-      !ReadRequiredString(receipt, "canary_tier", &canary_tier) ||
-      !ReadRequiredSize(receipt, "successful_runs", 2, &successful_runs) ||
-      successful_runs != 2 || canary_tier != "C" ||
-      receipt_build_id != build_id ||
-      receipt_payload_path != canonical_payload_path ||
-      receipt_payload_sha256 != payload_sha256 ||
-      receipt_profile_sha256 != profile_sha256 ||
-      !IsLowerHex(receipt_runtime_build_id, 40) ||
-      !IsLowerHex(canary_runtime_sha256, 64) ||
-      receipt_runtime_sha256 != canary_runtime_sha256 ||
-      !IsLowerHex(payload_fingerprint, 64)) {
-    *error =
-        "approval receipt does not authorize the exact ABI profile and payload";
+  MocktailRustParsedApprovalReceipt parsed{};
+  char err_buf[256] = {};
+  const int parse_rc = mocktail_rust_host_abi_parse_receipt_json(
+      receipt_bytes.data(), receipt_bytes.size(), receipt_path.c_str(),
+      canonical_payload_path.c_str(), payload_sha256.c_str(),
+      profile_sha256.c_str(), payload_id.c_str(), build_id.c_str(), &parsed,
+      err_buf, sizeof(err_buf));
+  if (parse_rc == -2) {
+    *error = "invalid JSON object: " + receipt_path;
     return false;
   }
-
-  const std::filesystem::path receipt_file(receipt_path);
-  const std::string evidence_prefix = payload_id + "-" + generation;
-  if (receipt_file.filename() != evidence_prefix + ".json") {
-    *error = "approval receipt filename does not match its evidence generation";
+  if (parse_rc != 0) {
+    *error = err_buf[0] != '\0'
+                 ? err_buf
+                 : "approval receipt does not authorize the exact ABI profile and payload";
     return false;
   }
 
@@ -1037,11 +496,14 @@ bool ValidateReceipt(const std::string& receipt_path,
     *error = "cannot hash compatibility manifest for approval receipt";
     return false;
   }
-  if (receipt_manifest_sha256 != manifest_hash.sha256) {
+  if (std::string_view(parsed.compatibility_manifest_sha256) !=
+      manifest_hash.sha256) {
     *error = "approval receipt belongs to different compatibility bytes";
     return false;
   }
 
+  const std::filesystem::path receipt_file(receipt_path);
+  const std::string evidence_prefix = payload_id + "-" + parsed.generation;
   std::array<CanaryEvidence, 2> canary_evidence;
   for (std::size_t index = 0; index < canary_evidence.size(); ++index) {
     const std::string filename =
@@ -1059,55 +521,22 @@ bool ValidateReceipt(const std::string& receipt_path,
       return false;
     }
     if (!ValidateCanaryAttestation(
-            *canonical_attestation, index + 1, payload_id, payload_fingerprint,
-            profile_sha256, manifest_hash.sha256, canary_runtime_sha256,
-            receipt_runtime_build_id, &canary_evidence[index], error)) {
-      return false;
-    }
-  }
-  if (canary_evidence[0].run_id == canary_evidence[1].run_id) {
-    *error = "approval receipt canary attestations reuse one run ID";
-    return false;
-  }
-
-  const Json* attestation_hashes =
-      RequiredField(receipt, "canary_attestation_sha256");
-  if (attestation_hashes == nullptr || !attestation_hashes->is_array() ||
-      attestation_hashes->size() != canary_evidence.size()) {
-    *error = "approval receipt must bind exactly two canary attestations";
-    return false;
-  }
-  for (std::size_t index = 0; index < canary_evidence.size(); ++index) {
-    const Json& encoded_hash = (*attestation_hashes)[index];
-    if (!encoded_hash.is_string() ||
-        encoded_hash.get_ref<const std::string&>() !=
-            canary_evidence[index].sha256) {
-      *error = "approval receipt canary attestation hash does not match";
+            *canonical_attestation, index + 1, payload_id,
+            parsed.payload_fingerprint, profile_sha256, manifest_hash.sha256,
+            parsed.canary_runtime_sha256, parsed.runtime_build_id,
+            &canary_evidence[index], error)) {
       return false;
     }
   }
 
-  std::string generation_evidence;
-  generation_evidence.append("runtime_build_id=")
-      .append(receipt_runtime_build_id)
-      .append("\n");
-  generation_evidence.append("payload=")
-      .append(payload_fingerprint)
-      .append("\n");
-  generation_evidence.append("profile=").append(profile_sha256).append("\n");
-  generation_evidence.append("compatibility=")
-      .append(manifest_hash.sha256)
-      .append("\n");
-  generation_evidence.append("canary_1=")
-      .append(canary_evidence[0].sha256)
-      .append("\n");
-  generation_evidence.append("canary_2=")
-      .append(canary_evidence[1].sha256)
-      .append("\n");
-  const std::string expected_generation =
-      ComputeSha256Hex(generation_evidence, 40);
-  if (generation != expected_generation) {
-    *error = "approval receipt evidence generation does not match";
+  if (mocktail_rust_host_abi_verify_receipt_evidence(
+          &parsed, profile_sha256.c_str(), manifest_hash.sha256.c_str(),
+          canary_evidence[0].sha256.c_str(), canary_evidence[0].run_id.c_str(),
+          canary_evidence[1].sha256.c_str(), canary_evidence[1].run_id.c_str(),
+          err_buf, sizeof(err_buf)) != 0) {
+    *error = err_buf[0] != '\0'
+                 ? err_buf
+                 : "approval receipt evidence generation does not match";
     return false;
   }
   return true;
@@ -1205,34 +634,31 @@ ExternalHostAbiProfileResult LoadExternalHostAbiProfile(
     return Failure(path_error);
   }
 
-  Json root;
   std::string profile_bytes;
-  if (!ParseJsonFile(*canonical_profile, kMaximumProfileBytes, false, &root,
-                     &profile_bytes, &path_error)) {
+  if (!ReadSmallRegularFile(*canonical_profile, kMaximumProfileBytes, false,
+                            &profile_bytes, &path_error)) {
     return Failure(path_error);
   }
   std::unique_ptr<OwnedHostAbiProfile> profile =
-      ParseProfile(root, &path_error);
+      ParseProfileBytes(*canonical_profile, profile_bytes, &path_error);
   if (!profile) {
     return Failure(path_error);
   }
 
-  std::string encoded_payload_sha256;
-  std::string encoded_payload_path;
-  std::string payload_id;
-  if (!ReadRequiredString(root, "payload_sha256", &encoded_payload_sha256) ||
-      !ReadRequiredString(root, "payload_path", &encoded_payload_path) ||
-      !ReadRequiredString(root, "payload_id", &payload_id) ||
-      !IsLowerHex(encoded_payload_sha256, 64) ||
-      !ValidatePayloadId(payload_id, profile->build_id) ||
-      !ValidateStoredPayloadPath(encoded_payload_path, payload_id,
-                                 *canonical_payload) ||
-      profile->reference_build_id == profile->build_id ||
-      profile->reference_payload_sha256 == encoded_payload_sha256 ||
-      profile->build_id != Lowercase(request.expected_build_id)) {
+  char encoded_payload_sha256_buf[65] = {};
+  char payload_id_buf[128] = {};
+  if (mocktail_rust_host_abi_validate_profile_identity(
+          profile_bytes.data(), profile_bytes.size(), profile->build_id.c_str(),
+          profile->reference_build_id.c_str(),
+          profile->reference_payload_sha256.c_str(), canonical_payload->c_str(),
+          request.expected_build_id.c_str(), encoded_payload_sha256_buf,
+          sizeof(encoded_payload_sha256_buf), payload_id_buf,
+          sizeof(payload_id_buf)) != 0) {
     return Failure(
         "external host ABI profile payload identity does not match the launch");
   }
+  const std::string encoded_payload_sha256(encoded_payload_sha256_buf);
+  const std::string payload_id(payload_id_buf);
   const BuildIdResult actual_build_id = ReadElfBuildId(*canonical_payload);
   if (!actual_build_id || actual_build_id.build_id != profile->build_id) {
     return Failure(
@@ -1326,7 +752,7 @@ ExternalHostAbiProfileResult InitializeHostAbiProfileFromEnvironment(
 }
 
 void SetHostAbiProfileHashingFaultForTesting(bool enabled) noexcept {
-  g_hashing_fault_for_testing.store(enabled, std::memory_order_release);
+  mocktail_rust_host_abi_set_hashing_fault_for_testing(enabled);
 }
 
 }  // namespace mocktail::compat

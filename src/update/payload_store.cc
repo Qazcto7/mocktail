@@ -1,9 +1,6 @@
 #include "update/payload_store.h"
 #include "mocktail/mocktail_rust.h"
 
-#include "update/state_file.h"
-
-#define JSON_NOEXCEPTION 1
 #include <fcntl.h>
 #include <sys/file.h>
 #include <sys/stat.h>
@@ -13,6 +10,7 @@
 #include <sys/ioctl.h>
 #endif
 
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <cerrno>
@@ -20,7 +18,6 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <nlohmann/json.hpp>
 #include <set>
 #include <string>
 #include <utility>
@@ -437,23 +434,39 @@ struct ManifestIdentity {
   explicit operator bool() const { return error.empty(); }
 };
 
+void AssignPayloadStoreString(void* raw_ctx, const char* ptr, size_t len) {
+  auto* out = static_cast<std::string*>(raw_ctx);
+  out->assign(ptr, len);
+}
+
+struct InspectApprovalPaths {
+  std::string profile;
+  std::string compatibility;
+  std::string receipt;
+};
+
+void AssignInspectApprovalPaths(void* raw_ctx, const char* profile_ptr,
+                                size_t profile_len, const char* compat_ptr,
+                                size_t compat_len, const char* receipt_ptr,
+                                size_t receipt_len) {
+  auto* out = static_cast<InspectApprovalPaths*>(raw_ctx);
+  out->profile.assign(profile_ptr, profile_len);
+  out->compatibility.assign(compat_ptr, compat_len);
+  out->receipt.assign(receipt_ptr, receipt_len);
+}
+
 ManifestIdentity ReadManifest(const std::filesystem::path& path,
                               bool missing_ok = false) {
   ManifestIdentity result;
   result.contents = ReadRegular(path, 1024U * 1024U, &result.error, missing_ok);
   if (!result.error.empty() || result.contents.empty()) return result;
-  const nlohmann::json document =
-      nlohmann::json::parse(result.contents, nullptr, false, true);
-  if (document.is_discarded() || !document.is_object() ||
-      document.value("schema_version", 0) != 1 ||
-      !document.contains("payload_id") || !document["payload_id"].is_string()) {
-    result.error = "active payload manifest is invalid";
-    return result;
-  }
-  result.payload_id = document["payload_id"].get<std::string>();
-  if (!ValidPayloadId(result.payload_id) ||
-      document.value("payload_path", "") != "payloads/" + result.payload_id) {
-    result.error = "active payload manifest identity is invalid";
+  char err_buf[256] = {};
+  if (mocktail_rust_payload_store_parse_manifest_identity(
+          result.contents.data(), result.contents.size(),
+          AssignPayloadStoreString, &result.payload_id, err_buf,
+          sizeof(err_buf)) != 0) {
+    result.error =
+        err_buf[0] != '\0' ? err_buf : "active payload manifest is invalid";
   }
   return result;
 }
@@ -480,32 +493,23 @@ bool ExactSupported(const std::filesystem::path& compatibility,
   return true;
 }
 
-nlohmann::json ActivationManifest(const PayloadIntegrityResult& payload) {
-  return {
-      {"schema_version", 1},
-      {"payload_id", payload.payload_id},
-      {"payload_path", "payloads/" + payload.payload_id},
-      {"version_name", payload.metadata.version_name},
-      {"version_code", payload.metadata.version_code},
-      {"elf_build_id", payload.metadata.build_id},
-      {"payload_sha256", payload.metadata.library_sha256},
-      {"activated_at_epoch",
-       std::chrono::duration_cast<std::chrono::seconds>(
-           std::chrono::system_clock::now().time_since_epoch())
-           .count()},
-  };
+std::string ActivationManifestJson(
+    const PayloadIntegrityResult& payload,
+    const std::string& approval_generation = {}) {
+  std::string out;
+  mocktail_rust_payload_store_build_activation_manifest(
+      payload.payload_id.c_str(), payload.metadata.version_name.c_str(),
+      payload.metadata.version_code, payload.metadata.build_id.c_str(),
+      payload.metadata.library_sha256.c_str(),
+      approval_generation.empty() ? nullptr : approval_generation.c_str(),
+      AssignPayloadStoreString, &out);
+  return out;
 }
 
-nlohmann::json ProbationActivationManifest(
+std::string ProbationActivationManifestJson(
     const PayloadIntegrityResult& payload,
     const CandidateApprovalResult& approval) {
-  nlohmann::json manifest = ActivationManifest(payload);
-  const std::string stem = payload.payload_id + "-" + approval.generation;
-  manifest["approval_path"] = "approvals/" + stem + ".json";
-  manifest["host_abi_profile_path"] = "host_abi_profiles/" + stem + ".json";
-  manifest["compatibility_manifest_path"] =
-      "compatibility_profiles/" + stem + ".json";
-  return manifest;
+  return ActivationManifestJson(payload, approval.generation);
 }
 
 bool PopulateInspectedResult(
@@ -525,35 +529,24 @@ bool PopulateInspectedResult(
   result->version_code = payload.metadata.version_code;
   result->build_id = payload.metadata.build_id;
   if (verified_payload != nullptr) *verified_payload = payload;
-  const nlohmann::json document =
-      nlohmann::json::parse(manifest.contents, nullptr, false, true);
-  if (document.is_discarded() ||
-      document.value("version_name", "") != payload.metadata.version_name ||
-      document.value("version_code", 0ULL) != payload.metadata.version_code ||
-      document.value("elf_build_id", "") != payload.metadata.build_id) {
-    result->error = "active payload manifest is invalid";
+
+  InspectApprovalPaths paths;
+  uint8_t has_approval = 0;
+  char err_buf[256] = {};
+  if (mocktail_rust_payload_store_inspect_manifest_json(
+          manifest.contents.data(), manifest.contents.size(),
+          payload.metadata.version_name.c_str(), payload.metadata.version_code,
+          payload.metadata.build_id.c_str(),
+          payload.metadata.library_sha256.c_str(), AssignInspectApprovalPaths,
+          &paths, &has_approval, err_buf, sizeof(err_buf)) != 0) {
+    result->error =
+        err_buf[0] != '\0' ? err_buf : "active payload manifest is invalid";
     return false;
   }
-  const auto cached_sha256 = document.find("payload_sha256");
-  if (cached_sha256 != document.end() &&
-      (!cached_sha256->is_string() ||
-       cached_sha256->get_ref<const std::string&>() !=
-           payload.metadata.library_sha256)) {
-    result->error = "active payload manifest hash does not match payload";
-    return false;
-  }
-  const std::string profile = document.value("host_abi_profile_path", "");
-  const std::string compatibility =
-      document.value("compatibility_manifest_path", "");
-  const std::string receipt = document.value("approval_path", "");
-  if (!profile.empty() || !compatibility.empty() || !receipt.empty()) {
-    if (profile.empty() || compatibility.empty() || receipt.empty()) {
-      result->error = "active payload approval reference set is incomplete";
-      return false;
-    }
-    result->host_abi_profile = root / profile;
-    result->compatibility_manifest = root / compatibility;
-    result->approval_receipt = root / receipt;
+  if (has_approval != 0) {
+    result->host_abi_profile = root / paths.profile;
+    result->compatibility_manifest = root / paths.compatibility;
+    result->approval_receipt = root / paths.receipt;
   }
   return true;
 }
@@ -562,25 +555,21 @@ bool PersistPayloadSha256(const std::filesystem::path& root,
                           const ManifestIdentity& manifest,
                           const PayloadIntegrityResult& payload,
                           std::string* error) {
-  nlohmann::json document =
-      nlohmann::json::parse(manifest.contents, nullptr, false, true);
-  if (document.is_discarded() || !document.is_object()) {
-    *error = "active payload manifest is invalid";
+  std::string updated_json;
+  uint8_t needs_write = 0;
+  char err_buf[256] = {};
+  if (mocktail_rust_payload_store_persist_payload_sha256(
+          manifest.contents.data(), manifest.contents.size(),
+          payload.metadata.library_sha256.c_str(), AssignPayloadStoreString,
+          &updated_json, &needs_write, err_buf, sizeof(err_buf)) != 0) {
+    *error =
+        err_buf[0] != '\0' ? err_buf : "active payload manifest is invalid";
     return false;
   }
-  const auto cached = document.find("payload_sha256");
-  if (cached != document.end()) {
-    if (!cached->is_string() ||
-        cached->get_ref<const std::string&>() !=
-            payload.metadata.library_sha256) {
-      *error = "active payload manifest hash does not match payload";
-      return false;
-    }
+  if (needs_write == 0) {
     return true;
   }
-  document["payload_sha256"] = payload.metadata.library_sha256;
-  return WriteAtomic(root, root / "current.json", document.dump(2) + "\n",
-                     error);
+  return WriteAtomic(root, root / "current.json", updated_json, error);
 }
 
 }  // namespace
@@ -681,7 +670,7 @@ PayloadStoreResult PayloadStore::Promote(std::string_view payload_id) {
                    &result.error)) {
     return result;
   }
-  const std::string contents = ActivationManifest(payload).dump(2) + "\n";
+  const std::string contents = ActivationManifestJson(payload);
   if (!WriteAtomic(root_, root_ / "current.json", contents, &result.error)) {
     return result;
   }
@@ -728,7 +717,7 @@ PayloadStoreResult PayloadStore::PromoteProbation(
     return result;
   }
   const std::string contents =
-      ProbationActivationManifest(payload, approval).dump(2) + "\n";
+      ProbationActivationManifestJson(payload, approval);
   CandidateApprovalResult verified_approval;
   if (!ValidateCandidateApproval(root_, contents, payload, &verified_approval,
                                  &result.error)) {
@@ -937,17 +926,13 @@ std::string PayloadStore::StatusJson(std::string* output_error) const {
     *error = !current.error.empty() ? current.error : previous.error;
     return {};
   }
-  nlohmann::json document;
-  document["updates"] = ReadStateFile(root_ / "update.json");
-  document["current"] =
-      current.contents.empty()
-          ? nlohmann::json(nullptr)
-          : nlohmann::json::parse(current.contents, nullptr, false, true);
-  document["previous_good"] =
-      previous.contents.empty()
-          ? nlohmann::json(nullptr)
-          : nlohmann::json::parse(previous.contents, nullptr, false, true);
-  return document.dump(2) + "\n";
+  std::string output;
+  const std::filesystem::path update_path = root_ / "update.json";
+  mocktail_rust_payload_store_build_status_json(
+      update_path.c_str(), current.contents.data(), current.contents.size(),
+      previous.contents.data(), previous.contents.size(),
+      AssignPayloadStoreString, &output);
+  return output;
 }
 
 }  // namespace mocktail::update

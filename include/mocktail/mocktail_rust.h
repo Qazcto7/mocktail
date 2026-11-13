@@ -3024,6 +3024,465 @@ int32_t mocktail_rust_utf8_to_utf16_bounded(
     size_t out_cap,
     size_t* out_len);
 
+// ============================================================================
+// 134. Runtime Bridges (Experience Launch / Runtime Config / Browser Service)
+// ============================================================================
+
+typedef void (*MocktailExperienceLaunchStringCallback)(
+    void* ctx, uint32_t field_index, const char* ptr, size_t len);
+typedef void (*MocktailExperienceLaunchCanonicalCallback)(
+    void* ctx, const char* ptr, size_t len);
+
+int32_t mocktail_rust_parse_experience_launch_json_full(
+    const char* json_ptr,
+    size_t json_len,
+    MocktailRustExperienceLaunchData* out_data,
+    void* ctx,
+    MocktailExperienceLaunchStringCallback on_string,
+    MocktailExperienceLaunchCanonicalCallback on_canonical,
+    char* err_buf,
+    size_t err_cap);
+
+typedef void (*MocktailRuntimeConfigKvCallback)(
+    void* ctx,
+    const char* key,
+    size_t key_len,
+    const char* val,
+    size_t val_len);
+
+int32_t mocktail_rust_parse_runtime_config_yaml_kv(
+    const uint8_t* yaml_bytes,
+    size_t yaml_len,
+    void* ctx,
+    MocktailRuntimeConfigKvCallback emit_kv,
+    char* out_error,
+    size_t error_cap);
+
+typedef struct MocktailRustRuntimeConfigPolicyFlags {
+    int32_t frame_rate_valid;
+    int32_t device_profile_valid;
+    int32_t has_usable_input;
+    int32_t graphics_backend_valid;
+    int32_t theme_mode_valid;
+    int32_t high_dpi_valid;
+    int32_t vsync_mode_valid;
+    int32_t present_mode_valid;
+    int32_t audio_output_device_valid;
+    int32_t audio_input_device_valid;
+    int32_t memory_limit_valid;
+    int32_t game_mode_valid;
+    int32_t physics_worker_mode_valid;
+    int32_t fleasion_valid;
+    int32_t ca_bundle_valid;
+    int32_t discord_rpc_valid;
+} MocktailRustRuntimeConfigPolicyFlags;
+
+int32_t mocktail_rust_validate_runtime_config_policy(
+    const MocktailRustRuntimeConfigPolicyFlags* flags,
+    int32_t for_export,
+    char* out_error,
+    size_t error_cap);
+
+typedef struct MocktailRustBrowserServiceCommandHeader {
+    int32_t command_type;
+    int32_t has_title;
+    int32_t has_visible;
+    int32_t visible;
+    int32_t modal;
+    int32_t has_back_navigation_disabled;
+    int32_t back_navigation_disabled;
+    int32_t show_domain_as_title;
+} MocktailRustBrowserServiceCommandHeader;
+
+typedef void (*MocktailBrowserServiceStringCallback)(
+    void* ctx, uint32_t field_kind, const char* ptr, size_t len);
+
+int32_t mocktail_rust_validate_browser_service_open_url(
+    const char* payload_ptr,
+    size_t payload_len,
+    char* err_buf,
+    size_t err_cap);
+
+int32_t mocktail_rust_parse_browser_service_command_full(
+    const char* json_str,
+    size_t json_len,
+    MocktailRustBrowserServiceCommandHeader* out_header,
+    void* ctx,
+    MocktailBrowserServiceStringCallback on_string,
+    char* err_buf,
+    size_t err_cap);
+
+int32_t mocktail_rust_browser_service_can_queue_outgoing(
+    size_t queued_events,
+    size_t queued_bytes,
+    size_t drain_events,
+    size_t drain_bytes,
+    size_t incoming_bytes);
+
+// ============================================================================
+// 135. Stateful Input & Gamepad Router
+// ============================================================================
+
+typedef struct MocktailRustInputRouterState MocktailRustInputRouterState;
+
+typedef struct MocktailRustInputViewport {
+    int32_t logical_width;
+    int32_t logical_height;
+    int32_t pixel_width;
+    int32_t pixel_height;
+    float density_scale;
+} MocktailRustInputViewport;
+
+typedef struct MocktailRustInputSnapshot {
+    int32_t active;
+    int32_t focused;
+    MocktailRustInputViewport viewport;
+    uint64_t mouse_events;
+    uint64_t touch_events;
+    uint64_t keyboard_events;
+    uint64_t ignored_text_events;
+    uint64_t text_events;
+    uint64_t native_errors;
+    uint32_t active_mouse_buttons;
+    uint32_t active_touches;
+    uint32_t active_keys;
+    uint64_t gamepad_events;
+    uint32_t detected_gamepads;
+    uint32_t connected_gamepads;
+} MocktailRustInputSnapshot;
+
+typedef struct MocktailRustInputDispatchResult {
+    int32_t state;
+    int32_t kind;
+    int32_t status_code;
+} MocktailRustInputDispatchResult;
+
+typedef struct MocktailRustInputCallbacks {
+    int32_t has_mouse_move;
+    int32_t has_mouse_button;
+    int32_t has_mouse_wheel;
+    int32_t has_touch;
+    int32_t has_key;
+    int32_t has_gamepad;
+    int32_t (*mouse_move)(void* ctx, float x, float y, float dx, float dy);
+    int32_t (*mouse_button)(void* ctx, float x, float y, int32_t pressed, int32_t button);
+    int32_t (*mouse_wheel)(void* ctx, float x, float y, float delta_y);
+    int32_t (*touch)(void* ctx, int32_t pointer_id, float x, float y, int32_t action, int32_t w, int32_t h);
+    int32_t (*key)(void* ctx, int32_t pressed, int32_t scan_code, int32_t key_code, int32_t repeat);
+    int32_t (*end_text_focus)(void* ctx);
+    int32_t (*gamepad_supported_key)(void* ctx, int32_t device_id, int32_t key, int32_t supported, int32_t gp_type);
+    int32_t (*gamepad_supported_motion)(void* ctx, int32_t device_id, int32_t axis, int32_t direction, int32_t supported, int32_t gp_type);
+    int32_t (*gamepad_connect)(void* ctx, int32_t device_id, int32_t gp_type);
+    int32_t (*gamepad_disconnect)(void* ctx, int32_t device_id);
+    int32_t (*gamepad_button)(void* ctx, int32_t device_id, int32_t key, int32_t pressed);
+    int32_t (*gamepad_axis)(void* ctx, int32_t device_id, int32_t axis, float x, float y, float z);
+} MocktailRustInputCallbacks;
+
+MocktailRustInputRouterState* mocktail_rust_input_router_new(void);
+void mocktail_rust_input_router_free(MocktailRustInputRouterState* state);
+void mocktail_rust_input_router_snapshot(
+    const MocktailRustInputRouterState* state,
+    MocktailRustInputSnapshot* out_snapshot);
+int32_t mocktail_rust_input_router_is_active(
+    const MocktailRustInputRouterState* state);
+int32_t mocktail_rust_input_router_activate(
+    MocktailRustInputRouterState* state,
+    MocktailRustInputViewport viewport,
+    int32_t initially_focused,
+    char* err_buf,
+    size_t err_cap);
+int32_t mocktail_rust_input_router_deactivate(
+    MocktailRustInputRouterState* state,
+    const MocktailRustInputCallbacks* cb,
+    void* cb_ctx);
+int32_t mocktail_rust_input_router_prepare_routed_event(
+    MocktailRustInputRouterState* state);
+MocktailRustInputDispatchResult mocktail_rust_input_router_record_text_result(
+    MocktailRustInputRouterState* state,
+    int32_t handled,
+    int32_t dispatched,
+    int32_t failed);
+MocktailRustInputDispatchResult mocktail_rust_input_router_handle_viewport(
+    MocktailRustInputRouterState* state,
+    MocktailRustInputViewport viewport,
+    char* err_buf,
+    size_t err_cap);
+MocktailRustInputDispatchResult mocktail_rust_input_router_handle_focus(
+    MocktailRustInputRouterState* state,
+    int32_t focused,
+    const MocktailRustInputCallbacks* cb,
+    void* cb_ctx);
+MocktailRustInputDispatchResult mocktail_rust_input_router_handle_mouse_motion(
+    MocktailRustInputRouterState* state,
+    float x,
+    float y,
+    float delta_x,
+    float delta_y,
+    int32_t relative_mode,
+    const MocktailRustInputCallbacks* cb,
+    void* cb_ctx,
+    char* err_buf,
+    size_t err_cap);
+MocktailRustInputDispatchResult mocktail_rust_input_router_handle_mouse_button(
+    MocktailRustInputRouterState* state,
+    int32_t pressed,
+    uint8_t sdl_button,
+    float x,
+    float y,
+    int32_t relative_mode,
+    const MocktailRustInputCallbacks* cb,
+    void* cb_ctx,
+    char* err_buf,
+    size_t err_cap);
+MocktailRustInputDispatchResult mocktail_rust_input_router_handle_mouse_wheel(
+    MocktailRustInputRouterState* state,
+    float delta_y,
+    float mouse_x,
+    float mouse_y,
+    int32_t relative_mode,
+    const MocktailRustInputCallbacks* cb,
+    void* cb_ctx,
+    char* err_buf,
+    size_t err_cap);
+MocktailRustInputDispatchResult mocktail_rust_input_router_handle_touch(
+    MocktailRustInputRouterState* state,
+    int32_t action_kind,
+    int64_t touch_id,
+    int64_t finger_id,
+    float norm_x,
+    float norm_y,
+    const MocktailRustInputCallbacks* cb,
+    void* cb_ctx,
+    char* err_buf,
+    size_t err_cap);
+MocktailRustInputDispatchResult mocktail_rust_input_router_handle_key(
+    MocktailRustInputRouterState* state,
+    int32_t pressed,
+    int32_t repeat,
+    uint32_t scancode,
+    uint32_t keycode,
+    const MocktailRustInputCallbacks* cb,
+    void* cb_ctx,
+    char* err_buf,
+    size_t err_cap);
+MocktailRustInputDispatchResult mocktail_rust_input_router_handle_gamepad_connection(
+    MocktailRustInputRouterState* state,
+    int64_t instance_id,
+    int32_t connected,
+    int32_t remapped,
+    int32_t family,
+    const char* name,
+    uint32_t buttons_mask,
+    uint32_t axes_mask,
+    const MocktailRustInputCallbacks* cb,
+    void* cb_ctx,
+    char* err_buf,
+    size_t err_cap);
+MocktailRustInputDispatchResult mocktail_rust_input_router_handle_gamepad_button(
+    MocktailRustInputRouterState* state,
+    int64_t instance_id,
+    uint8_t button,
+    int32_t pressed,
+    const MocktailRustInputCallbacks* cb,
+    void* cb_ctx,
+    char* err_buf,
+    size_t err_cap);
+MocktailRustInputDispatchResult mocktail_rust_input_router_handle_gamepad_axis(
+    MocktailRustInputRouterState* state,
+    int64_t instance_id,
+    uint8_t axis,
+    int16_t value,
+    const MocktailRustInputCallbacks* cb,
+    void* cb_ctx,
+    char* err_buf,
+    size_t err_cap);
+
+// ============================================================================
+// 136. Full APK Signature Scheme Container & Merkle Digest Verifier
+// ============================================================================
+
+typedef int32_t (*MocktailApkVerifySigFn)(
+    void* ctx,
+    const uint8_t* pubkey,
+    size_t pubkey_len,
+    const uint8_t* signed_data,
+    size_t signed_data_len,
+    const uint8_t* signature,
+    size_t signature_len,
+    int32_t digest_kind,
+    int32_t is_pss,
+    char* err_buf,
+    size_t err_cap);
+
+typedef int32_t (*MocktailApkVerifyCertFn)(
+    void* ctx,
+    const uint8_t* encoded_cert,
+    size_t encoded_cert_len,
+    int32_t is_leaf,
+    char* err_buf,
+    size_t err_cap);
+
+typedef void (*MocktailApkEmitFingerprintFn)(
+    void* ctx, const char* hex_ptr, size_t hex_len);
+
+int32_t mocktail_rust_verify_apk_signature_container(
+    const uint8_t* file_bytes,
+    size_t file_size,
+    void* cb_ctx,
+    MocktailApkVerifySigFn verify_sig,
+    MocktailApkVerifyCertFn verify_cert,
+    MocktailApkEmitFingerprintFn emit_fingerprint,
+    char* err_buf,
+    size_t err_cap);
+
+// ============================================================================
+// 137. Storage Paths, Payload Store & Host ABI Profile Loader (storage_paths)
+// ============================================================================
+
+typedef void (*MocktailRuntimePathsFieldCallback)(void* ctx, uint32_t field_id,
+                                                  const char* ptr, size_t len);
+typedef void (*MocktailPayloadStoreStringCallback)(void* ctx, const char* ptr,
+                                                   size_t len);
+typedef void (*MocktailPayloadStoreApprovalPathsCallback)(
+    void* ctx, const char* profile_ptr, size_t profile_len,
+    const char* compat_ptr, size_t compat_len, const char* receipt_ptr,
+    size_t receipt_len);
+
+enum {
+  MOCKTAIL_RUNTIME_PATH_FIELD_PAYLOAD_ID = 0,
+  MOCKTAIL_RUNTIME_PATH_FIELD_PAYLOAD_REL = 1,
+  MOCKTAIL_RUNTIME_PATH_FIELD_COMPATIBILITY_REL = 2,
+  MOCKTAIL_RUNTIME_PATH_FIELD_PROFILE_REL = 3,
+  MOCKTAIL_RUNTIME_PATH_FIELD_RECEIPT_REL = 4,
+  MOCKTAIL_RUNTIME_PATH_FIELD_GENERATION = 5,
+};
+
+struct MocktailRustHostBridgeEntry {
+  uint64_t rva;
+  int32_t kind;
+  char label[65];
+};
+
+struct MocktailRustParsedHostAbiProfile {
+  char build_id[65];
+  char reference_build_id[65];
+  char reference_payload_sha256[65];
+  struct MocktailRustHostBridgeEntry bridge_entries[8];
+  size_t bridge_entry_count;
+  uint64_t allocator_object_slot;
+  uint64_t empty_string_slot;
+  uint64_t jni_singleton_slot;
+  size_t jni_singleton_bytes;
+  uint64_t arena_initializer;
+  uint64_t allocator_thread_initializer;
+  uint64_t arena_guard_slot;
+  uint64_t arena_table_slot;
+  size_t arena_table_slot_count;
+  uint64_t native_allocator_allocate;
+  uint64_t native_allocator_deallocate;
+  uint64_t init_array_offset;
+  size_t init_array_count;
+  struct MocktailRustConstructorRange constructor_run_ranges[26];
+  size_t constructor_run_range_count;
+  struct MocktailRustConstructorRange native_mimalloc_constructor_run_ranges[26];
+  size_t native_mimalloc_constructor_run_range_count;
+  size_t native_mimalloc_thread_initializer_after_constructor;
+  uint64_t native_pre_jni_registry_initializer;
+  uint64_t native_pre_jni_registry_slot;
+  int32_t default_allocator_strategy;
+  uint8_t host_allocator_bridges_supported;
+  uint64_t derivation_code_rvas[7];
+  size_t derivation_code_rva_count;
+};
+
+struct MocktailRustParsedApprovalReceipt {
+  char generation[41];
+  char runtime_build_id[41];
+  char canary_runtime_sha256[65];
+  char compatibility_manifest_sha256[65];
+  char payload_fingerprint[65];
+  char attestation_sha256_0[65];
+  char attestation_sha256_1[65];
+  uint8_t attestation_hashes_valid_array;
+  uint8_t attestation_hash_0_is_string;
+  uint8_t attestation_hash_1_is_string;
+};
+
+int32_t mocktail_rust_runtime_paths_parse_active_manifest(
+    const char* json_ptr, size_t json_len,
+    MocktailRuntimePathsFieldCallback on_field, void* ctx, char* err_buf,
+    size_t err_cap);
+int32_t mocktail_rust_runtime_paths_parse_active_approval_refs(
+    const char* json_ptr, size_t json_len, const char* payload_id,
+    MocktailRuntimePathsFieldCallback on_field, void* ctx,
+    uint8_t* out_has_approval, char* err_buf, size_t err_cap);
+int32_t mocktail_rust_runtime_paths_resolve_adjacent_roblox_asset_path(
+    const char* roblox_library, const char* working_dir,
+    MocktailPayloadStoreStringCallback on_path, void* ctx);
+
+int32_t mocktail_rust_payload_store_parse_manifest_identity(
+    const char* json_ptr, size_t json_len,
+    MocktailPayloadStoreStringCallback on_payload_id, void* ctx, char* err_buf,
+    size_t err_cap);
+int32_t mocktail_rust_payload_store_build_activation_manifest(
+    const char* payload_id, const char* version_name, uint64_t version_code,
+    const char* build_id, const char* library_sha256,
+    const char* approval_generation, MocktailPayloadStoreStringCallback on_json,
+    void* ctx);
+int32_t mocktail_rust_payload_store_inspect_manifest_json(
+    const char* json_ptr, size_t json_len, const char* expected_version_name,
+    uint64_t expected_version_code, const char* expected_build_id,
+    const char* expected_library_sha256,
+    MocktailPayloadStoreApprovalPathsCallback on_approval_paths, void* ctx,
+    uint8_t* out_has_approval, char* err_buf, size_t err_cap);
+int32_t mocktail_rust_payload_store_persist_payload_sha256(
+    const char* json_ptr, size_t json_len, const char* library_sha256,
+    MocktailPayloadStoreStringCallback on_updated_json, void* ctx,
+    uint8_t* out_needs_write, char* err_buf, size_t err_cap);
+int32_t mocktail_rust_payload_store_build_status_json(
+    const char* update_json_path, const char* current_json_ptr,
+    size_t current_json_len, const char* previous_json_ptr,
+    size_t previous_json_len, MocktailPayloadStoreStringCallback on_json,
+    void* ctx);
+
+void mocktail_rust_host_abi_set_hashing_fault_for_testing(bool enabled);
+int32_t mocktail_rust_host_abi_sha256_hex(const uint8_t* bytes_ptr,
+                                          size_t bytes_len, size_t max_chars,
+                                          char* out_hex, size_t hex_cap);
+bool mocktail_rust_host_abi_validate_payload_id(const char* payload_id,
+                                                const char* build_id);
+bool mocktail_rust_host_abi_validate_canary_run_id(const char* run_id,
+                                                   const char* payload_id,
+                                                   size_t run);
+int32_t mocktail_rust_host_abi_parse_profile_json(
+    const char* json_ptr, size_t json_len, bool is_x86_64, size_t pointer_align,
+    uint64_t uintptr_max, struct MocktailRustParsedHostAbiProfile* out_profile,
+    char* err_buf, size_t err_cap);
+int32_t mocktail_rust_host_abi_validate_profile_identity(
+    const char* json_ptr, size_t json_len, const char* profile_build_id,
+    const char* reference_build_id, const char* reference_payload_sha256,
+    const char* canonical_payload_path, const char* expected_launch_build_id,
+    char* out_payload_sha256, size_t sha_cap, char* out_payload_id,
+    size_t pid_cap);
+int32_t mocktail_rust_host_abi_parse_receipt_json(
+    const char* json_ptr, size_t json_len, const char* receipt_path,
+    const char* canonical_payload_path, const char* payload_sha256,
+    const char* profile_sha256, const char* payload_id, const char* build_id,
+    struct MocktailRustParsedApprovalReceipt* out_receipt, char* err_buf,
+    size_t err_cap);
+int32_t mocktail_rust_host_abi_validate_canary_attestation_json(
+    const char* json_ptr, size_t json_len, size_t expected_run,
+    const char* payload_id, const char* payload_fingerprint,
+    const char* profile_sha256, const char* compatibility_manifest_sha256,
+    const char* runtime_sha256, const char* runtime_build_id, char* out_sha256,
+    size_t sha_cap, MocktailPayloadStoreStringCallback on_run_id, void* ctx,
+    char* err_buf, size_t err_cap);
+int32_t mocktail_rust_host_abi_verify_receipt_evidence(
+    const struct MocktailRustParsedApprovalReceipt* receipt,
+    const char* profile_sha256, const char* manifest_sha256,
+    const char* canary_sha_0, const char* run_id_0, const char* canary_sha_1,
+    const char* run_id_1, char* err_buf, size_t err_cap);
+
 #ifdef __cplusplus
 }
 #endif

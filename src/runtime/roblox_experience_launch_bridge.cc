@@ -1,8 +1,7 @@
 #include "runtime/roblox_experience_launch_bridge.h"
 #include "mocktail/mocktail_rust.h"
 
-#include <nlohmann/json.hpp>
-
+#include <array>
 #include <cstdio>
 #include <limits>
 #include <string>
@@ -15,7 +14,6 @@ namespace {
 constexpr char kExperienceProtocolClass[] =
     "com/roblox/universalapp/experience/JNIExperienceProtocol";
 constexpr char kConnectionPointerField[] = "f10205a";
-constexpr std::size_t kMaximumLaunchStringBytes = 16 * 1024;
 
 Status Invalid(std::string message) {
   return Status::Error(StatusCode::kInvalidArgument, std::move(message));
@@ -29,23 +27,34 @@ Status FailedPrecondition(std::string message) {
   return Status::Error(StatusCode::kFailedPrecondition, std::move(message));
 }
 
-Status ReadOptionalString(const nlohmann::json &object, const char *name,
-                          std::string *value) {
-  const auto found = object.find(name);
-  if (found == object.end() || found->is_null()) {
-    return Status::Ok();
+void AssignLaunchStringField(void* ctx, uint32_t field_index, const char* ptr,
+                             size_t len) {
+  auto* parsed = static_cast<RobloxExperienceLaunchRequest*>(ctx);
+  if (parsed == nullptr || ptr == nullptr) {
+    return;
   }
-  if (!found->is_string()) {
-    return Invalid(std::string("experience launch field is not a string: ") +
-                   name);
+  switch (field_index) {
+    case 0: parsed->game_instance_id.assign(ptr, len); break;
+    case 1: parsed->reserved_server_access_code.assign(ptr, len); break;
+    case 2: parsed->call_id.assign(ptr, len); break;
+    case 3: parsed->referral_page.assign(ptr, len); break;
+    case 4: parsed->access_code.assign(ptr, len); break;
+    case 5: parsed->link_code.assign(ptr, len); break;
+    case 6: parsed->launch_data.assign(ptr, len); break;
+    case 7: parsed->event_id.assign(ptr, len); break;
+    case 8: parsed->game_join_context.assign(ptr, len); break;
+    case 9: parsed->join_attempt_id.assign(ptr, len); break;
+    case 10: parsed->join_attempt_origin.assign(ptr, len); break;
+    case 11: parsed->iso_context.assign(ptr, len); break;
+    default: break;
   }
-  if (found->get_ref<const std::string &>().size() >
-      kMaximumLaunchStringBytes) {
-    return Invalid(std::string("experience launch field is too large: ") +
-                   name);
+}
+
+void AssignLaunchCanonicalJson(void* ctx, const char* ptr, size_t len) {
+  auto* parsed = static_cast<RobloxExperienceLaunchRequest*>(ctx);
+  if (parsed != nullptr && ptr != nullptr) {
+    parsed->canonical_json.assign(ptr, len);
   }
-  *value = found->get<std::string>();
-  return Status::Ok();
 }
 
 } // namespace
@@ -62,66 +71,23 @@ Status ParseRobloxExperienceLaunchJson(const std::string &json,
   }
   *request = {};
 
+  RobloxExperienceLaunchRequest parsed;
   MocktailRustExperienceLaunchData data{};
-  std::vector<char> canonical_buf(json.size() + 512);
-  size_t canonical_len = 0;
   std::array<char, 256> err_buf{};
 
-  int32_t rc = mocktail_rust_parse_experience_launch_json(
-      json.data(), json.size(), &data, canonical_buf.data(),
-      canonical_buf.size(), &canonical_len, err_buf.data(), err_buf.size());
-  if (rc == -7) {
-    canonical_buf.resize(canonical_len + 128);
-    rc = mocktail_rust_parse_experience_launch_json(
-        json.data(), json.size(), &data, canonical_buf.data(),
-        canonical_buf.size(), &canonical_len, err_buf.data(), err_buf.size());
-  }
+  const int32_t rc = mocktail_rust_parse_experience_launch_json_full(
+      json.data(), json.size(), &data, &parsed, &AssignLaunchStringField,
+      &AssignLaunchCanonicalJson, err_buf.data(), err_buf.size());
   if (rc != 0) {
     return Invalid(err_buf[0] != '\0' ? err_buf.data()
                                       : "experience launch JSON is invalid");
   }
 
-  const nlohmann::json document =
-      nlohmann::json::parse(json.begin(), json.end(), nullptr, false);
-  if (document.is_discarded() || !document.is_object()) {
-    return Invalid("experience launch payload is not a JSON object");
-  }
-
-  RobloxExperienceLaunchRequest parsed;
   parsed.place_id = data.place_id;
   parsed.user_id = data.user_id;
   parsed.conversation_id = data.conversation_id;
   parsed.referred_by_player_id = data.referred_by_player_id;
 
-  struct StringField {
-    const char *name;
-    std::string RobloxExperienceLaunchRequest::*member;
-  };
-  constexpr StringField kStringFields[] = {
-      {"gameInstanceId", &RobloxExperienceLaunchRequest::game_instance_id},
-      {"reservedServerAccessCode",
-       &RobloxExperienceLaunchRequest::reserved_server_access_code},
-      {"callId", &RobloxExperienceLaunchRequest::call_id},
-      {"referralPage", &RobloxExperienceLaunchRequest::referral_page},
-      {"accessCode", &RobloxExperienceLaunchRequest::access_code},
-      {"linkCode", &RobloxExperienceLaunchRequest::link_code},
-      {"launchData", &RobloxExperienceLaunchRequest::launch_data},
-      {"eventId", &RobloxExperienceLaunchRequest::event_id},
-      {"gameJoinContext", &RobloxExperienceLaunchRequest::game_join_context},
-      {"joinAttemptId", &RobloxExperienceLaunchRequest::join_attempt_id},
-      {"joinAttemptOrigin",
-       &RobloxExperienceLaunchRequest::join_attempt_origin},
-      {"isoContext", &RobloxExperienceLaunchRequest::iso_context},
-  };
-  Status status = Status::Ok();
-  for (const StringField &field : kStringFields) {
-    status = ReadOptionalString(document, field.name, &(parsed.*field.member));
-    if (!status.ok()) {
-      return status;
-    }
-  }
-
-  parsed.canonical_json.assign(canonical_buf.data(), canonical_len);
   *request = std::move(parsed);
   return Status::Ok();
 }

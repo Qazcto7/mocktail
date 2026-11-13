@@ -1,15 +1,16 @@
 #ifndef MOCKTAIL_RUNTIME_ROBLOX_INPUT_ROUTER_H_
 #define MOCKTAIL_RUNTIME_ROBLOX_INPUT_ROUTER_H_
 
-#include <array>
 #include <cmath>
 #include <cstdint>
+#include <memory>
 #include <mutex>
-#include <vector>
 
 #include "mocktail/platform/platform_runtime.h"
 #include "mocktail/status.h"
 #include "runtime/roblox_text_editor.h"
+
+struct MocktailRustInputRouterState;
 
 namespace mocktail {
 namespace runtime {
@@ -174,70 +175,14 @@ class RobloxInputRouter final {
   RobloxInputSnapshot Snapshot() const;
 
  private:
-  struct ActiveTouch {
-    int64_t touch_id = 0;
-    int64_t finger_id = 0;
-    int32_t pointer_id = -1;
-    float x = 0.0f;
-    float y = 0.0f;
+  struct RustStateDeleter {
+    void operator()(MocktailRustInputRouterState* ptr) const;
   };
-
-  struct ActiveKey {
-    uint32_t sdl_scancode = 0;
-    AndroidKeyMapping android;
-  };
-
-  struct ActiveGamepad {
-    int64_t instance_id = 0;
-    int32_t device_id = 0;
-    platform::GamepadDescriptor descriptor;
-    bool connected = false;
-    uint32_t pressed_buttons = 0;
-    std::array<int16_t, 6> raw_axes{};
-    std::array<float, 6> sent_axes{};
-  };
-
-  RobloxInputDispatchResult HandleMouseMotionLocked(
-      const platform::MouseMotionEvent& event);
-  RobloxInputDispatchResult HandleMouseButtonLocked(
-      const platform::MouseButtonEvent& event);
-  RobloxInputDispatchResult HandleMouseWheelLocked(
-      const platform::MouseWheelEvent& event);
-  RobloxInputDispatchResult HandleTouchLocked(
-      const platform::TouchEvent& event);
-  RobloxInputDispatchResult HandleKeyLocked(const platform::KeyEvent& event);
-  RobloxInputDispatchResult HandleGamepadConnectionLocked(
-      const platform::GamepadConnectionEvent& event);
-  RobloxInputDispatchResult HandleGamepadButtonLocked(
-      const platform::GamepadButtonEvent& event);
-  RobloxInputDispatchResult HandleGamepadAxisLocked(
-      const platform::GamepadAxisEvent& event);
-  std::vector<ActiveGamepad>::iterator FindGamepadLocked(int64_t instance_id);
-  Status ConfigureGamepadLocked(const ActiveGamepad& gamepad, bool available);
-  Status ConnectGamepadLocked(ActiveGamepad& gamepad);
-  Status DispatchGamepadAxesLocked(ActiveGamepad& gamepad, uint8_t axis,
-                                   bool* dispatched);
-  Status ReleaseGamepadInputsLocked(ActiveGamepad& gamepad);
-  Status DisconnectGamepadLocked(ActiveGamepad& gamepad);
-  Status DisconnectGamepadsLocked();
-  Status ReleasePressedInputsLocked();
-  int32_t AllocatePointerIdLocked() const;
-  std::vector<ActiveTouch>::iterator FindTouchIteratorLocked(int64_t touch_id,
-                                                             int64_t finger_id);
-  std::vector<ActiveKey>::iterator FindKeyIteratorLocked(uint32_t sdl_scancode);
-  RobloxInputDispatchResult NativeResultLocked(Status status,
-                                               RobloxInputEventKind kind);
 
   const RobloxInputSink sink_;
   RobloxTextEditor text_editor_;
   mutable std::mutex mutex_;
-  RobloxInputSnapshot snapshot_;
-  std::vector<int32_t> active_mouse_buttons_;
-  std::vector<ActiveTouch> active_touches_;
-  std::vector<ActiveKey> active_keys_;
-  std::vector<ActiveGamepad> gamepads_;
-  float mouse_x_ = 0.0f;
-  float mouse_y_ = 0.0f;
+  std::unique_ptr<MocktailRustInputRouterState, RustStateDeleter> rust_state_;
 };
 
 const char* RobloxInputDispatchStateName(RobloxInputDispatchState state);
