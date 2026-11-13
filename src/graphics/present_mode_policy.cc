@@ -65,6 +65,13 @@ PresentModePolicy CachedPresentModePolicy() {
   return policy;
 }
 
+PresentModePolicy ResolveVulkanSurfacePolicy(PresentModePolicy configured,
+                                             bool wayland_surface) {
+  return wayland_surface && configured == PresentModePolicy::kHostDefault
+             ? PresentModePolicy::kMailbox
+             : configured;
+}
+
 std::vector<VkPresentModeKHR>
 FilterPresentModes(PresentModePolicy policy,
                    const std::vector<VkPresentModeKHR> &host_modes) {
