@@ -63,6 +63,7 @@
 #include "runtime/display_size.h"
 #include "runtime/environment.h"
 #include "runtime/discord_rpc.h"
+#include "runtime/micup_rpc.h"
 #include "runtime/jnivm_platform_web_callbacks.h"
 #include "runtime/owned_pthread.h"
 #include "runtime/platform_cache_migration.h"
@@ -4512,6 +4513,26 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
                 << "; continuing without Rich Presence\n";
     }
   }
+  mocktail::runtime::MicupRpcSession micup_rpc(runtime_config.micup_rpc());
+  if (runtime_config.micup_rpc().enabled) {
+    std::string micup_rpc_detail;
+    if (micup_rpc.Start(&micup_rpc_detail)) {
+      std::cout << "  [micup-rpc] enabled; browsing activity queued\n";
+    } else {
+      std::cerr << "  [micup-rpc] unavailable: " << micup_rpc_detail
+                << "; continuing without Micup Rich Presence\n";
+    }
+  }
+  // Remove inline Micup token from process environment once handed to the Rust
+  // worker so child helper processes (WebView/cookie helpers) never inherit it.
+  unsetenv("MOCKTAIL_MICUP_TOKEN");
+  mocktail::runtime::RobloxExperiencePresenceObserverFanout presence_observers;
+  if (runtime_config.discord_rpc().enabled) {
+    presence_observers.Add(discord_rpc.observer());
+  }
+  if (runtime_config.micup_rpc().enabled) {
+    presence_observers.Add(micup_rpc.observer());
+  }
   const mocktail::runtime::InputCapabilityConfig& input_capabilities =
       runtime_config.input_capabilities();
   if (!runtime_config.frame_rate().valid()) {
@@ -6683,7 +6704,7 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
               jni_factory, present_boundary, std::move(surface_config),
               &dependencies.roblox_credential(),
               mocktail::runtime::RobloxExperienceSurfaceProvider{},
-              discord_rpc.observer(),
+              presence_observers.observer(),
               dependencies.clear_persisted_web_view_cookie(),
               runtime_config.microphone_enabled());
       const mocktail::Status platform_protocol_status =

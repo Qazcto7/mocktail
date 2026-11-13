@@ -19,6 +19,11 @@ zip = { version = "2.2", default-features = false, features = ["deflate"] }
 url = "2.5"
 serde_yaml = "0.9"
 unicode-segmentation = "1.13"
+base64 = "0.23"
+tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pki-types = "1"
+webpki-roots = "1.0"
 
 [profile.release]
 opt-level = 3

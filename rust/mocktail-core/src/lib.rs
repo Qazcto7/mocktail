@@ -15,6 +15,8 @@ pub mod deriver_json;
 pub use deriver_json::*;
 pub mod input_router;
 pub use input_router::*;
+pub mod micup_rpc;
+pub use micup_rpc::*;
 pub mod runtime_bridges;
 pub use runtime_bridges::*;
 pub mod runtime_policies;
@@ -2859,6 +2861,12 @@ pub(crate) fn build_runtime_config_yaml_env_map(
         "integrations.discord_rpc.join.button_label", "integrations.discord_rpc.text.browsing",
         "integrations.discord_rpc.text.joining", "integrations.discord_rpc.text.playing",
         "integrations.discord_rpc.text.state", "integrations.discord_rpc.text.unknown_place",
+        "integrations.micup_rpc.enabled", "integrations.micup_rpc.token",
+        "integrations.micup_rpc.token_file", "integrations.micup_rpc.gateway_url",
+        "integrations.micup_rpc.status", "integrations.micup_rpc.activity_mode",
+        "integrations.micup_rpc.show_place_name", "integrations.micup_rpc.show_elapsed_time",
+        "integrations.micup_rpc.text.browsing", "integrations.micup_rpc.text.joining",
+        "integrations.micup_rpc.text.playing", "integrations.micup_rpc.text.unknown_place",
     ];
 
     for (k, _) in &values {
@@ -3183,6 +3191,71 @@ pub(crate) fn build_runtime_config_yaml_env_map(
         if let Some(val) = values.get(yaml_key) {
             if val.is_empty() || val.len() > max_len || val.bytes().any(|b| b < 0x20 || b == 0x7F) {
                 return Err((-42, format!("{} must be non-empty, bounded, and contain no control bytes", yaml_key)));
+            }
+            env.insert(env_key.to_string(), serde_json::json!(val));
+        }
+    }
+
+    let bool_micup_fields = [
+        ("integrations.micup_rpc.enabled", "MOCKTAIL_MICUP_ENABLED"),
+        ("integrations.micup_rpc.show_place_name", "MOCKTAIL_MICUP_SHOW_PLACE_NAME"),
+        ("integrations.micup_rpc.show_elapsed_time", "MOCKTAIL_MICUP_SHOW_ELAPSED_TIME"),
+    ];
+    for (k, env_k) in bool_micup_fields {
+        if let Some(val) = values.get(k) {
+            match parse_yaml_bool(val) {
+                Some(true) => { env.insert(env_k.to_string(), serde_json::json!("1")); }
+                Some(false) => { env.insert(env_k.to_string(), serde_json::json!("0")); }
+                None => return Err((-43, format!("{} must be true or false", k))),
+            }
+        }
+    }
+
+    if let Some(tok) = values.get("integrations.micup_rpc.token") {
+        if !crate::micup_rpc::is_valid_micup_token(tok) {
+            return Err((-44, "integrations.micup_rpc.token must be 1..=256 visible bytes with no control characters".to_string()));
+        }
+        env.insert("MOCKTAIL_MICUP_TOKEN".to_string(), serde_json::json!(tok));
+    }
+
+    if let Some(tok_file) = values.get("integrations.micup_rpc.token_file") {
+        if tok_file.is_empty() || tok_file.len() > 4096 || tok_file.bytes().any(|b| b < 0x20 || b == 0x7F) {
+            return Err((-45, "integrations.micup_rpc.token_file must be a bounded path without control bytes".to_string()));
+        }
+        env.insert("MOCKTAIL_MICUP_TOKEN_FILE".to_string(), serde_json::json!(tok_file));
+    }
+
+    if let Some(gw) = values.get("integrations.micup_rpc.gateway_url") {
+        if crate::micup_rpc::normalize_gateway_url(gw).is_none() {
+            return Err((-46, "integrations.micup_rpc.gateway_url must be a valid wss:// URL (or loopback ws://)".to_string()));
+        }
+        env.insert("MOCKTAIL_MICUP_GATEWAY_URL".to_string(), serde_json::json!(gw));
+    }
+
+    if let Some(status) = values.get("integrations.micup_rpc.status") {
+        if !crate::micup_rpc::is_valid_micup_status(status) {
+            return Err((-47, "integrations.micup_rpc.status must be auto, online, idle, dnd, or invisible".to_string()));
+        }
+        env.insert("MOCKTAIL_MICUP_STATUS".to_string(), serde_json::json!(status));
+    }
+
+    if let Some(mode) = values.get("integrations.micup_rpc.activity_mode") {
+        if !crate::micup_rpc::is_valid_micup_activity_mode(mode) {
+            return Err((-48, "integrations.micup_rpc.activity_mode must be auto, manual, or catalog".to_string()));
+        }
+        env.insert("MOCKTAIL_MICUP_ACTIVITY_MODE".to_string(), serde_json::json!(mode));
+    }
+
+    let string_micup_fields = [
+        ("integrations.micup_rpc.text.browsing", "MOCKTAIL_MICUP_TEXT_BROWSING", 128),
+        ("integrations.micup_rpc.text.joining", "MOCKTAIL_MICUP_TEXT_JOINING", 128),
+        ("integrations.micup_rpc.text.playing", "MOCKTAIL_MICUP_TEXT_PLAYING", 128),
+        ("integrations.micup_rpc.text.unknown_place", "MOCKTAIL_MICUP_TEXT_UNKNOWN_PLACE", 128),
+    ];
+    for (yaml_key, env_key, max_len) in string_micup_fields {
+        if let Some(val) = values.get(yaml_key) {
+            if !crate::micup_rpc::is_valid_micup_text(val, max_len) {
+                return Err((-49, format!("{} must be non-empty, bounded, and contain no control bytes", yaml_key)));
             }
             env.insert(env_key.to_string(), serde_json::json!(val));
         }

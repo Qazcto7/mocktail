@@ -50,6 +50,12 @@ target_link_libraries(discord_rpc_test PRIVATE
   GTest::gtest_main
 )
 
+add_executable(micup_rpc_test micup_rpc_test.cc)
+target_link_libraries(micup_rpc_test PRIVATE
+  Mocktail::Runtime
+  GTest::gtest_main
+)
+
 add_executable(native_update_helper_fixture native_update_helper_fixture.cc)
 add_executable(native_progress_helper_fixture native_progress_helper_fixture.cc)
 mocktail_apply_compile_options(native_update_helper_fixture)
@@ -1085,6 +1091,7 @@ if(MOCKTAIL_ENABLE_UPSTREAM_JNIVM)
 endif()
 gtest_discover_tests(libc_shim_test)
 gtest_discover_tests(discord_rpc_test)
+gtest_discover_tests(micup_rpc_test)
 gtest_discover_tests(asset_manager_test)
 gtest_discover_tests(android_looper_test)
 gtest_discover_tests(android_native_window_test)

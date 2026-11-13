@@ -345,6 +345,67 @@ RuntimeConfig RuntimeConfig::FromEnvironment(const Environment& environment) {
       IsDiscordText(config.discord_rpc_.text.playing, 128) &&
       IsDiscordText(config.discord_rpc_.text.state, 128) &&
       IsDiscordText(config.discord_rpc_.text.unknown_place, 128);
+
+  bool micup_booleans_valid = true;
+  config.micup_rpc_.enabled = ReadBoolean(
+      environment, "MOCKTAIL_MICUP_ENABLED", false, &micup_booleans_valid);
+  config.micup_rpc_.show_place_name = ReadBoolean(
+      environment, "MOCKTAIL_MICUP_SHOW_PLACE_NAME", true,
+      &micup_booleans_valid);
+  config.micup_rpc_.show_elapsed_time = ReadBoolean(
+      environment, "MOCKTAIL_MICUP_SHOW_ELAPSED_TIME", true,
+      &micup_booleans_valid);
+  config.micup_rpc_.gateway_url = environment.GetOr(
+      "MOCKTAIL_MICUP_GATEWAY_URL", config.micup_rpc_.gateway_url);
+  config.micup_rpc_.token =
+      environment.GetOr("MOCKTAIL_MICUP_TOKEN", config.micup_rpc_.token);
+  config.micup_rpc_.token_file = environment.GetOr(
+      "MOCKTAIL_MICUP_TOKEN_FILE", config.micup_rpc_.token_file);
+  config.micup_rpc_.status =
+      environment.GetOr("MOCKTAIL_MICUP_STATUS", config.micup_rpc_.status);
+  config.micup_rpc_.activity_mode = environment.GetOr(
+      "MOCKTAIL_MICUP_ACTIVITY_MODE", config.micup_rpc_.activity_mode);
+  config.micup_rpc_.text.browsing = environment.GetOr(
+      "MOCKTAIL_MICUP_TEXT_BROWSING", config.micup_rpc_.text.browsing);
+  config.micup_rpc_.text.joining = environment.GetOr(
+      "MOCKTAIL_MICUP_TEXT_JOINING", config.micup_rpc_.text.joining);
+  config.micup_rpc_.text.playing = environment.GetOr(
+      "MOCKTAIL_MICUP_TEXT_PLAYING", config.micup_rpc_.text.playing);
+  config.micup_rpc_.text.unknown_place = environment.GetOr(
+      "MOCKTAIL_MICUP_TEXT_UNKNOWN_PLACE",
+      config.micup_rpc_.text.unknown_place);
+  const bool micup_token_valid =
+      config.micup_rpc_.token.empty() ||
+      mocktail_rust_micup_is_valid_token(config.micup_rpc_.token.data(),
+                                         config.micup_rpc_.token.size()) == 1;
+  const bool micup_token_file_valid =
+      config.micup_rpc_.token_file.empty() ||
+      mocktail_rust_micup_is_valid_text(
+          config.micup_rpc_.token_file.data(),
+          config.micup_rpc_.token_file.size(), 4096) == 1;
+  config.micup_rpc_valid_ = micup_booleans_valid && micup_token_valid &&
+      micup_token_file_valid &&
+      mocktail_rust_micup_is_valid_gateway_url(
+          config.micup_rpc_.gateway_url.data(),
+          config.micup_rpc_.gateway_url.size()) == 1 &&
+      mocktail_rust_micup_is_valid_status(
+          config.micup_rpc_.status.data(),
+          config.micup_rpc_.status.size()) == 1 &&
+      mocktail_rust_micup_is_valid_activity_mode(
+          config.micup_rpc_.activity_mode.data(),
+          config.micup_rpc_.activity_mode.size()) == 1 &&
+      mocktail_rust_micup_is_valid_text(
+          config.micup_rpc_.text.browsing.data(),
+          config.micup_rpc_.text.browsing.size(), 128) == 1 &&
+      mocktail_rust_micup_is_valid_text(
+          config.micup_rpc_.text.joining.data(),
+          config.micup_rpc_.text.joining.size(), 128) == 1 &&
+      mocktail_rust_micup_is_valid_text(
+          config.micup_rpc_.text.playing.data(),
+          config.micup_rpc_.text.playing.size(), 128) == 1 &&
+      mocktail_rust_micup_is_valid_text(
+          config.micup_rpc_.text.unknown_place.data(),
+          config.micup_rpc_.text.unknown_place.size(), 128) == 1;
   for (const std::string_view name : kUnsafeDetachedThreadOverrides) {
     if (LegacyEnabled(environment, name)) {
       config.unsafe_detached_thread_overrides_.emplace_back(name);

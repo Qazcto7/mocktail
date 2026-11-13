@@ -196,6 +196,48 @@ TEST(RuntimeConfigTest, RejectsMalformedDiscordApplicationId) {
   EXPECT_FALSE(invalid_boolean.discord_rpc_valid());
 }
 
+TEST(RuntimeConfigTest, ReadsAndValidatesMicupRpcConfiguration) {
+  const RuntimeConfig defaults = RuntimeConfig::FromEnvironment(MapEnvironment({}));
+  EXPECT_FALSE(defaults.micup_rpc().enabled);
+  EXPECT_EQ(defaults.micup_rpc().gateway_url,
+            "wss://micup.gg/gateway?v=1&encoding=json");
+  EXPECT_EQ(defaults.micup_rpc().status, "auto");
+  EXPECT_EQ(defaults.micup_rpc().activity_mode, "auto");
+  EXPECT_TRUE(defaults.micup_rpc().show_place_name);
+  EXPECT_TRUE(defaults.micup_rpc().show_elapsed_time);
+  EXPECT_EQ(defaults.micup_rpc().text.browsing, "Browsing Roblox");
+  EXPECT_TRUE(defaults.micup_rpc_valid());
+
+  const RuntimeConfig configured = RuntimeConfig::FromEnvironment(MapEnvironment({
+      {"MOCKTAIL_MICUP_ENABLED", "1"},
+      {"MOCKTAIL_MICUP_TOKEN", "secret-tok"},
+      {"MOCKTAIL_MICUP_GATEWAY_URL", "ws://127.0.0.1:9001/gw"},
+      {"MOCKTAIL_MICUP_STATUS", "dnd"},
+      {"MOCKTAIL_MICUP_ACTIVITY_MODE", "manual"},
+      {"MOCKTAIL_MICUP_SHOW_PLACE_NAME", "0"},
+      {"MOCKTAIL_MICUP_SHOW_ELAPSED_TIME", "0"},
+      {"MOCKTAIL_MICUP_TEXT_PLAYING", "In {place_name}"},
+  }));
+  EXPECT_TRUE(configured.micup_rpc().enabled);
+  EXPECT_EQ(configured.micup_rpc().token, "secret-tok");
+  EXPECT_EQ(configured.micup_rpc().status, "dnd");
+  EXPECT_EQ(configured.micup_rpc().activity_mode, "manual");
+  EXPECT_FALSE(configured.micup_rpc().show_place_name);
+  EXPECT_FALSE(configured.micup_rpc().show_elapsed_time);
+  EXPECT_EQ(configured.micup_rpc().text.playing, "In {place_name}");
+  EXPECT_TRUE(configured.micup_rpc_valid());
+
+  EXPECT_FALSE(RuntimeConfig::FromEnvironment(
+                   MapEnvironment({{"MOCKTAIL_MICUP_STATUS", "away"}}))
+                   .micup_rpc_valid());
+  EXPECT_FALSE(RuntimeConfig::FromEnvironment(
+                   MapEnvironment({{"MOCKTAIL_MICUP_GATEWAY_URL", "http://micup.gg/gw"}}))
+                   .micup_rpc_valid());
+  EXPECT_FALSE(RuntimeConfig::FromEnvironment(
+                   MapEnvironment({{"MOCKTAIL_MICUP_ACTIVITY_MODE", "broken"}}))
+                   .micup_rpc_valid());
+}
+
 TEST(RuntimeConfigTest, RejectsInvalidEnvironmentProxyValues) {
   for (const std::pair<const char*, const char*> invalid : {
            std::pair{"proxy.example.test", "not-a-port"},

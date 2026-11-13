@@ -157,6 +157,7 @@ add_custom_command(
     "${MOCKTAIL_RUST_CORE_DIR}/src/deriver_json.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/input_router.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/lib.rs"
+    "${MOCKTAIL_RUST_CORE_DIR}/src/micup_rpc.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/runtime_bridges.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/runtime_policies.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/storage_paths.rs"
@@ -164,6 +165,7 @@ add_custom_command(
     "${MOCKTAIL_RUST_CORE_DIR}/src/update_json.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/window_gates.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/Cargo.toml"
+    "${CMAKE_CURRENT_SOURCE_DIR}/config/mocktail.example.yaml"
   COMMENT "Building mocktail-core Rust library"
   VERBATIM
 )
@@ -312,6 +314,8 @@ add_library(mocktail_runtime STATIC
   src/runtime/command_line.cc
   src/runtime/crash_report_policy.cc
   src/runtime/discord_rpc.cc
+  src/runtime/micup_rpc.cc
+  src/runtime/roblox_place_metadata.cc
   src/runtime/device_memory_profile.cc
   src/runtime/device_profile.cc
   src/runtime/environment.cc

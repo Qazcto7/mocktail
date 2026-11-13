@@ -111,6 +111,7 @@ bool ValidateRuntimeConfigPolicy(const RuntimeConfig& config, bool for_export,
       config.fleasion_valid() ? 1 : 0,
       config.ca_bundle_valid() ? 1 : 0,
       config.discord_rpc_valid() ? 1 : 0,
+      config.micup_rpc_valid() ? 1 : 0,
   };
   std::array<char, 256> err_buf{};
   const int32_t rc = mocktail_rust_validate_runtime_config_policy(
@@ -290,8 +291,46 @@ bool ExportRuntimeConfigEnvironment(const RuntimeConfig& config,
       SetEnvironmentValue("MOCKTAIL_DISCORD_RPC_TEXT_STATE",
                           config.discord_rpc().text.state, error) &&
       SetEnvironmentValue("MOCKTAIL_DISCORD_RPC_TEXT_UNKNOWN_PLACE",
-                          config.discord_rpc().text.unknown_place, error);
+                          config.discord_rpc().text.unknown_place, error) &&
+      SetEnvironmentValue("MOCKTAIL_MICUP_ENABLED",
+                          config.micup_rpc().enabled ? "1" : "0", error) &&
+      SetEnvironmentValue("MOCKTAIL_MICUP_SHOW_PLACE_NAME",
+                          config.micup_rpc().show_place_name ? "1" : "0",
+                          error) &&
+      SetEnvironmentValue("MOCKTAIL_MICUP_SHOW_ELAPSED_TIME",
+                          config.micup_rpc().show_elapsed_time ? "1" : "0",
+                          error) &&
+      SetEnvironmentValue("MOCKTAIL_MICUP_GATEWAY_URL",
+                          config.micup_rpc().gateway_url, error) &&
+      SetEnvironmentValue("MOCKTAIL_MICUP_STATUS", config.micup_rpc().status,
+                          error) &&
+      SetEnvironmentValue("MOCKTAIL_MICUP_ACTIVITY_MODE",
+                          config.micup_rpc().activity_mode, error) &&
+      SetEnvironmentValue("MOCKTAIL_MICUP_TEXT_BROWSING",
+                          config.micup_rpc().text.browsing, error) &&
+      SetEnvironmentValue("MOCKTAIL_MICUP_TEXT_JOINING",
+                          config.micup_rpc().text.joining, error) &&
+      SetEnvironmentValue("MOCKTAIL_MICUP_TEXT_PLAYING",
+                          config.micup_rpc().text.playing, error) &&
+      SetEnvironmentValue("MOCKTAIL_MICUP_TEXT_UNKNOWN_PLACE",
+                          config.micup_rpc().text.unknown_place, error);
   if (!base_exported) {
+    return false;
+  }
+  if (!config.micup_rpc().token.empty()) {
+    if (!SetEnvironmentValue("MOCKTAIL_MICUP_TOKEN", config.micup_rpc().token,
+                             error)) {
+      return false;
+    }
+  } else if (!UnsetEnvironmentValue("MOCKTAIL_MICUP_TOKEN", error)) {
+    return false;
+  }
+  if (!config.micup_rpc().token_file.empty()) {
+    if (!SetEnvironmentValue("MOCKTAIL_MICUP_TOKEN_FILE",
+                             config.micup_rpc().token_file, error)) {
+      return false;
+    }
+  } else if (!UnsetEnvironmentValue("MOCKTAIL_MICUP_TOKEN_FILE", error)) {
     return false;
   }
   if (!SetEnvironmentValue("MOCKTAIL_FLEASION_ENABLED",

@@ -349,6 +349,19 @@ integrations:
       playing: "Inside {place_name}"
       state: Playing Roblox on Linux
       unknown_place: Unknown world
+  micup_rpc:
+    enabled: true
+    token_file: /tmp/micup-token
+    status: idle
+    activity_mode: catalog
+    show_place_name: false
+    show_elapsed_time: false
+    gateway_url: wss://micup.gg/gateway?v=1&encoding=json
+    text:
+      browsing: Exploring Roblox
+      joining: Loading into Roblox
+      playing: "Playing {place_name}"
+      unknown_place: Unknown Roblox game
 updates:
   automatic: true
 )yaml");
@@ -399,6 +412,20 @@ updates:
   EXPECT_EQ(loaded.config.discord_rpc().text.state,
             "Playing Roblox on Linux");
   EXPECT_EQ(loaded.config.discord_rpc().text.unknown_place, "Unknown world");
+  EXPECT_TRUE(loaded.config.micup_rpc().enabled);
+  EXPECT_EQ(loaded.config.micup_rpc().token_file, "/tmp/micup-token");
+  EXPECT_EQ(loaded.config.micup_rpc().status, "idle");
+  EXPECT_EQ(loaded.config.micup_rpc().activity_mode, "catalog");
+  EXPECT_FALSE(loaded.config.micup_rpc().show_place_name);
+  EXPECT_FALSE(loaded.config.micup_rpc().show_elapsed_time);
+  EXPECT_EQ(loaded.config.micup_rpc().gateway_url,
+            "wss://micup.gg/gateway?v=1&encoding=json");
+  EXPECT_EQ(loaded.config.micup_rpc().text.browsing, "Exploring Roblox");
+  EXPECT_EQ(loaded.config.micup_rpc().text.joining, "Loading into Roblox");
+  EXPECT_EQ(loaded.config.micup_rpc().text.playing, "Playing {place_name}");
+  EXPECT_EQ(loaded.config.micup_rpc().text.unknown_place,
+            "Unknown Roblox game");
+  EXPECT_TRUE(loaded.config.micup_rpc_valid());
 }
 
 TEST(RuntimeConfigFileTest, EnvironmentOverridesYaml) {

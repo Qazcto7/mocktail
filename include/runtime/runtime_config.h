@@ -67,6 +67,25 @@ struct DiscordRpcConfig {
   DiscordRpcTextConfig text;
 };
 
+struct MicupRpcTextConfig {
+  std::string browsing = "Browsing Roblox";
+  std::string joining = "Joining an experience";
+  std::string playing = "{place_name}";
+  std::string unknown_place = "Unknown experience";
+};
+
+struct MicupRpcConfig {
+  bool enabled = false;
+  bool show_place_name = true;
+  bool show_elapsed_time = true;
+  std::string gateway_url = "wss://micup.gg/gateway?v=1&encoding=json";
+  std::string token;
+  std::string token_file;
+  std::string status = "auto";
+  std::string activity_mode = "auto";
+  MicupRpcTextConfig text;
+};
+
 std::optional<NetworkProxyConfig> ParseNetworkProxyConfig(
     std::string_view host, std::string_view port,
     std::string_view scheme = "http", std::string_view username = {},
@@ -139,6 +158,8 @@ class RuntimeConfig {
   }
   const DiscordRpcConfig& discord_rpc() const { return discord_rpc_; }
   bool discord_rpc_valid() const { return discord_rpc_valid_; }
+  const MicupRpcConfig& micup_rpc() const { return micup_rpc_; }
+  bool micup_rpc_valid() const { return micup_rpc_valid_; }
 
   // These legacy opt-ins create workers that do not own their VM/JNI state.
   // Empty and "0" values are disabled; every other non-empty value is unsafe.
@@ -182,6 +203,8 @@ class RuntimeConfig {
   bool ca_bundle_valid_ = true;
   DiscordRpcConfig discord_rpc_;
   bool discord_rpc_valid_ = true;
+  MicupRpcConfig micup_rpc_;
+  bool micup_rpc_valid_ = true;
   std::vector<std::string> unsafe_detached_thread_overrides_;
 };
 

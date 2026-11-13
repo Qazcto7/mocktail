@@ -116,6 +116,36 @@ integrations:
     #   unknown_place: Unknown experience
     # Advanced: overrides the application bundled by the package maintainer.
     # application_id: 123456789012345678
+  micup_rpc:
+    # Boolean (default: false): publish Mocktail activity to Micup (micup.gg)
+    # over the authenticated Micup Gateway WebSocket. Requires a user token.
+    enabled: false
+    # Recommended: store your Micup account token in a private file (chmod 600)
+    # rather than inline here.
+    # token_file: ~/.config/micup/token
+    # Optional inline token fallback (or pass via MOCKTAIL_MICUP_TOKEN):
+    # token: your_micup_account_token
+    # String (default: auto): auto | online | idle | dnd | invisible.
+    # auto stays invisible when another Micup desktop/web client is open, and
+    # uses online only when no other visible session is active.
+    status: auto
+    # String (default: auto): auto | manual | catalog.
+    # auto sends exact Roblox experience titles when available and falls back to
+    # the official "roblox" catalog badge; catalog always uses the "roblox"
+    # catalog entry; manual always uses custom text templates.
+    activity_mode: auto
+    # Boolean (default: true): show the current Roblox experience name.
+    show_place_name: true
+    # Boolean (default: true): show elapsed session minutes in Micup.
+    show_elapsed_time: true
+    # English defaults. Uncomment only the lines you want to customize.
+    # text:
+    #   browsing: Browsing Roblox
+    #   joining: Joining an experience
+    #   playing: "{place_name}"
+    #   unknown_place: Unknown experience
+    # Advanced: overrides Micup's default WebSocket gateway endpoint.
+    # gateway_url: wss://micup.gg/gateway?v=1&encoding=json
 
 window:
   # Integer (default: 1280): initial window width in logical desktop units.

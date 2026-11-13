@@ -3075,6 +3075,7 @@ typedef struct MocktailRustRuntimeConfigPolicyFlags {
     int32_t fleasion_valid;
     int32_t ca_bundle_valid;
     int32_t discord_rpc_valid;
+    int32_t micup_rpc_valid;
 } MocktailRustRuntimeConfigPolicyFlags;
 
 int32_t mocktail_rust_validate_runtime_config_policy(
@@ -3902,6 +3903,67 @@ int32_t mocktail_rust_deriver_build_documents(
     MocktailPayloadStoreStringCallback on_profile_json,
     MocktailPayloadStoreStringCallback on_compatibility_json, void* ctx,
     char* out_err, size_t err_cap);
+
+typedef struct MocktailRustMicupConfig {
+  const char* gateway_url_ptr;
+  size_t gateway_url_len;
+  const char* token_ptr;
+  size_t token_len;
+  const char* token_file_ptr;
+  size_t token_file_len;
+  const char* status_ptr;
+  size_t status_len;
+  const char* activity_mode_ptr;
+  size_t activity_mode_len;
+  const char* text_browsing_ptr;
+  size_t text_browsing_len;
+  const char* text_joining_ptr;
+  size_t text_joining_len;
+  const char* text_playing_ptr;
+  size_t text_playing_len;
+  const char* text_unknown_place_ptr;
+  size_t text_unknown_place_len;
+  const char* ca_bundle_ptr;
+  size_t ca_bundle_len;
+  const char* proxy_url_ptr;
+  size_t proxy_url_len;
+  const char* proxy_username_ptr;
+  size_t proxy_username_len;
+  const char* proxy_password_ptr;
+  size_t proxy_password_len;
+  int32_t enabled;
+  int32_t show_place_name;
+  int32_t show_elapsed_time;
+} MocktailRustMicupConfig;
+
+typedef struct MocktailRustMicupSession MocktailRustMicupSession;
+
+int32_t mocktail_rust_micup_is_valid_status(const char* ptr, size_t len);
+int32_t mocktail_rust_micup_is_valid_activity_mode(const char* ptr,
+                                                   size_t len);
+int32_t mocktail_rust_micup_is_valid_gateway_url(const char* ptr, size_t len);
+int32_t mocktail_rust_micup_is_valid_token(const char* ptr, size_t len);
+int32_t mocktail_rust_micup_is_valid_text(const char* ptr, size_t len,
+                                          size_t max_bytes);
+int32_t mocktail_rust_micup_build_activity_json(
+    const char* activity_mode_ptr, size_t activity_mode_len,
+    int32_t show_place_name, int32_t show_elapsed_time,
+    const char* text_browsing_ptr, size_t text_browsing_len,
+    const char* text_joining_ptr, size_t text_joining_len,
+    const char* text_playing_ptr, size_t text_playing_len,
+    const char* text_unknown_place_ptr, size_t text_unknown_place_len,
+    int32_t phase, const char* place_name_ptr, size_t place_name_len,
+    int64_t started_at_ms, int64_t current_ms, char* out_json, size_t out_cap,
+    size_t* out_len);
+int32_t mocktail_rust_micup_session_start(
+    const MocktailRustMicupConfig* config,
+    MocktailRustMicupSession** out_session, char* out_detail,
+    size_t detail_cap);
+int32_t mocktail_rust_micup_session_update(
+    MocktailRustMicupSession* session, int32_t phase, int64_t place_id,
+    const char* place_name_ptr, size_t place_name_len, int64_t started_at_ms,
+    uint64_t revision);
+void mocktail_rust_micup_session_stop(MocktailRustMicupSession* session);
 
 #ifdef __cplusplus
 }

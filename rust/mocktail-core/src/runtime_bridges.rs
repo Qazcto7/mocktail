@@ -263,6 +263,7 @@ pub struct MocktailRustRuntimeConfigPolicyFlags {
     pub fleasion_valid: i32,
     pub ca_bundle_valid: i32,
     pub discord_rpc_valid: i32,
+    pub micup_rpc_valid: i32,
 }
 
 #[no_mangle]
@@ -289,6 +290,7 @@ pub extern "C" fn mocktail_rust_validate_runtime_config_policy(
             (f.physics_worker_mode_valid, "cannot export an invalid physics worker policy"),
             (f.ca_bundle_valid, "cannot export an invalid CA bundle path"),
             (f.discord_rpc_valid, "cannot export an invalid Discord Rich Presence policy"),
+            (f.micup_rpc_valid, "cannot export an invalid Micup RPC policy"),
         ];
         for &(ok, msg) in export_checks {
             if ok == 0 {
@@ -319,6 +321,7 @@ pub extern "C" fn mocktail_rust_validate_runtime_config_policy(
         ),
         (f.ca_bundle_valid, "CA bundle path is invalid"),
         (f.discord_rpc_valid, "Discord Rich Presence configuration is invalid"),
+        (f.micup_rpc_valid, "Micup Rich Presence configuration is invalid"),
     ];
     for &(ok, msg) in load_checks {
         if ok == 0 {
@@ -779,6 +782,7 @@ mod tests {
             fleasion_valid: 1,
             ca_bundle_valid: 1,
             discord_rpc_valid: 1,
+            micup_rpc_valid: 1,
         };
         assert_eq!(
             mocktail_rust_validate_runtime_config_policy(&flags, 0, err.as_mut_ptr(), err.len()),
