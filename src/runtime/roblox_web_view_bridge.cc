@@ -1,8 +1,6 @@
 #include "runtime/roblox_web_view_bridge.h"
 #include "mocktail/mocktail_rust.h"
 
-#include <curl/curl.h>
-
 #include <array>
 #include <charconv>
 #include <cstdio>
@@ -87,27 +85,20 @@ Status EscapeCaptchaQueryValue(const std::string& value, std::string* escaped) {
   if (escaped == nullptr) {
     return Invalid("captcha query output is null");
   }
-  static std::once_flag curl_initialization;
-  static CURLcode curl_initialization_status = CURLE_FAILED_INIT;
-  std::call_once(curl_initialization, [] {
-    curl_initialization_status = curl_global_init(CURL_GLOBAL_DEFAULT);
-  });
-  if (curl_initialization_status != CURLE_OK) {
-    return Unavailable("could not initialize captcha URL encoder");
+  if (value.empty()) {
+    escaped->clear();
+    return Status::Ok();
   }
-  CURL* curl = curl_easy_init();
-  if (curl == nullptr) {
-    return Unavailable("could not initialize captcha URL encoder");
-  }
-  char* encoded =
-      curl_easy_escape(curl, value.data(), static_cast<int>(value.size()));
-  if (encoded == nullptr) {
-    curl_easy_cleanup(curl);
+  std::string out(value.size() * 3 + 1, '\0');
+  size_t out_len = 0;
+  const int rc = mocktail_rust_discord_percent_encode(
+      value.data(), value.size(), reinterpret_cast<uint8_t*>(out.data()),
+      out.size(), &out_len);
+  if (rc != 0 || out_len > out.size()) {
     return Unavailable("could not encode captcha credential value");
   }
-  escaped->assign(encoded);
-  curl_free(encoded);
-  curl_easy_cleanup(curl);
+  out.resize(out_len);
+  *escaped = std::move(out);
   return Status::Ok();
 }
 

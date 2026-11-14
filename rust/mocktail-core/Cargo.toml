@@ -9,6 +9,15 @@ description = "High-performance, memory-safe Rust core for Mocktail"
 name = "mocktail_core"
 crate-type = ["staticlib", "rlib"]
 
+[[bin]]
+name = "mocktail_updater"
+path = "src/bin/mocktail_updater.rs"
+required-features = ["updater"]
+
+[features]
+default = []
+updater = []
+
 [dependencies]
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
 sha2 = "0.10"
@@ -25,6 +34,8 @@ tungstenite = { version = "0.24", default-features = false, features = ["handsha
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = "1"
 webpki-roots = "1.0"
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
+httparse = "1.10"
 
 [profile.release]
 opt-level = 3

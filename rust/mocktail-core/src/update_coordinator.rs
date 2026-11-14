@@ -242,87 +242,87 @@ pub struct MocktailRustUpdateCoordinatorOps {
 // ============================================================================
 
 #[derive(Debug, Clone, Default)]
-struct UpdatePathsData {
-    config_file: PathBuf,
-    data_root: PathBuf,
-    cache_root: PathBuf,
-    state_root: PathBuf,
-    compatibility_manifest: PathBuf,
-    signing_trust_manifest: PathBuf,
-    host_abi_reference_profile: PathBuf,
-    runtime_binary: PathBuf,
-    runtime_launcher: PathBuf,
+pub(crate) struct UpdatePathsData {
+    pub config_file: PathBuf,
+    pub data_root: PathBuf,
+    pub cache_root: PathBuf,
+    pub state_root: PathBuf,
+    pub compatibility_manifest: PathBuf,
+    pub signing_trust_manifest: PathBuf,
+    pub host_abi_reference_profile: PathBuf,
+    pub runtime_binary: PathBuf,
+    pub runtime_launcher: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy)]
-struct UpdateRequestData {
-    startup_preflight: bool,
-    check_latest: bool,
-    run_canary: bool,
-    download_only: bool,
-    force_run_latest: bool,
-    canary_graphics_backend: i32,
-    progress_fd: i32,
+pub(crate) struct UpdateRequestData {
+    pub startup_preflight: bool,
+    pub check_latest: bool,
+    pub run_canary: bool,
+    pub download_only: bool,
+    pub force_run_latest: bool,
+    pub canary_graphics_backend: i32,
+    pub progress_fd: i32,
 }
 
 #[derive(Debug, Clone, Default)]
-struct UpdateResultData {
-    changed: bool,
-    stale: bool,
-    payload_id: String,
-    message: String,
-    warnings: Vec<String>,
-    error: String,
+pub(crate) struct UpdateResultData {
+    pub changed: bool,
+    pub stale: bool,
+    pub payload_id: String,
+    pub message: String,
+    pub warnings: Vec<String>,
+    pub error: String,
 }
 
 impl UpdateResultData {
-    fn is_ok(&self) -> bool {
+    pub(crate) fn is_ok(&self) -> bool {
         self.error.is_empty()
     }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct ExpectedIdentityData {
-    version_name: String,
-    version_code: u64,
-    exact_build_id: Option<String>,
+pub(crate) struct ExpectedIdentityData {
+    pub version_name: String,
+    pub version_code: u64,
+    pub exact_build_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
-struct CoordinatorStoreResult {
-    payload_id: String,
-    payload_directory: PathBuf,
-    host_abi_profile: PathBuf,
-    compatibility_manifest: PathBuf,
-    version_name: String,
-    version_code: u64,
-    build_id: String,
-    error: String,
+pub(crate) struct CoordinatorStoreResult {
+    pub payload_id: String,
+    pub payload_directory: PathBuf,
+    pub host_abi_profile: PathBuf,
+    pub compatibility_manifest: PathBuf,
+    pub version_name: String,
+    pub version_code: u64,
+    pub build_id: String,
+    pub error: String,
 }
 
 impl CoordinatorStoreResult {
-    fn is_valid(&self) -> bool {
+    pub(crate) fn is_valid(&self) -> bool {
         self.error.is_empty() && !self.payload_id.is_empty()
     }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct CandidatePlanData {
-    identity: ExpectedIdentityData,
-    exact_supported: bool,
-    reuse_installed: bool,
-    origin: &'static str,
+pub(crate) struct CandidatePlanData {
+    pub identity: ExpectedIdentityData,
+    pub exact_supported: bool,
+    pub reuse_installed: bool,
+    pub origin: &'static str,
 }
 
 #[derive(Debug, Clone, Default)]
-struct ProviderVersionData {
-    version_name: String,
-    version_code: u64,
-    error: String,
+pub(crate) struct ProviderVersionData {
+    pub version_name: String,
+    pub version_code: u64,
+    pub error: String,
 }
 
 impl ProviderVersionData {
-    fn is_valid(&self) -> bool {
+    pub(crate) fn is_valid(&self) -> bool {
         self.error.is_empty() && !self.version_name.is_empty() && self.version_code > 0
     }
 }
@@ -359,20 +359,20 @@ impl ReferenceProfileData {
 }
 
 #[derive(Debug, Default)]
-struct GarbageCollectData {
-    removed_count: usize,
-    freed_bytes: u64,
-    error: String,
+pub(crate) struct GarbageCollectData {
+    pub removed_count: usize,
+    pub freed_bytes: u64,
+    pub error: String,
 }
 
 #[derive(Debug, Default)]
-struct DerivedHostAbiData {
-    profile: PathBuf,
-    compatibility_manifest: PathBuf,
-    error: String,
+pub(crate) struct DerivedHostAbiData {
+    pub profile: PathBuf,
+    pub compatibility_manifest: PathBuf,
+    pub error: String,
 }
 
-trait UpdateBackend {
+pub(crate) trait UpdateBackend {
     fn provider_check_latest(&self) -> ProviderVersionData;
     fn download_and_prepare(
         &self,
@@ -1026,7 +1026,7 @@ fn preferred_supported_profile(profiles: &[SupportedProfile]) -> Option<&Support
     profiles.iter().max_by_key(|p| p.version_code)
 }
 
-fn find_supported_profile<'a>(
+pub(crate) fn find_supported_profile<'a>(
     profiles: &'a [SupportedProfile],
     version_name: &str,
     version_code: u64,
@@ -1036,7 +1036,7 @@ fn find_supported_profile<'a>(
     })
 }
 
-fn exact_payload_identity(profile: &SupportedProfile) -> ExpectedIdentityData {
+pub(crate) fn exact_payload_identity(profile: &SupportedProfile) -> ExpectedIdentityData {
     ExpectedIdentityData {
         version_name: profile.version_name.clone(),
         version_code: profile.version_code,
@@ -1665,7 +1665,7 @@ fn collect_superseded_payloads<B: UpdateBackend>(backend: &B, keep: &[String]) -
     )
 }
 
-fn run_update_internal<B: UpdateBackend>(
+pub(crate) fn run_update_internal<B: UpdateBackend>(
     paths: &UpdatePathsData,
     request: &UpdateRequestData,
     backend: &B,

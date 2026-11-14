@@ -4952,6 +4952,93 @@ int32_t mocktail_rust_deriver_derive_host_abi_profile(
     void* disasm_ctx, MocktailDeriverResultCallback on_result,
     MocktailHostAbiErrorCallback on_error, void* ctx);
 
+// ============================================================================
+// 152. Pure-Rust HTTP Transport & Services Orchestration Engine
+// ============================================================================
+
+typedef struct MocktailRustServiceHttpRequestView {
+  bool is_post;
+  struct MocktailRustStrSlice url;
+  struct MocktailRustStrSlice body;
+  const struct MocktailRustStrSlice* headers_ptr;
+  size_t headers_len;
+  struct MocktailRustStrSlice ca_bundle;
+  int64_t timeout_ms;
+  int32_t max_redirects;
+  size_t max_response_bytes;
+  int32_t max_attempts;
+  bool allow_local_socks5_fallback;
+  bool fallback_env_ca_bundle;
+  bool use_runtime_env_proxy;
+} MocktailRustServiceHttpRequestView;
+
+typedef void (*MocktailRustServiceHttpCallback)(
+    void* ctx, int32_t status_code, const char* body_ptr, size_t body_len,
+    const struct MocktailRustStrSlice* headers_ptr, size_t headers_len,
+    const char* error_ptr, size_t error_len, bool tls_cert_error);
+
+bool mocktail_rust_services_http_perform(
+    const MocktailRustServiceHttpRequestView* req_view,
+    MocktailRustServiceHttpCallback on_complete, void* ctx);
+
+int32_t mocktail_rust_http_transport_init(void);
+
+typedef void (*MocktailRustInjectedHttpRespFn)(
+    void* resp_ctx, bool transport_ok, int64_t status_code,
+    struct MocktailRustStrSlice body, struct MocktailRustStrSlice error);
+
+typedef void (*MocktailRustInjectedHttpGetFn)(
+    void* http_ctx, struct MocktailRustStrSlice url,
+    const struct MocktailRustStrSlice* headers_ptr, size_t headers_len,
+    int64_t timeout_ms, size_t maximum_body_bytes, bool follow_redirects,
+    MocktailRustInjectedHttpRespFn on_response, void* resp_ctx);
+
+typedef struct MocktailRustAuthSessionResultView {
+  int32_t status;
+  int64_t user_id;
+  struct MocktailRustStrSlice username;
+  struct MocktailRustStrSlice display_name;
+  int64_t http_status;
+  struct MocktailRustStrSlice error;
+} MocktailRustAuthSessionResultView;
+
+typedef void (*MocktailRustAuthSessionCallback)(
+    void* ctx, const MocktailRustAuthSessionResultView* result);
+
+void mocktail_rust_auth_resolve_session(
+    const char* cookie_header_ptr, size_t cookie_header_len, bool allow_guest,
+    MocktailRustInjectedHttpGetFn http_get, void* http_ctx,
+    MocktailRustAuthSessionCallback on_result, void* result_ctx);
+
+typedef struct MocktailRustClientSettingsOptionsView {
+  struct MocktailRustStrSlice explicit_json;
+  struct MocktailRustStrSlice explicit_file;
+  struct MocktailRustStrSlice bundled_file;
+  struct MocktailRustStrSlice cache_file;
+  struct MocktailRustStrSlice application;
+  struct MocktailRustStrSlice url;
+  bool use_bundled;
+  bool sober_mode;
+  bool fetch;
+  bool auto_update;
+} MocktailRustClientSettingsOptionsView;
+
+typedef struct MocktailRustClientSettingsResultView {
+  struct MocktailRustStrSlice json;
+  int32_t source;
+  bool valid_json;
+  bool cache_updated;
+  struct MocktailRustStrSlice error;
+} MocktailRustClientSettingsResultView;
+
+typedef void (*MocktailRustClientSettingsCallback)(
+    void* ctx, const MocktailRustClientSettingsResultView* result);
+
+void mocktail_rust_client_settings_resolve(
+    const MocktailRustClientSettingsOptionsView* options,
+    MocktailRustInjectedHttpGetFn http_get, void* http_ctx,
+    MocktailRustClientSettingsCallback on_result, void* result_ctx);
+
 #ifdef __cplusplus
 }
 #endif

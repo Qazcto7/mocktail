@@ -970,6 +970,28 @@ struct CallbackHttpTransport {
     ctx: *mut c_void,
 }
 
+#[cfg(any(test, feature = "updater"))]
+pub(crate) fn download_bytes_native(request: &HttpTransferRequestData) -> HttpBytesResultData {
+    let transport = CallbackHttpTransport {
+        cb: None,
+        ctx: std::ptr::null_mut(),
+    };
+    download_bytes(request, &transport)
+}
+
+#[cfg(any(test, feature = "updater"))]
+pub(crate) fn download_file_native(
+    request: &HttpTransferRequestData,
+    destination: &Path,
+    progress_fd: c_int,
+) -> HttpDownloadResultData {
+    let transport = CallbackHttpTransport {
+        cb: None,
+        ctx: std::ptr::null_mut(),
+    };
+    download_file(request, destination, progress_fd, &transport)
+}
+
 impl HttpTransport for CallbackHttpTransport {
     fn perform_attempt(
         &self,
@@ -977,11 +999,7 @@ impl HttpTransport for CallbackHttpTransport {
         sink: &mut dyn HttpAttemptSink,
     ) -> HttpAttemptOutcome {
         let Some(cb) = self.cb else {
-            return HttpAttemptOutcome {
-                init_failed: true,
-                curl_error: "HTTP transport is unavailable".to_string(),
-                ..HttpAttemptOutcome::default()
-            };
+            return crate::http_transport::perform_http_attempt_native(spec, sink);
         };
 
         struct SinkProxy<'a> {

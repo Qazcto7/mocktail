@@ -17,6 +17,8 @@ pub mod browser_tracker_service;
 pub use browser_tracker_service::*;
 pub mod candidate_approval;
 pub use candidate_approval::*;
+#[cfg(any(test, feature = "updater"))]
+pub(crate) mod capstone_ffi;
 pub mod deriver_json;
 pub use deriver_json::*;
 pub mod discord_rpc;
@@ -28,6 +30,8 @@ pub mod host_abi_deriver;
 pub use host_abi_deriver::*;
 pub mod http_download;
 pub use http_download::*;
+pub mod http_transport;
+pub use http_transport::*;
 pub mod input_router;
 pub use input_router::*;
 pub mod micup_rpc;
@@ -36,6 +40,8 @@ pub mod payload_store;
 pub use payload_store::*;
 pub mod payload_update_preflight;
 pub use payload_update_preflight::*;
+#[cfg(any(test, feature = "updater"))]
+pub(crate) mod provider_rs;
 pub mod readiness_canary;
 pub use readiness_canary::*;
 pub mod roblox_cookie_store;
@@ -44,6 +50,8 @@ pub mod runtime_bridges;
 pub use runtime_bridges::*;
 pub mod runtime_policies;
 pub use runtime_policies::*;
+pub mod services_rs;
+pub use services_rs::*;
 pub mod storage_paths;
 pub use storage_paths::*;
 pub mod text_runtime;
@@ -52,6 +60,8 @@ pub mod update_coordinator;
 pub use update_coordinator::*;
 pub mod update_json;
 pub use update_json::*;
+#[cfg(any(test, feature = "updater"))]
+pub mod updater_cli;
 pub(crate) mod unix_ipc;
 pub mod webview_helper_launcher;
 pub use webview_helper_launcher::*;
@@ -2287,7 +2297,7 @@ pub extern "C" fn mocktail_rust_bionic_eai_error(posix_error: c_int) -> c_int {
 // 21. Roblox Launch URI & Deep Links
 // ============================================================================
 
-fn percent_decode_helper(encoded: &str, plus_as_space: bool) -> Result<String, &'static str> {
+pub(crate) fn percent_decode_helper(encoded: &str, plus_as_space: bool) -> Result<String, &'static str> {
     if encoded.len() > 16384 {
         return Err("Roblox launch parameter size is invalid");
     }
@@ -4567,12 +4577,33 @@ pub struct MocktailRustZipEntryInfo {
     pub symbolic_link: bool,
 }
 
+fn open_regular_zip(path: &Path, err_code: c_int) -> Result<File, (c_int, String)> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let not_regular = || {
+        (
+            err_code,
+            format!("ZIP archive is not a regular file: {}", path.display()),
+        )
+    };
+    if !std::fs::symlink_metadata(path).map(|m| m.file_type().is_file()).unwrap_or(false) {
+        return Err(not_regular());
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|_| not_regular())?;
+    if !file.metadata().map(|m| m.file_type().is_file()).unwrap_or(false) {
+        return Err(not_regular());
+    }
+    Ok(file)
+}
+
 pub(crate) fn zip_list_entries_path(
     path: &Path,
     max_entries: usize,
 ) -> Result<Vec<MocktailRustZipEntryInfo>, (c_int, String)> {
-    let file =
-        std::fs::File::open(path).map_err(|e| (-3, format!("cannot open ZIP archive: {}: {}", path.display(), e)))?;
+    let file = open_regular_zip(path, -3)?;
     let mut zip =
         zip::ZipArchive::new(file).map_err(|e| (-4, format!("cannot parse ZIP archive: {}", e)))?;
     if zip.len() > max_entries {
@@ -4661,8 +4692,7 @@ pub(crate) fn zip_read_entry_bytes(
     target_name: &str,
     max_bytes: usize,
 ) -> Result<Vec<u8>, (c_int, String)> {
-    let file = std::fs::File::open(archive_path)
-        .map_err(|e| (-4, format!("cannot open ZIP archive: {}: {}", archive_path.display(), e)))?;
+    let file = open_regular_zip(archive_path, -4)?;
     let mut zip =
         zip::ZipArchive::new(file).map_err(|e| (-5, format!("cannot parse ZIP archive: {}", e)))?;
     let mut entry = zip
@@ -4742,8 +4772,7 @@ pub(crate) fn zip_extract_entry_file(
     dest: &Path,
     max_bytes: usize,
 ) -> Result<(), (c_int, String)> {
-    let file = std::fs::File::open(archive_path)
-        .map_err(|e| (-5, format!("cannot open ZIP archive: {}: {}", archive_path.display(), e)))?;
+    let file = open_regular_zip(archive_path, -5)?;
     let mut zip =
         zip::ZipArchive::new(file).map_err(|e| (-6, format!("cannot parse ZIP archive: {}", e)))?;
     let mut entry = zip
@@ -4845,8 +4874,7 @@ pub(crate) fn zip_extract_prefix_dir(
     dest_base: &Path,
     max_total_bytes: usize,
 ) -> Result<usize, (c_int, String)> {
-    let file = std::fs::File::open(archive_path)
-        .map_err(|e| (-5, format!("cannot open ZIP archive: {}: {}", archive_path.display(), e)))?;
+    let file = open_regular_zip(archive_path, -5)?;
     let mut zip =
         zip::ZipArchive::new(file).map_err(|e| (-6, format!("cannot parse ZIP archive: {}", e)))?;
     let mut total_bytes = 0usize;
@@ -5631,6 +5659,10 @@ fn apkpure_downloads_in_record(record: &[u8]) -> Vec<String> {
     downloads
 }
 
+pub(crate) fn apkpure_is_valid_version_name(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 128 && name.bytes().all(apkpure_version_character)
+}
+
 #[no_mangle]
 pub extern "C" fn mocktail_rust_apkpure_is_valid_version_name(
     name_ptr: *const c_char,
@@ -5639,8 +5671,22 @@ pub extern "C" fn mocktail_rust_apkpure_is_valid_version_name(
     if name_ptr.is_null() || name_len == 0 || name_len > 128 {
         return false;
     }
-    let slice = unsafe { std::slice::from_raw_parts(name_ptr as *const u8, name_len) };
-    slice.iter().copied().all(apkpure_version_character)
+    let slice = unsafe { slice::from_raw_parts(name_ptr as *const u8, name_len) };
+    std::str::from_utf8(slice).is_ok_and(apkpure_is_valid_version_name)
+}
+
+pub(crate) fn apkpure_has_zip_magic(path: &Path) -> bool {
+    let mut file = match File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut magic = [0u8; 4];
+    let n = file.read(&mut magic).unwrap_or(0);
+    n == 4
+        && magic[0] == b'P'
+        && magic[1] == b'K'
+        && matches!(magic[2], 3 | 5 | 7)
+        && matches!(magic[3], 4 | 6 | 8)
 }
 
 #[no_mangle]
@@ -5652,17 +5698,33 @@ pub extern "C" fn mocktail_rust_apkpure_has_zip_magic(path_ptr: *const c_char) -
         Ok(s) if !s.is_empty() => s,
         _ => return false,
     };
-    let mut file = match File::open(path_str) {
-        Ok(f) => f,
-        Err(_) => return false,
-    };
-    let mut magic = [0u8; 4];
-    let n = file.read(&mut magic).unwrap_or(0);
-    n == 4
-        && magic[0] == b'P'
-        && magic[1] == b'K'
-        && matches!(magic[2], 3 | 5 | 7)
-        && matches!(magic[3], 4 | 6 | 8)
+    apkpure_has_zip_magic(Path::new(path_str))
+}
+
+pub(crate) fn apkpure_parse_latest_bytes(data: &[u8]) -> Result<(String, u64), &'static str> {
+    if data.is_empty() {
+        return Err("APKPure metadata contains no downloadable version identity");
+    }
+    let markers = apkpure_version_markers(data);
+    let mut best_code: u64 = 0;
+    let mut best_name = String::new();
+    for (index, marker) in markers.iter().enumerate() {
+        let code = apkpure_version_code(data, marker);
+        let end = if index + 1 < markers.len() {
+            markers[index + 1].begin
+        } else {
+            data.len()
+        };
+        let record_slice = &data[marker.colon + 1..end];
+        if code > best_code && !apkpure_downloads_in_record(record_slice).is_empty() {
+            best_code = code;
+            best_name = marker.value.clone();
+        }
+    }
+    if best_code == 0 || best_name.is_empty() {
+        return Err("APKPure metadata contains no downloadable version identity");
+    }
+    Ok((best_name, best_code))
 }
 
 #[no_mangle]
@@ -5682,31 +5744,18 @@ pub extern "C" fn mocktail_rust_apkpure_parse_latest(
         set_err("invalid arguments");
         return -1;
     }
-    if meta_len == 0 {
-        set_err("APKPure metadata contains no downloadable version identity");
-        return -2;
-    }
-    let data = unsafe { std::slice::from_raw_parts(metadata, meta_len) };
-    let markers = apkpure_version_markers(data);
-    let mut best_code: u64 = 0;
-    let mut best_name = String::new();
-    for (index, marker) in markers.iter().enumerate() {
-        let code = apkpure_version_code(data, marker);
-        let end = if index + 1 < markers.len() {
-            markers[index + 1].begin
-        } else {
-            data.len()
-        };
-        let record_slice = &data[marker.colon + 1..end];
-        if code > best_code && !apkpure_downloads_in_record(record_slice).is_empty() {
-            best_code = code;
-            best_name = marker.value.clone();
+    let data = if meta_len == 0 {
+        &[][..]
+    } else {
+        unsafe { std::slice::from_raw_parts(metadata, meta_len) }
+    };
+    let (best_name, best_code) = match apkpure_parse_latest_bytes(data) {
+        Ok(v) => v,
+        Err(msg) => {
+            set_err(msg);
+            return -2;
         }
-    }
-    if best_code == 0 || best_name.is_empty() {
-        set_err("APKPure metadata contains no downloadable version identity");
-        return -2;
-    }
+    };
     if best_name.len() >= ver_cap {
         set_err("version name buffer too small");
         return -3;
@@ -9207,6 +9256,48 @@ fn trim_ascii_whitespace(slice: &[u8]) -> &[u8] {
     &slice[start..end]
 }
 
+pub(crate) fn extract_auth_cookie_bytes(slice: &[u8]) -> (bool, &[u8]) {
+    if slice.is_empty() {
+        return (false, &[]);
+    }
+    if slice.starts_with(b"_|") {
+        let mut end = 0;
+        while end < slice.len() && !is_auth_cookie_delimiter(slice[end]) {
+            end += 1;
+        }
+        return (true, trim_ascii_whitespace(&slice[..end]));
+    }
+
+    let mut segment_begin = 0;
+    while segment_begin < slice.len() {
+        while segment_begin < slice.len()
+            && (is_auth_cookie_delimiter(slice[segment_begin])
+                || slice[segment_begin].is_ascii_whitespace())
+        {
+            segment_begin += 1;
+        }
+        let mut segment_end = segment_begin;
+        while segment_end < slice.len() && !is_auth_cookie_delimiter(slice[segment_end]) {
+            segment_end += 1;
+        }
+        let segment = trim_ascii_whitespace(&slice[segment_begin..segment_end]);
+        let equals_pos = segment.iter().position(|&b| b == b'=');
+        let name = match equals_pos {
+            Some(pos) => trim_ascii_whitespace(&segment[..pos]),
+            None => trim_ascii_whitespace(segment),
+        };
+        if name == b".ROBLOSECURITY" {
+            let val = match equals_pos {
+                Some(pos) => trim_ascii_whitespace(&segment[pos + 1..]),
+                None => &[][..],
+            };
+            return (true, val);
+        }
+        segment_begin = segment_end + if segment_end < slice.len() { 1 } else { 0 };
+    }
+    (false, &[])
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn mocktail_rust_auth_extract_cookie(
     header: *const c_char,
@@ -9227,62 +9318,24 @@ pub unsafe extern "C" fn mocktail_rust_auth_extract_cookie(
         return 0;
     }
     let slice = std::slice::from_raw_parts(header as *const u8, header_len);
-    if slice.starts_with(b"_|") {
-        let mut end = 0;
-        while end < slice.len() && !is_auth_cookie_delimiter(slice[end]) {
-            end += 1;
+    let (present, val) = extract_auth_cookie_bytes(slice);
+    *out_present = present;
+    if present && !out_buf.is_null() && !out_len.is_null() {
+        if cap <= val.len() {
+            return -2;
         }
-        let val = trim_ascii_whitespace(&slice[..end]);
-        *out_present = true;
-        if !out_buf.is_null() && !out_len.is_null() {
-            if cap <= val.len() {
-                return -2;
-            }
-            if !val.is_empty() {
-                std::ptr::copy_nonoverlapping(val.as_ptr() as *const c_char, out_buf, val.len());
-            }
-            *out_buf.add(val.len()) = 0;
-            *out_len = val.len();
+        if !val.is_empty() {
+            std::ptr::copy_nonoverlapping(val.as_ptr() as *const c_char, out_buf, val.len());
         }
-        return 0;
-    }
-
-    let mut segment_begin = 0;
-    while segment_begin < slice.len() {
-        while segment_begin < slice.len() && (is_auth_cookie_delimiter(slice[segment_begin]) || slice[segment_begin].is_ascii_whitespace()) {
-            segment_begin += 1;
-        }
-        let mut segment_end = segment_begin;
-        while segment_end < slice.len() && !is_auth_cookie_delimiter(slice[segment_end]) {
-            segment_end += 1;
-        }
-        let segment = trim_ascii_whitespace(&slice[segment_begin..segment_end]);
-        let equals_pos = segment.iter().position(|&b| b == b'=');
-        let name = match equals_pos {
-            Some(pos) => trim_ascii_whitespace(&segment[..pos]),
-            None => trim_ascii_whitespace(segment),
-        };
-        if name == b".ROBLOSECURITY" {
-            *out_present = true;
-            let val = match equals_pos {
-                Some(pos) => trim_ascii_whitespace(&segment[pos + 1..]),
-                None => &[][..],
-            };
-            if !out_buf.is_null() && !out_len.is_null() {
-                if cap <= val.len() {
-                    return -2;
-                }
-                if !val.is_empty() {
-                    std::ptr::copy_nonoverlapping(val.as_ptr() as *const c_char, out_buf, val.len());
-                }
-                *out_buf.add(val.len()) = 0;
-                *out_len = val.len();
-            }
-            return 0;
-        }
-        segment_begin = segment_end + if segment_end < slice.len() { 1 } else { 0 };
+        *out_buf.add(val.len()) = 0;
+        *out_len = val.len();
     }
     0
+}
+
+#[inline]
+pub(crate) fn is_safe_auth_cookie_bytes(slice: &[u8]) -> bool {
+    !slice.is_empty() && slice.iter().all(|&b| b > 0x20 && b < 0x7f && b != b';')
 }
 
 #[no_mangle]
@@ -9294,7 +9347,7 @@ pub extern "C" fn mocktail_rust_auth_is_safe_cookie_value(
         return false;
     }
     let slice = unsafe { std::slice::from_raw_parts(value as *const u8, len) };
-    slice.iter().all(|&b| b > 0x20 && b < 0x7f && b != b';')
+    is_safe_auth_cookie_bytes(slice)
 }
 
 #[no_mangle]
@@ -9376,6 +9429,41 @@ pub unsafe extern "C" fn mocktail_rust_auth_redact_rejected(
     0
 }
 
+pub(crate) fn parse_auth_identity_slice(slice: &[u8]) -> Result<(i64, String, String), c_int> {
+    if slice.is_empty() {
+        return Err(-1);
+    }
+    let val: serde_json::Value = serde_json::from_slice(slice).map_err(|_| -2)?;
+    let obj = val.as_object().ok_or(-3)?;
+    let id_val = obj.get("id").ok_or(-4)?;
+    let user_id = if let Some(n) = id_val.as_number() {
+        if let Some(u) = n.as_u64() {
+            if u == 0 || u > i64::MAX as u64 {
+                return Err(-5);
+            }
+            u as i64
+        } else if let Some(s) = n.as_i64() {
+            if s <= 0 {
+                return Err(-6);
+            }
+            s
+        } else {
+            return Err(-7);
+        }
+    } else {
+        return Err(-8);
+    };
+    let name = match obj.get("name").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => return Err(-9),
+    };
+    let display_name = match obj.get("displayName").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        _ => return Err(-10),
+    };
+    Ok((user_id, name, display_name))
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn mocktail_rust_auth_parse_identity(
     body: *const c_char,
@@ -9391,45 +9479,10 @@ pub unsafe extern "C" fn mocktail_rust_auth_parse_identity(
     }
     *out_user_id = -1;
     let slice = std::slice::from_raw_parts(body as *const u8, body_len);
-    let val: serde_json::Value = match serde_json::from_slice(slice) {
+    let (user_id, name, display_name) = match parse_auth_identity_slice(slice) {
         Ok(v) => v,
-        Err(_) => return -2,
+        Err(rc) => return rc,
     };
-    let obj = match val.as_object() {
-        Some(o) => o,
-        None => return -3,
-    };
-    let id_val = match obj.get("id") {
-        Some(v) => v,
-        None => return -4,
-    };
-    let user_id = if let Some(n) = id_val.as_number() {
-        if let Some(u) = n.as_u64() {
-            if u == 0 || u > i64::MAX as u64 {
-                return -5;
-            }
-            u as i64
-        } else if let Some(s) = n.as_i64() {
-            if s <= 0 {
-                return -6;
-            }
-            s
-        } else {
-            return -7;
-        }
-    } else {
-        return -8;
-    };
-
-    let name = match obj.get("name").and_then(|v| v.as_str()) {
-        Some(s) if !s.is_empty() => s,
-        _ => return -9,
-    };
-    let display_name = match obj.get("displayName").and_then(|v| v.as_str()) {
-        Some(s) => s,
-        _ => return -10,
-    };
-
     if name.len() >= name_cap || display_name.len() >= display_cap {
         return -11;
     }
@@ -15352,18 +15405,7 @@ pub extern "C" fn mocktail_rust_network_proxy_parse(
 }
 
 fn encode_proxy_credential(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut encoded = String::with_capacity(bytes.len());
-    for &b in bytes {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
-            encoded.push(b as char);
-        } else {
-            encoded.push('%');
-            encoded.push(HEX[(b >> 4) as usize] as char);
-            encoded.push(HEX[(b & 15) as usize] as char);
-        }
-    }
-    encoded
+    crate::discord_rpc::percent_encode_bytes(bytes)
 }
 
 #[no_mangle]

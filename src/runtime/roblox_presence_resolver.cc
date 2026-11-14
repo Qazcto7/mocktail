@@ -1,7 +1,5 @@
 #include "runtime/roblox_presence_resolver.h"
 
-#include <curl/curl.h>
-
 #include <array>
 #include <cstdlib>
 #include <string>
@@ -20,10 +18,11 @@ Status Invalid(std::string message) {
   return Status::Error(StatusCode::kInvalidArgument, std::move(message));
 }
 
-size_t WriteToString(char* data, size_t size, size_t nmemb, void* userdata) {
-  static_cast<std::string*>(userdata)->append(data, size * nmemb);
-  return size * nmemb;
-}
+struct PresenceHttpCapture {
+  std::string body;
+  std::string error;
+  long status_code = 0;
+};
 
 }  // namespace
 
@@ -68,44 +67,58 @@ Status ResolveFollowUserPlace(int64_t user_id, const std::string& auth_cookie,
     return Invalid("Roblox presence lookup requires an authenticated session");
   }
 
-  CURL* curl = curl_easy_init();
-  if (curl == nullptr) {
-    return Invalid("Roblox presence lookup could not initialize a request");
-  }
-
+  static constexpr std::string_view kPresenceUrl =
+      "https://presence.roblox.com/v1/presence/users";
+  static constexpr std::string_view kJsonContentType =
+      "Content-Type: application/json";
   const std::string payload =
       "{\"userIds\":[" + std::to_string(user_id) + "]}";
-  std::string response;
-
-  struct curl_slist* headers = nullptr;
-  headers = curl_slist_append(headers, "Content-Type: application/json");
   std::string cookie_header = "Cookie: .ROBLOSECURITY=" + auth_cookie;
-  headers = curl_slist_append(headers, cookie_header.c_str());
+  const std::array<MocktailRustStrSlice, 2> headers = {
+      MocktailRustStrSlice{kJsonContentType.data(), kJsonContentType.size()},
+      MocktailRustStrSlice{cookie_header.data(), cookie_header.size()},
+  };
 
-  curl_easy_setopt(curl, CURLOPT_URL,
-                   "https://presence.roblox.com/v1/presence/users");
-  curl_easy_setopt(curl, CURLOPT_POST, 1L);
-  curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload.c_str());
-  curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteToString);
-  curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
-  curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
-  curl_easy_setopt(curl, CURLOPT_SSL_EC_CURVES, "X25519:P-256:P-384");
-  curl_easy_setopt(curl, CURLOPT_DOH_URL, "https://1.1.1.1/dns-query");
-  curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
+  MocktailRustServiceHttpRequestView view{};
+  view.is_post = true;
+  view.url = {kPresenceUrl.data(), kPresenceUrl.size()};
+  view.body = {payload.data(), payload.size()};
+  view.headers_ptr = headers.data();
+  view.headers_len = headers.size();
+  view.ca_bundle = {"", 0};
+  view.timeout_ms = 10000;
+  view.max_redirects = 0;
+  view.max_response_bytes = 512 * 1024;
+  view.max_attempts = 1;
+  view.allow_local_socks5_fallback = false;
+  view.fallback_env_ca_bundle = true;
+  view.use_runtime_env_proxy = true;
 
-  const CURLcode result = curl_easy_perform(curl);
-  long http_status = 0;
-  curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
-  curl_slist_free_all(headers);
+  PresenceHttpCapture capture;
+  const bool ok = mocktail_rust_services_http_perform(
+      &view,
+      [](void* ctx, int32_t status_code, const char* body_ptr, size_t body_len,
+         const MocktailRustStrSlice* /*headers_ptr*/, size_t /*headers_len*/,
+         const char* error_ptr, size_t error_len, bool /*tls_cert_error*/) {
+        auto* out_cap = static_cast<PresenceHttpCapture*>(ctx);
+        out_cap->status_code = static_cast<long>(status_code);
+        if (body_ptr != nullptr && body_len > 0) {
+          out_cap->body.assign(body_ptr, body_len);
+        }
+        if (error_ptr != nullptr && error_len > 0) {
+          out_cap->error.assign(error_ptr, error_len);
+        }
+      },
+      &capture);
   if (!cookie_header.empty()) {
     mocktail_rust_secure_zero(cookie_header.data(), cookie_header.size());
   }
-  curl_easy_cleanup(curl);
 
-  if (result != CURLE_OK) {
+  if (!ok || !capture.error.empty()) {
     return Invalid("Roblox presence lookup failed to connect");
   }
+  const long http_status = capture.status_code;
+  const std::string& response = capture.body;
   if (http_status != 200) {
     return Invalid("Roblox presence lookup was rejected (status " +
                    std::to_string(http_status) + ")");

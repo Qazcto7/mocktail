@@ -155,7 +155,7 @@ fn write_private_excl(path: &Path, contents: &str) -> Result<(), String> {
     })
 }
 
-struct ElfImage {
+pub(crate) struct ElfImage {
     mapped: MappedReadOnlyFile,
     segments: Vec<Elf64Phdr>,
     relro_ranges: Vec<(u64, u64)>,
@@ -625,40 +625,40 @@ fn decode_aps2(encoded: &[u8]) -> Result<Vec<Relocation>, String> {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum OperandKind {
+pub(crate) enum OperandKind {
     Reg,
     Imm,
     Mem,
 }
 
 #[derive(Clone, Debug)]
-struct Operand {
-    kind: OperandKind,
-    reg_name: String,
-    seg_name: String,
-    base_name: String,
-    index_name: String,
-    scale: i32,
-    value: i64,
-    size: u8,
-    rip_relative: bool,
+pub(crate) struct Operand {
+    pub kind: OperandKind,
+    pub reg_name: String,
+    pub seg_name: String,
+    pub base_name: String,
+    pub index_name: String,
+    pub scale: i32,
+    pub value: i64,
+    pub size: u8,
+    pub rip_relative: bool,
 }
 
 #[derive(Clone, Debug)]
-struct Instruction {
-    address: u64,
-    size: u16,
-    mnemonic: String,
-    operands: Vec<Operand>,
-    imm_offset: u8,
-    imm_size: u8,
-    disp_offset: u8,
-    disp_size: u8,
-    control_flow: bool,
-    returns: bool,
+pub(crate) struct Instruction {
+    pub address: u64,
+    pub size: u16,
+    pub mnemonic: String,
+    pub operands: Vec<Operand>,
+    pub imm_offset: u8,
+    pub imm_size: u8,
+    pub disp_offset: u8,
+    pub disp_size: u8,
+    pub control_flow: bool,
+    pub returns: bool,
 }
 
-trait X86Disassembler {
+pub(crate) trait X86Disassembler {
     fn open(&mut self) -> Result<(), String>;
     fn decode_raw(&self, rva: u64, code: &[u8], count: usize) -> Result<Vec<Instruction>, String>;
 
@@ -2090,7 +2090,7 @@ fn load_candidate_metadata(root: &Path, candidate: &ElfImage) -> Result<String, 
     Ok(metadata_json)
 }
 
-fn derive_host_abi_profile_rs(
+pub(crate) fn derive_host_abi_profile_rs(
     reference_library: &Path,
     reference_profile: &Path,
     reference_compatibility_manifests: &[PathBuf],

@@ -1,60 +1,38 @@
 #include "services/client_settings_service.h"
-#include "mocktail/mocktail_rust.h"
 
 #include <cstdint>
-#include <fstream>
 #include <string>
-#include <utility>
+#include <string_view>
+#include <vector>
 
-#include "runtime/runtime_paths.h"
+#include "mocktail/mocktail_rust.h"
+#include "services_rust_bridge.h"
 
 namespace mocktail {
 namespace services {
 namespace {
 
-constexpr const char kEmptyDefaults[] = "{\"applicationSettings\":{}}";
+using internal::AssignSlice;
+using internal::DispatchInjectedHttpGet;
+using internal::ToSlice;
 
-
-
-std::string ReadFile(const std::filesystem::path& path) {
-  if (path.empty()) {
-    return {};
+ClientSettingsSource SourceFromCode(int32_t code) {
+  switch (code) {
+    case 0:
+      return ClientSettingsSource::kExplicitJson;
+    case 1:
+      return ClientSettingsSource::kExplicitFile;
+    case 2:
+      return ClientSettingsSource::kBundledFile;
+    case 3:
+      return ClientSettingsSource::kSafeDefaults;
+    case 4:
+      return ClientSettingsSource::kDownloaded;
+    case 5:
+      return ClientSettingsSource::kCache;
+    default:
+      return ClientSettingsSource::kEmptyDefaults;
   }
-  std::ifstream file(path, std::ios::binary);
-  if (!file) {
-    return {};
-  }
-  return std::string((std::istreambuf_iterator<char>(file)),
-                     std::istreambuf_iterator<char>());
-}
-
-bool AtomicWriteFile(const std::filesystem::path& path,
-                     const std::string& content, std::string* error_message) {
-  if (path.empty()) {
-    if (error_message != nullptr) {
-      *error_message = "client settings cache path is empty";
-    }
-    return false;
-  }
-  char err_buf[512] = {};
-  const int rc = mocktail_rust_atomic_write_file(
-      path.c_str(), content.data(), content.size(), err_buf, sizeof(err_buf));
-  if (rc != 0) {
-    if (error_message != nullptr) {
-      *error_message = err_buf[0] != '\0' ? err_buf : "could not commit client settings cache";
-    }
-    return false;
-  }
-  return true;
-}
-
-ClientSettingsResult FileResult(const std::filesystem::path& path,
-                                ClientSettingsSource source) {
-  ClientSettingsResult result;
-  result.json = ReadFile(path);
-  result.source = source;
-  result.valid_json = ClientSettingsService::IsValidJson(result.json);
-  return result;
 }
 
 }  // namespace
@@ -80,7 +58,8 @@ FflagsMergeResult LoadAndMergeFflagsFile(const std::filesystem::path& path,
   }
   if (rc != 0) {
     result.json = std::string(base_json);
-    result.error = err_buf[0] != '\0' ? err_buf : "failed to load and merge fflags";
+    result.error =
+        err_buf[0] != '\0' ? err_buf : "failed to load and merge fflags";
     return result;
   }
   result.json = out_buf.data();
@@ -91,76 +70,38 @@ FflagsMergeResult LoadAndMergeFflagsFile(const std::filesystem::path& path,
 
 ClientSettingsResult ClientSettingsService::Resolve(
     const ClientSettingsOptions& options) {
-  if (!options.explicit_json.empty()) {
-    return {options.explicit_json,
-            ClientSettingsSource::kExplicitJson,
-            IsValidJson(options.explicit_json),
-            false,
-            {}};
-  }
+  const std::string& explicit_file = options.explicit_file.native();
+  const std::string& bundled_file = options.bundled_file.native();
+  const std::string& cache_file = options.cache_file.native();
 
-  if (!options.explicit_file.empty()) {
-    ClientSettingsResult result =
-        FileResult(options.explicit_file, ClientSettingsSource::kExplicitFile);
-    if (!result.json.empty()) {
-      return result;
-    }
-  }
+  MocktailRustClientSettingsOptionsView ffi_options{};
+  ffi_options.explicit_json = ToSlice(options.explicit_json);
+  ffi_options.explicit_file = ToSlice(explicit_file);
+  ffi_options.bundled_file = ToSlice(bundled_file);
+  ffi_options.cache_file = ToSlice(cache_file);
+  ffi_options.application = ToSlice(options.application);
+  ffi_options.url = ToSlice(options.url);
+  ffi_options.use_bundled = options.use_bundled;
+  ffi_options.sober_mode = options.sober_mode;
+  ffi_options.fetch = options.fetch;
+  ffi_options.auto_update = options.auto_update;
 
-  if (!options.fetch && options.use_bundled) {
-    ClientSettingsResult result =
-        FileResult(options.bundled_file, ClientSettingsSource::kBundledFile);
-    if (!result.json.empty()) {
-      return result;
-    }
-  }
-
-  if (options.sober_mode && !options.fetch) {
-    const std::string defaults = SafeDefaultsJson();
-    return {defaults, ClientSettingsSource::kSafeDefaults, true, false, {}};
-  }
-
-  std::string update_error;
-  if (options.auto_update && !options.cache_file.empty()) {
-    HttpRequest request;
-    request.url =
-        options.url.empty() ? DefaultUrl(options.application) : options.url;
-    request.timeout_ms = 20000;
-    request.maximum_body_bytes = 16 * 1024 * 1024;
-    request.headers.push_back("Accept: application/json");
-    HttpResponse response = http_client_.Get(request);
-    if (response.transport_ok && response.status_code >= 200 &&
-        response.status_code < 300 && !response.body.empty() &&
-        IsValidJson(response.body)) {
-      const std::string cached = ReadFile(options.cache_file);
-      bool updated = false;
-      if (cached != response.body) {
-        updated =
-            AtomicWriteFile(options.cache_file, response.body, &update_error);
-      }
-      if (cached == response.body || updated) {
-        return {response.body, ClientSettingsSource::kDownloaded, true, updated,
-                update_error};
-      }
-    } else if (!response.transport_ok) {
-      update_error = std::move(response.error);
-    } else if (response.status_code < 200 || response.status_code >= 300) {
-      update_error = "client settings server returned HTTP " +
-                     std::to_string(response.status_code);
-    } else {
-      update_error = "client settings response was empty or invalid JSON";
-    }
-  }
-
-  ClientSettingsResult cached =
-      FileResult(options.cache_file, ClientSettingsSource::kCache);
-  if (!cached.json.empty()) {
-    cached.error = std::move(update_error);
-    return cached;
-  }
-
-  return {kEmptyDefaults, ClientSettingsSource::kEmptyDefaults, true, false,
-          std::move(update_error)};
+  ClientSettingsResult result;
+  mocktail_rust_client_settings_resolve(
+      &ffi_options, &DispatchInjectedHttpGet, &http_client_,
+      [](void* ctx, const MocktailRustClientSettingsResultView* view) {
+        auto* out = static_cast<ClientSettingsResult*>(ctx);
+        if (out == nullptr || view == nullptr) {
+          return;
+        }
+        out->json = AssignSlice(view->json);
+        out->source = SourceFromCode(view->source);
+        out->valid_json = view->valid_json;
+        out->cache_updated = view->cache_updated;
+        out->error = AssignSlice(view->error);
+      },
+      &result);
+  return result;
 }
 
 std::string ClientSettingsService::SafeDefaultsJson() {
@@ -168,15 +109,17 @@ std::string ClientSettingsService::SafeDefaultsJson() {
   if (mocktail_rust_client_settings_safe_defaults(buf, sizeof(buf)) == 0) {
     return std::string(buf);
   }
-  return R"json({"applicationSettings":{}})json";
+  return {};
 }
 
-std::string ClientSettingsService::DefaultUrl(const std::string& application) {
-  char buf[512] = {};
-  if (mocktail_rust_client_settings_build_url(application.c_str(), buf, sizeof(buf)) == 0) {
+std::string ClientSettingsService::DefaultUrl(
+    const std::string& application) {
+  char buf[1024] = {};
+  if (mocktail_rust_client_settings_build_url(application.c_str(), buf,
+                                              sizeof(buf)) == 0) {
     return std::string(buf);
   }
-  return "https://clientsettingscdn.roblox.com/v2/settings/application/" + application;
+  return {};
 }
 
 bool ClientSettingsService::IsValidJson(const std::string& content) {

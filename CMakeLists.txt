@@ -143,50 +143,90 @@ if(BUILD_TESTING)
 endif()
 
 find_package(OpenSSL REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(CAPSTONE REQUIRED IMPORTED_TARGET capstone)
+
+get_filename_component(MOCKTAIL_OPENSSL_LIB_DIR "${OPENSSL_CRYPTO_LIBRARY}" DIRECTORY)
+string(JOIN ":" MOCKTAIL_CAPSTONE_LIB_DIRS_JOINED ${CAPSTONE_LIBRARY_DIRS})
 
 find_program(CARGO_EXECUTABLE cargo REQUIRED)
 set(MOCKTAIL_RUST_CORE_DIR "${CMAKE_SOURCE_DIR}/rust/mocktail-core")
 set(MOCKTAIL_RUST_LIB_STATIC "${CMAKE_BINARY_DIR}/cargo-target/release/libmocktail_core.a")
+set(MOCKTAIL_RUST_UPDATER_BIN "${CMAKE_BINARY_DIR}/cargo-target/release/mocktail_updater")
+set(MOCKTAIL_UPDATER_BIN "${CMAKE_BINARY_DIR}/mocktail_updater")
+set(MOCKTAIL_RUST_SOURCES
+  "${MOCKTAIL_RUST_CORE_DIR}/build.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/src/apk_bundle.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/src/apk_signature_rs.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/src/bin/mocktail_updater.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/src/browser_tracker_service.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/src/candidate_approval.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/src/capstone_ffi.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/src/deriver_json.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/src/discord_rpc.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/src/elf_reader.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/src/external_launch_broker.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/src/host_abi_deriver.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/src/http_download.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/src/http_transport.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/src/input_router.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/src/lib.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/src/micup_rpc.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/src/payload_store.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/src/payload_update_preflight.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/src/provider_rs.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/src/readiness_canary.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/src/roblox_cookie_store.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/src/runtime_bridges.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/src/runtime_policies.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/src/services_rs.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/src/storage_paths.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/src/text_runtime.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/src/unix_ipc.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/src/update_coordinator.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/src/update_json.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/src/updater_cli.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/src/webview_helper_launcher.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/src/window_gates.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/Cargo.toml"
+  "${CMAKE_CURRENT_SOURCE_DIR}/config/mocktail.example.yaml"
+)
+
+set(MOCKTAIL_CARGO_ENV
+  "MOCKTAIL_DEFAULT_COMPATIBILITY_MANIFEST=${MOCKTAIL_DEFAULT_COMPATIBILITY_MANIFEST}"
+  "MOCKTAIL_DEFAULT_SIGNING_TRUST_MANIFEST=${MOCKTAIL_DEFAULT_SIGNING_TRUST_MANIFEST}"
+  "MOCKTAIL_DEFAULT_DOWNLOAD_SOURCES_MANIFEST=${MOCKTAIL_DEFAULT_DOWNLOAD_SOURCES_MANIFEST}"
+  "MOCKTAIL_CAPSTONE_LIB_DIRS=${MOCKTAIL_CAPSTONE_LIB_DIRS_JOINED}"
+  "MOCKTAIL_OPENSSL_LIB_DIRS=${MOCKTAIL_OPENSSL_LIB_DIR}"
+)
 
 add_custom_command(
   OUTPUT "${MOCKTAIL_RUST_LIB_STATIC}"
-  COMMAND "${CARGO_EXECUTABLE}" build --release --manifest-path "${MOCKTAIL_RUST_CORE_DIR}/Cargo.toml" --target-dir "${CMAKE_BINARY_DIR}/cargo-target"
+  COMMAND "${CMAKE_COMMAND}" -E env ${MOCKTAIL_CARGO_ENV}
+    "${CARGO_EXECUTABLE}" build --release --lib --manifest-path "${MOCKTAIL_RUST_CORE_DIR}/Cargo.toml" --target-dir "${CMAKE_BINARY_DIR}/cargo-target"
   WORKING_DIRECTORY "${MOCKTAIL_RUST_CORE_DIR}"
-  DEPENDS
-    "${MOCKTAIL_RUST_CORE_DIR}/src/apk_bundle.rs"
-    "${MOCKTAIL_RUST_CORE_DIR}/src/apk_signature_rs.rs"
-    "${MOCKTAIL_RUST_CORE_DIR}/src/browser_tracker_service.rs"
-    "${MOCKTAIL_RUST_CORE_DIR}/src/candidate_approval.rs"
-    "${MOCKTAIL_RUST_CORE_DIR}/src/deriver_json.rs"
-    "${MOCKTAIL_RUST_CORE_DIR}/src/discord_rpc.rs"
-    "${MOCKTAIL_RUST_CORE_DIR}/src/elf_reader.rs"
-    "${MOCKTAIL_RUST_CORE_DIR}/src/external_launch_broker.rs"
-    "${MOCKTAIL_RUST_CORE_DIR}/src/host_abi_deriver.rs"
-    "${MOCKTAIL_RUST_CORE_DIR}/src/http_download.rs"
-    "${MOCKTAIL_RUST_CORE_DIR}/src/input_router.rs"
-    "${MOCKTAIL_RUST_CORE_DIR}/src/lib.rs"
-    "${MOCKTAIL_RUST_CORE_DIR}/src/micup_rpc.rs"
-    "${MOCKTAIL_RUST_CORE_DIR}/src/payload_store.rs"
-    "${MOCKTAIL_RUST_CORE_DIR}/src/payload_update_preflight.rs"
-    "${MOCKTAIL_RUST_CORE_DIR}/src/readiness_canary.rs"
-    "${MOCKTAIL_RUST_CORE_DIR}/src/roblox_cookie_store.rs"
-    "${MOCKTAIL_RUST_CORE_DIR}/src/runtime_bridges.rs"
-    "${MOCKTAIL_RUST_CORE_DIR}/src/runtime_policies.rs"
-    "${MOCKTAIL_RUST_CORE_DIR}/src/storage_paths.rs"
-    "${MOCKTAIL_RUST_CORE_DIR}/src/text_runtime.rs"
-    "${MOCKTAIL_RUST_CORE_DIR}/src/unix_ipc.rs"
-    "${MOCKTAIL_RUST_CORE_DIR}/src/update_coordinator.rs"
-    "${MOCKTAIL_RUST_CORE_DIR}/src/update_json.rs"
-    "${MOCKTAIL_RUST_CORE_DIR}/src/webview_helper_launcher.rs"
-    "${MOCKTAIL_RUST_CORE_DIR}/src/window_gates.rs"
-    "${MOCKTAIL_RUST_CORE_DIR}/Cargo.toml"
-    "${CMAKE_CURRENT_SOURCE_DIR}/config/mocktail.example.yaml"
+  DEPENDS ${MOCKTAIL_RUST_SOURCES}
   COMMENT "Building mocktail-core Rust library"
   VERBATIM
 )
 
 add_custom_target(mocktail_core_rust_build
   DEPENDS "${MOCKTAIL_RUST_LIB_STATIC}"
+)
+
+add_custom_command(
+  OUTPUT "${MOCKTAIL_UPDATER_BIN}"
+  COMMAND "${CMAKE_COMMAND}" -E env ${MOCKTAIL_CARGO_ENV}
+    "${CARGO_EXECUTABLE}" build --release --bin mocktail_updater --features updater --manifest-path "${MOCKTAIL_RUST_CORE_DIR}/Cargo.toml" --target-dir "${CMAKE_BINARY_DIR}/cargo-target"
+  COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${MOCKTAIL_RUST_UPDATER_BIN}" "${MOCKTAIL_UPDATER_BIN}"
+  WORKING_DIRECTORY "${MOCKTAIL_RUST_CORE_DIR}"
+  DEPENDS mocktail_core_rust_build ${MOCKTAIL_RUST_SOURCES}
+  COMMENT "Building pure-Rust mocktail_updater binary"
+  VERBATIM
+)
+
+add_custom_target(mocktail_updater_rust_build ALL
+  DEPENDS "${MOCKTAIL_UPDATER_BIN}"
 )
 
 add_library(mocktail_core_rust STATIC IMPORTED GLOBAL)
@@ -251,12 +291,9 @@ add_library(Mocktail::BionicStdio ALIAS mocktail_bionic_stdio_runtime)
 target_include_directories(mocktail_bionic_stdio_runtime PUBLIC include)
 mocktail_apply_compile_options(mocktail_bionic_stdio_runtime)
 
-find_package(CURL REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
-find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBYAML REQUIRED IMPORTED_TARGET yaml-0.1)
 pkg_check_modules(MINIZIP REQUIRED IMPORTED_TARGET minizip)
-pkg_check_modules(CAPSTONE REQUIRED IMPORTED_TARGET capstone)
 pkg_check_modules(GIO REQUIRED IMPORTED_TARGET gio-2.0)
 pkg_check_modules(LIBSECRET QUIET IMPORTED_TARGET libsecret-1)
 pkg_check_modules(GTK4 REQUIRED IMPORTED_TARGET gtk4)
@@ -287,7 +324,6 @@ add_library(Mocktail::Update ALIAS mocktail_update)
 target_include_directories(mocktail_update PUBLIC include)
 target_link_libraries(mocktail_update PUBLIC
   Mocktail::Compat
-  CURL::libcurl
   OpenSSL::Crypto
   PkgConfig::LIBYAML
   PkgConfig::MINIZIP
@@ -297,15 +333,6 @@ target_link_libraries(mocktail_update PUBLIC
   mocktail_core_rust
 )
 mocktail_apply_compile_options(mocktail_update)
-
-add_executable(mocktail_updater src/update/main.cc)
-target_link_libraries(mocktail_updater PRIVATE Mocktail::Update)
-target_compile_definitions(mocktail_updater PRIVATE
-  "MOCKTAIL_DEFAULT_COMPATIBILITY_MANIFEST=\"${MOCKTAIL_DEFAULT_COMPATIBILITY_MANIFEST}\""
-  "MOCKTAIL_DEFAULT_SIGNING_TRUST_MANIFEST=\"${MOCKTAIL_DEFAULT_SIGNING_TRUST_MANIFEST}\""
-  "MOCKTAIL_DEFAULT_DOWNLOAD_SOURCES_MANIFEST=\"${MOCKTAIL_DEFAULT_DOWNLOAD_SOURCES_MANIFEST}\""
-)
-mocktail_apply_compile_options(mocktail_updater)
 
 add_library(mocktail_legacy_jnivm STATIC
   src/jnivm/jnivm.cc
@@ -407,7 +434,6 @@ target_link_libraries(mocktail_runtime PUBLIC
 )
 target_link_libraries(mocktail_runtime PRIVATE
   OpenSSL::Crypto
-  CURL::libcurl
   nlohmann_json::nlohmann_json
   PkgConfig::GIO
   PkgConfig::LIBYAML
@@ -453,8 +479,6 @@ add_library(Mocktail::Services ALIAS mocktail_services)
 target_include_directories(mocktail_services PUBLIC include)
 target_link_libraries(mocktail_services PUBLIC
   mocktail_runtime
-  CURL::libcurl
-  nlohmann_json::nlohmann_json
 )
 mocktail_apply_compile_options(mocktail_services)
 
@@ -752,7 +776,6 @@ install(TARGETS mocktail
 )
 install(TARGETS
     mocktail
-    mocktail_updater
     mocktail_failure_dialog
     mocktail_webview_helper
     mocktail_cookie_helper
@@ -771,6 +794,9 @@ install(TARGETS
     stub_vulkan
   RUNTIME DESTINATION "${MOCKTAIL_INSTALL_RUNTIME_DIR}"
   LIBRARY DESTINATION "${MOCKTAIL_INSTALL_RUNTIME_DIR}"
+)
+install(PROGRAMS "${MOCKTAIL_UPDATER_BIN}"
+  DESTINATION "${MOCKTAIL_INSTALL_RUNTIME_DIR}"
 )
 if(MOCKTAIL_BUILD_FREEBSD_SOCKET_HELPER)
 install(PROGRAMS "${MOCKTAIL_FREEBSD_SOCKET_HELPER}"

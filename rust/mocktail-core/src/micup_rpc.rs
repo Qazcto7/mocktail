@@ -10,16 +10,15 @@ use std::collections::VecDeque;
 use std::ffi::c_char;
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use rustls::crypto::ring;
-use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
-use rustls_pki_types::{CertificateDer, ServerName};
+use crate::http_transport::is_loopback_host;
+use rustls::{ClientConfig, ClientConnection, StreamOwned};
+use rustls_pki_types::ServerName;
 use serde_json::{json, Value};
 use tungstenite::error::Error as WsError;
 use tungstenite::http::Uri;
@@ -35,8 +34,6 @@ pub const MICUP_ROBLOX_CATALOG_ID: &str = "roblox";
 const MAX_GATEWAY_URL_BYTES: usize = 512;
 const MAX_MICUP_TOKEN_BYTES: usize = 256;
 const MAX_TOKEN_FILE_BYTES: usize = 4096;
-const MAX_CA_BUNDLE_BYTES: usize = 4 * 1024 * 1024;
-const MAX_PROXY_CONNECT_HEADER_BYTES: usize = 8192;
 const MAX_MANUAL_NAME_CODEPOINTS: usize = 64;
 const MAX_MANUAL_NAME_BYTES: usize = 256;
 const MAX_GAME_ACTIVITY_JSON_BYTES: usize = 512;
@@ -369,11 +366,6 @@ pub fn is_valid_micup_token(token: &str) -> bool {
         && token.bytes().any(|b| b > 0x20)
 }
 
-fn is_loopback_host(host: &str) -> bool {
-    let trimmed = host.trim_start_matches('[').trim_end_matches(']');
-    trimmed.eq_ignore_ascii_case("localhost") || trimmed == "127.0.0.1" || trimmed == "::1"
-}
-
 /// Validates and normalizes a Micup Gateway WebSocket URL.
 /// Requires `wss://` for remote hosts; permits `ws://` only for loopback.
 pub fn normalize_gateway_url(raw: &str) -> Option<String> {
@@ -651,61 +643,8 @@ fn load_token_from_file(path: &Path) -> Result<Zeroizing<String>, String> {
     Ok(trimmed)
 }
 
-fn parse_pem_certificates(pem_bytes: &[u8]) -> Result<Vec<CertificateDer<'static>>, String> {
-    const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
-    const END: &str = "-----END CERTIFICATE-----";
-    let text = std::str::from_utf8(pem_bytes)
-        .map_err(|_| "CA bundle must be valid UTF-8/ASCII PEM".to_string())?;
-    let mut certs = Vec::new();
-    let mut rest = text;
-    while let Some(start_idx) = rest.find(BEGIN) {
-        let after_begin = &rest[start_idx + BEGIN.len()..];
-        let end_idx = after_begin
-            .find(END)
-            .ok_or_else(|| "unterminated PEM certificate block in CA bundle".to_string())?;
-        let b64: String = after_begin[..end_idx]
-            .chars()
-            .filter(|c| !c.is_ascii_whitespace())
-            .collect();
-        let der = BASE64_STANDARD
-            .decode(b64.as_bytes())
-            .map_err(|_| "invalid base64 certificate data in CA bundle".to_string())?;
-        certs.push(CertificateDer::from(der));
-        rest = &after_begin[end_idx + END.len()..];
-    }
-    Ok(certs)
-}
-
 fn build_tls_config(ca_bundle: Option<&Path>) -> Result<Arc<ClientConfig>, String> {
-    let mut roots = RootCertStore {
-        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-    };
-    if let Some(path) = ca_bundle {
-        let mut file = File::open(path)
-            .map_err(|e| format!("cannot open CA bundle {}: {}", path.display(), e))?;
-        let mut buf = Vec::new();
-        (&mut file)
-            .take((MAX_CA_BUNDLE_BYTES + 1) as u64)
-            .read_to_end(&mut buf)
-            .map_err(|e| format!("cannot read CA bundle {}: {}", path.display(), e))?;
-        if buf.len() > MAX_CA_BUNDLE_BYTES {
-            return Err("CA bundle exceeds 4 MiB limit".to_string());
-        }
-        let certs = parse_pem_certificates(&buf)?;
-        let (added, _) = roots.add_parsable_certificates(certs);
-        if added == 0 {
-            return Err(format!(
-                "no valid PEM certificates found in CA bundle {}",
-                path.display()
-            ));
-        }
-    }
-    let config = ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
-        .with_safe_default_protocol_versions()
-        .map_err(|e| format!("cannot configure TLS versions: {}", e))?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    Ok(Arc::new(config))
+    crate::http_transport::build_tls_config(ca_bundle, false)
 }
 
 fn resolve_effective_status(
@@ -783,109 +722,19 @@ impl Write for GatewayStream {
     }
 }
 
-fn connect_tcp_with_timeout(host: &str, port: u16) -> Result<TcpStream, String> {
-    let addrs: Vec<_> = (host, port)
-        .to_socket_addrs()
-        .map_err(|e| format!("DNS resolution failed for {}:{}: {}", host, port, e))?
-        .collect();
-    if addrs.is_empty() {
-        return Err(format!("no addresses resolved for {}:{}", host, port));
-    }
-    let mut last_err = None;
-    for addr in addrs {
-        match TcpStream::connect_timeout(&addr, IO_CONNECT_TIMEOUT) {
-            Ok(stream) => {
-                let _ = stream.set_read_timeout(Some(IO_HANDSHAKE_TIMEOUT));
-                let _ = stream.set_write_timeout(Some(IO_HANDSHAKE_TIMEOUT));
-                let _ = stream.set_nodelay(true);
-                return Ok(stream);
-            }
-            Err(err) => last_err = Some(err),
-        }
-    }
-    Err(format!(
-        "TCP connect failed for {}:{}: {}",
-        host,
-        port,
-        last_err
-            .map(|e| e.to_string())
-            .unwrap_or_else(|| "unknown error".to_string())
-    ))
-}
-
 fn connect_via_http_proxy(
     proxy: &ProxyConfig,
     target_host: &str,
     target_port: u16,
 ) -> Result<TcpStream, String> {
-    let proxy_url = Url::parse(&proxy.url)
-        .map_err(|e| format!("invalid proxy URL for Micup RPC: {}", e))?;
-    if proxy_url.scheme() != "http" {
-        return Err(format!(
-            "Micup RPC currently supports direct connections or HTTP CONNECT proxies (got {}://)",
-            proxy_url.scheme()
-        ));
-    }
-    let proxy_host = proxy_url
-        .host_str()
-        .ok_or_else(|| "proxy URL missing host".to_string())?;
-    let proxy_port = proxy_url.port_or_known_default().unwrap_or(8080);
-    let mut stream = connect_tcp_with_timeout(proxy_host, proxy_port)?;
-
-    let authority = if target_host.contains(':') {
-        format!("[{}]:{}", target_host, target_port)
-    } else {
-        format!("{}:{}", target_host, target_port)
-    };
-    let mut req = Zeroizing::new(format!(
-        "CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n"
-    ));
-    if !proxy.username.is_empty() || !proxy.password.is_empty() {
-        let raw_creds = Zeroizing::new(format!("{}:{}", proxy.username, &*proxy.password));
-        let encoded = Zeroizing::new(BASE64_STANDARD.encode(raw_creds.as_bytes()));
-        req.push_str("Proxy-Authorization: Basic ");
-        req.push_str(&encoded);
-        req.push_str("\r\n");
-    }
-    req.push_str("\r\n");
-    stream
-        .write_all(req.as_bytes())
-        .map_err(|e| format!("failed to send proxy CONNECT: {}", e))?;
-    stream
-        .flush()
-        .map_err(|e| format!("failed to flush proxy CONNECT: {}", e))?;
-
-    // Read single bytes until \r\n\r\n so we never over-read post-tunnel TLS bytes.
-    let mut header_bytes = Vec::with_capacity(256);
-    let mut one = [0u8; 1];
-    while header_bytes.len() < MAX_PROXY_CONNECT_HEADER_BYTES {
-        let n = stream
-            .read(&mut one)
-            .map_err(|e| format!("failed reading proxy CONNECT response: {}", e))?;
-        if n == 0 {
-            return Err("proxy closed connection during CONNECT".to_string());
-        }
-        header_bytes.push(one[0]);
-        if header_bytes.ends_with(b"\r\n\r\n") {
-            break;
-        }
-    }
-    if !header_bytes.ends_with(b"\r\n\r\n") {
-        return Err("proxy CONNECT response headers exceeded limit".to_string());
-    }
-    let status_line = std::str::from_utf8(&header_bytes)
-        .ok()
-        .and_then(|s| s.lines().next())
-        .unwrap_or("");
-    let status_code = status_line
-        .split_ascii_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse::<u16>().ok())
-        .unwrap_or(0);
-    if status_code != 200 {
-        return Err(format!("proxy CONNECT failed with status {}", status_code));
-    }
-    Ok(stream)
+    crate::http_transport::connect_tcp_via_http_proxy(
+        &proxy.url,
+        &proxy.username,
+        &proxy.password,
+        target_host,
+        target_port,
+        IO_CONNECT_TIMEOUT,
+    )
 }
 
 fn connect_gateway_websocket(
@@ -903,8 +752,17 @@ fn connect_gateway_websocket(
     let port = url.port().unwrap_or(if is_tls { 443 } else { 80 });
 
     let tcp = match proxy {
-        Some(p) if !is_loopback_host(host) => connect_via_http_proxy(p, host, port)?,
-        _ => connect_tcp_with_timeout(host, port)?,
+        Some(p) if !crate::http_transport::is_loopback_host(host) => {
+            connect_via_http_proxy(p, host, port)?
+        }
+        _ => crate::http_transport::connect_tcp_with_timeout(
+            host,
+            port,
+            IO_CONNECT_TIMEOUT,
+            IO_HANDSHAKE_TIMEOUT,
+            false,
+        )
+        .map_err(|e| e.message)?,
     };
 
     let stream = if is_tls {

@@ -377,7 +377,9 @@ name = "mocktail-core"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "flate2",
  "hex",
+ "httparse",
  "libc",
  "rustls",
  "rustls-pki-types",

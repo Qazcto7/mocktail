@@ -816,14 +816,14 @@ pub extern "C" fn mocktail_rust_candidate_approval_verify_evidence(
 // 5. Pinned APK Source Manifest Query & Validation
 // ============================================================================
 
-struct PinnedArchiveEntry {
-    filename: String,
-    url: String,
-    sha256: String,
-    size: u64,
+pub(crate) struct PinnedArchiveEntry {
+    pub filename: String,
+    pub url: String,
+    pub sha256: String,
+    pub size: u64,
 }
 
-fn find_pinned_source_internal(
+pub(crate) fn find_pinned_source_internal(
     manifest_path: &str,
     version_name: &str,
     version_code: u64,

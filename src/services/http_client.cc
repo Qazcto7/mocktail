@@ -1,225 +1,79 @@
 #include "services/http_client.h"
 
-#include <arpa/inet.h>
-#include <curl/curl.h>
-#include <netinet/in.h>
-#include <poll.h>
-#include <sys/socket.h>
-#include <unistd.h>
+#include <cstdint>
+#include <string>
+#include <string_view>
+#include <vector>
 
-#include <array>
-#include <chrono>
-#include <cstdlib>
-#include <limits>
-#include <mutex>
-#include <thread>
-
-#include "runtime/runtime_config.h"
+#include "mocktail/mocktail_rust.h"
+#include "services_rust_bridge.h"
 
 namespace mocktail {
 namespace services {
 namespace {
 
-std::once_flag g_curl_init_once;
-CURLcode g_curl_init_result = CURLE_FAILED_INIT;
+using internal::ToSlice;
 
-void InitialiseCurl() {
-  g_curl_init_result = curl_global_init(CURL_GLOBAL_DEFAULT);
-}
+HttpResponse PerformRequest(const HttpRequest& request, bool is_post,
+                            std::string_view post_body) {
+  std::vector<MocktailRustStrSlice> header_slices;
+  header_slices.reserve(request.headers.size());
+  for (const auto& h : request.headers) {
+    header_slices.push_back(ToSlice(h));
+  }
 
-bool IsLocalPortListening(uint16_t port) {
-  int fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-  if (fd < 0) return false;
-  sockaddr_in addr{};
-  addr.sin_family = AF_INET;
-  addr.sin_port = htons(port);
-  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  int res = connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
-  bool available = (res == 0);
-  if (res < 0 && errno == EINPROGRESS) {
-    pollfd pfd{};
-    pfd.fd = fd;
-    pfd.events = POLLOUT;
-    if (poll(&pfd, 1, 30) > 0 && (pfd.revents & POLLOUT)) {
-      int err = 0;
-      socklen_t len = sizeof(err);
-      if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) == 0 && err == 0) {
-        available = true;
-      }
-    }
-  }
-  close(fd);
-  return available;
-}
+  MocktailRustServiceHttpRequestView view{};
+  view.is_post = is_post;
+  view.url = ToSlice(request.url);
+  view.body = is_post ? ToSlice(post_body) : MocktailRustStrSlice{"", 0};
+  view.headers_ptr = header_slices.empty() ? nullptr : header_slices.data();
+  view.headers_len = header_slices.size();
+  view.ca_bundle = MocktailRustStrSlice{"", 0};
+  view.timeout_ms = request.timeout_ms;
+  view.max_redirects = request.follow_redirects ? 5 : 0;
+  view.max_response_bytes = request.maximum_body_bytes;
+  view.max_attempts = 3;
+  view.allow_local_socks5_fallback = true;
+  view.fallback_env_ca_bundle = true;
+  view.use_runtime_env_proxy = true;
 
-struct ResponseWriter {
-  std::string* body = nullptr;
-  size_t maximum_body_bytes = 0;
-  bool limit_exceeded = false;
-};
-
-size_t WriteResponse(char* data, size_t size, size_t count, void* user_data) {
-  auto* writer = static_cast<ResponseWriter*>(user_data);
-  if (writer == nullptr || writer->body == nullptr || data == nullptr ||
-      (count != 0 && size > std::numeric_limits<size_t>::max() / count)) {
-    return 0;
-  }
-  const size_t bytes = size * count;
-  if (bytes > writer->maximum_body_bytes ||
-      writer->body->size() > writer->maximum_body_bytes - bytes) {
-    writer->limit_exceeded = true;
-    return 0;
-  }
-  writer->body->append(data, bytes);
-  return bytes;
-}
-
-size_t WriteHeader(char* data, size_t size, size_t count, void* user_data) {
-  auto* headers = static_cast<std::vector<std::string>*>(user_data);
-  if (headers == nullptr || data == nullptr ||
-      (count != 0 && size > std::numeric_limits<size_t>::max() / count)) {
-    return 0;
-  }
-  const size_t bytes = size * count;
-  std::string header(data, bytes);
-  while (!header.empty() && (header.back() == '\r' || header.back() == '\n')) {
-    header.pop_back();
-  }
-  if (!header.empty()) headers->push_back(std::move(header));
-  return bytes;
+  HttpResponse response;
+  const bool ok = mocktail_rust_services_http_perform(
+      &view,
+      [](void* ctx, int32_t status_code, const char* body_ptr, size_t body_len,
+         const MocktailRustStrSlice* headers_ptr, size_t headers_len,
+         const char* error_ptr, size_t error_len, bool /*tls_cert_error*/) {
+        auto* out = static_cast<HttpResponse*>(ctx);
+        out->status_code = static_cast<long>(status_code);
+        if (body_ptr != nullptr && body_len > 0) {
+          out->body.assign(body_ptr, body_len);
+        }
+        if (headers_ptr != nullptr && headers_len > 0) {
+          out->headers.reserve(headers_len);
+          for (size_t i = 0; i < headers_len; ++i) {
+            if (headers_ptr[i].ptr != nullptr && headers_ptr[i].len > 0) {
+              out->headers.emplace_back(headers_ptr[i].ptr, headers_ptr[i].len);
+            }
+          }
+        }
+        if (error_ptr != nullptr && error_len > 0) {
+          out->error.assign(error_ptr, error_len);
+        }
+      },
+      &response);
+  response.transport_ok = ok && response.error.empty();
+  return response;
 }
 
 }  // namespace
 
-HttpResponse PerformRequest(const HttpRequest& request,
-                            const std::string* post_body) {
-  HttpResponse response;
-  if (request.url.empty()) {
-    response.error = "HTTP request URL is empty";
-    return response;
-  }
-
-  std::call_once(g_curl_init_once, InitialiseCurl);
-  if (g_curl_init_result != CURLE_OK) {
-    response.error = curl_easy_strerror(g_curl_init_result);
-    return response;
-  }
-
-  CURL* handle = curl_easy_init();
-  if (handle == nullptr) {
-    response.error = "curl_easy_init failed";
-    return response;
-  }
-
-  curl_slist* headers = nullptr;
-  for (const std::string& header : request.headers) {
-    curl_slist* next = curl_slist_append(headers, header.c_str());
-    if (next == nullptr) {
-      curl_slist_free_all(headers);
-      curl_easy_cleanup(handle);
-      response.error = "could not allocate HTTP headers";
-      return response;
-    }
-    headers = next;
-  }
-
-  std::array<char, CURL_ERROR_SIZE> error_buffer{};
-  ResponseWriter writer{&response.body, request.maximum_body_bytes, false};
-  curl_easy_setopt(handle, CURLOPT_URL, request.url.c_str());
-  if (post_body == nullptr) {
-    curl_easy_setopt(handle, CURLOPT_HTTPGET, 1L);
-  } else {
-    curl_easy_setopt(handle, CURLOPT_POST, 1L);
-    curl_easy_setopt(handle, CURLOPT_POSTFIELDS, post_body->data());
-    curl_easy_setopt(handle, CURLOPT_POSTFIELDSIZE_LARGE,
-                     static_cast<curl_off_t>(post_body->size()));
-  }
-  curl_easy_setopt(handle, CURLOPT_FOLLOWLOCATION,
-                   request.follow_redirects ? 1L : 0L);
-  curl_easy_setopt(handle, CURLOPT_MAXREDIRS, 5L);
-  curl_easy_setopt(handle, CURLOPT_PROTOCOLS_STR, "https");
-  curl_easy_setopt(handle, CURLOPT_REDIR_PROTOCOLS_STR, "https");
-  curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L);
-  curl_easy_setopt(handle, CURLOPT_TIMEOUT_MS,
-                   request.timeout_ms > 0 ? request.timeout_ms : 15000L);
-  curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT_MS, 5000L);
-  curl_easy_setopt(handle, CURLOPT_ACCEPT_ENCODING, "");
-  curl_easy_setopt(handle, CURLOPT_USERAGENT, "Mocktail/0.1");
-  curl_easy_setopt(handle, CURLOPT_ERRORBUFFER, error_buffer.data());
-  curl_easy_setopt(handle, CURLOPT_SSL_EC_CURVES, "X25519:P-256:P-384");
-  curl_easy_setopt(handle, CURLOPT_DOH_URL, "https://1.1.1.1/dns-query");
-  curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, WriteResponse);
-  curl_easy_setopt(handle, CURLOPT_WRITEDATA, &writer);
-  curl_easy_setopt(handle, CURLOPT_HEADERFUNCTION, WriteHeader);
-  curl_easy_setopt(handle, CURLOPT_HEADERDATA, &response.headers);
-  if (const char* ca_bundle = std::getenv("MOCKTAIL_CA_BUNDLE");
-      ca_bundle != nullptr && ca_bundle[0] != '\0') {
-    curl_easy_setopt(handle, CURLOPT_CAINFO, ca_bundle);
-  }
-  std::string proxy_url;
-  const auto proxy = runtime::ReadNetworkProxy(runtime::ProcessEnvironment());
-  if (proxy.has_value()) {
-    proxy_url = runtime::BuildNetworkProxyUrl(*proxy);
-    curl_easy_setopt(handle, CURLOPT_PROXY, proxy_url.c_str());
-    if (!proxy->username.empty()) {
-      curl_easy_setopt(handle, CURLOPT_PROXYUSERNAME, proxy->username.c_str());
-      curl_easy_setopt(handle, CURLOPT_PROXYPASSWORD, proxy->password.c_str());
-    }
-    curl_easy_setopt(handle, CURLOPT_NOPROXY, "");
-  }
-  if (headers != nullptr) {
-    curl_easy_setopt(handle, CURLOPT_HTTPHEADER, headers);
-  }
-
-  constexpr int kMaxAttempts = 3;
-  CURLcode result = CURLE_OK;
-  for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
-    if (attempt > 0) {
-      response.body.clear();
-      response.headers.clear();
-      error_buffer.fill('\0');
-      writer.limit_exceeded = false;
-      std::this_thread::sleep_for(std::chrono::milliseconds(50 * attempt));
-    }
-    result = curl_easy_perform(handle);
-    if (result == CURLE_OK || writer.limit_exceeded) {
-      break;
-    }
-    // Fail immediately on certificate verification failures or fatal SSL config errors
-    if (result == CURLE_PEER_FAILED_VERIFICATION ||
-        result == CURLE_SSL_CACERT ||
-        result == CURLE_SSL_CERTPROBLEM ||
-        result == CURLE_SSL_CIPHER) {
-      break;
-    }
-    // If no proxy was explicitly configured and direct connection fails, try local SOCKS proxy
-    if (!proxy.has_value() && attempt == 0 && IsLocalPortListening(1080)) {
-      curl_easy_setopt(handle, CURLOPT_PROXY, "socks5://127.0.0.1:1080");
-    }
-  }
-  if (result == CURLE_OK) {
-    curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &response.status_code);
-    response.transport_ok = true;
-  } else if (writer.limit_exceeded) {
-    response.error = "HTTP response exceeded configured size limit";
-  } else if (error_buffer[0] != '\0') {
-    response.error = error_buffer.data();
-  } else {
-    response.error = curl_easy_strerror(result);
-  }
-
-  curl_slist_free_all(headers);
-  curl_easy_cleanup(handle);
-  return response;
-}
-
 HttpResponse CurlHttpClient::Get(const HttpRequest& request) {
-  return PerformRequest(request, nullptr);
+  return PerformRequest(request, false, {});
 }
 
 HttpResponse CurlHttpClient::Post(const HttpRequest& request,
                                   const std::string& body) {
-  return PerformRequest(request, &body);
+  return PerformRequest(request, true, body);
 }
 
 }  // namespace services
