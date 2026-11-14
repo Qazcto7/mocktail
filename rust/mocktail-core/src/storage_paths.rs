@@ -218,7 +218,7 @@ fn is_decimal(value: &str) -> bool {
     !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit())
 }
 
-fn is_valid_payload_id_only(payload_id: &str) -> bool {
+pub(crate) fn is_valid_payload_id_only(payload_id: &str) -> bool {
     let Some((prefix, build_id)) = payload_id.split_once('-') else {
         return false;
     };
@@ -497,6 +497,197 @@ pub extern "C" fn mocktail_rust_runtime_paths_resolve_adjacent_roblox_asset_path
 // 2. Payload Store Manifest Parsing, Serialization & Status JSON
 // ============================================================================
 
+pub(crate) struct InspectedApprovalPaths {
+    pub profile: String,
+    pub compatibility: String,
+    pub receipt: String,
+}
+
+pub(crate) fn parse_manifest_identity_str(
+    json_str: &str,
+) -> Result<String, (Option<String>, &'static str)> {
+    let doc: serde_json::Value =
+        serde_json::from_str(json_str).map_err(|_| (None, "active payload manifest is invalid"))?;
+    let obj = doc
+        .as_object()
+        .ok_or((None, "active payload manifest is invalid"))?;
+    let schema_ok = obj.get("schema_version").and_then(|v| v.as_i64()) == Some(1);
+    let payload_id = if schema_ok {
+        obj.get("payload_id").and_then(|v| v.as_str())
+    } else {
+        None
+    }
+    .ok_or((None, "active payload manifest is invalid"))?;
+
+    let expected_path = format!("payloads/{}", payload_id);
+    if !is_valid_payload_id_only(payload_id)
+        || obj.get("payload_path").and_then(|v| v.as_str()) != Some(expected_path.as_str())
+    {
+        return Err((
+            Some(payload_id.to_owned()),
+            "active payload manifest identity is invalid",
+        ));
+    }
+    Ok(payload_id.to_owned())
+}
+
+pub(crate) fn build_activation_manifest_str(
+    payload_id: &str,
+    version_name: &str,
+    version_code: u64,
+    build_id: &str,
+    library_sha256: &str,
+    approval_generation: Option<&str>,
+) -> Option<String> {
+    let epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let mut map = serde_json::Map::new();
+    map.insert("schema_version".to_string(), serde_json::json!(1));
+    map.insert("payload_id".to_string(), serde_json::json!(payload_id));
+    map.insert(
+        "payload_path".to_string(),
+        serde_json::json!(format!("payloads/{}", payload_id)),
+    );
+    map.insert("version_name".to_string(), serde_json::json!(version_name));
+    map.insert("version_code".to_string(), serde_json::json!(version_code));
+    map.insert("elf_build_id".to_string(), serde_json::json!(build_id));
+    map.insert(
+        "payload_sha256".to_string(),
+        serde_json::json!(library_sha256),
+    );
+    map.insert("activated_at_epoch".to_string(), serde_json::json!(epoch));
+
+    if let Some(gen) = approval_generation.filter(|g| !g.is_empty()) {
+        let stem = format!("{}-{}", payload_id, gen);
+        map.insert(
+            "approval_path".to_string(),
+            serde_json::json!(format!("approvals/{}.json", stem)),
+        );
+        map.insert(
+            "host_abi_profile_path".to_string(),
+            serde_json::json!(format!("host_abi_profiles/{}.json", stem)),
+        );
+        map.insert(
+            "compatibility_manifest_path".to_string(),
+            serde_json::json!(format!("compatibility_profiles/{}.json", stem)),
+        );
+    }
+
+    let mut rendered = serde_json::to_string_pretty(&serde_json::Value::Object(map)).ok()?;
+    rendered.push('\n');
+    Some(rendered)
+}
+
+pub(crate) fn inspect_manifest_json_str(
+    json_str: &str,
+    exp_ver_name: &str,
+    exp_ver_code: u64,
+    exp_build_id: &str,
+    exp_sha256: &str,
+) -> Result<Option<InspectedApprovalPaths>, &'static str> {
+    let doc: serde_json::Value =
+        serde_json::from_str(json_str).map_err(|_| "active payload manifest is invalid")?;
+    let obj = doc
+        .as_object()
+        .ok_or("active payload manifest is invalid")?;
+
+    if obj.get("version_name").and_then(|v| v.as_str()) != Some(exp_ver_name)
+        || obj.get("version_code").and_then(|v| v.as_u64()) != Some(exp_ver_code)
+        || obj.get("elf_build_id").and_then(|v| v.as_str()) != Some(exp_build_id)
+    {
+        return Err("active payload manifest is invalid");
+    }
+
+    if let Some(cached_sha) = obj.get("payload_sha256") {
+        if cached_sha.as_str() != Some(exp_sha256) {
+            return Err("active payload manifest hash does not match payload");
+        }
+    }
+
+    let prof_val = obj.get("host_abi_profile_path");
+    let compat_val = obj.get("compatibility_manifest_path");
+    let receipt_val = obj.get("approval_path");
+    let profile = prof_val.and_then(|v| v.as_str()).unwrap_or("");
+    let compatibility = compat_val.and_then(|v| v.as_str()).unwrap_or("");
+    let receipt = receipt_val.and_then(|v| v.as_str()).unwrap_or("");
+    let non_string_present = prof_val.is_some_and(|v| !v.is_string())
+        || compat_val.is_some_and(|v| !v.is_string())
+        || receipt_val.is_some_and(|v| !v.is_string());
+
+    if non_string_present || !profile.is_empty() || !compatibility.is_empty() || !receipt.is_empty()
+    {
+        if profile.is_empty() || compatibility.is_empty() || receipt.is_empty() {
+            return Err("active payload approval reference set is incomplete");
+        }
+        return Ok(Some(InspectedApprovalPaths {
+            profile: profile.to_owned(),
+            compatibility: compatibility.to_owned(),
+            receipt: receipt.to_owned(),
+        }));
+    }
+
+    Ok(None)
+}
+
+pub(crate) fn persist_payload_sha256_str(
+    json_str: &str,
+    library_sha256: &str,
+) -> Result<Option<String>, &'static str> {
+    let mut doc: serde_json::Value =
+        serde_json::from_str(json_str).map_err(|_| "active payload manifest is invalid")?;
+    let obj = doc
+        .as_object_mut()
+        .ok_or("active payload manifest is invalid")?;
+
+    if let Some(cached) = obj.get("payload_sha256") {
+        if cached.as_str() != Some(library_sha256) {
+            return Err("active payload manifest hash does not match payload");
+        }
+        return Ok(None);
+    }
+
+    obj.insert(
+        "payload_sha256".to_string(),
+        serde_json::json!(library_sha256),
+    );
+    let mut rendered =
+        serde_json::to_string_pretty(&doc).map_err(|_| "active payload manifest is invalid")?;
+    rendered.push('\n');
+    Ok(Some(rendered))
+}
+
+pub(crate) fn build_status_json_str(
+    update_json_path: Option<&Path>,
+    current_json: &str,
+    previous_json: &str,
+) -> Option<String> {
+    let updates_val = update_json_path
+        .and_then(|p| p.to_str())
+        .and_then(read_update_state_json_string)
+        .map(|(_, doc)| doc)
+        .unwrap_or(serde_json::Value::Null);
+
+    let parse_opt_manifest = |s: &str| -> serde_json::Value {
+        if s.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_str(s).unwrap_or(serde_json::Value::Null)
+        }
+    };
+
+    let mut root = serde_json::Map::new();
+    root.insert("updates".to_string(), updates_val);
+    root.insert("current".to_string(), parse_opt_manifest(current_json));
+    root.insert("previous_good".to_string(), parse_opt_manifest(previous_json));
+
+    let mut rendered = serde_json::to_string_pretty(&serde_json::Value::Object(root)).ok()?;
+    rendered.push('\n');
+    Some(rendered)
+}
+
 #[no_mangle]
 pub extern "C" fn mocktail_rust_payload_store_parse_manifest_identity(
     json_ptr: *const c_char,
@@ -510,38 +701,19 @@ pub extern "C" fn mocktail_rust_payload_store_parse_manifest_identity(
         copy_error(err_buf, err_cap, "active payload manifest is invalid");
         return -1;
     };
-    let doc: serde_json::Value = match serde_json::from_str(json_str) {
-        Ok(v) => v,
-        Err(_) => {
-            copy_error(err_buf, err_cap, "active payload manifest is invalid");
-            return -1;
+    match parse_manifest_identity_str(json_str) {
+        Ok(payload_id) => {
+            emit_string(on_payload_id, ctx, &payload_id);
+            0
         }
-    };
-    let Some(obj) = doc.as_object() else {
-        copy_error(err_buf, err_cap, "active payload manifest is invalid");
-        return -1;
-    };
-    let schema_ok = obj.get("schema_version").and_then(|v| v.as_i64()) == Some(1);
-    let Some(payload_id) = (if schema_ok {
-        obj.get("payload_id").and_then(|v| v.as_str())
-    } else {
-        None
-    }) else {
-        copy_error(err_buf, err_cap, "active payload manifest is invalid");
-        return -1;
-    };
-
-    let expected_path = format!("payloads/{}", payload_id);
-    if !is_valid_payload_id_only(payload_id)
-        || obj.get("payload_path").and_then(|v| v.as_str()) != Some(expected_path.as_str())
-    {
-        emit_string(on_payload_id, ctx, payload_id);
-        copy_error(err_buf, err_cap, "active payload manifest identity is invalid");
-        return -1;
+        Err((opt_id, msg)) => {
+            if let Some(pid) = opt_id {
+                emit_string(on_payload_id, ctx, &pid);
+            }
+            copy_error(err_buf, err_cap, msg);
+            -1
+        }
     }
-
-    emit_string(on_payload_id, ctx, payload_id);
-    0
 }
 
 #[no_mangle]
@@ -563,44 +735,17 @@ pub extern "C" fn mocktail_rust_payload_store_build_activation_manifest(
     ) else {
         return -1;
     };
-    let epoch = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let mut map = serde_json::Map::new();
-    map.insert("schema_version".to_string(), serde_json::json!(1));
-    map.insert("payload_id".to_string(), serde_json::json!(payload_id));
-    map.insert(
-        "payload_path".to_string(),
-        serde_json::json!(format!("payloads/{}", payload_id)),
-    );
-    map.insert("version_name".to_string(), serde_json::json!(version_name));
-    map.insert("version_code".to_string(), serde_json::json!(version_code));
-    map.insert("elf_build_id".to_string(), serde_json::json!(build_id));
-    map.insert("payload_sha256".to_string(), serde_json::json!(library_sha256));
-    map.insert("activated_at_epoch".to_string(), serde_json::json!(epoch));
-
-    if let Some(gen) = c_str_opt(approval_generation_ptr).filter(|g| !g.is_empty()) {
-        let stem = format!("{}-{}", payload_id, gen);
-        map.insert(
-            "approval_path".to_string(),
-            serde_json::json!(format!("approvals/{}.json", stem)),
-        );
-        map.insert(
-            "host_abi_profile_path".to_string(),
-            serde_json::json!(format!("host_abi_profiles/{}.json", stem)),
-        );
-        map.insert(
-            "compatibility_manifest_path".to_string(),
-            serde_json::json!(format!("compatibility_profiles/{}.json", stem)),
-        );
-    }
-
-    let Ok(mut rendered) = serde_json::to_string_pretty(&serde_json::Value::Object(map)) else {
+    let approval_generation = c_str_opt(approval_generation_ptr).filter(|g| !g.is_empty());
+    let Some(rendered) = build_activation_manifest_str(
+        payload_id,
+        version_name,
+        version_code,
+        build_id,
+        library_sha256,
+        approval_generation,
+    ) else {
         return -1;
     };
-    rendered.push('\n');
     emit_string(on_json, ctx, &rendered);
     0
 }
@@ -634,75 +779,38 @@ pub extern "C" fn mocktail_rust_payload_store_inspect_manifest_json(
         copy_error(err_buf, err_cap, "active payload manifest is invalid");
         return -1;
     };
-    let doc: serde_json::Value = match serde_json::from_str(json_str) {
-        Ok(v) => v,
-        Err(_) => {
-            copy_error(err_buf, err_cap, "active payload manifest is invalid");
-            return -1;
-        }
-    };
-    let Some(obj) = doc.as_object() else {
-        copy_error(err_buf, err_cap, "active payload manifest is invalid");
-        return -1;
-    };
-
-    if obj.get("version_name").and_then(|v| v.as_str()) != Some(exp_ver_name)
-        || obj.get("version_code").and_then(|v| v.as_u64()) != Some(expected_version_code)
-        || obj.get("elf_build_id").and_then(|v| v.as_str()) != Some(exp_build_id)
-    {
-        copy_error(err_buf, err_cap, "active payload manifest is invalid");
-        return -1;
-    }
-
-    if let Some(cached_sha) = obj.get("payload_sha256") {
-        if cached_sha.as_str() != Some(exp_sha256) {
-            copy_error(
-                err_buf,
-                err_cap,
-                "active payload manifest hash does not match payload",
-            );
-            return -1;
-        }
-    }
-
-    let prof_val = obj.get("host_abi_profile_path");
-    let compat_val = obj.get("compatibility_manifest_path");
-    let receipt_val = obj.get("approval_path");
-    let profile = prof_val.and_then(|v| v.as_str()).unwrap_or("");
-    let compatibility = compat_val.and_then(|v| v.as_str()).unwrap_or("");
-    let receipt = receipt_val.and_then(|v| v.as_str()).unwrap_or("");
-    let non_string_present = prof_val.is_some_and(|v| !v.is_string())
-        || compat_val.is_some_and(|v| !v.is_string())
-        || receipt_val.is_some_and(|v| !v.is_string());
-
-    if non_string_present || !profile.is_empty() || !compatibility.is_empty() || !receipt.is_empty()
-    {
-        if profile.is_empty() || compatibility.is_empty() || receipt.is_empty() {
-            copy_error(
-                err_buf,
-                err_cap,
-                "active payload approval reference set is incomplete",
-            );
-            return -1;
-        }
-        if !out_has_approval.is_null() {
-            unsafe { *out_has_approval = 1 };
-        }
-        if let Some(cb) = on_approval_paths {
-            unsafe {
-                cb(
-                    ctx,
-                    profile.as_ptr() as *const c_char,
-                    profile.len(),
-                    compatibility.as_ptr() as *const c_char,
-                    compatibility.len(),
-                    receipt.as_ptr() as *const c_char,
-                    receipt.len(),
-                );
+    match inspect_manifest_json_str(
+        json_str,
+        exp_ver_name,
+        expected_version_code,
+        exp_build_id,
+        exp_sha256,
+    ) {
+        Ok(Some(paths)) => {
+            if !out_has_approval.is_null() {
+                unsafe { *out_has_approval = 1 };
             }
+            if let Some(cb) = on_approval_paths {
+                unsafe {
+                    cb(
+                        ctx,
+                        paths.profile.as_ptr() as *const c_char,
+                        paths.profile.len(),
+                        paths.compatibility.as_ptr() as *const c_char,
+                        paths.compatibility.len(),
+                        paths.receipt.as_ptr() as *const c_char,
+                        paths.receipt.len(),
+                    );
+                }
+            }
+            0
+        }
+        Ok(None) => 0,
+        Err(msg) => {
+            copy_error(err_buf, err_cap, msg);
+            -1
         }
     }
-    0
 }
 
 #[no_mangle]
@@ -727,41 +835,20 @@ pub extern "C" fn mocktail_rust_payload_store_persist_payload_sha256(
         copy_error(err_buf, err_cap, "active payload manifest is invalid");
         return -1;
     };
-    let mut doc: serde_json::Value = match serde_json::from_str(json_str) {
-        Ok(v) => v,
-        Err(_) => {
-            copy_error(err_buf, err_cap, "active payload manifest is invalid");
-            return -1;
+    match persist_payload_sha256_str(json_str, library_sha256) {
+        Ok(None) => 0,
+        Ok(Some(rendered)) => {
+            if !out_needs_write.is_null() {
+                unsafe { *out_needs_write = 1 };
+            }
+            emit_string(on_updated_json, ctx, &rendered);
+            0
         }
-    };
-    let Some(obj) = doc.as_object_mut() else {
-        copy_error(err_buf, err_cap, "active payload manifest is invalid");
-        return -1;
-    };
-
-    if let Some(cached) = obj.get("payload_sha256") {
-        if cached.as_str() != Some(library_sha256) {
-            copy_error(
-                err_buf,
-                err_cap,
-                "active payload manifest hash does not match payload",
-            );
-            return -1;
+        Err(msg) => {
+            copy_error(err_buf, err_cap, msg);
+            -1
         }
-        return 0;
     }
-
-    obj.insert("payload_sha256".to_string(), serde_json::json!(library_sha256));
-    let Ok(mut rendered) = serde_json::to_string_pretty(&doc) else {
-        copy_error(err_buf, err_cap, "active payload manifest is invalid");
-        return -1;
-    };
-    rendered.push('\n');
-    if !out_needs_write.is_null() {
-        unsafe { *out_needs_write = 1 };
-    }
-    emit_string(on_updated_json, ctx, &rendered);
-    0
 }
 
 #[no_mangle]
@@ -774,33 +861,12 @@ pub extern "C" fn mocktail_rust_payload_store_build_status_json(
     on_json: MocktailPayloadStoreStringCallback,
     ctx: *mut c_void,
 ) -> c_int {
-    let updates_val = c_str_opt(update_json_path_ptr)
-        .and_then(read_update_state_json_string)
-        .map(|(_, doc)| doc)
-        .unwrap_or(serde_json::Value::Null);
-
-    let parse_opt_manifest = |ptr: *const c_char, len: usize| -> serde_json::Value {
-        match slice_to_str(ptr, len) {
-            Some(s) if !s.is_empty() => serde_json::from_str(s).unwrap_or(serde_json::Value::Null),
-            _ => serde_json::Value::Null,
-        }
-    };
-
-    let mut root = serde_json::Map::new();
-    root.insert("updates".to_string(), updates_val);
-    root.insert(
-        "current".to_string(),
-        parse_opt_manifest(current_json_ptr, current_json_len),
-    );
-    root.insert(
-        "previous_good".to_string(),
-        parse_opt_manifest(previous_json_ptr, previous_json_len),
-    );
-
-    let Ok(mut rendered) = serde_json::to_string_pretty(&serde_json::Value::Object(root)) else {
+    let update_path = c_str_opt(update_json_path_ptr).map(Path::new);
+    let current_json = slice_to_str(current_json_ptr, current_json_len).unwrap_or("");
+    let previous_json = slice_to_str(previous_json_ptr, previous_json_len).unwrap_or("");
+    let Some(rendered) = build_status_json_str(update_path, current_json, previous_json) else {
         return -1;
     };
-    rendered.push('\n');
     emit_string(on_json, ctx, &rendered);
     0
 }

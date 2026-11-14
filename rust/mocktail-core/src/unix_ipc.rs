@@ -1,12 +1,14 @@
-//! Shared POSIX Unix-domain IPC, process-spawning, and descriptor helpers
-//! used across `discord_rpc`, `external_launch_broker`,
-//! `webview_helper_launcher`, and `roblox_cookie_store`.
+//! Shared POSIX Unix-domain IPC, process-spawning, descriptor, and
+//! atomic/locked filesystem helpers used across `discord_rpc`,
+//! `external_launch_broker`, `webview_helper_launcher`, `roblox_cookie_store`,
+//! `browser_tracker_service`, and `payload_store`.
 
-use std::ffi::{CStr, CString};
+use std::ffi::{CStr, CString, OsStr};
 use std::io;
 use std::mem::{self, MaybeUninit};
 use std::os::fd::RawFd;
-use std::path::Path;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Component, Path, PathBuf};
 
 extern "C" {
     static environ: *const *mut libc::c_char;
@@ -214,12 +216,58 @@ pub(crate) fn peer_uid(fd: RawFd) -> Option<libc::uid_t> {
     }
 }
 
+pub(crate) unsafe fn slice_from_ffi<'a>(ptr: *const libc::c_char, len: usize) -> &'a [u8] {
+    if ptr.is_null() || len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(ptr.cast::<u8>(), len)
+    }
+}
+
+pub(crate) fn path_from_ffi(ptr: *const libc::c_char, len: usize) -> Option<PathBuf> {
+    if ptr.is_null() && len > 0 {
+        return None;
+    }
+    let bytes = unsafe { slice_from_ffi(ptr, len) };
+    if bytes.contains(&0) {
+        return None;
+    }
+    Some(PathBuf::from(OsStr::from_bytes(bytes)))
+}
+
+pub(crate) fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(p) => normalized.push(p.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    normalized
+}
+
+pub(crate) fn lexical_absolute(path: &Path) -> Option<PathBuf> {
+    if path.as_os_str().is_empty() {
+        return None;
+    }
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    Some(lexical_normalize(&abs))
+}
+
 pub(crate) fn path_to_cstr(path: &Path) -> Option<CString> {
-    use std::os::unix::ffi::OsStrExt;
     CString::new(path.as_os_str().as_bytes()).ok()
 }
 
-pub(crate) fn lstat_cstr(cpath: &CString) -> Result<libc::stat, i32> {
+pub(crate) fn lstat_cstr(cpath: &CStr) -> Result<libc::stat, i32> {
     let mut st = MaybeUninit::<libc::stat>::zeroed();
     let rc = unsafe { libc::lstat(cpath.as_ptr(), st.as_mut_ptr()) };
     if rc == 0 {
@@ -240,6 +288,173 @@ pub(crate) fn is_private_owned_dir(path: &Path, uid: libc::uid_t) -> bool {
         return false;
     };
     (st.st_mode & libc::S_IFMT) == libc::S_IFDIR && st.st_uid == uid && (st.st_mode & 0o077) == 0
+}
+
+pub(crate) fn is_non_group_other_writable_dir(st: &libc::stat, euid: libc::uid_t) -> bool {
+    (st.st_mode & libc::S_IFMT) == libc::S_IFDIR
+        && st.st_uid == euid
+        && (st.st_mode & (libc::S_IWGRP | libc::S_IWOTH)) == 0
+}
+
+pub(crate) fn parent_or_dot(path: &Path) -> Option<PathBuf> {
+    let parent = path.parent()?;
+    if parent.as_os_str().is_empty() && path != Path::new(".") {
+        Some(PathBuf::from("."))
+    } else if parent.as_os_str().is_empty() {
+        None
+    } else {
+        Some(parent.to_path_buf())
+    }
+}
+
+pub(crate) fn find_existing_directory_ancestor(directory: &Path) -> Option<PathBuf> {
+    if directory.as_os_str().is_empty() {
+        return None;
+    }
+    let mut candidate = directory.to_path_buf();
+    loop {
+        let cpath = path_to_cstr(&candidate)?;
+        match lstat_cstr(&cpath) {
+            Ok(st) => {
+                if (st.st_mode & libc::S_IFMT) == libc::S_IFDIR {
+                    return Some(candidate);
+                }
+                return None;
+            }
+            Err(err) => {
+                if err != libc::ENOENT {
+                    return None;
+                }
+                let next = parent_or_dot(&candidate)?;
+                if next == candidate {
+                    return None;
+                }
+                candidate = next;
+            }
+        }
+    }
+}
+
+pub(crate) fn fsync_dir_path(path: &Path, nofollow: bool) -> bool {
+    let Some(cpath) = path_to_cstr(path) else {
+        return false;
+    };
+    let mut flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC;
+    if nofollow {
+        flags |= libc::O_NOFOLLOW;
+    }
+    let raw = unsafe { libc::open(cpath.as_ptr(), flags) };
+    let Some(fd) = OwnedFd::from_raw(raw) else {
+        return false;
+    };
+    let mut st = MaybeUninit::<libc::stat>::zeroed();
+    unsafe {
+        libc::fstat(fd.as_raw(), st.as_mut_ptr()) == 0
+            && (st.assume_init().st_mode & libc::S_IFMT) == libc::S_IFDIR
+            && libc::fsync(fd.as_raw()) == 0
+    }
+}
+
+pub(crate) fn fsync_directory_chain(first: &Path, last: &Path) -> bool {
+    let mut current = first.to_path_buf();
+    loop {
+        if !fsync_dir_path(&current, true) {
+            return false;
+        }
+        if current == last {
+            return true;
+        }
+        let Some(next) = parent_or_dot(&current) else {
+            return false;
+        };
+        if next == current {
+            return false;
+        }
+        current = next;
+    }
+}
+
+pub(crate) fn flock_fd(fd: RawFd, operation: libc::c_int) -> bool {
+    loop {
+        if unsafe { libc::flock(fd, operation) } == 0 {
+            return true;
+        }
+        if last_errno() != libc::EINTR {
+            return false;
+        }
+    }
+}
+
+pub(crate) fn is_safe_destination_at(dir_fd: RawFd, name: &CStr, euid: libc::uid_t) -> bool {
+    let mut st = MaybeUninit::<libc::stat>::zeroed();
+    if unsafe { libc::fstatat(dir_fd, name.as_ptr(), st.as_mut_ptr(), libc::AT_SYMLINK_NOFOLLOW) }
+        == 0
+    {
+        let st = unsafe { st.assume_init() };
+        return (st.st_mode & libc::S_IFMT) == libc::S_IFREG
+            && st.st_uid == euid
+            && st.st_nlink == 1;
+    }
+    last_errno() == libc::ENOENT
+}
+
+pub(crate) fn is_opened_file_at(
+    dir_fd: RawFd,
+    name: &CStr,
+    fd: RawFd,
+    euid: libc::uid_t,
+) -> bool {
+    let mut opened = MaybeUninit::<libc::stat>::zeroed();
+    let mut linked = MaybeUninit::<libc::stat>::zeroed();
+    unsafe {
+        if libc::fstat(fd, opened.as_mut_ptr()) != 0
+            || libc::fstatat(
+                dir_fd,
+                name.as_ptr(),
+                linked.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            ) != 0
+        {
+            return false;
+        }
+        let opened = opened.assume_init();
+        let linked = linked.assume_init();
+        (opened.st_mode & libc::S_IFMT) == libc::S_IFREG
+            && (linked.st_mode & libc::S_IFMT) == libc::S_IFREG
+            && opened.st_uid == euid
+            && linked.st_uid == euid
+            && opened.st_nlink == 1
+            && linked.st_nlink == 1
+            && opened.st_dev == linked.st_dev
+            && opened.st_ino == linked.st_ino
+    }
+}
+
+pub(crate) fn unlink_opened_file_at(dir_fd: RawFd, name: &CStr, fd: RawFd, euid: libc::uid_t) {
+    if is_opened_file_at(dir_fd, name, fd, euid) {
+        unsafe {
+            libc::unlinkat(dir_fd, name.as_ptr(), 0);
+        }
+    }
+}
+
+pub(crate) fn read_all_fd(fd: RawFd, reserve: usize) -> Result<Vec<u8>, i32> {
+    let mut out = Vec::with_capacity(reserve);
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        let rc = unsafe { libc::read(fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };
+        if rc == 0 {
+            return Ok(out);
+        }
+        if rc < 0 {
+            let err = last_errno();
+            if err == libc::EINTR {
+                continue;
+            }
+            return Err(err);
+        }
+        out.extend_from_slice(&buf[..rc as usize]);
+    }
 }
 
 pub(crate) fn write_all_fd(fd: RawFd, bytes: &[u8]) -> bool {

@@ -4169,6 +4169,175 @@ int32_t mocktail_rust_webview_process_drain_events(
 int32_t mocktail_rust_webview_process_request_close(
     const MocktailRustWebViewProcess* process);
 
+typedef void (*MocktailRustBrowserTrackerHttpResponseReceiver)(
+    void* receiver_ctx, const char* body_ptr, size_t body_len,
+    const char* headers_ptr, size_t headers_len);
+typedef void (*MocktailRustBrowserTrackerHttpPostCallback)(
+    void* ctx, const char* url_ptr, size_t url_len, const char* headers_ptr,
+    size_t headers_len, const char* body_ptr, size_t body_len,
+    size_t maximum_body_bytes, bool* out_transport_ok,
+    int64_t* out_status_code, void* receiver_ctx,
+    MocktailRustBrowserTrackerHttpResponseReceiver receiver_cb);
+typedef void (*MocktailRustBrowserTrackerResultCallback)(
+    void* ctx, int32_t status, int64_t http_status, const char* id_ptr,
+    size_t id_len, const char* err_ptr, size_t err_len);
+
+int32_t mocktail_rust_browser_tracker_ensure_initialized(
+    const char* app_storage_ptr, size_t app_storage_len,
+    const char* cookie_file_ptr, size_t cookie_file_len,
+    bool allow_cookie_update,
+    MocktailRustBrowserTrackerHttpPostCallback http_post_cb,
+    MocktailRustBrowserTrackerResultCallback on_result, void* ctx);
+
+typedef struct MocktailRustPayloadInfoData {
+  const char* payload_id;
+  size_t payload_id_len;
+  const char* package_name;
+  size_t package_name_len;
+  const char* version_name;
+  size_t version_name_len;
+  uint64_t version_code;
+  const char* build_id;
+  size_t build_id_len;
+  const char* library_sha256;
+  size_t library_sha256_len;
+  const char* base_apk_sha256;
+  size_t base_apk_sha256_len;
+  const char* split_apk_sha256;
+  size_t split_apk_sha256_len;
+  size_t asset_file_count;
+  const char* asset_tree_sha256;
+  size_t asset_tree_sha256_len;
+  const char* error;
+  size_t error_len;
+} MocktailRustPayloadInfoData;
+
+typedef struct MocktailRustCandidateApprovalData {
+  const char* generation;
+  size_t generation_len;
+  const char* profile;
+  size_t profile_len;
+  const char* compatibility_manifest;
+  size_t compatibility_manifest_len;
+  const char* receipt;
+  size_t receipt_len;
+  const char* error;
+  size_t error_len;
+} MocktailRustCandidateApprovalData;
+
+typedef struct MocktailRustPayloadStorePaths {
+  const char* root_ptr;
+  size_t root_len;
+  const char* compatibility_manifest_ptr;
+  size_t compatibility_manifest_len;
+  const char* runtime_binary_ptr;
+  size_t runtime_binary_len;
+} MocktailRustPayloadStorePaths;
+
+typedef struct MocktailRustPayloadStoreResultData {
+  const char* payload_id;
+  size_t payload_id_len;
+  const char* payload_directory;
+  size_t payload_directory_len;
+  const char* host_abi_profile;
+  size_t host_abi_profile_len;
+  const char* compatibility_manifest;
+  size_t compatibility_manifest_len;
+  const char* approval_receipt;
+  size_t approval_receipt_len;
+  const char* version_name;
+  size_t version_name_len;
+  uint64_t version_code;
+  const char* build_id;
+  size_t build_id_len;
+  const char* error;
+  size_t error_len;
+} MocktailRustPayloadStoreResultData;
+
+typedef void (*MocktailRustPayloadInfoReceiver)(
+    void* receiver_ctx, const MocktailRustPayloadInfoData* info);
+typedef void (*MocktailRustCandidateApprovalReceiver)(
+    void* receiver_ctx, const MocktailRustCandidateApprovalData* approval);
+typedef void (*MocktailRustPayloadStoreStrReceiver)(void* receiver_ctx,
+                                                    const char* ptr,
+                                                    size_t len);
+typedef void (*MocktailRustPayloadStoreResultCallback)(
+    void* ctx, const MocktailRustPayloadStoreResultData* result);
+
+typedef struct MocktailRustPayloadStoreOps {
+  void* ctx;
+  void (*inspect_prepared_payload)(void* ctx, const char* dir_ptr,
+                                   size_t dir_len, void* receiver_ctx,
+                                   MocktailRustPayloadInfoReceiver receiver);
+  void (*verify_prepared_payload)(void* ctx, const char* dir_ptr,
+                                  size_t dir_len, void* receiver_ctx,
+                                  MocktailRustPayloadInfoReceiver receiver);
+  void (*hash_regular_file)(void* ctx, const char* path_ptr, size_t path_len,
+                            void* receiver_ctx,
+                            MocktailRustPayloadStoreStrReceiver on_hash,
+                            MocktailRustPayloadStoreStrReceiver on_error);
+  bool (*exact_supported)(void* ctx, const char* compat_ptr, size_t compat_len,
+                          const MocktailRustPayloadInfoData* payload,
+                          void* receiver_ctx,
+                          MocktailRustPayloadStoreStrReceiver on_error);
+  void (*create_candidate_approval)(
+      void* ctx, const char* store_root_ptr, size_t store_root_len,
+      const char* payload_dir_ptr, size_t payload_dir_len,
+      const char* profile_ptr, size_t profile_len, const char* compat_ptr,
+      size_t compat_len, const char* runtime_binary_ptr,
+      size_t runtime_binary_len, const char* canary0_ptr, size_t canary0_len,
+      const char* canary1_ptr, size_t canary1_len,
+      const MocktailRustPayloadInfoData* verified_payload, void* receiver_ctx,
+      MocktailRustCandidateApprovalReceiver receiver);
+  bool (*validate_candidate_approval)(
+      void* ctx, const char* store_root_ptr, size_t store_root_len,
+      const char* activation_json_ptr, size_t activation_json_len,
+      const MocktailRustPayloadInfoData* payload, void* receiver_ctx,
+      MocktailRustCandidateApprovalReceiver receiver);
+} MocktailRustPayloadStoreOps;
+
+int32_t mocktail_rust_payload_store_stage(
+    const MocktailRustPayloadStorePaths* paths, const char* prepared_ptr,
+    size_t prepared_len, const MocktailRustPayloadStoreOps* ops,
+    MocktailRustPayloadStoreResultCallback on_result, void* ctx);
+int32_t mocktail_rust_payload_store_promote(
+    const MocktailRustPayloadStorePaths* paths, const char* payload_id_ptr,
+    size_t payload_id_len, const MocktailRustPayloadStoreOps* ops,
+    MocktailRustPayloadStoreResultCallback on_result, void* ctx);
+int32_t mocktail_rust_payload_store_promote_probation(
+    const MocktailRustPayloadStorePaths* paths, const char* payload_id_ptr,
+    size_t payload_id_len, const char* candidate_profile_ptr,
+    size_t candidate_profile_len, const char* candidate_compat_ptr,
+    size_t candidate_compat_len, const char* canary0_ptr, size_t canary0_len,
+    const char* canary1_ptr, size_t canary1_len,
+    const MocktailRustPayloadStoreOps* ops,
+    MocktailRustPayloadStoreResultCallback on_result, void* ctx);
+int32_t mocktail_rust_payload_store_import(
+    const MocktailRustPayloadStorePaths* paths, const char* prepared_ptr,
+    size_t prepared_len, const MocktailRustPayloadStoreOps* ops,
+    MocktailRustPayloadStoreResultCallback on_result, void* ctx);
+int32_t mocktail_rust_payload_store_verify_current(
+    const MocktailRustPayloadStorePaths* paths,
+    const MocktailRustPayloadStoreOps* ops,
+    MocktailRustPayloadStoreResultCallback on_result, void* ctx);
+int32_t mocktail_rust_payload_store_inspect_current(
+    const MocktailRustPayloadStorePaths* paths,
+    const MocktailRustPayloadStoreOps* ops,
+    MocktailRustPayloadStoreResultCallback on_result, void* ctx);
+int32_t mocktail_rust_payload_store_rollback(
+    const MocktailRustPayloadStorePaths* paths,
+    const MocktailRustPayloadStoreOps* ops,
+    MocktailRustPayloadStoreResultCallback on_result, void* ctx);
+int32_t mocktail_rust_payload_store_collect_garbage(
+    const char* root_ptr, size_t root_len, const char* const* keep_ptrs,
+    const size_t* keep_lens, size_t keep_count,
+    MocktailRustPayloadStoreStrReceiver on_removed, uint64_t* out_freed_bytes,
+    MocktailRustPayloadStoreStrReceiver on_error, void* ctx);
+int32_t mocktail_rust_payload_store_status_json(
+    const char* root_ptr, size_t root_len,
+    MocktailRustPayloadStoreStrReceiver on_json,
+    MocktailRustPayloadStoreStrReceiver on_error, void* ctx);
+
 #ifdef __cplusplus
 }
 #endif

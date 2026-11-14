@@ -914,6 +914,53 @@ pub extern "C" fn mocktail_rust_platform_cache_apply_theme(
 // Browser Tracker appStorage & Init Response Helpers
 // ============================================================================
 
+pub(crate) fn read_stored_browser_tracker_id_str(json_str: &str) -> Result<Option<String>, ()> {
+    let Some(map) = parse_json_object_str(json_str, false) else {
+        return Err(());
+    };
+    let Some(val) = map.get("BrowserTrackerId") else {
+        return Ok(None);
+    };
+    let Some(id_str) = val.as_str() else {
+        return Err(());
+    };
+    if !is_valid_browser_tracker_id_bytes(id_str.as_bytes()) {
+        return Err(());
+    }
+    Ok(Some(id_str.to_owned()))
+}
+
+pub(crate) fn set_stored_browser_tracker_id_str(json_str: &str, new_id: &str) -> Option<String> {
+    let mut map = if json_str.is_empty() {
+        Map::new()
+    } else {
+        parse_json_object_str(json_str, false)?
+    };
+    map.insert(
+        "BrowserTrackerId".to_owned(),
+        Value::String(new_id.to_owned()),
+    );
+    serde_json::to_string(&Value::Object(map)).ok()
+}
+
+pub(crate) fn parse_browser_tracker_init_response_str(body_str: &str) -> Option<String> {
+    let body = parse_json_value_str(body_str, false)?;
+    let id = match &body {
+        Value::Number(num) => num.as_u64().map(|n| n.to_string()),
+        Value::String(s) => Some(s.clone()),
+        Value::Object(map) => match map.get("browserTrackerId") {
+            Some(Value::Number(num)) => num.as_u64().map(|n| n.to_string()),
+            Some(Value::String(s)) => Some(s.clone()),
+            _ => None,
+        },
+        _ => None,
+    }?;
+    if !is_valid_browser_tracker_id_bytes(id.as_bytes()) {
+        return None;
+    }
+    Some(id)
+}
+
 #[no_mangle]
 pub extern "C" fn mocktail_rust_browser_tracker_read_stored_id(
     json_ptr: *const c_char,
@@ -928,25 +975,19 @@ pub extern "C" fn mocktail_rust_browser_tracker_read_stored_id(
     let Some(s) = slice_to_str(json_ptr, json_len) else {
         return -1;
     };
-    let Some(map) = parse_json_object_str(s, false) else {
-        return -1;
-    };
-    let Some(val) = map.get("BrowserTrackerId") else {
-        return 0;
-    };
-    let Some(id_str) = val.as_str() else {
-        return -1;
-    };
-    if !is_valid_browser_tracker_id_bytes(id_str.as_bytes()) {
-        return -1;
+    match read_stored_browser_tracker_id_str(s) {
+        Ok(None) => 0,
+        Ok(Some(id_str)) => {
+            if !out_has_id.is_null() {
+                unsafe { *out_has_id = true };
+            }
+            if !out_id.is_null() && id_cap > 0 && copy_to_c_buffer(&id_str, out_id, id_cap) != 0 {
+                return -1;
+            }
+            0
+        }
+        Err(()) => -1,
     }
-    if !out_has_id.is_null() {
-        unsafe { *out_has_id = true };
-    }
-    if !out_id.is_null() && id_cap > 0 && copy_to_c_buffer(id_str, out_id, id_cap) != 0 {
-        return -1;
-    }
-    0
 }
 
 #[no_mangle]
@@ -958,22 +999,11 @@ pub extern "C" fn mocktail_rust_browser_tracker_set_stored_id(
     on_json: MocktailPayloadStoreStringCallback,
     ctx: *mut c_void,
 ) -> i32 {
-    let Some(id_str) = slice_to_str(id_ptr, id_len) else {
+    let (Some(s), Some(id_str)) = (slice_to_str(json_ptr, json_len), slice_to_str(id_ptr, id_len))
+    else {
         return -1;
     };
-    let mut map = match slice_to_str(json_ptr, json_len) {
-        Some("") => Map::new(),
-        Some(s) => match parse_json_object_str(s, false) {
-            Some(m) => m,
-            None => return -1,
-        },
-        None => return -1,
-    };
-    map.insert(
-        "BrowserTrackerId".to_owned(),
-        Value::String(id_str.to_owned()),
-    );
-    let Ok(compact) = serde_json::to_string(&Value::Object(map)) else {
+    let Some(compact) = set_stored_browser_tracker_id_str(s, id_str) else {
         return -1;
     };
     emit_string(on_json, ctx, &compact);
@@ -990,25 +1020,9 @@ pub extern "C" fn mocktail_rust_browser_tracker_parse_init_response(
     let Some(body_str) = slice_to_str(body_ptr, body_len) else {
         return -1;
     };
-    let Some(body) = parse_json_value_str(body_str, false) else {
+    let Some(id_str) = parse_browser_tracker_init_response_str(body_str) else {
         return -1;
     };
-    let id = match &body {
-        Value::Number(num) => num.as_u64().map(|n| n.to_string()),
-        Value::String(s) => Some(s.clone()),
-        Value::Object(map) => match map.get("browserTrackerId") {
-            Some(Value::Number(num)) => num.as_u64().map(|n| n.to_string()),
-            Some(Value::String(s)) => Some(s.clone()),
-            _ => None,
-        },
-        _ => None,
-    };
-    let Some(id_str) = id else {
-        return -1;
-    };
-    if !is_valid_browser_tracker_id_bytes(id_str.as_bytes()) {
-        return -1;
-    }
     if copy_to_c_buffer(&id_str, out_id, id_cap) != 0 {
         return -1;
     }

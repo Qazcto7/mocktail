@@ -11,6 +11,8 @@ use zeroize::Zeroize;
 
 pub mod apk_signature_rs;
 pub use apk_signature_rs::*;
+pub mod browser_tracker_service;
+pub use browser_tracker_service::*;
 pub mod deriver_json;
 pub use deriver_json::*;
 pub mod discord_rpc;
@@ -21,6 +23,8 @@ pub mod input_router;
 pub use input_router::*;
 pub mod micup_rpc;
 pub use micup_rpc::*;
+pub mod payload_store;
+pub use payload_store::*;
 pub mod roblox_cookie_store;
 pub use roblox_cookie_store::*;
 pub mod runtime_bridges;
@@ -5712,18 +5716,11 @@ pub extern "C" fn mocktail_rust_apkpure_parse_exact_urls(
 // 31. BrowserTracker & RBXEventTracker
 // ============================================================================
 
-fn is_valid_browser_id(val: &str) -> bool {
+pub(crate) fn is_valid_browser_id(val: &str) -> bool {
     !val.is_empty() && val.len() <= 20 && !val.starts_with('0') && val.chars().all(|c| c.is_ascii_digit())
 }
 
-#[no_mangle]
-pub extern "C" fn mocktail_rust_browser_tracker_generate_id(
-    out_id: *mut c_char,
-    id_cap: usize,
-) -> c_int {
-    if out_id.is_null() || id_cap < 21 {
-        return -1;
-    }
+pub(crate) fn generate_browser_tracker_id_string() -> String {
     // Read from /dev/urandom for crypto-secure random 64-bit uint > 0
     let mut rand_val: u64 = 0;
     let mut got_random = false;
@@ -5743,7 +5740,33 @@ pub extern "C" fn mocktail_rust_browser_tracker_generate_id(
             rand_val = 13374210987654321;
         }
     }
-    let id_str = rand_val.to_string();
+    rand_val.to_string()
+}
+
+pub(crate) fn extract_browser_id_from_tracker(tracker_cookie: &str) -> Option<String> {
+    for field in tracker_cookie.split('&') {
+        let field = field.trim();
+        if let Some((k, v)) = field.split_once('=') {
+            if k.trim() == "browserid" {
+                let id = v.trim();
+                if is_valid_browser_id(id) {
+                    return Some(id.to_owned());
+                }
+            }
+        }
+    }
+    None
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_browser_tracker_generate_id(
+    out_id: *mut c_char,
+    id_cap: usize,
+) -> c_int {
+    if out_id.is_null() || id_cap < 21 {
+        return -1;
+    }
+    let id_str = generate_browser_tracker_id_string();
     unsafe {
         std::ptr::copy_nonoverlapping(id_str.as_ptr() as *const c_char, out_id, id_str.len());
         *out_id.add(id_str.len()) = 0;
@@ -5764,23 +5787,15 @@ pub extern "C" fn mocktail_rust_browser_tracker_extract_id(
         Ok(s) => s,
         Err(_) => return -2,
     };
-    for field in cookie_str.split('&') {
-        let field = field.trim();
-        if let Some((k, v)) = field.split_once('=') {
-            if k.trim() == "browserid" {
-                let id = v.trim();
-                if is_valid_browser_id(id) {
-                    if id.len() >= id_cap {
-                        return -3;
-                    }
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(id.as_ptr() as *const c_char, out_id, id.len());
-                        *out_id.add(id.len()) = 0;
-                    }
-                    return 0;
-                }
-            }
+    if let Some(id) = extract_browser_id_from_tracker(cookie_str) {
+        if id.len() >= id_cap {
+            return -3;
         }
+        unsafe {
+            std::ptr::copy_nonoverlapping(id.as_ptr() as *const c_char, out_id, id.len());
+            *out_id.add(id.len()) = 0;
+        }
+        return 0;
     }
     -4
 }
@@ -8003,32 +8018,10 @@ pub extern "C" fn mocktail_rust_payload_store_valid_id(
         return 0;
     }
     let slice = unsafe { slice::from_raw_parts(id_ptr as *const u8, len) };
-    let s = match std::str::from_utf8(slice) {
-        Ok(val) => val,
-        Err(_) => return 0,
-    };
-    let dash = match s.find('-') {
-        Some(pos) => pos,
-        None => return 0,
-    };
-    if dash == 0 || s.len() - dash - 1 != 40 {
-        return 0;
+    match std::str::from_utf8(slice) {
+        Ok(val) if storage_paths::is_valid_payload_id_only(val) => 1,
+        _ => 0,
     }
-    for (i, c) in s.char_indices() {
-        if i == dash {
-            continue;
-        }
-        if i < dash {
-            if !c.is_ascii_digit() {
-                return 0;
-            }
-        } else {
-            if !c.is_ascii_digit() && !(c >= 'a' && c <= 'f') {
-                return 0;
-            }
-        }
-    }
-    1
 }
 
 #[no_mangle]
@@ -8966,6 +8959,34 @@ pub unsafe extern "C" fn mocktail_rust_browser_tracker_is_valid_id(
     is_valid_browser_tracker_id_bytes(slice)
 }
 
+pub(crate) fn extract_cookie_value_str<'a>(cookies: &'a str, name: &str) -> Option<&'a str> {
+    let name_trimmed = name.trim();
+    if name_trimmed.is_empty() || cookies.is_empty() {
+        return None;
+    }
+    for part in cookies.split(&[';', '\r', '\n'][..]) {
+        let part_trimmed = part.trim();
+        if let Some((k, v)) = part_trimmed.split_once('=') {
+            if k.trim() == name_trimmed {
+                return Some(v.trim());
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn extract_tracker_from_headers_str<'a>(headers: &'a str) -> Option<&'a str> {
+    for line in headers.lines() {
+        let trimmed = line.trim();
+        if trimmed.len() >= 11 && trimmed[..11].eq_ignore_ascii_case("set-cookie:") {
+            if let Some(value) = extract_cookie_value_str(&trimmed[11..], "RBXEventTrackerV2") {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn mocktail_rust_browser_tracker_extract_cookie(
     cookies: *const c_char,
@@ -8994,20 +9015,14 @@ pub unsafe extern "C" fn mocktail_rust_browser_tracker_extract_cookie(
         Err(_) => return -1,
     };
 
-    for part in cookies_str.split(&[';', '\r', '\n'][..]) {
-        let part_trimmed = part.trim();
-        if let Some((k, v)) = part_trimmed.split_once('=') {
-            if k.trim() == name_str {
-                let val_trimmed = v.trim();
-                let v_bytes = val_trimmed.as_bytes();
-                *out_len = v_bytes.len();
-                if out_buf.is_null() || cap < v_bytes.len() {
-                    return if out_buf.is_null() { 0 } else { -2 };
-                }
-                std::ptr::copy_nonoverlapping(v_bytes.as_ptr(), out_buf, v_bytes.len());
-                return 0;
-            }
+    if let Some(val_trimmed) = extract_cookie_value_str(cookies_str, name_str) {
+        let v_bytes = val_trimmed.as_bytes();
+        *out_len = v_bytes.len();
+        if out_buf.is_null() || cap < v_bytes.len() {
+            return if out_buf.is_null() { 0 } else { -2 };
         }
+        std::ptr::copy_nonoverlapping(v_bytes.as_ptr(), out_buf, v_bytes.len());
+        return 0;
     }
     1 // not found
 }
@@ -9048,25 +9063,14 @@ pub unsafe extern "C" fn mocktail_rust_browser_tracker_from_headers(
         Ok(s) => s,
         Err(_) => return -1,
     };
-    let cookie_name = b"RBXEventTrackerV2";
-
-    for line in headers_str.lines() {
-        let trimmed = line.trim();
-        if trimmed.len() >= 11 && trimmed[..11].eq_ignore_ascii_case("set-cookie:") {
-            let rest = &trimmed[11..];
-            let rc = mocktail_rust_browser_tracker_extract_cookie(
-                rest.as_ptr() as *const c_char,
-                rest.len(),
-                cookie_name.as_ptr() as *const c_char,
-                cookie_name.len(),
-                out_buf,
-                cap,
-                out_len,
-            );
-            if rc == 0 {
-                return 0;
-            }
+    if let Some(val_trimmed) = extract_tracker_from_headers_str(headers_str) {
+        let v_bytes = val_trimmed.as_bytes();
+        *out_len = v_bytes.len();
+        if out_buf.is_null() || cap < v_bytes.len() {
+            return if out_buf.is_null() { 0 } else { -2 };
         }
+        std::ptr::copy_nonoverlapping(v_bytes.as_ptr(), out_buf, v_bytes.len());
+        return 0;
     }
     1 // not found
 }

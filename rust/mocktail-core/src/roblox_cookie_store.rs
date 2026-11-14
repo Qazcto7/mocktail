@@ -4,14 +4,15 @@
 use std::ffi::{c_char, c_void};
 use std::mem::MaybeUninit;
 use std::os::fd::RawFd;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::unix_ipc::{
-    build_filtered_helper_env_ptrs, current_euid, last_errno, move_fd_above_stdio, path_to_cstr,
-    poll_retry_eintr, validate_executable_absolute_regular_file, OwnedFd,
+    build_filtered_helper_env_ptrs, current_euid, last_errno, lexical_absolute,
+    move_fd_above_stdio, path_from_ffi, path_to_cstr, poll_retry_eintr, slice_from_ffi,
+    validate_executable_absolute_regular_file, OwnedFd,
 };
 
 pub const K_COOKIE_STATUS_FOUND: i32 = 0;
@@ -24,36 +25,6 @@ const K_HELPER_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub type MocktailRustCookieStringCallback =
     Option<unsafe extern "C" fn(ctx: *mut c_void, data: *const c_char, len: usize)>;
-
-fn lexical_normalize(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(p) => normalized.push(p.as_os_str()),
-            Component::RootDir => normalized.push(component.as_os_str()),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if !normalized.pop() {
-                    // Only happens on relative paths (caller prepends cwd first).
-                }
-            }
-            Component::Normal(part) => normalized.push(part),
-        }
-    }
-    normalized
-}
-
-fn lexical_absolute(path: &Path) -> Option<PathBuf> {
-    if path.as_os_str().is_empty() {
-        return None;
-    }
-    let abs = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir().ok()?.join(path)
-    };
-    Some(lexical_normalize(&abs))
-}
 
 fn read_roblox_cookie_file_impl(
     path: &Path,
@@ -489,26 +460,6 @@ fn exchange_cookie_impl(
     }
 
     response
-}
-
-unsafe fn slice_from_ffi<'a>(ptr: *const c_char, len: usize) -> &'a [u8] {
-    if ptr.is_null() || len == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(ptr.cast::<u8>(), len)
-    }
-}
-
-fn path_from_ffi(ptr: *const c_char, len: usize) -> Option<PathBuf> {
-    if ptr.is_null() && len > 0 {
-        return None;
-    }
-    let bytes = unsafe { slice_from_ffi(ptr, len) };
-    if bytes.contains(&0) {
-        return None;
-    }
-    use std::os::unix::ffi::OsStrExt;
-    Some(PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
 }
 
 #[no_mangle]
