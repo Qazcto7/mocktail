@@ -160,6 +160,7 @@ add_custom_command(
     "${MOCKTAIL_RUST_CORE_DIR}/src/deriver_json.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/discord_rpc.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/external_launch_broker.rs"
+    "${MOCKTAIL_RUST_CORE_DIR}/src/http_download.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/input_router.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/lib.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/micup_rpc.rs"

@@ -1215,6 +1215,55 @@ pub(crate) fn strerror_string(err: i32) -> String {
     format!("errno {err}")
 }
 
+/// Returns `true` if `path` exists as a non-symlink directory.
+pub(crate) fn is_real_dir_no_symlink(path: &Path) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => !meta.file_type().is_symlink() && meta.is_dir(),
+        Err(_) => false,
+    }
+}
+
+/// Returns `true` if `path` exists as a non-symlink regular file.
+pub(crate) fn is_real_file_no_symlink(path: &Path) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => !meta.file_type().is_symlink() && meta.is_file(),
+        Err(_) => false,
+    }
+}
+
+/// Canonicalizes `path` if it exists, or canonicalizes its longest existing ancestor
+/// and appends remaining lexically normalized components (matching `std::filesystem::weakly_canonical`).
+pub(crate) fn weakly_canonical(path: &Path) -> std::io::Result<PathBuf> {
+    if let Ok(canon) = std::fs::canonicalize(path) {
+        return Ok(canon);
+    }
+    let abs = lexical_absolute(path)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "empty path"))?;
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur = abs.as_path();
+    while !cur.as_os_str().is_empty() {
+        match std::fs::canonicalize(cur) {
+            Ok(mut resolved) => {
+                for comp in tail.into_iter().rev() {
+                    resolved.push(comp);
+                }
+                return Ok(resolved);
+            }
+            Err(_) => {
+                let Some(name) = cur.file_name() else {
+                    break;
+                };
+                tail.push(name.to_os_string());
+                cur = match cur.parent() {
+                    Some(p) => p,
+                    None => break,
+                };
+            }
+        }
+    }
+    Ok(abs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

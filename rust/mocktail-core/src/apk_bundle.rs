@@ -13,7 +13,7 @@ use crate::update_json::{
     MocktailRustStrSlice,
 };
 use crate::{
-    host_guest_abi, internal_inspect_payload, parse_android_manifest_bytes,
+    guest_abi, host_guest_abi, internal_inspect_payload, parse_android_manifest_bytes,
     parse_elf_build_id_bytes, sha256_regular_file_strict, zip_extract_entry_file,
     zip_extract_prefix_dir, zip_list_entries_path, zip_read_entry_bytes, ParsedAndroidManifest,
 };
@@ -33,22 +33,6 @@ const K_REQUIRED_EXPORTS: [&str; 7] = [
     "Java_com_roblox_engine_jni_NativeGLInterface_nativeAppBridgeV2StartAppWithParams",
     "Java_com_roblox_engine_jni_NativeGLInterface_nativeAppBridgeV2UpdateSurfaceAppWithPlatformParams",
 ];
-
-#[cfg(target_arch = "aarch64")]
-mod guest_abi {
-    pub(super) const SPLIT_NAME: &str = "config.arm64_v8a";
-    pub(super) const SPLIT_APK_FILE: &str = "split_config.arm64_v8a.apk";
-    pub(super) const SPLIT_APK_HASH_KEY: &str = "arm64_v8a_split_apk";
-    pub(super) const ELF_MACHINE: u16 = 183; // EM_AARCH64
-}
-
-#[cfg(target_arch = "x86_64")]
-mod guest_abi {
-    pub(super) const SPLIT_NAME: &str = "config.x86_64";
-    pub(super) const SPLIT_APK_FILE: &str = "split_config.x86_64.apk";
-    pub(super) const SPLIT_APK_HASH_KEY: &str = "x86_64_split_apk";
-    pub(super) const ELF_MACHINE: u16 = 62; // EM_X86_64
-}
 
 #[derive(Debug, Default, Clone)]
 pub(crate) struct ExpectedPayloadIdentityData {

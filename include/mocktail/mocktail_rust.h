@@ -4675,6 +4675,180 @@ void mocktail_rust_apk_prepare_payload_from_archives(
                       const MocktailRustPreparedPayloadView* result),
     void* ctx);
 
+// 147. Runtime Paths Engine
+typedef struct MocktailRustRuntimeEnvOverridesView {
+  struct MocktailRustStrSlice home;
+  struct MocktailRustStrSlice working_directory;
+  struct MocktailRustStrSlice mocktail_config_root;
+  struct MocktailRustStrSlice xdg_config_home;
+  struct MocktailRustStrSlice xdg_data_home;
+  struct MocktailRustStrSlice xdg_cache_home;
+  struct MocktailRustStrSlice xdg_state_home;
+  struct MocktailRustStrSlice mocktail_data_root;
+  struct MocktailRustStrSlice mocktail_cache_root;
+  struct MocktailRustStrSlice mocktail_state_root;
+  struct MocktailRustStrSlice mocktail_auth_root;
+  struct MocktailRustStrSlice use_real_sober_paths;
+} MocktailRustRuntimeEnvOverridesView;
+
+typedef struct MocktailRustRuntimePathsView {
+  struct MocktailRustStrSlice home;
+  struct MocktailRustStrSlice working_directory;
+  struct MocktailRustStrSlice sober_data_root;
+  struct MocktailRustStrSlice sober_cache_root;
+  struct MocktailRustStrSlice cache_root;
+  struct MocktailRustStrSlice config_root;
+  struct MocktailRustStrSlice data_root;
+  struct MocktailRustStrSlice state_root;
+  struct MocktailRustStrSlice auth_root;
+  struct MocktailRustStrSlice payloads_root;
+  struct MocktailRustStrSlice downloads_root;
+  struct MocktailRustStrSlice logs_root;
+  struct MocktailRustStrSlice android_runtime_root;
+  struct MocktailRustStrSlice android_data_root;
+  struct MocktailRustStrSlice android_cache_root;
+  struct MocktailRustStrSlice vulkan_shader_cache_file;
+  struct MocktailRustStrSlice config_file;
+  struct MocktailRustStrSlice active_payload_manifest;
+  struct MocktailRustStrSlice cookie_file;
+  bool use_real_sober_paths;
+} MocktailRustRuntimePathsView;
+
+typedef struct MocktailRustActivePayloadPathsView {
+  bool active;
+  struct MocktailRustStrSlice root;
+  struct MocktailRustStrSlice roblox_library;
+  struct MocktailRustStrSlice base_apk;
+  struct MocktailRustStrSlice arch_split_apk;
+  struct MocktailRustStrSlice assets_content;
+  struct MocktailRustStrSlice compatibility_manifest;
+  struct MocktailRustStrSlice host_abi_profile;
+  struct MocktailRustStrSlice host_abi_approval_receipt;
+  struct MocktailRustStrSlice error;
+} MocktailRustActivePayloadPathsView;
+
+void mocktail_rust_runtime_paths_from_environment(
+    const MocktailRustRuntimeEnvOverridesView* input,
+    void (*on_result)(void* ctx, const MocktailRustRuntimePathsView* result),
+    void* ctx);
+
+void mocktail_rust_runtime_paths_resolve_active_payload(
+    struct MocktailRustStrSlice data_root,
+    struct MocktailRustStrSlice payloads_root,
+    struct MocktailRustStrSlice active_manifest,
+    void (*on_result)(void* ctx,
+                      const MocktailRustActivePayloadPathsView* result),
+    void* ctx);
+
+void mocktail_rust_runtime_paths_default_asset_path(
+    struct MocktailRustStrSlice data_root,
+    struct MocktailRustStrSlice payloads_root,
+    struct MocktailRustStrSlice active_manifest,
+    struct MocktailRustStrSlice working_directory,
+    struct MocktailRustStrSlice sober_data_root, bool use_real_sober_paths,
+    void (*on_result)(void* ctx, struct MocktailRustStrSlice path), void* ctx);
+
+bool mocktail_rust_runtime_paths_export_environment(
+    struct MocktailRustStrSlice config_root,
+    struct MocktailRustStrSlice android_runtime_root,
+    struct MocktailRustStrSlice android_cache_root,
+    struct MocktailRustStrSlice vulkan_shader_cache_file,
+    void (*on_error)(void* ctx, struct MocktailRustStrSlice error), void* ctx);
+
+bool mocktail_rust_runtime_paths_prepare_managed_working_dir(
+    struct MocktailRustStrSlice data_root,
+    struct MocktailRustStrSlice active_root, bool active,
+    void (*on_error)(void* ctx, struct MocktailRustStrSlice error), void* ctx);
+
+// 148. HTTP Transfer & Download State Engine
+typedef struct MocktailRustHttpTransferRequestView {
+  struct MocktailRustStrSlice url;
+  const struct MocktailRustStrSlice* headers_ptr;
+  size_t headers_len;
+  const struct MocktailRustStrSlice* allowed_hosts_ptr;
+  size_t allowed_hosts_len;
+  struct MocktailRustStrSlice ca_bundle;
+  size_t maximum_bytes;
+  int64_t connect_timeout_ms;
+  int64_t transfer_timeout_ms;
+  int64_t low_speed_bytes_per_second;
+  int64_t low_speed_seconds;
+  int32_t maximum_attempts;
+  int64_t retry_delay_ms;
+  int32_t maximum_redirects;
+} MocktailRustHttpTransferRequestView;
+
+typedef struct MocktailRustHttpAttemptRequestView {
+  struct MocktailRustStrSlice url;
+  const struct MocktailRustStrSlice* headers_ptr;
+  size_t headers_len;
+  struct MocktailRustStrSlice ca_bundle;
+  int64_t connect_timeout_ms;
+  int64_t transfer_timeout_ms;
+  int64_t low_speed_bytes_per_second;
+  int64_t low_speed_seconds;
+  bool accept_encoding_identity;
+  bool has_resume_offset;
+  uint64_t resume_offset;
+  bool enable_progress;
+  void* attempt_ctx;
+  bool (*on_header)(void* ctx, const uint8_t* ptr, size_t len);
+  bool (*on_write)(void* ctx, const uint8_t* ptr, size_t len);
+  int32_t (*on_progress)(void* ctx, int64_t expected, int64_t now);
+} MocktailRustHttpAttemptRequestView;
+
+typedef struct MocktailRustHttpAttemptOutcomeView {
+  bool init_failed;
+  bool headers_alloc_failed;
+  bool configure_failed;
+  int32_t curl_code;
+  bool is_range_error;
+  int64_t http_status;
+  struct MocktailRustStrSlice redirect_url;
+  struct MocktailRustStrSlice curl_error;
+} MocktailRustHttpAttemptOutcomeView;
+
+typedef struct MocktailRustHttpBytesResultView {
+  const uint8_t* bytes_ptr;
+  size_t bytes_len;
+  int64_t status_code;
+  struct MocktailRustStrSlice final_url;
+  struct MocktailRustStrSlice error;
+} MocktailRustHttpBytesResultView;
+
+typedef struct MocktailRustHttpDownloadResultView {
+  size_t bytes_written;
+  struct MocktailRustStrSlice sha256;
+  struct MocktailRustStrSlice final_url;
+  struct MocktailRustStrSlice error;
+} MocktailRustHttpDownloadResultView;
+
+typedef void (*MocktailRustPerformHttpAttemptFn)(
+    void* transport_ctx, const MocktailRustHttpAttemptRequestView* req,
+    void (*on_outcome)(void* ctx,
+                       const MocktailRustHttpAttemptOutcomeView* outcome),
+    void* outcome_ctx);
+
+bool mocktail_rust_http_is_trusted_https_url(
+    struct MocktailRustStrSlice url,
+    const struct MocktailRustStrSlice* allowed_hosts_ptr,
+    size_t allowed_hosts_len,
+    void (*on_error)(void* ctx, struct MocktailRustStrSlice error), void* ctx);
+
+void mocktail_rust_http_download_bytes(
+    const MocktailRustHttpTransferRequestView* request,
+    MocktailRustPerformHttpAttemptFn perform_attempt, void* transport_ctx,
+    void (*on_result)(void* ctx, const MocktailRustHttpBytesResultView* result),
+    void* ctx);
+
+void mocktail_rust_http_download_file(
+    const MocktailRustHttpTransferRequestView* request,
+    struct MocktailRustStrSlice destination, int32_t progress_fd,
+    MocktailRustPerformHttpAttemptFn perform_attempt, void* transport_ctx,
+    void (*on_result)(void* ctx,
+                      const MocktailRustHttpDownloadResultView* result),
+    void* ctx);
+
 #ifdef __cplusplus
 }
 #endif

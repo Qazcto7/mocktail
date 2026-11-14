@@ -1,510 +1,176 @@
 // Includes changes by vii from CoderDayton/nightcap.
 #include "runtime/runtime_paths.h"
-#include "mocktail/mocktail_rust.h"
 
-#include <array>
-#include <atomic>
-#include <cctype>
-#include <cstdint>
-#include <cstdlib>
-#include <fstream>
-#include <iterator>
 #include <optional>
 #include <string>
-#include <unistd.h>
-#include <utility>
+#include <string_view>
 
-#include "compat/guest_abi.h"
+#include "mocktail/mocktail_rust.h"
 
 namespace mocktail {
 namespace runtime {
 namespace {
 
-bool LegacyEnabled(const Environment& environment, std::string_view name) {
-  const std::optional<std::string> value = environment.Get(name);
-  return value.has_value() && !value->empty() && *value != "0";
+MocktailRustStrSlice ToSlice(std::string_view value) {
+  return {value.data(), value.size()};
 }
 
-std::filesystem::path XdgHome(const Environment& environment,
-                              std::string_view variable,
-                              const std::filesystem::path& fallback) {
-  const std::filesystem::path configured = environment.GetOr(variable, "");
-  return configured.is_absolute() ? configured : fallback;
+MocktailRustStrSlice ToSliceOpt(const std::optional<std::string>& value) {
+  if (!value.has_value()) {
+    return {nullptr, 0};
+  }
+  return ToSlice(*value);
 }
 
-struct ActiveManifestParseContext {
-  std::string payload_id;
-  std::filesystem::path payload_relative;
-  std::filesystem::path compatibility_relative;
-  std::filesystem::path profile_relative;
-  std::filesystem::path receipt_relative;
-  std::string generation;
-};
+std::string ToString(MocktailRustStrSlice slice) {
+  if (slice.ptr == nullptr || slice.len == 0) {
+    return {};
+  }
+  return std::string(slice.ptr, slice.len);
+}
 
-void AssignActiveManifestField(void* raw_ctx, uint32_t field_id, const char* ptr,
-                               size_t len) {
-  auto* ctx = static_cast<ActiveManifestParseContext*>(raw_ctx);
-  std::string_view val(ptr, len);
-  switch (field_id) {
-    case MOCKTAIL_RUNTIME_PATH_FIELD_PAYLOAD_ID:
-      ctx->payload_id.assign(val);
-      break;
-    case MOCKTAIL_RUNTIME_PATH_FIELD_PAYLOAD_REL:
-      ctx->payload_relative = std::string(val);
-      break;
-    case MOCKTAIL_RUNTIME_PATH_FIELD_COMPATIBILITY_REL:
-      ctx->compatibility_relative = std::string(val);
-      break;
-    case MOCKTAIL_RUNTIME_PATH_FIELD_PROFILE_REL:
-      ctx->profile_relative = std::string(val);
-      break;
-    case MOCKTAIL_RUNTIME_PATH_FIELD_RECEIPT_REL:
-      ctx->receipt_relative = std::string(val);
-      break;
-    case MOCKTAIL_RUNTIME_PATH_FIELD_GENERATION:
-      ctx->generation.assign(val);
-      break;
-    default:
-      break;
+std::filesystem::path ToPath(MocktailRustStrSlice slice) {
+  if (slice.ptr == nullptr || slice.len == 0) {
+    return {};
+  }
+  return std::filesystem::path(std::string_view(slice.ptr, slice.len));
+}
+
+void AssignError(void* ctx, MocktailRustStrSlice error) {
+  auto* target = static_cast<std::string*>(ctx);
+  if (target != nullptr) {
+    *target = ToString(error);
   }
 }
 
-void AssignRuntimeString(void* raw_ctx, const char* ptr, size_t len) {
-  auto* out = static_cast<std::string*>(raw_ctx);
-  out->assign(ptr, len);
-}
-
-bool ResolveApprovalFile(const std::filesystem::path& data_root,
-                         const std::filesystem::path& relative,
-                         std::string_view directory_name,
-                         std::string_view payload_id,
-                         std::string_view generation,
-                         std::filesystem::path* resolved, std::string* error) {
-  const std::filesystem::path expected_filename =
-      std::string(payload_id) + "-" + std::string(generation) + ".json";
-  const std::filesystem::path expected_directory = std::string(directory_name);
-  if (relative != (expected_directory / expected_filename)) {
-    if (error != nullptr) {
-      *error = "active payload approval path is not a direct " +
-               std::string(directory_name) + " child";
-    }
-    return false;
+void AssignRuntimeString(void* ctx, const char* value, size_t length) {
+  auto* target = static_cast<std::string*>(ctx);
+  if (target == nullptr) {
+    return;
   }
-
-  std::error_code filesystem_error;
-  const std::filesystem::path candidate = data_root / relative;
-  const std::filesystem::file_status status =
-      std::filesystem::symlink_status(candidate, filesystem_error);
-  if (filesystem_error || !std::filesystem::is_regular_file(status) ||
-      std::filesystem::is_symlink(status)) {
-    if (error != nullptr) {
-      *error = "active payload approval file is missing, invalid, or a symlink";
-    }
-    return false;
-  }
-  const std::filesystem::path approval_directory =
-      data_root / expected_directory;
-  const std::filesystem::file_status directory_status =
-      std::filesystem::symlink_status(approval_directory, filesystem_error);
-  if (filesystem_error || !std::filesystem::is_directory(directory_status) ||
-      std::filesystem::is_symlink(directory_status)) {
-    if (error != nullptr) {
-      *error =
-          "active payload approval directory is missing, invalid, or a symlink";
-    }
-    return false;
-  }
-  const std::filesystem::path canonical_data_root =
-      std::filesystem::canonical(data_root, filesystem_error);
-  if (filesystem_error) {
-    if (error != nullptr) {
-      *error = "cannot canonicalize active payload data root";
-    }
-    return false;
-  }
-  const std::filesystem::path canonical_directory =
-      std::filesystem::canonical(approval_directory, filesystem_error);
-  if (filesystem_error ||
-      canonical_directory.parent_path() != canonical_data_root) {
-    if (error != nullptr) {
-      *error = "active payload approval directory escapes the data root";
-    }
-    return false;
-  }
-  const std::filesystem::path canonical_candidate =
-      std::filesystem::canonical(candidate, filesystem_error);
-  if (filesystem_error ||
-      canonical_candidate.parent_path() != canonical_directory) {
-    if (error != nullptr) {
-      *error = "active payload approval file escapes its storage directory";
-    }
-    return false;
-  }
-  if (resolved != nullptr) {
-    *resolved = canonical_candidate;
-  }
-  return true;
-}
-
-bool SetEnvironmentDefault(const char* name,
-                           const std::filesystem::path& value,
-                           std::string* error) {
-  const char* existing = std::getenv(name);
-  if (existing != nullptr && existing[0] != '\0') {
-    return true;
-  }
-  if (setenv(name, value.c_str(), 1) == 0) {
-    return true;
-  }
-  if (error != nullptr) {
-    *error = std::string("cannot export resolved runtime path: ") + name;
-  }
-  return false;
-}
-
-struct ManagedPayloadBinding {
-  std::filesystem::path target;
-  std::filesystem::path link;
-  const char* name;
-  bool directory;
-};
-
-bool ResolveManagedPayloadBinding(ManagedPayloadBinding* binding,
-                                  std::string* error) {
-  std::error_code filesystem_error;
-  const std::filesystem::file_status target_status =
-      std::filesystem::symlink_status(binding->target, filesystem_error);
-  const bool expected_type =
-      binding->directory ? std::filesystem::is_directory(target_status)
-                         : std::filesystem::is_regular_file(target_status);
-  if (filesystem_error || !expected_type ||
-      std::filesystem::is_symlink(target_status)) {
-    if (error != nullptr) {
-      *error = "managed payload " + std::string(binding->name) +
-               " target is missing, invalid, or a symlink: " +
-               binding->target.string();
-    }
-    return false;
-  }
-  binding->target =
-      std::filesystem::canonical(binding->target, filesystem_error);
-  if (filesystem_error) {
-    if (error != nullptr) {
-      *error = "cannot canonicalize managed payload " +
-               std::string(binding->name) + " target: " +
-               binding->target.string();
-    }
-    return false;
-  }
-
-  const std::filesystem::file_status link_status =
-      std::filesystem::symlink_status(binding->link, filesystem_error);
-  if (filesystem_error == std::errc::no_such_file_or_directory) {
-    filesystem_error.clear();
-    return true;
-  }
-  if (!filesystem_error &&
-      link_status.type() == std::filesystem::file_type::not_found) {
-    return true;
-  }
-  if (filesystem_error) {
-    if (error != nullptr) {
-      *error = "cannot inspect managed payload " +
-               std::string(binding->name) + " path: " +
-               binding->link.string();
-    }
-    return false;
-  }
-  if (!std::filesystem::is_symlink(link_status)) {
-    if (error != nullptr) {
-      *error = "refusing to replace non-symlink managed payload " +
-               std::string(binding->name) + " path: " +
-               binding->link.string();
-    }
-    return false;
-  }
-  return true;
-}
-
-bool PublishManagedPayloadBinding(const ManagedPayloadBinding& binding,
-                                  std::string* error) {
-  std::error_code filesystem_error;
-  const std::filesystem::path current_target =
-      std::filesystem::read_symlink(binding.link, filesystem_error);
-  if (!filesystem_error && current_target == binding.target) {
-    return true;
-  }
-  if (filesystem_error == std::errc::no_such_file_or_directory) {
-    filesystem_error.clear();
-  } else if (filesystem_error) {
-    if (error != nullptr) {
-      *error = "cannot read managed payload " + std::string(binding.name) +
-               " link: " + binding.link.string();
-    }
-    return false;
-  }
-
-  static std::atomic_uint64_t sequence{0};
-  const std::filesystem::path temporary_link =
-      binding.link.string() + ".mocktail-next-" +
-      std::to_string(static_cast<unsigned long long>(getpid())) + "-" +
-      std::to_string(sequence.fetch_add(1, std::memory_order_relaxed));
-  const std::filesystem::file_status temporary_status =
-      std::filesystem::symlink_status(temporary_link, filesystem_error);
-  if (filesystem_error == std::errc::no_such_file_or_directory ||
-      (!filesystem_error && temporary_status.type() ==
-                                std::filesystem::file_type::not_found)) {
-    filesystem_error.clear();
-  } else {
-    if (error != nullptr) {
-      *error = "managed payload temporary link already exists: " +
-               temporary_link.string();
-    }
-    return false;
-  }
-
-  if (binding.directory) {
-    std::filesystem::create_directory_symlink(binding.target, temporary_link,
-                                              filesystem_error);
-  } else {
-    std::filesystem::create_symlink(binding.target, temporary_link,
-                                    filesystem_error);
-  }
-  if (!filesystem_error) {
-    std::filesystem::rename(temporary_link, binding.link, filesystem_error);
-  }
-  if (filesystem_error) {
-    std::error_code cleanup_error;
-    std::filesystem::remove(temporary_link, cleanup_error);
-    if (error != nullptr) {
-      *error = "cannot publish managed payload " + std::string(binding.name) +
-               " link: " + binding.link.string();
-    }
-    return false;
-  }
-  return true;
+  target->assign(value != nullptr ? value : "", length);
 }
 
 }  // namespace
 
 RuntimePaths RuntimePaths::FromEnvironment(
     const Environment& environment, std::filesystem::path working_directory) {
+  const std::optional<std::string> home = environment.Get("HOME");
+  const std::string working_dir_str = working_directory.string();
+  const std::optional<std::string> mocktail_config_root =
+      environment.Get("MOCKTAIL_CONFIG_ROOT");
+  const std::optional<std::string> xdg_config_home =
+      environment.Get("XDG_CONFIG_HOME");
+  const std::optional<std::string> xdg_data_home =
+      environment.Get("XDG_DATA_HOME");
+  const std::optional<std::string> xdg_cache_home =
+      environment.Get("XDG_CACHE_HOME");
+  const std::optional<std::string> xdg_state_home =
+      environment.Get("XDG_STATE_HOME");
+  const std::optional<std::string> mocktail_data_root =
+      environment.Get("MOCKTAIL_DATA_ROOT");
+  const std::optional<std::string> mocktail_cache_root =
+      environment.Get("MOCKTAIL_CACHE_ROOT");
+  const std::optional<std::string> mocktail_state_root =
+      environment.Get("MOCKTAIL_STATE_ROOT");
+  const std::optional<std::string> mocktail_auth_root =
+      environment.Get("MOCKTAIL_AUTH_ROOT");
+  const std::optional<std::string> use_real_sober_paths =
+      environment.Get("MOCKTAIL_USE_REAL_SOBER_PATHS");
+
+  MocktailRustRuntimeEnvOverridesView input{};
+  input.home = ToSliceOpt(home);
+  input.working_directory = ToSlice(working_dir_str);
+  input.mocktail_config_root = ToSliceOpt(mocktail_config_root);
+  input.xdg_config_home = ToSliceOpt(xdg_config_home);
+  input.xdg_data_home = ToSliceOpt(xdg_data_home);
+  input.xdg_cache_home = ToSliceOpt(xdg_cache_home);
+  input.xdg_state_home = ToSliceOpt(xdg_state_home);
+  input.mocktail_data_root = ToSliceOpt(mocktail_data_root);
+  input.mocktail_cache_root = ToSliceOpt(mocktail_cache_root);
+  input.mocktail_state_root = ToSliceOpt(mocktail_state_root);
+  input.mocktail_auth_root = ToSliceOpt(mocktail_auth_root);
+  input.use_real_sober_paths = ToSliceOpt(use_real_sober_paths);
+
   RuntimePaths paths;
-  paths.home_ = environment.GetOr("HOME", "/root");
-  if (working_directory.empty()) {
-    std::error_code error;
-    working_directory = std::filesystem::current_path(error);
-    if (error) {
-      working_directory = ".";
-    }
-  }
-  paths.working_directory_ = std::move(working_directory);
-
-  paths.sober_data_root_ =
-      paths.home_ / ".var/app/org.vinegarhq.Sober/data/sober";
-  paths.sober_cache_root_ =
-      paths.home_ / ".var/app/org.vinegarhq.Sober/cache/sober";
-  if (environment.HasNonEmpty("MOCKTAIL_CONFIG_ROOT")) {
-    paths.config_root_ = environment.GetOr("MOCKTAIL_CONFIG_ROOT", "");
-  } else {
-    paths.config_root_ =
-        XdgHome(environment, "XDG_CONFIG_HOME", paths.home_ / ".config") /
-        "mocktail";
-  }
-
-  const std::filesystem::path xdg_data_home =
-      XdgHome(environment, "XDG_DATA_HOME", paths.home_ / ".local/share");
-  const std::filesystem::path xdg_cache_home =
-      XdgHome(environment, "XDG_CACHE_HOME", paths.home_ / ".cache");
-  const std::filesystem::path xdg_state_home =
-      XdgHome(environment, "XDG_STATE_HOME", paths.home_ / ".local/state");
-  paths.data_root_ =
-      environment.HasNonEmpty("MOCKTAIL_DATA_ROOT")
-          ? std::filesystem::path(environment.GetOr("MOCKTAIL_DATA_ROOT", ""))
-          : xdg_data_home / "mocktail";
-  paths.cache_root_ =
-      environment.HasNonEmpty("MOCKTAIL_CACHE_ROOT")
-          ? std::filesystem::path(environment.GetOr("MOCKTAIL_CACHE_ROOT", ""))
-          : xdg_cache_home / "mocktail";
-  paths.state_root_ =
-      environment.HasNonEmpty("MOCKTAIL_STATE_ROOT")
-          ? std::filesystem::path(environment.GetOr("MOCKTAIL_STATE_ROOT", ""))
-          : xdg_state_home / "mocktail";
-  paths.auth_root_ =
-      environment.HasNonEmpty("MOCKTAIL_AUTH_ROOT")
-          ? std::filesystem::path(environment.GetOr("MOCKTAIL_AUTH_ROOT", ""))
-          : paths.data_root_ / "auth";
-  paths.payloads_root_ = paths.data_root_ / "payloads";
-  paths.downloads_root_ = paths.cache_root_ / "downloads";
-  paths.logs_root_ = paths.state_root_ / "logs";
-  paths.android_runtime_root_ = paths.data_root_ / "android";
-  paths.android_data_root_ = paths.android_runtime_root_ / "data";
-  paths.android_cache_root_ = paths.cache_root_ / "android";
-  paths.vulkan_shader_cache_file_ =
-      paths.cache_root_ / "graphics/shadercachevk.bin";
-  paths.config_file_ = paths.config_root_ / "config.yaml";
-  paths.active_payload_manifest_ = paths.data_root_ / "current.json";
-
-  paths.cookie_file_ = paths.auth_root_ / "roblox.cookie";
-  paths.use_real_sober_paths_ =
-      LegacyEnabled(environment, "MOCKTAIL_USE_REAL_SOBER_PATHS");
+  mocktail_rust_runtime_paths_from_environment(
+      &input,
+      [](void* ctx, const MocktailRustRuntimePathsView* view) {
+        if (ctx == nullptr || view == nullptr) {
+          return;
+        }
+        auto* out = static_cast<RuntimePaths*>(ctx);
+        out->home_ = ToPath(view->home);
+        out->working_directory_ = ToPath(view->working_directory);
+        out->sober_data_root_ = ToPath(view->sober_data_root);
+        out->sober_cache_root_ = ToPath(view->sober_cache_root);
+        out->cache_root_ = ToPath(view->cache_root);
+        out->config_root_ = ToPath(view->config_root);
+        out->data_root_ = ToPath(view->data_root);
+        out->state_root_ = ToPath(view->state_root);
+        out->auth_root_ = ToPath(view->auth_root);
+        out->payloads_root_ = ToPath(view->payloads_root);
+        out->downloads_root_ = ToPath(view->downloads_root);
+        out->logs_root_ = ToPath(view->logs_root);
+        out->android_runtime_root_ = ToPath(view->android_runtime_root);
+        out->android_data_root_ = ToPath(view->android_data_root);
+        out->android_cache_root_ = ToPath(view->android_cache_root);
+        out->vulkan_shader_cache_file_ =
+            ToPath(view->vulkan_shader_cache_file);
+        out->config_file_ = ToPath(view->config_file);
+        out->active_payload_manifest_ = ToPath(view->active_payload_manifest);
+        out->cookie_file_ = ToPath(view->cookie_file);
+        out->use_real_sober_paths_ = view->use_real_sober_paths;
+      },
+      &paths);
   return paths;
 }
 
 std::filesystem::path RuntimePaths::DefaultAssetPath() const {
-  const ActivePayloadPaths active = ResolveActivePayload();
-  if (active && active.active) {
-    return active.assets_content;
-  }
-  const std::filesystem::path relative = "rbx_bin/assets/content";
-  if (Exists(working_directory_ / relative)) {
-    return relative;
-  }
-  return DefaultSoberAwarePath(sober_data_root_ / "assets/content", relative);
+  const std::string data_root = data_root_.string();
+  const std::string payloads_root = payloads_root_.string();
+  const std::string active_manifest = active_payload_manifest_.string();
+  const std::string working_directory = working_directory_.string();
+  const std::string sober_data_root = sober_data_root_.string();
+  std::filesystem::path resolved;
+  mocktail_rust_runtime_paths_default_asset_path(
+      ToSlice(data_root), ToSlice(payloads_root), ToSlice(active_manifest),
+      ToSlice(working_directory), ToSlice(sober_data_root),
+      use_real_sober_paths_,
+      [](void* ctx, MocktailRustStrSlice path) {
+        if (ctx != nullptr) {
+          *static_cast<std::filesystem::path*>(ctx) = ToPath(path);
+        }
+      },
+      &resolved);
+  return resolved;
 }
 
 ActivePayloadPaths RuntimePaths::ResolveActivePayload() const {
+  const std::string data_root = data_root_.string();
+  const std::string payloads_root = payloads_root_.string();
+  const std::string active_manifest = active_payload_manifest_.string();
   ActivePayloadPaths result;
-  std::error_code filesystem_error;
-  const std::filesystem::file_status manifest_status =
-      std::filesystem::symlink_status(active_payload_manifest_,
-                                      filesystem_error);
-  if (filesystem_error == std::errc::no_such_file_or_directory) {
-    return result;
-  }
-  if (filesystem_error || !std::filesystem::is_regular_file(manifest_status) ||
-      std::filesystem::is_symlink(manifest_status)) {
-    result.error = "active payload manifest is invalid or a symlink";
-    return result;
-  }
-
-  std::ifstream input(active_payload_manifest_, std::ios::binary);
-  std::string manifest_contents;
-  if (input) {
-    manifest_contents.assign(std::istreambuf_iterator<char>(input),
-                             std::istreambuf_iterator<char>());
-  }
-  ActiveManifestParseContext parsed_manifest;
-  char err_buf[256] = {};
-  if (mocktail_rust_runtime_paths_parse_active_manifest(
-          manifest_contents.data(), manifest_contents.size(),
-          AssignActiveManifestField, &parsed_manifest, err_buf,
-          sizeof(err_buf)) != 0) {
-    result.error = err_buf[0] != '\0' ? err_buf
-                                      : "active payload manifest is not valid JSON";
-    return result;
-  }
-
-  const std::filesystem::path& relative = parsed_manifest.payload_relative;
-  const std::string& id = parsed_manifest.payload_id;
-
-  const std::filesystem::path root = data_root_ / relative;
-  const std::filesystem::file_status root_status =
-      std::filesystem::symlink_status(root, filesystem_error);
-  if (filesystem_error || !std::filesystem::is_directory(root_status) ||
-      std::filesystem::is_symlink(root_status)) {
-    result.error = "active payload root is missing, invalid, or a symlink";
-    return result;
-  }
-  const std::filesystem::path canonical_payloads =
-      std::filesystem::weakly_canonical(payloads_root_, filesystem_error);
-  if (filesystem_error) {
-    result.error = "cannot canonicalize payload storage";
-    return result;
-  }
-  const std::filesystem::path canonical_root =
-      std::filesystem::canonical(root, filesystem_error);
-  if (filesystem_error || canonical_root.parent_path() != canonical_payloads) {
-    result.error = "active payload escapes payload storage";
-    return result;
-  }
-
-  const std::filesystem::path library = canonical_root / "libroblox.so";
-  const std::filesystem::path package_root = canonical_root / "sober_apk";
-  const std::filesystem::path base_apk = package_root / "base.apk";
-  const std::filesystem::path arch_split_apk =
-      package_root / compat::kGuestSplitApkFile;
-  const std::filesystem::path assets_root = canonical_root / "assets";
-  const std::filesystem::path assets = canonical_root / "assets/content";
-  const std::filesystem::file_status library_status =
-      std::filesystem::symlink_status(library, filesystem_error);
-  if (filesystem_error || !std::filesystem::is_regular_file(library_status) ||
-      std::filesystem::is_symlink(library_status)) {
-    result.error = "active payload libroblox.so is missing or invalid";
-    return result;
-  }
-  const std::filesystem::file_status package_root_status =
-      std::filesystem::symlink_status(package_root, filesystem_error);
-  if (filesystem_error ||
-      !std::filesystem::is_directory(package_root_status) ||
-      std::filesystem::is_symlink(package_root_status)) {
-    result.error = "active payload sober_apk root is missing or invalid";
-    return result;
-  }
-  for (const auto& [path, name] :
-       std::array<std::pair<std::filesystem::path, const char*>, 2>{
-           std::pair{base_apk, "base.apk"},
-           std::pair{arch_split_apk,
-                     compat::kGuestSplitApkFile.data()}}) {
-    const std::filesystem::file_status status =
-        std::filesystem::symlink_status(path, filesystem_error);
-    if (filesystem_error || !std::filesystem::is_regular_file(status) ||
-        std::filesystem::is_symlink(status)) {
-      result.error = "active payload " + std::string(name) +
-                     " is missing or invalid";
-      return result;
-    }
-  }
-  const std::filesystem::file_status assets_root_status =
-      std::filesystem::symlink_status(assets_root, filesystem_error);
-  if (filesystem_error || !std::filesystem::is_directory(assets_root_status) ||
-      std::filesystem::is_symlink(assets_root_status)) {
-    result.error = "active payload assets root is missing or invalid";
-    return result;
-  }
-  const std::filesystem::file_status assets_status =
-      std::filesystem::symlink_status(assets, filesystem_error);
-  if (filesystem_error || !std::filesystem::is_directory(assets_status) ||
-      std::filesystem::is_symlink(assets_status)) {
-    result.error = "active payload assets/content is missing or invalid";
-    return result;
-  }
-
-  result.active = true;
-  result.root = canonical_root;
-  result.roblox_library = library;
-  result.base_apk = base_apk;
-  result.arch_split_apk = arch_split_apk;
-  result.assets_content = assets;
-
-  uint8_t has_approval = 0;
-  if (mocktail_rust_runtime_paths_parse_active_approval_refs(
-          manifest_contents.data(), manifest_contents.size(), id.c_str(),
-          AssignActiveManifestField, &parsed_manifest, &has_approval, err_buf,
-          sizeof(err_buf)) != 0) {
-    result.error = err_buf[0] != '\0'
-                       ? err_buf
-                       : "active payload approval references must be a complete string set";
-    result.active = false;
-    return result;
-  }
-  if (has_approval != 0) {
-    if (!ResolveApprovalFile(data_root_, parsed_manifest.compatibility_relative,
-                             "compatibility_profiles", id,
-                             parsed_manifest.generation,
-                             &result.compatibility_manifest, &result.error) ||
-        !ResolveApprovalFile(data_root_, parsed_manifest.profile_relative,
-                             "host_abi_profiles", id,
-                             parsed_manifest.generation,
-                             &result.host_abi_profile, &result.error) ||
-        !ResolveApprovalFile(data_root_, parsed_manifest.receipt_relative,
-                             "approvals", id, parsed_manifest.generation,
-                             &result.host_abi_approval_receipt,
-                             &result.error)) {
-      result.active = false;
-      return result;
-    }
-  }
+  mocktail_rust_runtime_paths_resolve_active_payload(
+      ToSlice(data_root), ToSlice(payloads_root), ToSlice(active_manifest),
+      [](void* ctx, const MocktailRustActivePayloadPathsView* view) {
+        if (ctx == nullptr || view == nullptr) {
+          return;
+        }
+        auto* out = static_cast<ActivePayloadPaths*>(ctx);
+        out->active = view->active;
+        out->root = ToPath(view->root);
+        out->roblox_library = ToPath(view->roblox_library);
+        out->base_apk = ToPath(view->base_apk);
+        out->arch_split_apk = ToPath(view->arch_split_apk);
+        out->assets_content = ToPath(view->assets_content);
+        out->compatibility_manifest = ToPath(view->compatibility_manifest);
+        out->host_abi_profile = ToPath(view->host_abi_profile);
+        out->host_abi_approval_receipt =
+            ToPath(view->host_abi_approval_receipt);
+        out->error = ToString(view->error);
+      },
+      &result);
   return result;
 }
 
@@ -544,82 +210,36 @@ bool RuntimePaths::EnsureDirectory(const std::filesystem::path& path,
 
 bool ExportRuntimePathEnvironment(const RuntimePaths& paths,
                                   std::string* error) {
-  std::error_code filesystem_error;
-  for (const std::filesystem::path& directory :
-       {paths.android_runtime_root(), paths.android_cache_root(),
-        paths.vulkan_shader_cache_file().parent_path()}) {
-    if (!RuntimePaths::EnsureDirectory(directory, &filesystem_error)) {
-      if (error != nullptr) {
-        *error = "cannot create resolved runtime path: " + directory.string();
-      }
-      return false;
-    }
+  const std::string config_root = paths.config_root().string();
+  const std::string android_runtime_root =
+      paths.android_runtime_root().string();
+  const std::string android_cache_root = paths.android_cache_root().string();
+  const std::string vulkan_shader_cache_file =
+      paths.vulkan_shader_cache_file().string();
+  std::string rust_error;
+  const bool ok = mocktail_rust_runtime_paths_export_environment(
+      ToSlice(config_root), ToSlice(android_runtime_root),
+      ToSlice(android_cache_root), ToSlice(vulkan_shader_cache_file),
+      AssignError, &rust_error);
+  if (!ok && error != nullptr) {
+    *error = std::move(rust_error);
   }
-
-  return SetEnvironmentDefault("MOCKTAIL_RUNTIME_ROOT",
-                               paths.android_runtime_root(), error) &&
-         SetEnvironmentDefault("MOCKTAIL_ANDROID_CACHE_HOST_ROOT",
-                               paths.android_cache_root(), error) &&
-         SetEnvironmentDefault("MOCKTAIL_VULKAN_SHADER_CACHE_HOST_PATH",
-                               paths.vulkan_shader_cache_file(), error) &&
-         SetEnvironmentDefault("MOCKTAIL_TEXTURE_OVERRIDE_DIR",
-                               paths.config_root() / "textures", error);
+  return ok;
 }
 
 bool PrepareManagedPayloadWorkingDirectory(const RuntimePaths& paths,
                                            const ActivePayloadPaths& active,
                                            std::string* error) {
-  if (!active.active) {
-    return true;
+  const std::string data_root = paths.data_root().string();
+  const std::string active_root = active.root.string();
+  std::string rust_error;
+  const bool ok = mocktail_rust_runtime_paths_prepare_managed_working_dir(
+      ToSlice(data_root), ToSlice(active_root), active.active, AssignError,
+      &rust_error);
+  if (!ok && error != nullptr) {
+    *error = std::move(rust_error);
   }
-  std::error_code filesystem_error;
-  const std::filesystem::path rbx_root = paths.data_root() / "rbx_bin";
-  if (!RuntimePaths::EnsureDirectory(rbx_root, &filesystem_error)) {
-    if (error != nullptr) {
-      *error = "cannot prepare managed payload working directory: " +
-               rbx_root.string();
-    }
-    return false;
-  }
-  const std::filesystem::file_status rbx_root_status =
-      std::filesystem::symlink_status(rbx_root, filesystem_error);
-  if (filesystem_error || !std::filesystem::is_directory(rbx_root_status) ||
-      std::filesystem::is_symlink(rbx_root_status)) {
-    if (error != nullptr) {
-      *error = "managed payload rbx_bin root is invalid or a symlink: " +
-               rbx_root.string();
-    }
-    return false;
-  }
-
-  std::array<ManagedPayloadBinding, 3> bindings{{
-      {active.root / "assets", rbx_root / "assets", "assets", true},
-      {active.root / "sober_apk", rbx_root / "sober_apk", "APK directory",
-       true},
-      {active.root / "libroblox.so", rbx_root / "libroblox.so",
-       "native library", false},
-  }};
-  // Validate all destinations before publishing any of them.
-  for (ManagedPayloadBinding& binding : bindings) {
-    if (!ResolveManagedPayloadBinding(&binding, error)) {
-      return false;
-    }
-  }
-  for (const ManagedPayloadBinding& binding : bindings) {
-    if (!PublishManagedPayloadBinding(binding, error)) {
-      return false;
-    }
-  }
-
-  std::filesystem::current_path(paths.data_root(), filesystem_error);
-  if (filesystem_error) {
-    if (error != nullptr) {
-      *error = "cannot activate managed payload working directory: " +
-               paths.data_root().string();
-    }
-    return false;
-  }
-  return true;
+  return ok;
 }
 
 std::filesystem::path ResolveAdjacentRobloxAssetPath(

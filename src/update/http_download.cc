@@ -1,24 +1,18 @@
 #include "update/http_download.h"
-#include "mocktail/mocktail_rust.h"
 
 #include <curl/curl.h>
-#include <fcntl.h>
-#include <sys/file.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 #include <array>
-#include <cerrno>
-#include <charconv>
-#include <chrono>
-#include <cstring>
-#include <ctime>
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
-#include "update/payload_integrity.h"
+#include "mocktail/mocktail_rust.h"
 
 namespace mocktail::update {
 namespace {
@@ -28,31 +22,23 @@ CURLcode g_curl_status = CURLE_FAILED_INIT;
 
 void InitialiseCurl() { g_curl_status = curl_global_init(CURL_GLOBAL_DEFAULT); }
 
-bool HostMatches(std::string_view host, std::string_view allowed) {
-  return mocktail_rust_update_host_matches(host.data(), host.size(),
-                                           allowed.data(), allowed.size());
+MocktailRustStrSlice ToSlice(std::string_view value) {
+  return {value.data(), value.size()};
 }
 
-std::string Lower(std::string value) {
-  for (char& character : value) {
-    if (character >= 'A' && character <= 'Z') {
-      character = static_cast<char>(character - 'A' + 'a');
-    }
+std::string ToString(MocktailRustStrSlice slice) {
+  if (slice.ptr == nullptr || slice.len == 0) {
+    return {};
   }
-  return value;
+  return std::string(slice.ptr, slice.len);
 }
 
-struct CurlUrlDeleter {
-  void operator()(CURLU* url) const {
-    if (url != nullptr) curl_url_cleanup(url);
+void AssignError(void* ctx, MocktailRustStrSlice error) {
+  auto* target = static_cast<std::string*>(ctx);
+  if (target != nullptr) {
+    *target = ToString(error);
   }
-};
-
-struct CurlStringDeleter {
-  void operator()(char* value) const {
-    if (value != nullptr) curl_free(value);
-  }
-};
+}
 
 struct CurlHandleDeleter {
   void operator()(CURL* handle) const {
@@ -66,300 +52,19 @@ struct CurlHeadersDeleter {
   }
 };
 
-bool RedirectStatus(long status) {
-  return mocktail_rust_update_is_redirect_status(status);
-}
-
-bool RetryableTransport(CURLcode status) {
-  return mocktail_rust_update_is_retryable_curl_code(static_cast<int32_t>(status));
-}
-
-bool RetryableStatus(long status) {
-  return mocktail_rust_update_is_retryable_status(status);
-}
-
-void Sleep(long milliseconds) {
-  if (milliseconds <= 0) return;
-  struct timespec delay = {milliseconds / 1000,
-                           (milliseconds % 1000) * 1000000L};
-  while (nanosleep(&delay, &delay) != 0 && errno == EINTR) {
-  }
-}
-
-void PublishMessage(int descriptor, const std::string& message) {
-  if (descriptor < 0) return;
-  const std::string packet = "P" + message;
-  (void)send(descriptor, packet.data(), packet.size(), MSG_NOSIGNAL);
-}
-
-constexpr curl_off_t kMebibyte = 1024 * 1024;
-
-struct TransferProgress {
-  int descriptor = -1;
-  curl_off_t resumed_bytes = 0;
-  std::chrono::steady_clock::time_point reported_at{};
-  curl_off_t reported_bytes = 0;
-  bool started = false;
-};
-
-// One decimal place without dragging in a stream: 1536 KiB/s reads as 1.5.
-std::string Rate(curl_off_t bytes, std::chrono::milliseconds elapsed) {
-  if (elapsed.count() <= 0) return {};
-  const curl_off_t per_second = bytes * 1000 / elapsed.count();
-  if (per_second < kMebibyte) {
-    return " at " + std::to_string(per_second / 1024) + " KiB/s";
-  }
-  const curl_off_t tenths = per_second * 10 / kMebibyte;
-  return " at " + std::to_string(tenths / 10) + "." +
-         std::to_string(tenths % 10) + " MiB/s";
-}
-
-// Refreshed once a second: a dialog that only moves every 64 MiB looks frozen.
-int ReportTransferProgress(void* opaque, curl_off_t expected, curl_off_t now,
-                           curl_off_t, curl_off_t) {
-  auto* progress = static_cast<TransferProgress*>(opaque);
-  if (progress == nullptr || progress->descriptor < 0) return 0;
-  const auto moment = std::chrono::steady_clock::now();
-  const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-      moment - progress->reported_at);
-  if (progress->started && elapsed < std::chrono::seconds(1)) return 0;
-  const curl_off_t received = progress->resumed_bytes + now;
-  const curl_off_t total =
-      expected > 0 ? progress->resumed_bytes + expected : 0;
-  std::string message =
-      "Downloading Roblox... " + std::to_string(received / kMebibyte) + " MiB";
-  if (total > 0) {
-    message += " / " + std::to_string(total / kMebibyte) + " MiB (" +
-               std::to_string(received * 100 / total) + "%)";
-  }
-  if (progress->started && received > progress->reported_bytes) {
-    message += Rate(received - progress->reported_bytes, elapsed);
-  }
-  progress->started = true;
-  progress->reported_at = moment;
-  progress->reported_bytes = received;
-  PublishMessage(progress->descriptor, message);
-  return 0;
-}
-
-struct BytesWriter {
-  std::string* output = nullptr;
-  std::size_t maximum = 0;
-  bool exceeded = false;
-};
-
-std::size_t WriteBytes(char* data, std::size_t size, std::size_t count,
-                       void* opaque) {
-  auto* writer = static_cast<BytesWriter*>(opaque);
-  if (writer == nullptr || writer->output == nullptr || data == nullptr ||
-      (count != 0 && size > std::numeric_limits<std::size_t>::max() / count)) {
-    return 0;
-  }
-  const std::size_t bytes = size * count;
-  if (bytes > writer->maximum ||
-      writer->output->size() > writer->maximum - bytes) {
-    writer->exceeded = true;
-    return 0;
-  }
-  writer->output->append(data, bytes);
-  return bytes;
-}
-
-struct DownloadHeaders {
-  long status = 0;
-  std::string etag;
-  std::string encoding;
-  std::string range;
-  std::string expected_etag;
-  std::string url;
-  std::filesystem::path state_path;
-  std::size_t offset = 0;
-  std::size_t maximum = 0;
-  std::size_t total = 0;
-  bool restart = false;
-  bool failed = false;
-  bool complete = false;
-};
-
-bool StrongEtag(std::string_view value) {
-  if (value.size() < 2 || value.front() != '"' || value.back() != '"')
-    return false;
-  for (const unsigned char character : value) {
-    if (character < 0x21 || character == 0x7f) return false;
-  }
-  return true;
-}
-
-bool ReadRange(DownloadHeaders* headers) {
-  std::string_view range = headers->range;
-  if (range.substr(0, 6) != "bytes ") return false;
-  range.remove_prefix(6);
-  std::size_t values[3] = {};
-  for (int index = 0; index < 3; ++index) {
-    const auto parsed = std::from_chars(
-        range.data(), range.data() + range.size(), values[index]);
-    if (parsed.ec != std::errc()) return false;
-    range.remove_prefix(parsed.ptr - range.data());
-    if (index < 2) {
-      if (range.empty() || range.front() != (index == 0 ? '-' : '/'))
-        return false;
-      range.remove_prefix(1);
-    }
-  }
-  headers->total = values[2];
-  return range.empty() && values[0] == headers->offset &&
-         values[1] >= values[0] && values[1] < values[2] &&
-         values[1] == values[2] - 1 && values[2] <= headers->maximum;
-}
-
-std::size_t ReadDownloadHeaders(char* data, std::size_t size, std::size_t count,
-                                void* opaque) {
-  if (count != 0 && size > std::numeric_limits<std::size_t>::max() / count)
-    return 0;
-  const std::size_t bytes = size * count;
-  auto* headers = static_cast<DownloadHeaders*>(opaque);
-  std::string_view line(data, bytes);
-  if (line.substr(0, 5) == "HTTP/") {
-    headers->complete = false;
-    headers->etag.clear();
-    headers->encoding.clear();
-    headers->range.clear();
-    headers->status = 0;
-    const auto space = line.find(' ');
-    if (space != std::string_view::npos) {
-      std::from_chars(line.data() + space + 1, line.data() + line.size(),
-                      headers->status);
-    }
-  } else if (line == "\r\n" || line == "\n") {
-    headers->complete = true;
-    if (headers->offset > 0 &&
-        (headers->status == 200 || headers->status == 416)) {
-      headers->restart = true;
-      return 0;
-    }
-    if (headers->status != 200 && headers->status != 206) return bytes;
-    if ((!headers->encoding.empty() && headers->encoding != "identity") ||
-        (headers->status == 206 &&
-         (!ReadRange(headers) ||
-          (!headers->expected_etag.empty() && !headers->etag.empty() &&
-           headers->expected_etag != headers->etag)))) {
-      headers->restart = true;
-      return 0;
-    }
-    if (headers->offset == 0 && StrongEtag(headers->etag) &&
-        mocktail_rust_http_write_resume_state(headers->state_path.c_str(),
-                                              headers->url.c_str(),
-                                              headers->etag.c_str()) != 0) {
-      headers->failed = true;
-      return 0;
-    }
-  } else if (!headers->complete) {
-    const auto colon = line.find(':');
-    if (colon == std::string_view::npos) return bytes;
-    const std::string key = Lower(std::string(line.substr(0, colon)));
-    line.remove_prefix(colon + 1);
-    while (!line.empty() && (line.front() == ' ' || line.front() == '\t'))
-      line.remove_prefix(1);
-    while (!line.empty() &&
-           (line.back() == '\r' || line.back() == '\n' || line.back() == ' '))
-      line.remove_suffix(1);
-    if (key == "etag") headers->etag = line;
-    if (key == "content-encoding") headers->encoding = Lower(std::string(line));
-    if (key == "content-range") headers->range = line;
-  }
-  return bytes;
-}
-
-struct FileWriter {
-  int descriptor = -1;
-  std::size_t maximum = 0;
-  // Includes any resumed prefix, so the limit covers the whole file.
-  std::size_t written = 0;
-  // Null while resuming; the digest is then taken in one pass at the end.
-  FileDigest* sha256 = nullptr;
-  bool exceeded = false;
-  bool write_failed = false;
-  bool hash_failed = false;
-  const DownloadHeaders* headers = nullptr;
-};
-
-std::size_t WriteFileBytes(char* data, std::size_t size, std::size_t count,
-                           void* opaque) {
-  auto* writer = static_cast<FileWriter*>(opaque);
-  if (writer == nullptr || writer->descriptor < 0 || data == nullptr ||
-      (count != 0 && size > std::numeric_limits<std::size_t>::max() / count)) {
-    return 0;
-  }
-  const std::size_t bytes = size * count;
-  if (writer->headers != nullptr && writer->headers->status != 200 &&
-      writer->headers->status != 206)
-    return bytes;
-  if (bytes > writer->maximum || writer->written > writer->maximum - bytes) {
-    writer->exceeded = true;
-    return 0;
-  }
-  std::size_t offset = 0;
-  while (offset < bytes) {
-    const ssize_t result =
-        write(writer->descriptor, data + offset, bytes - offset);
-    if (result <= 0) {
-      if (result < 0 && errno == EINTR) continue;
-      writer->write_failed = true;
-      return 0;
-    }
-    offset += static_cast<std::size_t>(result);
-  }
-  if (writer->sha256 != nullptr) {
-    if (!writer->sha256->Update(data, bytes)) {
-      writer->hash_failed = true;
-      return 0;
-    }
-  }
-  writer->written += bytes;
-  return bytes;
-}
-
-bool Configure(CURL* handle, const HttpTransferRequest& request,
-               std::string_view url, curl_slist* headers,
-               std::array<char, CURL_ERROR_SIZE>* error_buffer) {
-  return curl_easy_setopt(handle, CURLOPT_URL, std::string(url).c_str()) ==
-             CURLE_OK &&
-         curl_easy_setopt(handle, CURLOPT_HTTPGET, 1L) == CURLE_OK &&
-         curl_easy_setopt(handle, CURLOPT_FOLLOWLOCATION, 0L) == CURLE_OK &&
-         curl_easy_setopt(handle, CURLOPT_PROTOCOLS_STR, "https") == CURLE_OK &&
-         curl_easy_setopt(handle, CURLOPT_REDIR_PROTOCOLS_STR, "https") ==
-             CURLE_OK &&
-         curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L) == CURLE_OK &&
-         curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT_MS,
-                          request.connect_timeout_ms) == CURLE_OK &&
-         curl_easy_setopt(handle, CURLOPT_TIMEOUT_MS,
-                          request.transfer_timeout_ms) == CURLE_OK &&
-         curl_easy_setopt(handle, CURLOPT_LOW_SPEED_LIMIT,
-                          request.low_speed_bytes_per_second) == CURLE_OK &&
-         curl_easy_setopt(handle, CURLOPT_LOW_SPEED_TIME,
-                          request.low_speed_seconds) == CURLE_OK &&
-         curl_easy_setopt(handle, CURLOPT_ACCEPT_ENCODING, "") == CURLE_OK &&
-         curl_easy_setopt(handle, CURLOPT_SSL_EC_CURVES, "X25519:P-256:P-384") == CURLE_OK &&
-         curl_easy_setopt(handle, CURLOPT_DOH_URL, "https://1.1.1.1/dns-query") == CURLE_OK &&
-         curl_easy_setopt(handle, CURLOPT_USERAGENT,
-                          "Mocktail-native-updater/1") == CURLE_OK &&
-         curl_easy_setopt(handle, CURLOPT_ERRORBUFFER, error_buffer->data()) ==
-             CURLE_OK &&
-         (request.ca_bundle.empty() ||
-          curl_easy_setopt(handle, CURLOPT_CAINFO, request.ca_bundle.c_str()) ==
-              CURLE_OK) &&
-         (headers == nullptr ||
-          curl_easy_setopt(handle, CURLOPT_HTTPHEADER, headers) == CURLE_OK);
-}
-
 std::unique_ptr<curl_slist, CurlHeadersDeleter> BuildHeaders(
-    const std::vector<std::string>& values, std::string* error) {
+    const MocktailRustStrSlice* ptr, std::size_t len, bool* allocated) {
+  *allocated = true;
+  if (ptr == nullptr || len == 0) {
+    return {};
+  }
   curl_slist* list = nullptr;
-  for (const std::string& value : values) {
+  for (std::size_t i = 0; i < len; ++i) {
+    const std::string value = ToString(ptr[i]);
     curl_slist* next = curl_slist_append(list, value.c_str());
     if (next == nullptr) {
       curl_slist_free_all(list);
-      *error = "cannot allocate HTTP request headers";
+      *allocated = false;
       return {};
     }
     list = next;
@@ -382,254 +87,221 @@ std::string CurlFailure(CURLcode status,
                            : std::string(curl_easy_strerror(status));
 }
 
-std::string UrlHost(std::string_view url) {
-  std::unique_ptr<CURLU, CurlUrlDeleter> parsed(curl_url());
-  char* raw_host = nullptr;
-  if (!parsed ||
-      curl_url_set(parsed.get(), CURLUPART_URL, std::string(url).c_str(), 0) !=
-          CURLUE_OK ||
-      curl_url_get(parsed.get(), CURLUPART_HOST, &raw_host, 0) != CURLUE_OK ||
-      raw_host == nullptr) {
-    return {};
+std::size_t WriteCurlCallback(char* data, std::size_t size, std::size_t count,
+                              void* opaque) {
+  const auto* req =
+      static_cast<const MocktailRustHttpAttemptRequestView*>(opaque);
+  if (req == nullptr || req->on_write == nullptr ||
+      (count != 0 && size > std::numeric_limits<std::size_t>::max() / count)) {
+    return 0;
   }
-  std::unique_ptr<char, CurlStringDeleter> host(raw_host);
-  return Lower(host.get());
+  const std::size_t bytes = size * count;
+  if (bytes > 0 && data == nullptr) {
+    return 0;
+  }
+  return req->on_write(req->attempt_ctx,
+                       reinterpret_cast<const std::uint8_t*>(data), bytes)
+             ? bytes
+             : 0;
 }
 
-// Provider outages are the most common first-run failure, so the host that
-// rejected the transfer belongs in the message the user actually reads.
-std::string StatusFailure(std::string_view action, std::string_view url,
-                          long status_code) {
-  const std::string host = UrlHost(url);
-  return (host.empty() ? std::string("HTTPS ") + std::string(action)
-                       : host + " " + std::string(action)) +
-         " returned status " + std::to_string(status_code);
+std::size_t HeaderCurlCallback(char* data, std::size_t size, std::size_t nitems,
+                               void* opaque) {
+  const auto* req =
+      static_cast<const MocktailRustHttpAttemptRequestView*>(opaque);
+  if (req == nullptr || req->on_header == nullptr ||
+      (nitems != 0 && size > std::numeric_limits<std::size_t>::max() / nitems)) {
+    return 0;
+  }
+  const std::size_t bytes = size * nitems;
+  if (bytes > 0 && data == nullptr) {
+    return 0;
+  }
+  return req->on_header(req->attempt_ctx,
+                        reinterpret_cast<const std::uint8_t*>(data), bytes)
+             ? bytes
+             : 0;
 }
 
-HttpBytesResult DownloadBytesAttempt(const HttpTransferRequest& request,
-                                     bool* retryable) {
-  HttpBytesResult result;
-  std::string current = request.url;
-  for (int redirect = 0; redirect <= request.maximum_redirects; ++redirect) {
-    std::unique_ptr<CURL, CurlHandleDeleter> handle(curl_easy_init());
-    if (!handle) {
-      result.error = "curl_easy_init failed";
-      return result;
-    }
-    auto headers = BuildHeaders(request.headers, &result.error);
-    if (!request.headers.empty() && !headers) return result;
-    std::array<char, CURL_ERROR_SIZE> error_buffer{};
-    if (!Configure(handle.get(), request, current, headers.get(),
-                   &error_buffer)) {
-      result.error = "cannot configure HTTPS request";
-      return result;
-    }
-    result.bytes.clear();
-    BytesWriter writer{&result.bytes, request.maximum_bytes, false};
-    curl_easy_setopt(handle.get(), CURLOPT_WRITEFUNCTION, WriteBytes);
-    curl_easy_setopt(handle.get(), CURLOPT_WRITEDATA, &writer);
-    const CURLcode status = curl_easy_perform(handle.get());
-    if (status != CURLE_OK) {
-      result.error = writer.exceeded ? "HTTPS response exceeds its size limit"
-                                     : CurlFailure(status, error_buffer);
-      *retryable = !writer.exceeded && RetryableTransport(status);
-      return result;
-    }
-    curl_easy_getinfo(handle.get(), CURLINFO_RESPONSE_CODE,
-                      &result.status_code);
-    if (RedirectStatus(result.status_code)) {
-      const std::string next = RedirectUrl(handle.get());
-      if (next.empty() || redirect == request.maximum_redirects ||
-          !IsTrustedHttpsUrl(next, request.allowed_hosts, &result.error)) {
-        if (result.error.empty()) result.error = "invalid HTTPS redirect";
-        return result;
-      }
-      current = next;
-      continue;
-    }
-    if (result.status_code < 200 || result.status_code >= 300) {
-      result.error = StatusFailure("request", current, result.status_code);
-      *retryable = RetryableStatus(result.status_code);
-      return result;
-    }
-    result.final_url = current;
-    return result;
+int ProgressCurlCallback(void* opaque, curl_off_t expected, curl_off_t now,
+                         curl_off_t, curl_off_t) {
+  const auto* req =
+      static_cast<const MocktailRustHttpAttemptRequestView*>(opaque);
+  if (req == nullptr || req->on_progress == nullptr) {
+    return 0;
   }
-  result.error = "too many HTTPS redirects";
-  return result;
+  return req->on_progress(req->attempt_ctx, static_cast<std::int64_t>(expected),
+                          static_cast<std::int64_t>(now));
 }
 
-// Leaves the transferred bytes in `temporary`: they survive a retryable
-// failure so the next attempt resumes instead of pulling the archive again.
-HttpDownloadResult DownloadFileAttempt(const HttpTransferRequest& request,
-                                       const std::filesystem::path& temporary,
-                                       int progress_fd, bool* retryable) {
-  HttpDownloadResult result;
-  std::error_code filesystem_error;
-  const std::filesystem::path state_path = temporary.string() + ".json";
-  std::string etag;
-  std::array<char, 4096> etag_buf{};
-  if (mocktail_rust_http_read_resume_etag(
-          state_path.c_str(), request.url.c_str(), etag_buf.data(),
-          etag_buf.size()) == 0) {
-    etag = etag_buf.data();
+bool ConfigureAttempt(CURL* handle, const MocktailRustHttpAttemptRequestView* req,
+                      const std::string& url, const std::string& ca_bundle,
+                      const std::string& range, curl_slist* headers,
+                      std::array<char, CURL_ERROR_SIZE>* error_buffer) {
+  if (curl_easy_setopt(handle, CURLOPT_URL, url.c_str()) != CURLE_OK ||
+      curl_easy_setopt(handle, CURLOPT_HTTPGET, 1L) != CURLE_OK ||
+      curl_easy_setopt(handle, CURLOPT_FOLLOWLOCATION, 0L) != CURLE_OK ||
+      curl_easy_setopt(handle, CURLOPT_PROTOCOLS_STR, "https") != CURLE_OK ||
+      curl_easy_setopt(handle, CURLOPT_REDIR_PROTOCOLS_STR, "https") !=
+          CURLE_OK ||
+      curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L) != CURLE_OK ||
+      curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT_MS,
+                       static_cast<long>(req->connect_timeout_ms)) != CURLE_OK ||
+      curl_easy_setopt(handle, CURLOPT_TIMEOUT_MS,
+                       static_cast<long>(req->transfer_timeout_ms)) !=
+          CURLE_OK ||
+      curl_easy_setopt(handle, CURLOPT_LOW_SPEED_LIMIT,
+                       static_cast<long>(req->low_speed_bytes_per_second)) !=
+          CURLE_OK ||
+      curl_easy_setopt(handle, CURLOPT_LOW_SPEED_TIME,
+                       static_cast<long>(req->low_speed_seconds)) != CURLE_OK ||
+      curl_easy_setopt(handle, CURLOPT_ACCEPT_ENCODING,
+                       req->accept_encoding_identity ? "identity" : "") !=
+          CURLE_OK ||
+      curl_easy_setopt(handle, CURLOPT_SSL_EC_CURVES, "X25519:P-256:P-384") !=
+          CURLE_OK ||
+      curl_easy_setopt(handle, CURLOPT_DOH_URL, "https://1.1.1.1/dns-query") !=
+          CURLE_OK ||
+      curl_easy_setopt(handle, CURLOPT_USERAGENT, "Mocktail-native-updater/1") !=
+          CURLE_OK ||
+      curl_easy_setopt(handle, CURLOPT_ERRORBUFFER, error_buffer->data()) !=
+          CURLE_OK) {
+    return false;
   }
-  std::uintmax_t existing =
-      std::filesystem::file_size(temporary, filesystem_error);
-  if (filesystem_error || existing > request.maximum_bytes ||
-      !StrongEtag(etag)) {
-    std::filesystem::remove(temporary, filesystem_error);
-    std::filesystem::remove(state_path, filesystem_error);
-    existing = 0;
-    etag.clear();
+  if (!ca_bundle.empty() &&
+      curl_easy_setopt(handle, CURLOPT_CAINFO, ca_bundle.c_str()) != CURLE_OK) {
+    return false;
   }
-  TransferProgress progress;
-  progress.descriptor = progress_fd;
-  progress.resumed_bytes = static_cast<curl_off_t>(existing);
-  std::string current = request.url;
-  for (int redirect = 0; redirect <= request.maximum_redirects; ++redirect) {
-    const bool resuming = existing > 0;
-    const int descriptor =
-        open(temporary.c_str(),
-             O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW |
-                 (resuming ? 0 : O_TRUNC),
-             0600);
-    if (descriptor < 0) {
-      result.error = "cannot create temporary download: " +
-                     std::string(std::strerror(errno));
-      return result;
-    }
-    if (resuming && lseek(descriptor, 0, SEEK_END) < 0) {
-      close(descriptor);
-      std::filesystem::remove(temporary, filesystem_error);
-      result.error = "cannot resume temporary download: " +
-                     std::string(std::strerror(errno));
-      return result;
-    }
-    std::unique_ptr<CURL, CurlHandleDeleter> handle(curl_easy_init());
-    std::vector<std::string> header_values = request.headers;
-    if (resuming) header_values.push_back("If-Range: " + etag);
-    auto headers = BuildHeaders(header_values, &result.error);
-    if (!handle || (!header_values.empty() && !headers)) {
-      close(descriptor);
-      std::filesystem::remove(temporary, filesystem_error);
-      if (result.error.empty()) result.error = "curl_easy_init failed";
-      return result;
-    }
-    std::array<char, CURL_ERROR_SIZE> error_buffer{};
-    if (!Configure(handle.get(), request, current, headers.get(),
-                   &error_buffer)) {
-      close(descriptor);
-      std::filesystem::remove(temporary, filesystem_error);
-      result.error = "cannot configure HTTPS download";
-      return result;
-    }
-    FileDigest sha256;
-    if (!resuming && !sha256.valid()) {
-      close(descriptor);
-      std::filesystem::remove(temporary, filesystem_error);
-      result.error = "cannot initialize sha256 digest";
-      return result;
-    }
-    DownloadHeaders response;
-    response.expected_etag = etag;
-    response.url = request.url;
-    response.state_path = state_path;
-    response.offset = existing;
-    response.maximum = request.maximum_bytes;
-    FileWriter writer{descriptor,
-                      request.maximum_bytes,
-                      static_cast<std::size_t>(existing),
-                      resuming ? nullptr : &sha256,
-                      false,
-                      false,
-                      false,
-                      &response};
-    curl_easy_setopt(handle.get(), CURLOPT_ACCEPT_ENCODING, "identity");
-    curl_easy_setopt(handle.get(), CURLOPT_SUPPRESS_CONNECT_HEADERS, 1L);
-    curl_easy_setopt(handle.get(), CURLOPT_HEADERFUNCTION, ReadDownloadHeaders);
-    curl_easy_setopt(handle.get(), CURLOPT_HEADERDATA, &response);
-    curl_easy_setopt(handle.get(), CURLOPT_WRITEFUNCTION, WriteFileBytes);
-    curl_easy_setopt(handle.get(), CURLOPT_WRITEDATA, &writer);
-    curl_easy_setopt(handle.get(), CURLOPT_NOPROGRESS,
-                     progress_fd < 0 ? 1L : 0L);
-    curl_easy_setopt(handle.get(), CURLOPT_XFERINFOFUNCTION,
-                     ReportTransferProgress);
-    curl_easy_setopt(handle.get(), CURLOPT_XFERINFODATA, &progress);
-    if (resuming) {
-      curl_easy_setopt(handle.get(), CURLOPT_RANGE,
-                       (std::to_string(existing) + "-").c_str());
-    }
-    const CURLcode status = curl_easy_perform(handle.get());
-    long http_status = 0;
-    curl_easy_getinfo(handle.get(), CURLINFO_RESPONSE_CODE, &http_status);
-    const bool synced = fsync(descriptor) == 0;
-    close(descriptor);
-    if (synced && RetryableStatus(http_status)) {
-      result.error = StatusFailure("download", current, http_status);
-      *retryable = true;
-      return result;
-    }
-    if (RedirectStatus(http_status)) {
-      const std::string next = RedirectUrl(handle.get());
-      if (next.empty() || redirect == request.maximum_redirects ||
-          !IsTrustedHttpsUrl(next, request.allowed_hosts, &result.error)) {
-        std::filesystem::remove(temporary, filesystem_error);
-        if (result.error.empty()) result.error = "invalid HTTPS redirect";
-        return result;
-      }
-      current = next;
-      continue;
-    }
-    if (response.restart || (resuming && status == CURLE_RANGE_ERROR)) {
-      std::filesystem::remove(temporary, filesystem_error);
-      std::filesystem::remove(state_path, filesystem_error);
-      result.error = "HTTPS download must restart with a complete archive";
-      *retryable = true;
-      return result;
-    }
-    if (status != CURLE_OK || writer.write_failed || writer.hash_failed ||
-        response.failed || !synced) {
-      if (writer.hash_failed) {
-        result.error = "cannot compute SHA-256 digest during download";
-      } else if (writer.exceeded) {
-        result.error = "HTTPS download exceeds its size limit";
-      } else if (writer.write_failed || response.failed || !synced) {
-        result.error = "cannot persist HTTPS download";
-      } else {
-        result.error = CurlFailure(status, error_buffer);
-        *retryable = RetryableTransport(status);
-      }
-      if (!*retryable) std::filesystem::remove(temporary, filesystem_error);
-      return result;
-    }
-    if ((http_status != 200 && http_status != 206) || writer.written == 0) {
-      result.error = StatusFailure("download", current, http_status);
-      *retryable = RetryableStatus(http_status);
-      if (!*retryable) std::filesystem::remove(temporary, filesystem_error);
-      return result;
-    }
-    if (http_status == 206 && writer.written != response.total) {
-      result.error = "HTTPS download has an incomplete content range";
-      *retryable = true;
-      return result;
-    }
-    result.bytes_written = writer.written;
-    result.sha256 = resuming ? HashRegularFile(temporary, &result.error)
-                             : sha256.FinalHex();
-    if (result.sha256.empty()) {
-      std::filesystem::remove(temporary, filesystem_error);
-      if (result.error.empty()) {
-        result.error = "cannot finalize SHA-256 digest of downloaded file";
-      }
-      return result;
-    }
-    result.final_url = current;
-    return result;
+  if (headers != nullptr &&
+      curl_easy_setopt(handle, CURLOPT_HTTPHEADER, headers) != CURLE_OK) {
+    return false;
   }
-  std::filesystem::remove(temporary, filesystem_error);
-  result.error = "too many HTTPS redirects";
-  return result;
+  if (req->accept_encoding_identity) {
+    curl_easy_setopt(handle, CURLOPT_SUPPRESS_CONNECT_HEADERS, 1L);
+    if (req->on_header != nullptr) {
+      curl_easy_setopt(handle, CURLOPT_HEADERFUNCTION, HeaderCurlCallback);
+      curl_easy_setopt(handle, CURLOPT_HEADERDATA,
+                       const_cast<MocktailRustHttpAttemptRequestView*>(req));
+    }
+  }
+  if (req->on_write != nullptr) {
+    curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, WriteCurlCallback);
+    curl_easy_setopt(handle, CURLOPT_WRITEDATA,
+                     const_cast<MocktailRustHttpAttemptRequestView*>(req));
+  }
+  curl_easy_setopt(handle, CURLOPT_NOPROGRESS, req->enable_progress ? 0L : 1L);
+  if (req->enable_progress && req->on_progress != nullptr) {
+    curl_easy_setopt(handle, CURLOPT_XFERINFOFUNCTION, ProgressCurlCallback);
+    curl_easy_setopt(handle, CURLOPT_XFERINFODATA,
+                     const_cast<MocktailRustHttpAttemptRequestView*>(req));
+  }
+  if (req->has_resume_offset) {
+    curl_easy_setopt(handle, CURLOPT_RANGE, range.c_str());
+  }
+  return true;
+}
+
+void PerformHttpAttempt(
+    void* /*transport_ctx*/, const MocktailRustHttpAttemptRequestView* req,
+    void (*on_outcome)(void* ctx,
+                       const MocktailRustHttpAttemptOutcomeView* outcome),
+    void* outcome_ctx) {
+  if (on_outcome == nullptr || req == nullptr) {
+    return;
+  }
+
+  MocktailRustHttpAttemptOutcomeView outcome{};
+  std::call_once(g_curl_once, InitialiseCurl);
+  if (g_curl_status != CURLE_OK) {
+    outcome.init_failed = true;
+    const char* err = curl_easy_strerror(g_curl_status);
+    outcome.curl_error = ToSlice(err != nullptr ? err : "");
+    on_outcome(outcome_ctx, &outcome);
+    return;
+  }
+
+  std::unique_ptr<CURL, CurlHandleDeleter> handle(curl_easy_init());
+  if (!handle) {
+    outcome.init_failed = true;
+    outcome.curl_error = ToSlice("curl_easy_init failed");
+    on_outcome(outcome_ctx, &outcome);
+    return;
+  }
+
+  bool headers_ok = true;
+  auto headers = BuildHeaders(req->headers_ptr, req->headers_len, &headers_ok);
+  if (!headers_ok) {
+    outcome.headers_alloc_failed = true;
+    on_outcome(outcome_ctx, &outcome);
+    return;
+  }
+
+  const std::string url = ToString(req->url);
+  const std::string ca_bundle = ToString(req->ca_bundle);
+  const std::string range =
+      req->has_resume_offset ? (std::to_string(req->resume_offset) + "-")
+                             : std::string();
+  std::array<char, CURL_ERROR_SIZE> error_buffer{};
+  if (!ConfigureAttempt(handle.get(), req, url, ca_bundle, range, headers.get(),
+                        &error_buffer)) {
+    outcome.configure_failed = true;
+    on_outcome(outcome_ctx, &outcome);
+    return;
+  }
+
+  const CURLcode status = curl_easy_perform(handle.get());
+  long http_status = 0;
+  curl_easy_getinfo(handle.get(), CURLINFO_RESPONSE_CODE, &http_status);
+  const std::string redirect_url = RedirectUrl(handle.get());
+  const std::string curl_error =
+      status != CURLE_OK ? CurlFailure(status, error_buffer) : std::string();
+
+  outcome.curl_code = static_cast<std::int32_t>(status);
+  outcome.is_range_error = (status == CURLE_RANGE_ERROR);
+  outcome.http_status = static_cast<std::int64_t>(http_status);
+  outcome.redirect_url = ToSlice(redirect_url);
+  outcome.curl_error = ToSlice(curl_error);
+  on_outcome(outcome_ctx, &outcome);
+}
+
+struct TransferRequestStorage {
+  std::vector<MocktailRustStrSlice> headers;
+  std::vector<MocktailRustStrSlice> allowed_hosts;
+  std::string ca_bundle;
+  MocktailRustHttpTransferRequestView view{};
+};
+
+void BuildRequestView(const HttpTransferRequest& request,
+                      TransferRequestStorage* storage) {
+  storage->headers.reserve(request.headers.size());
+  for (const std::string& header : request.headers) {
+    storage->headers.push_back(ToSlice(header));
+  }
+  storage->allowed_hosts.reserve(request.allowed_hosts.size());
+  for (const std::string& host : request.allowed_hosts) {
+    storage->allowed_hosts.push_back(ToSlice(host));
+  }
+  storage->ca_bundle = request.ca_bundle.string();
+
+  storage->view.url = ToSlice(request.url);
+  storage->view.headers_ptr = storage->headers.data();
+  storage->view.headers_len = storage->headers.size();
+  storage->view.allowed_hosts_ptr = storage->allowed_hosts.data();
+  storage->view.allowed_hosts_len = storage->allowed_hosts.size();
+  storage->view.ca_bundle = ToSlice(storage->ca_bundle);
+  storage->view.maximum_bytes = request.maximum_bytes;
+  storage->view.connect_timeout_ms =
+      static_cast<std::int64_t>(request.connect_timeout_ms);
+  storage->view.transfer_timeout_ms =
+      static_cast<std::int64_t>(request.transfer_timeout_ms);
+  storage->view.low_speed_bytes_per_second =
+      static_cast<std::int64_t>(request.low_speed_bytes_per_second);
+  storage->view.low_speed_seconds =
+      static_cast<std::int64_t>(request.low_speed_seconds);
+  storage->view.maximum_attempts = request.maximum_attempts;
+  storage->view.retry_delay_ms =
+      static_cast<std::int64_t>(request.retry_delay_ms);
+  storage->view.maximum_redirects = request.maximum_redirects;
 }
 
 }  // namespace
@@ -637,126 +309,65 @@ HttpDownloadResult DownloadFileAttempt(const HttpTransferRequest& request,
 bool IsTrustedHttpsUrl(std::string_view url,
                        const std::vector<std::string>& allowed_hosts,
                        std::string* error) {
-  std::unique_ptr<CURLU, CurlUrlDeleter> parsed(curl_url());
-  if (!parsed || curl_url_set(parsed.get(), CURLUPART_URL,
-                              std::string(url).c_str(), 0) != CURLUE_OK) {
-    if (error != nullptr) *error = "URL is malformed";
-    return false;
+  std::vector<MocktailRustStrSlice> host_slices;
+  host_slices.reserve(allowed_hosts.size());
+  for (const std::string& host : allowed_hosts) {
+    host_slices.push_back(ToSlice(host));
   }
-  char* raw_scheme = nullptr;
-  char* raw_host = nullptr;
-  char* raw_port = nullptr;
-  char* raw_user = nullptr;
-  const CURLUcode scheme_status =
-      curl_url_get(parsed.get(), CURLUPART_SCHEME, &raw_scheme, 0);
-  const CURLUcode host_status =
-      curl_url_get(parsed.get(), CURLUPART_HOST, &raw_host, 0);
-  const CURLUcode port_status =
-      curl_url_get(parsed.get(), CURLUPART_PORT, &raw_port, 0);
-  const CURLUcode user_status =
-      curl_url_get(parsed.get(), CURLUPART_USER, &raw_user, 0);
-  std::unique_ptr<char, CurlStringDeleter> scheme(raw_scheme);
-  std::unique_ptr<char, CurlStringDeleter> host(raw_host);
-  std::unique_ptr<char, CurlStringDeleter> port(raw_port);
-  std::unique_ptr<char, CurlStringDeleter> user(raw_user);
-  if (scheme_status != CURLUE_OK || host_status != CURLUE_OK ||
-      scheme == nullptr || host == nullptr || Lower(scheme.get()) != "https" ||
-      (port_status == CURLUE_OK && port != nullptr &&
-       std::string_view(port.get()) != "443") ||
-      (user_status == CURLUE_OK && user != nullptr && user.get()[0] != '\0')) {
-    if (error != nullptr)
-      *error = "URL must be credential-free HTTPS on port 443";
-    return false;
+  std::string rust_error;
+  const bool ok = mocktail_rust_http_is_trusted_https_url(
+      ToSlice(url), host_slices.data(), host_slices.size(), AssignError,
+      &rust_error);
+  if (!ok && error != nullptr) {
+    *error = std::move(rust_error);
   }
-  std::string normalized_host = Lower(host.get());
-  while (!normalized_host.empty() && normalized_host.back() == '.') {
-    normalized_host.pop_back();
-  }
-  for (const std::string& allowed : allowed_hosts) {
-    if (HostMatches(normalized_host, Lower(allowed))) return true;
-  }
-  if (error != nullptr) *error = "URL host is not trusted";
-  return false;
+  return ok;
 }
 
 HttpBytesResult DownloadBytes(const HttpTransferRequest& request) {
+  TransferRequestStorage storage;
+  BuildRequestView(request, &storage);
   HttpBytesResult result;
-  if (request.maximum_bytes == 0 ||
-      !IsTrustedHttpsUrl(request.url, request.allowed_hosts, &result.error)) {
-    if (result.error.empty()) result.error = "HTTP byte limit is zero";
-    return result;
-  }
-  std::call_once(g_curl_once, InitialiseCurl);
-  if (g_curl_status != CURLE_OK) {
-    result.error = curl_easy_strerror(g_curl_status);
-    return result;
-  }
-  const int attempts =
-      request.maximum_attempts > 0 ? request.maximum_attempts : 1;
-  for (int attempt = 1;; ++attempt) {
-    bool retryable = false;
-    result = DownloadBytesAttempt(request, &retryable);
-    if (result || !retryable || attempt >= attempts) return result;
-    Sleep(request.retry_delay_ms * attempt);
-  }
+  mocktail_rust_http_download_bytes(
+      &storage.view, PerformHttpAttempt, nullptr,
+      [](void* ctx, const MocktailRustHttpBytesResultView* view) {
+        if (ctx == nullptr || view == nullptr) {
+          return;
+        }
+        auto* out = static_cast<HttpBytesResult*>(ctx);
+        if (view->bytes_ptr != nullptr && view->bytes_len > 0) {
+          out->bytes.assign(reinterpret_cast<const char*>(view->bytes_ptr),
+                            view->bytes_len);
+        }
+        out->status_code = static_cast<long>(view->status_code);
+        out->final_url = ToString(view->final_url);
+        out->error = ToString(view->error);
+      },
+      &result);
+  return result;
 }
 
 HttpDownloadResult DownloadFile(const HttpTransferRequest& request,
                                 const std::filesystem::path& destination,
                                 int progress_fd) {
+  TransferRequestStorage storage;
+  BuildRequestView(request, &storage);
+  const std::string dest_str = destination.string();
   HttpDownloadResult result;
-  if (request.maximum_bytes == 0 ||
-      !IsTrustedHttpsUrl(request.url, request.allowed_hosts, &result.error)) {
-    if (result.error.empty()) result.error = "HTTP byte limit is zero";
-    return result;
-  }
-  std::call_once(g_curl_once, InitialiseCurl);
-  if (g_curl_status != CURLE_OK) {
-    result.error = curl_easy_strerror(g_curl_status);
-    return result;
-  }
-  std::error_code filesystem_error;
-  std::filesystem::create_directories(destination.parent_path(),
-                                      filesystem_error);
-  if (filesystem_error) {
-    result.error = "cannot create download directory";
-    return result;
-  }
-  const std::filesystem::path temporary = destination.string() + ".part";
-  const std::filesystem::path state_path = temporary.string() + ".json";
-  struct DownloadLock {
-    int descriptor;
-    ~DownloadLock() {
-      if (descriptor >= 0) close(descriptor);
-    }
-  } lock{open((destination.string() + ".lock").c_str(),
-              O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600)};
-  if (lock.descriptor < 0 || flock(lock.descriptor, LOCK_EX) != 0) {
-    result.error = "cannot lock HTTPS download";
-    return result;
-  }
-  const int attempts =
-      request.maximum_attempts > 0 ? request.maximum_attempts : 1;
-  for (int attempt = 1;; ++attempt) {
-    bool retryable = false;
-    result = DownloadFileAttempt(request, temporary, progress_fd, &retryable);
-    if (result) break;
-    if (!retryable || attempt >= attempts) {
-      if (!retryable) {
-        std::filesystem::remove(temporary, filesystem_error);
-        std::filesystem::remove(state_path, filesystem_error);
-      }
-      return result;
-    }
-    PublishMessage(progress_fd, "Retrying Roblox download...");
-    Sleep(request.retry_delay_ms * attempt);
-  }
-  std::filesystem::rename(temporary, destination, filesystem_error);
-  if (filesystem_error) {
-    result.error = "cannot publish completed download";
-  } else {
-    std::filesystem::remove(state_path, filesystem_error);
-  }
+  mocktail_rust_http_download_file(
+      &storage.view, ToSlice(dest_str), progress_fd, PerformHttpAttempt,
+      nullptr,
+      [](void* ctx, const MocktailRustHttpDownloadResultView* view) {
+        if (ctx == nullptr || view == nullptr) {
+          return;
+        }
+        auto* out = static_cast<HttpDownloadResult*>(ctx);
+        out->bytes_written = view->bytes_written;
+        out->sha256 = ToString(view->sha256);
+        out->final_url = ToString(view->final_url);
+        out->error = ToString(view->error);
+      },
+      &result);
   return result;
 }
 

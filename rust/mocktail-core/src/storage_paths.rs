@@ -1,13 +1,20 @@
-use std::ffi::{c_char, c_int, c_void, CStr};
-use std::path::Path;
+use std::ffi::{c_char, c_int, c_void, CStr, CString};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::slice;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
+use crate::unix_ipc::{
+    current_pid, is_real_dir_no_symlink, is_real_file_no_symlink, path_to_slice,
+    read_regular_file_limited, slice_to_opt_str, slice_to_pathbuf, weakly_canonical,
+};
+use crate::update_json::MocktailRustStrSlice;
 use crate::{
-    copy_error, copy_to_c_buffer, read_update_state_json_string, MocktailRustConstructorRange,
+    copy_error, copy_to_c_buffer, guest_abi, read_update_state_json_string,
+    MocktailRustConstructorRange,
 };
 
 pub const K_RUNTIME_PATH_FIELD_PAYLOAD_ID: u32 = 0;
@@ -322,6 +329,85 @@ pub fn resolve_adjacent_roblox_asset_path_internal(
     format!("/{}", segments.join("/"))
 }
 
+pub(crate) fn parse_active_manifest_str(json_str: &str) -> Result<(String, String), &'static str> {
+    let doc: serde_json::Value =
+        serde_json::from_str(json_str).map_err(|_| "active payload manifest is not valid JSON")?;
+    let obj = doc
+        .as_object()
+        .ok_or("active payload manifest is not valid JSON")?;
+
+    let schema_ok = obj.get("schema_version").and_then(|v| v.as_i64()) == Some(1);
+    let payload_id = obj.get("payload_id").and_then(|v| v.as_str());
+    let payload_path = obj.get("payload_path").and_then(|v| v.as_str());
+    let version_name = obj.get("version_name").and_then(|v| v.as_str());
+    let version_code = obj.get("version_code").and_then(|v| v.as_i64()).filter(|&n| n >= 0);
+    let elf_build_id = obj.get("elf_build_id").and_then(|v| v.as_str());
+
+    let (Some(id), Some(rel_path), Some(_ver_name), Some(ver_code), Some(build_id)) = (
+        if schema_ok { payload_id } else { None },
+        payload_path,
+        version_name.filter(|s| !s.is_empty()),
+        version_code,
+        elf_build_id,
+    ) else {
+        return Err("active payload manifest has an unsupported schema");
+    };
+
+    let expected_id = format!("{}-{}", ver_code, build_id);
+    let expected_rel = format!("payloads/{}", id);
+    if id.is_empty()
+        || id != expected_id
+        || rel_path != expected_rel
+        || !is_lower_hex(build_id, 40)
+    {
+        return Err("active payload path is not a direct payloads child");
+    }
+
+    Ok((id.to_string(), rel_path.to_string()))
+}
+
+#[allow(clippy::type_complexity)]
+pub(crate) fn parse_active_approval_refs_str(
+    json_str: &str,
+    payload_id: &str,
+) -> Result<Option<(String, String, String, String)>, String> {
+    let doc: serde_json::Value = serde_json::from_str(json_str)
+        .map_err(|_| "active payload manifest is not valid JSON".to_string())?;
+    let obj = doc
+        .as_object()
+        .ok_or_else(|| "active payload manifest is not valid JSON".to_string())?;
+
+    let compat = obj.get("compatibility_manifest_path");
+    let profile = obj.get("host_abi_profile_path");
+    let receipt = obj.get("approval_path");
+    if compat.is_none() && profile.is_none() && receipt.is_none() {
+        return Ok(None);
+    }
+
+    let (Some(compat_str), Some(profile_str), Some(receipt_str)) = (
+        compat.and_then(|v| v.as_str()),
+        profile.and_then(|v| v.as_str()),
+        receipt.and_then(|v| v.as_str()),
+    ) else {
+        return Err("active payload approval references must be a complete string set".to_string());
+    };
+
+    let compat_gen = parse_approval_generation(compat_str, "compatibility_profiles", payload_id)?;
+    let profile_gen = parse_approval_generation(profile_str, "host_abi_profiles", payload_id)?;
+    let receipt_gen = parse_approval_generation(receipt_str, "approvals", payload_id)?;
+
+    if compat_gen != profile_gen || compat_gen != receipt_gen {
+        return Err("active payload approval references use different generations".to_string());
+    }
+
+    Ok(Some((
+        compat_str.to_string(),
+        profile_str.to_string(),
+        receipt_str.to_string(),
+        compat_gen,
+    )))
+}
+
 #[no_mangle]
 pub extern "C" fn mocktail_rust_runtime_paths_parse_active_manifest(
     json_ptr: *const c_char,
@@ -335,51 +421,17 @@ pub extern "C" fn mocktail_rust_runtime_paths_parse_active_manifest(
         copy_error(err_buf, err_cap, "active payload manifest is not valid JSON");
         return -1;
     };
-    let doc: serde_json::Value = match serde_json::from_str(json_str) {
-        Ok(v) => v,
-        Err(_) => {
-            copy_error(err_buf, err_cap, "active payload manifest is not valid JSON");
-            return -1;
+    match parse_active_manifest_str(json_str) {
+        Ok((id, rel_path)) => {
+            emit_field(on_field, ctx, K_RUNTIME_PATH_FIELD_PAYLOAD_ID, &id);
+            emit_field(on_field, ctx, K_RUNTIME_PATH_FIELD_PAYLOAD_REL, &rel_path);
+            0
         }
-    };
-    let Some(obj) = doc.as_object() else {
-        copy_error(err_buf, err_cap, "active payload manifest is not valid JSON");
-        return -1;
-    };
-
-    let schema_ok = obj.get("schema_version").and_then(|v| v.as_i64()) == Some(1);
-    let payload_id = obj.get("payload_id").and_then(|v| v.as_str());
-    let payload_path = obj.get("payload_path").and_then(|v| v.as_str());
-    let version_name = obj.get("version_name").and_then(|v| v.as_str());
-    let version_code = obj.get("version_code").and_then(|v| v.as_i64()).filter(|&n| n >= 0);
-    let elf_build_id = obj.get("elf_build_id").and_then(|v| v.as_str());
-
-    let (Some(id), Some(rel_path), Some(ver_name), Some(ver_code), Some(build_id)) = (
-        if schema_ok { payload_id } else { None },
-        payload_path,
-        version_name.filter(|s| !s.is_empty()),
-        version_code,
-        elf_build_id,
-    ) else {
-        copy_error(err_buf, err_cap, "active payload manifest has an unsupported schema");
-        return -1;
-    };
-    let _ = ver_name;
-
-    let expected_id = format!("{}-{}", ver_code, build_id);
-    let expected_rel = format!("payloads/{}", id);
-    if id.is_empty()
-        || id != expected_id
-        || rel_path != expected_rel
-        || !is_lower_hex(build_id, 40)
-    {
-        copy_error(err_buf, err_cap, "active payload path is not a direct payloads child");
-        return -1;
+        Err(msg) => {
+            copy_error(err_buf, err_cap, msg);
+            -1
+        }
     }
-
-    emit_field(on_field, ctx, K_RUNTIME_PATH_FIELD_PAYLOAD_ID, id);
-    emit_field(on_field, ctx, K_RUNTIME_PATH_FIELD_PAYLOAD_REL, rel_path);
-    0
 }
 
 #[no_mangle]
@@ -404,79 +456,28 @@ pub extern "C" fn mocktail_rust_runtime_paths_parse_active_approval_refs(
         copy_error(err_buf, err_cap, "invalid payload_id");
         return -1;
     };
-    let doc: serde_json::Value = match serde_json::from_str(json_str) {
-        Ok(v) => v,
-        Err(_) => {
-            copy_error(err_buf, err_cap, "active payload manifest is not valid JSON");
-            return -1;
-        }
-    };
-    let Some(obj) = doc.as_object() else {
-        copy_error(err_buf, err_cap, "active payload manifest is not valid JSON");
-        return -1;
-    };
-
-    let compat = obj.get("compatibility_manifest_path");
-    let profile = obj.get("host_abi_profile_path");
-    let receipt = obj.get("approval_path");
-    if compat.is_none() && profile.is_none() && receipt.is_none() {
-        return 0;
-    }
-
-    let (Some(compat_str), Some(profile_str), Some(receipt_str)) = (
-        compat.and_then(|v| v.as_str()),
-        profile.and_then(|v| v.as_str()),
-        receipt.and_then(|v| v.as_str()),
-    ) else {
-        copy_error(
-            err_buf,
-            err_cap,
-            "active payload approval references must be a complete string set",
-        );
-        return -1;
-    };
-
-    let compat_gen =
-        match parse_approval_generation(compat_str, "compatibility_profiles", payload_id) {
-            Ok(g) => g,
-            Err(e) => {
-                copy_error(err_buf, err_cap, &e);
-                return -1;
+    match parse_active_approval_refs_str(json_str, payload_id) {
+        Ok(None) => 0,
+        Ok(Some((compat_str, profile_str, receipt_str, compat_gen))) => {
+            if !out_has_approval.is_null() {
+                unsafe { *out_has_approval = 1 };
             }
-        };
-    let profile_gen = match parse_approval_generation(profile_str, "host_abi_profiles", payload_id)
-    {
-        Ok(g) => g,
+            emit_field(
+                on_field,
+                ctx,
+                K_RUNTIME_PATH_FIELD_COMPATIBILITY_REL,
+                &compat_str,
+            );
+            emit_field(on_field, ctx, K_RUNTIME_PATH_FIELD_PROFILE_REL, &profile_str);
+            emit_field(on_field, ctx, K_RUNTIME_PATH_FIELD_RECEIPT_REL, &receipt_str);
+            emit_field(on_field, ctx, K_RUNTIME_PATH_FIELD_GENERATION, &compat_gen);
+            0
+        }
         Err(e) => {
             copy_error(err_buf, err_cap, &e);
-            return -1;
+            -1
         }
-    };
-    let receipt_gen = match parse_approval_generation(receipt_str, "approvals", payload_id) {
-        Ok(g) => g,
-        Err(e) => {
-            copy_error(err_buf, err_cap, &e);
-            return -1;
-        }
-    };
-
-    if compat_gen != profile_gen || compat_gen != receipt_gen {
-        copy_error(
-            err_buf,
-            err_cap,
-            "active payload approval references use different generations",
-        );
-        return -1;
     }
-
-    if !out_has_approval.is_null() {
-        unsafe { *out_has_approval = 1 };
-    }
-    emit_field(on_field, ctx, K_RUNTIME_PATH_FIELD_COMPATIBILITY_REL, compat_str);
-    emit_field(on_field, ctx, K_RUNTIME_PATH_FIELD_PROFILE_REL, profile_str);
-    emit_field(on_field, ctx, K_RUNTIME_PATH_FIELD_RECEIPT_REL, receipt_str);
-    emit_field(on_field, ctx, K_RUNTIME_PATH_FIELD_GENERATION, &compat_gen);
-    0
 }
 
 #[no_mangle]
@@ -491,6 +492,781 @@ pub extern "C" fn mocktail_rust_runtime_paths_resolve_adjacent_roblox_asset_path
     let resolved = resolve_adjacent_roblox_asset_path_internal(lib, wd);
     emit_string(on_path, ctx, &resolved);
     0
+}
+
+#[derive(Debug, Default, Clone)]
+pub(crate) struct RuntimePathsEnvInput {
+    pub home: Option<String>,
+    pub working_directory: PathBuf,
+    pub mocktail_config_root: Option<String>,
+    pub xdg_config_home: Option<String>,
+    pub xdg_data_home: Option<String>,
+    pub xdg_cache_home: Option<String>,
+    pub xdg_state_home: Option<String>,
+    pub mocktail_data_root: Option<String>,
+    pub mocktail_cache_root: Option<String>,
+    pub mocktail_state_root: Option<String>,
+    pub mocktail_auth_root: Option<String>,
+    pub use_real_sober_paths: Option<String>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub(crate) struct RuntimePathsData {
+    pub home: PathBuf,
+    pub working_directory: PathBuf,
+    pub sober_data_root: PathBuf,
+    pub sober_cache_root: PathBuf,
+    pub cache_root: PathBuf,
+    pub config_root: PathBuf,
+    pub data_root: PathBuf,
+    pub state_root: PathBuf,
+    pub auth_root: PathBuf,
+    pub payloads_root: PathBuf,
+    pub downloads_root: PathBuf,
+    pub logs_root: PathBuf,
+    pub android_runtime_root: PathBuf,
+    pub android_data_root: PathBuf,
+    pub android_cache_root: PathBuf,
+    pub vulkan_shader_cache_file: PathBuf,
+    pub config_file: PathBuf,
+    pub active_payload_manifest: PathBuf,
+    pub cookie_file: PathBuf,
+    pub use_real_sober_paths: bool,
+}
+
+#[derive(Debug, Default, Clone)]
+pub(crate) struct ActivePayloadPathsData {
+    pub active: bool,
+    pub root: PathBuf,
+    pub roblox_library: PathBuf,
+    pub base_apk: PathBuf,
+    pub arch_split_apk: PathBuf,
+    pub assets_content: PathBuf,
+    pub compatibility_manifest: PathBuf,
+    pub host_abi_profile: PathBuf,
+    pub host_abi_approval_receipt: PathBuf,
+    pub error: String,
+}
+
+impl ActivePayloadPathsData {
+    fn from_error(err: impl Into<String>) -> Self {
+        Self {
+            error: err.into(),
+            ..Self::default()
+        }
+    }
+}
+
+fn non_empty_opt(value: Option<&str>) -> Option<&str> {
+    value.filter(|v| !v.is_empty())
+}
+
+fn xdg_home(configured: Option<&str>, fallback: PathBuf) -> PathBuf {
+    match non_empty_opt(configured) {
+        Some(v) if Path::new(v).is_absolute() => PathBuf::from(v),
+        _ => fallback,
+    }
+}
+
+pub(crate) fn runtime_paths_from_env(input: &RuntimePathsEnvInput) -> RuntimePathsData {
+    let home = PathBuf::from(non_empty_opt(input.home.as_deref()).unwrap_or("/root"));
+    let working_directory = if input.working_directory.as_os_str().is_empty() {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    } else {
+        input.working_directory.clone()
+    };
+
+    let sober_data_root = home.join(".var/app/org.vinegarhq.Sober/data/sober");
+    let sober_cache_root = home.join(".var/app/org.vinegarhq.Sober/cache/sober");
+    let config_root = match non_empty_opt(input.mocktail_config_root.as_deref()) {
+        Some(v) => PathBuf::from(v),
+        None => xdg_home(input.xdg_config_home.as_deref(), home.join(".config")).join("mocktail"),
+    };
+    let xdg_data_home = xdg_home(input.xdg_data_home.as_deref(), home.join(".local/share"));
+    let xdg_cache_home = xdg_home(input.xdg_cache_home.as_deref(), home.join(".cache"));
+    let xdg_state_home = xdg_home(input.xdg_state_home.as_deref(), home.join(".local/state"));
+
+    let data_root = match non_empty_opt(input.mocktail_data_root.as_deref()) {
+        Some(v) => PathBuf::from(v),
+        None => xdg_data_home.join("mocktail"),
+    };
+    let cache_root = match non_empty_opt(input.mocktail_cache_root.as_deref()) {
+        Some(v) => PathBuf::from(v),
+        None => xdg_cache_home.join("mocktail"),
+    };
+    let state_root = match non_empty_opt(input.mocktail_state_root.as_deref()) {
+        Some(v) => PathBuf::from(v),
+        None => xdg_state_home.join("mocktail"),
+    };
+    let auth_root = match non_empty_opt(input.mocktail_auth_root.as_deref()) {
+        Some(v) => PathBuf::from(v),
+        None => data_root.join("auth"),
+    };
+
+    let payloads_root = data_root.join("payloads");
+    let downloads_root = cache_root.join("downloads");
+    let logs_root = state_root.join("logs");
+    let android_runtime_root = data_root.join("android");
+    let android_data_root = android_runtime_root.join("data");
+    let android_cache_root = cache_root.join("android");
+    let vulkan_shader_cache_file = cache_root.join("graphics/shadercachevk.bin");
+    let config_file = config_root.join("config.yaml");
+    let active_payload_manifest = data_root.join("current.json");
+    let cookie_file = auth_root.join("roblox.cookie");
+    let use_real_sober_paths = non_empty_opt(input.use_real_sober_paths.as_deref())
+        .is_some_and(|v| v != "0");
+
+    RuntimePathsData {
+        home,
+        working_directory,
+        sober_data_root,
+        sober_cache_root,
+        cache_root,
+        config_root,
+        data_root,
+        state_root,
+        auth_root,
+        payloads_root,
+        downloads_root,
+        logs_root,
+        android_runtime_root,
+        android_data_root,
+        android_cache_root,
+        vulkan_shader_cache_file,
+        config_file,
+        active_payload_manifest,
+        cookie_file,
+        use_real_sober_paths,
+    }
+}
+
+fn resolve_runtime_approval_file(
+    data_root: &Path,
+    relative: &str,
+    directory_name: &str,
+    payload_id: &str,
+    generation: &str,
+) -> Result<PathBuf, String> {
+    let expected = format!("{}/{}-{}.json", directory_name, payload_id, generation);
+    if relative != expected {
+        return Err(format!(
+            "active payload approval path is not a direct {} child",
+            directory_name
+        ));
+    }
+    let candidate = data_root.join(relative);
+    if !is_real_file_no_symlink(&candidate) {
+        return Err("active payload approval file is missing, invalid, or a symlink".to_string());
+    }
+    let approval_directory = data_root.join(directory_name);
+    if !is_real_dir_no_symlink(&approval_directory) {
+        return Err(
+            "active payload approval directory is missing, invalid, or a symlink".to_string(),
+        );
+    }
+    let canonical_data_root = fs::canonicalize(data_root)
+        .map_err(|_| "cannot canonicalize active payload data root".to_string())?;
+    let canonical_directory = fs::canonicalize(&approval_directory)
+        .map_err(|_| "active payload approval directory escapes the data root".to_string())?;
+    if canonical_directory.parent() != Some(canonical_data_root.as_path()) {
+        return Err("active payload approval directory escapes the data root".to_string());
+    }
+    let canonical_candidate = fs::canonicalize(&candidate)
+        .map_err(|_| "active payload approval file escapes its storage directory".to_string())?;
+    if canonical_candidate.parent() != Some(canonical_directory.as_path()) {
+        return Err("active payload approval file escapes its storage directory".to_string());
+    }
+    Ok(canonical_candidate)
+}
+
+pub(crate) fn resolve_active_payload_data(
+    data_root: &Path,
+    payloads_root: &Path,
+    active_payload_manifest: &Path,
+) -> ActivePayloadPathsData {
+    match fs::symlink_metadata(active_payload_manifest) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return ActivePayloadPathsData::default();
+        }
+        Ok(meta) if !meta.file_type().is_symlink() && meta.is_file() => {}
+        _ => {
+            return ActivePayloadPathsData::from_error(
+                "active payload manifest is invalid or a symlink",
+            );
+        }
+    }
+
+    let manifest_bytes =
+        match read_regular_file_limited(active_payload_manifest, 4 * 1024 * 1024, false, true) {
+            Ok(b) => b,
+            Err(_) => {
+                return ActivePayloadPathsData::from_error(
+                    "active payload manifest is not valid JSON",
+                );
+            }
+        };
+    let Ok(manifest_contents) = std::str::from_utf8(&manifest_bytes) else {
+        return ActivePayloadPathsData::from_error("active payload manifest is not valid JSON");
+    };
+
+    let (id, relative) = match parse_active_manifest_str(manifest_contents) {
+        Ok(parsed) => parsed,
+        Err(err) => return ActivePayloadPathsData::from_error(err),
+    };
+
+    let root = data_root.join(&relative);
+    if !is_real_dir_no_symlink(&root) {
+        return ActivePayloadPathsData::from_error(
+            "active payload root is missing, invalid, or a symlink",
+        );
+    }
+    let Ok(canonical_payloads) = weakly_canonical(payloads_root) else {
+        return ActivePayloadPathsData::from_error("cannot canonicalize payload storage");
+    };
+    let Ok(canonical_root) = fs::canonicalize(&root) else {
+        return ActivePayloadPathsData::from_error("active payload escapes payload storage");
+    };
+    if canonical_root.parent() != Some(canonical_payloads.as_path()) {
+        return ActivePayloadPathsData::from_error("active payload escapes payload storage");
+    }
+
+    let library = canonical_root.join("libroblox.so");
+    let package_root = canonical_root.join("sober_apk");
+    let base_apk = package_root.join("base.apk");
+    let arch_split_apk = package_root.join(guest_abi::SPLIT_APK_FILE);
+    let assets_root = canonical_root.join("assets");
+    let assets = canonical_root.join("assets/content");
+
+    if !is_real_file_no_symlink(&library) {
+        return ActivePayloadPathsData::from_error(
+            "active payload libroblox.so is missing or invalid",
+        );
+    }
+    if !is_real_dir_no_symlink(&package_root) {
+        return ActivePayloadPathsData::from_error(
+            "active payload sober_apk root is missing or invalid",
+        );
+    }
+    for (path, name) in [
+        (&base_apk, "base.apk"),
+        (&arch_split_apk, guest_abi::SPLIT_APK_FILE),
+    ] {
+        if !is_real_file_no_symlink(path) {
+            return ActivePayloadPathsData::from_error(format!(
+                "active payload {} is missing or invalid",
+                name
+            ));
+        }
+    }
+    if !is_real_dir_no_symlink(&assets_root) {
+        return ActivePayloadPathsData::from_error(
+            "active payload assets root is missing or invalid",
+        );
+    }
+    if !is_real_dir_no_symlink(&assets) {
+        return ActivePayloadPathsData::from_error(
+            "active payload assets/content is missing or invalid",
+        );
+    }
+
+    let mut result = ActivePayloadPathsData {
+        active: true,
+        root: canonical_root,
+        roblox_library: library,
+        base_apk,
+        arch_split_apk,
+        assets_content: assets,
+        ..ActivePayloadPathsData::default()
+    };
+
+    match parse_active_approval_refs_str(manifest_contents, &id) {
+        Ok(None) => result,
+        Ok(Some((compat_rel, profile_rel, receipt_rel, generation))) => {
+            let compat = match resolve_runtime_approval_file(
+                data_root,
+                &compat_rel,
+                "compatibility_profiles",
+                &id,
+                &generation,
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    result.active = false;
+                    result.error = e;
+                    return result;
+                }
+            };
+            let profile = match resolve_runtime_approval_file(
+                data_root,
+                &profile_rel,
+                "host_abi_profiles",
+                &id,
+                &generation,
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    result.active = false;
+                    result.error = e;
+                    return result;
+                }
+            };
+            let receipt = match resolve_runtime_approval_file(
+                data_root,
+                &receipt_rel,
+                "approvals",
+                &id,
+                &generation,
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    result.active = false;
+                    result.error = e;
+                    return result;
+                }
+            };
+            result.compatibility_manifest = compat;
+            result.host_abi_profile = profile;
+            result.host_abi_approval_receipt = receipt;
+            result
+        }
+        Err(e) => {
+            result.active = false;
+            result.error = e;
+            result
+        }
+    }
+}
+
+pub(crate) fn default_asset_path_data(
+    data_root: &Path,
+    payloads_root: &Path,
+    active_manifest: &Path,
+    working_directory: &Path,
+    sober_data_root: &Path,
+    use_real_sober_paths: bool,
+) -> PathBuf {
+    let active = resolve_active_payload_data(data_root, payloads_root, active_manifest);
+    if active.error.is_empty() && active.active {
+        return active.assets_content;
+    }
+    let relative = PathBuf::from("rbx_bin/assets/content");
+    if working_directory.join(&relative).exists() {
+        return relative;
+    }
+    let sober_assets = sober_data_root.join("assets/content");
+    if use_real_sober_paths && sober_assets.exists() {
+        return sober_assets;
+    }
+    relative
+}
+
+fn ensure_runtime_directory(path: &Path) -> Result<(), String> {
+    if path.as_os_str().is_empty() {
+        return Err(format!("cannot create resolved runtime path: {}", path.display()));
+    }
+    fs::create_dir_all(path)
+        .map_err(|_| format!("cannot create resolved runtime path: {}", path.display()))?;
+    if !path.is_dir() {
+        return Err(format!("cannot create resolved runtime path: {}", path.display()));
+    }
+    Ok(())
+}
+
+fn set_env_default(name: &str, value: &Path) -> Result<(), String> {
+    if std::env::var_os(name).is_some_and(|v| !v.is_empty()) {
+        return Ok(());
+    }
+    let Ok(c_name) = CString::new(name) else {
+        return Err(format!("cannot export resolved runtime path: {}", name));
+    };
+    let Ok(c_value) = CString::new(value.as_os_str().as_encoded_bytes()) else {
+        return Err(format!("cannot export resolved runtime path: {}", name));
+    };
+    if unsafe { libc::setenv(c_name.as_ptr(), c_value.as_ptr(), 1) } != 0 {
+        return Err(format!("cannot export resolved runtime path: {}", name));
+    }
+    Ok(())
+}
+
+pub(crate) fn export_runtime_path_environment_data(
+    config_root: &Path,
+    android_runtime_root: &Path,
+    android_cache_root: &Path,
+    vulkan_shader_cache_file: &Path,
+) -> Result<(), String> {
+    let shader_parent = vulkan_shader_cache_file.parent().unwrap_or(Path::new(""));
+    for dir in [android_runtime_root, android_cache_root, shader_parent] {
+        ensure_runtime_directory(dir)?;
+    }
+    let texture_dir = config_root.join("textures");
+    set_env_default("MOCKTAIL_RUNTIME_ROOT", android_runtime_root)?;
+    set_env_default("MOCKTAIL_ANDROID_CACHE_HOST_ROOT", android_cache_root)?;
+    set_env_default(
+        "MOCKTAIL_VULKAN_SHADER_CACHE_HOST_PATH",
+        vulkan_shader_cache_file,
+    )?;
+    set_env_default("MOCKTAIL_TEXTURE_OVERRIDE_DIR", &texture_dir)?;
+    Ok(())
+}
+
+struct ManagedPayloadBinding {
+    target: PathBuf,
+    link: PathBuf,
+    name: &'static str,
+}
+
+static MANAGED_LINK_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn prepare_managed_payload_symlinks(data_root: &Path, active_root: &Path) -> Result<(), String> {
+    let rbx_root = data_root.join("rbx_bin");
+    if ensure_runtime_directory(&rbx_root).is_err() {
+        return Err(format!(
+            "cannot prepare managed payload working directory: {}",
+            rbx_root.display()
+        ));
+    }
+    if !is_real_dir_no_symlink(&rbx_root) {
+        return Err(format!(
+            "managed payload rbx_bin root is invalid or a symlink: {}",
+            rbx_root.display()
+        ));
+    }
+
+    let mut bindings = [
+        ManagedPayloadBinding {
+            target: active_root.join("assets"),
+            link: rbx_root.join("assets"),
+            name: "assets",
+        },
+        ManagedPayloadBinding {
+            target: active_root.join("sober_apk"),
+            link: rbx_root.join("sober_apk"),
+            name: "APK directory",
+        },
+        ManagedPayloadBinding {
+            target: active_root.join("libroblox.so"),
+            link: rbx_root.join("libroblox.so"),
+            name: "native library",
+        },
+    ];
+
+    for (idx, binding) in bindings.iter_mut().enumerate() {
+        let valid_target = if idx < 2 {
+            is_real_dir_no_symlink(&binding.target)
+        } else {
+            is_real_file_no_symlink(&binding.target)
+        };
+        if !valid_target {
+            return Err(format!(
+                "managed payload {} target is missing, invalid, or a symlink: {}",
+                binding.name,
+                binding.target.display()
+            ));
+        }
+        binding.target = fs::canonicalize(&binding.target).map_err(|_| {
+            format!(
+                "cannot canonicalize managed payload {} target: {}",
+                binding.name,
+                binding.target.display()
+            )
+        })?;
+
+        match fs::symlink_metadata(&binding.link) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                return Err(format!(
+                    "cannot inspect managed payload {} path: {}",
+                    binding.name,
+                    binding.link.display()
+                ));
+            }
+            Ok(meta) => {
+                if !meta.file_type().is_symlink() {
+                    return Err(format!(
+                        "refusing to replace non-symlink managed payload {} path: {}",
+                        binding.name,
+                        binding.link.display()
+                    ));
+                }
+            }
+        }
+    }
+
+    let pid = current_pid();
+    for binding in &bindings {
+        match fs::read_link(&binding.link) {
+            Ok(current) if current == binding.target => continue,
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                return Err(format!(
+                    "cannot read managed payload {} link: {}",
+                    binding.name,
+                    binding.link.display()
+                ));
+            }
+        }
+
+        let seq = MANAGED_LINK_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let temporary_link = PathBuf::from(format!(
+            "{}.mocktail-next-{}-{}",
+            binding.link.display(),
+            pid,
+            seq
+        ));
+        match fs::symlink_metadata(&temporary_link) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            _ => {
+                return Err(format!(
+                    "managed payload temporary link already exists: {}",
+                    temporary_link.display()
+                ));
+            }
+        }
+        if std::os::unix::fs::symlink(&binding.target, &temporary_link).is_err()
+            || fs::rename(&temporary_link, &binding.link).is_err()
+        {
+            let _ = fs::remove_file(&temporary_link);
+            return Err(format!(
+                "cannot publish managed payload {} link: {}",
+                binding.name,
+                binding.link.display()
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+pub(crate) fn prepare_managed_payload_working_directory_data(
+    data_root: &Path,
+    active_root: &Path,
+    active: bool,
+) -> Result<(), String> {
+    if !active {
+        return Ok(());
+    }
+    prepare_managed_payload_symlinks(data_root, active_root)?;
+    std::env::set_current_dir(data_root).map_err(|_| {
+        format!(
+            "cannot activate managed payload working directory: {}",
+            data_root.display()
+        )
+    })?;
+    Ok(())
+}
+
+#[repr(C)]
+pub struct MocktailRustRuntimeEnvOverridesView {
+    pub home: MocktailRustStrSlice,
+    pub working_directory: MocktailRustStrSlice,
+    pub mocktail_config_root: MocktailRustStrSlice,
+    pub xdg_config_home: MocktailRustStrSlice,
+    pub xdg_data_home: MocktailRustStrSlice,
+    pub xdg_cache_home: MocktailRustStrSlice,
+    pub xdg_state_home: MocktailRustStrSlice,
+    pub mocktail_data_root: MocktailRustStrSlice,
+    pub mocktail_cache_root: MocktailRustStrSlice,
+    pub mocktail_state_root: MocktailRustStrSlice,
+    pub mocktail_auth_root: MocktailRustStrSlice,
+    pub use_real_sober_paths: MocktailRustStrSlice,
+}
+
+#[repr(C)]
+pub struct MocktailRustRuntimePathsView {
+    pub home: MocktailRustStrSlice,
+    pub working_directory: MocktailRustStrSlice,
+    pub sober_data_root: MocktailRustStrSlice,
+    pub sober_cache_root: MocktailRustStrSlice,
+    pub cache_root: MocktailRustStrSlice,
+    pub config_root: MocktailRustStrSlice,
+    pub data_root: MocktailRustStrSlice,
+    pub state_root: MocktailRustStrSlice,
+    pub auth_root: MocktailRustStrSlice,
+    pub payloads_root: MocktailRustStrSlice,
+    pub downloads_root: MocktailRustStrSlice,
+    pub logs_root: MocktailRustStrSlice,
+    pub android_runtime_root: MocktailRustStrSlice,
+    pub android_data_root: MocktailRustStrSlice,
+    pub android_cache_root: MocktailRustStrSlice,
+    pub vulkan_shader_cache_file: MocktailRustStrSlice,
+    pub config_file: MocktailRustStrSlice,
+    pub active_payload_manifest: MocktailRustStrSlice,
+    pub cookie_file: MocktailRustStrSlice,
+    pub use_real_sober_paths: bool,
+}
+
+#[repr(C)]
+pub struct MocktailRustActivePayloadPathsView {
+    pub active: bool,
+    pub root: MocktailRustStrSlice,
+    pub roblox_library: MocktailRustStrSlice,
+    pub base_apk: MocktailRustStrSlice,
+    pub arch_split_apk: MocktailRustStrSlice,
+    pub assets_content: MocktailRustStrSlice,
+    pub compatibility_manifest: MocktailRustStrSlice,
+    pub host_abi_profile: MocktailRustStrSlice,
+    pub host_abi_approval_receipt: MocktailRustStrSlice,
+    pub error: MocktailRustStrSlice,
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_runtime_paths_from_environment(
+    input: *const MocktailRustRuntimeEnvOverridesView,
+    on_result: Option<
+        unsafe extern "C" fn(ctx: *mut c_void, result: *const MocktailRustRuntimePathsView),
+    >,
+    ctx: *mut c_void,
+) {
+    let parsed_input = if input.is_null() {
+        RuntimePathsEnvInput::default()
+    } else {
+        let i = &*input;
+        RuntimePathsEnvInput {
+            home: slice_to_opt_str(i.home),
+            working_directory: slice_to_pathbuf(i.working_directory),
+            mocktail_config_root: slice_to_opt_str(i.mocktail_config_root),
+            xdg_config_home: slice_to_opt_str(i.xdg_config_home),
+            xdg_data_home: slice_to_opt_str(i.xdg_data_home),
+            xdg_cache_home: slice_to_opt_str(i.xdg_cache_home),
+            xdg_state_home: slice_to_opt_str(i.xdg_state_home),
+            mocktail_data_root: slice_to_opt_str(i.mocktail_data_root),
+            mocktail_cache_root: slice_to_opt_str(i.mocktail_cache_root),
+            mocktail_state_root: slice_to_opt_str(i.mocktail_state_root),
+            mocktail_auth_root: slice_to_opt_str(i.mocktail_auth_root),
+            use_real_sober_paths: slice_to_opt_str(i.use_real_sober_paths),
+        }
+    };
+    let out = runtime_paths_from_env(&parsed_input);
+    if let Some(cb) = on_result {
+        let view = MocktailRustRuntimePathsView {
+            home: path_to_slice(&out.home),
+            working_directory: path_to_slice(&out.working_directory),
+            sober_data_root: path_to_slice(&out.sober_data_root),
+            sober_cache_root: path_to_slice(&out.sober_cache_root),
+            cache_root: path_to_slice(&out.cache_root),
+            config_root: path_to_slice(&out.config_root),
+            data_root: path_to_slice(&out.data_root),
+            state_root: path_to_slice(&out.state_root),
+            auth_root: path_to_slice(&out.auth_root),
+            payloads_root: path_to_slice(&out.payloads_root),
+            downloads_root: path_to_slice(&out.downloads_root),
+            logs_root: path_to_slice(&out.logs_root),
+            android_runtime_root: path_to_slice(&out.android_runtime_root),
+            android_data_root: path_to_slice(&out.android_data_root),
+            android_cache_root: path_to_slice(&out.android_cache_root),
+            vulkan_shader_cache_file: path_to_slice(&out.vulkan_shader_cache_file),
+            config_file: path_to_slice(&out.config_file),
+            active_payload_manifest: path_to_slice(&out.active_payload_manifest),
+            cookie_file: path_to_slice(&out.cookie_file),
+            use_real_sober_paths: out.use_real_sober_paths,
+        };
+        cb(ctx, &view);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_runtime_paths_resolve_active_payload(
+    data_root: MocktailRustStrSlice,
+    payloads_root: MocktailRustStrSlice,
+    active_manifest: MocktailRustStrSlice,
+    on_result: Option<
+        unsafe extern "C" fn(ctx: *mut c_void, result: *const MocktailRustActivePayloadPathsView),
+    >,
+    ctx: *mut c_void,
+) {
+    let res = resolve_active_payload_data(
+        &slice_to_pathbuf(data_root),
+        &slice_to_pathbuf(payloads_root),
+        &slice_to_pathbuf(active_manifest),
+    );
+    if let Some(cb) = on_result {
+        let view = MocktailRustActivePayloadPathsView {
+            active: res.active,
+            root: path_to_slice(&res.root),
+            roblox_library: path_to_slice(&res.roblox_library),
+            base_apk: path_to_slice(&res.base_apk),
+            arch_split_apk: path_to_slice(&res.arch_split_apk),
+            assets_content: path_to_slice(&res.assets_content),
+            compatibility_manifest: path_to_slice(&res.compatibility_manifest),
+            host_abi_profile: path_to_slice(&res.host_abi_profile),
+            host_abi_approval_receipt: path_to_slice(&res.host_abi_approval_receipt),
+            error: MocktailRustStrSlice::from_str(&res.error),
+        };
+        cb(ctx, &view);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_runtime_paths_default_asset_path(
+    data_root: MocktailRustStrSlice,
+    payloads_root: MocktailRustStrSlice,
+    active_manifest: MocktailRustStrSlice,
+    working_directory: MocktailRustStrSlice,
+    sober_data_root: MocktailRustStrSlice,
+    use_real_sober_paths: bool,
+    on_result: Option<unsafe extern "C" fn(ctx: *mut c_void, path: MocktailRustStrSlice)>,
+    ctx: *mut c_void,
+) {
+    let resolved = default_asset_path_data(
+        &slice_to_pathbuf(data_root),
+        &slice_to_pathbuf(payloads_root),
+        &slice_to_pathbuf(active_manifest),
+        &slice_to_pathbuf(working_directory),
+        &slice_to_pathbuf(sober_data_root),
+        use_real_sober_paths,
+    );
+    if let Some(cb) = on_result {
+        cb(ctx, path_to_slice(&resolved));
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_runtime_paths_export_environment(
+    config_root: MocktailRustStrSlice,
+    android_runtime_root: MocktailRustStrSlice,
+    android_cache_root: MocktailRustStrSlice,
+    vulkan_shader_cache_file: MocktailRustStrSlice,
+    on_error: Option<unsafe extern "C" fn(ctx: *mut c_void, error: MocktailRustStrSlice)>,
+    ctx: *mut c_void,
+) -> bool {
+    match export_runtime_path_environment_data(
+        &slice_to_pathbuf(config_root),
+        &slice_to_pathbuf(android_runtime_root),
+        &slice_to_pathbuf(android_cache_root),
+        &slice_to_pathbuf(vulkan_shader_cache_file),
+    ) {
+        Ok(()) => true,
+        Err(e) => {
+            if let Some(cb) = on_error {
+                cb(ctx, MocktailRustStrSlice::from_str(&e));
+            }
+            false
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_runtime_paths_prepare_managed_working_dir(
+    data_root: MocktailRustStrSlice,
+    active_root: MocktailRustStrSlice,
+    active: bool,
+    on_error: Option<unsafe extern "C" fn(ctx: *mut c_void, error: MocktailRustStrSlice)>,
+    ctx: *mut c_void,
+) -> bool {
+    match prepare_managed_payload_working_directory_data(
+        &slice_to_pathbuf(data_root),
+        &slice_to_pathbuf(active_root),
+        active,
+    ) {
+        Ok(()) => true,
+        Err(e) => {
+            if let Some(cb) = on_error {
+                cb(ctx, MocktailRustStrSlice::from_str(&e));
+            }
+            false
+        }
+    }
 }
 
 // ============================================================================
@@ -2370,5 +3146,86 @@ mod tests {
             &payload_id,
             1
         ));
+    }
+
+    #[test]
+    fn runtime_paths_from_env_resolve_active_and_symlink_guards() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "mocktail-runtime-paths-rust-{}-{}",
+            std::process::id(),
+            nonce
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let paths = runtime_paths_from_env(&RuntimePathsEnvInput {
+            home: Some("/home/tester".to_string()),
+            working_directory: root.clone(),
+            xdg_config_home: Some("relative/config".to_string()),
+            xdg_data_home: Some("/custom/data".to_string()),
+            mocktail_cache_root: Some("/explicit/cache".to_string()),
+            use_real_sober_paths: Some("1".to_string()),
+            ..RuntimePathsEnvInput::default()
+        });
+        assert_eq!(paths.config_root, PathBuf::from("/home/tester/.config/mocktail"));
+        assert_eq!(paths.data_root, PathBuf::from("/custom/data/mocktail"));
+        assert_eq!(paths.cache_root, PathBuf::from("/explicit/cache"));
+        assert!(paths.use_real_sober_paths);
+
+        let data = root.join("data");
+        let build_id = "d0cb1fa0deb3d9161b4cd77530cbcd2e50de3a21";
+        let payload_id = format!("2546-{}", build_id);
+        let payload_root = data.join("payloads").join(&payload_id);
+        fs::create_dir_all(payload_root.join("assets/content")).unwrap();
+        fs::create_dir_all(payload_root.join("sober_apk")).unwrap();
+        fs::write(payload_root.join("libroblox.so"), b"elf").unwrap();
+        fs::write(payload_root.join("sober_apk/base.apk"), b"apk").unwrap();
+        fs::write(
+            payload_root.join("sober_apk").join(guest_abi::SPLIT_APK_FILE),
+            b"split",
+        )
+        .unwrap();
+
+        let gen = "1111111111111111111111111111111111111111";
+        let app_name = format!("{}-{}.json", payload_id, gen);
+        for dir in ["compatibility_profiles", "host_abi_profiles", "approvals"] {
+            fs::create_dir_all(data.join(dir)).unwrap();
+            fs::write(data.join(dir).join(&app_name), b"{}").unwrap();
+        }
+        let manifest_path = data.join("current.json");
+        let manifest = serde_json::json!({
+            "schema_version": 1,
+            "payload_id": payload_id,
+            "payload_path": format!("payloads/{}", payload_id),
+            "version_name": "2.725.1142",
+            "version_code": 2546,
+            "elf_build_id": build_id,
+            "compatibility_manifest_path": format!("compatibility_profiles/{}", app_name),
+            "host_abi_profile_path": format!("host_abi_profiles/{}", app_name),
+            "approval_path": format!("approvals/{}", app_name),
+        });
+        fs::write(&manifest_path, manifest.to_string()).unwrap();
+
+        let active = resolve_active_payload_data(&data, &data.join("payloads"), &manifest_path);
+        assert!(active.error.is_empty(), "unexpected error: {}", active.error);
+        assert!(active.active);
+        assert_eq!(active.assets_content, active.root.join("assets/content"));
+
+        prepare_managed_payload_symlinks(&data, &active.root).unwrap();
+        assert_eq!(
+            fs::read_link(data.join("rbx_bin/libroblox.so")).unwrap(),
+            active.root.join("libroblox.so")
+        );
+
+        let _ = fs::remove_dir_all(data.join("rbx_bin"));
+        fs::create_dir_all(data.join("rbx_bin/sober_apk")).unwrap();
+        let err = prepare_managed_payload_symlinks(&data, &active.root).unwrap_err();
+        assert!(err.contains("refusing to replace non-symlink"));
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

@@ -23,6 +23,8 @@ pub mod discord_rpc;
 pub use discord_rpc::*;
 pub mod external_launch_broker;
 pub use external_launch_broker::*;
+pub mod http_download;
+pub use http_download::*;
 pub mod input_router;
 pub use input_router::*;
 pub mod micup_rpc;
@@ -1800,12 +1802,26 @@ pub(crate) struct SupportedProfile {
     pub elf_build_id: String,
 }
 
+#[cfg(target_arch = "aarch64")]
+pub(crate) mod guest_abi {
+    pub(crate) const ABI: &str = "arm64-v8a";
+    pub(crate) const SPLIT_NAME: &str = "config.arm64_v8a";
+    pub(crate) const SPLIT_APK_FILE: &str = "split_config.arm64_v8a.apk";
+    pub(crate) const SPLIT_APK_HASH_KEY: &str = "arm64_v8a_split_apk";
+    pub(crate) const ELF_MACHINE: u16 = 183; // EM_AARCH64
+}
+
+#[cfg(target_arch = "x86_64")]
+pub(crate) mod guest_abi {
+    pub(crate) const ABI: &str = "x86_64";
+    pub(crate) const SPLIT_NAME: &str = "config.x86_64";
+    pub(crate) const SPLIT_APK_FILE: &str = "split_config.x86_64.apk";
+    pub(crate) const SPLIT_APK_HASH_KEY: &str = "x86_64_split_apk";
+    pub(crate) const ELF_MACHINE: u16 = 62; // EM_X86_64
+}
+
 pub(crate) fn host_guest_abi() -> &'static str {
-    if cfg!(target_arch = "aarch64") {
-        "arm64-v8a"
-    } else {
-        "x86_64"
-    }
+    guest_abi::ABI
 }
 
 pub(crate) fn parse_compatibility_catalog_bytes(
@@ -8642,21 +8658,15 @@ pub extern "C" fn mocktail_rust_audio_spec_equals(
 // 53. Update Coordinator & Download Preflight Helpers
 // ============================================================================
 
-#[no_mangle]
-pub unsafe extern "C" fn mocktail_rust_update_host_matches(
-    host: *const c_char,
-    host_len: usize,
-    allowed: *const c_char,
-    allowed_len: usize,
-) -> bool {
-    if host.is_null() || allowed.is_null() || host_len == 0 || allowed_len == 0 {
+pub(crate) fn host_matches_bytes(host_s: &[u8], allowed_s: &[u8]) -> bool {
+    if host_s.is_empty() || allowed_s.is_empty() {
         return false;
     }
-    let host_s = std::slice::from_raw_parts(host as *const u8, host_len);
-    let allowed_s = std::slice::from_raw_parts(allowed as *const u8, allowed_len);
-
     if host_s.len() == allowed_s.len() {
-        return host_s.iter().zip(allowed_s.iter()).all(|(a, b)| a.to_ascii_lowercase() == b.to_ascii_lowercase());
+        return host_s
+            .iter()
+            .zip(allowed_s.iter())
+            .all(|(a, b)| a.to_ascii_lowercase() == b.to_ascii_lowercase());
     }
     if host_s.len() > allowed_s.len() {
         let prefix_len = host_s.len() - allowed_s.len();
@@ -8671,23 +8681,46 @@ pub unsafe extern "C" fn mocktail_rust_update_host_matches(
     false
 }
 
+pub(crate) fn is_redirect_status_code(status_code: i64) -> bool {
+    matches!(status_code, 301 | 302 | 303 | 307 | 308)
+}
+
+pub(crate) fn is_retryable_status_code(status_code: i64) -> bool {
+    status_code == 408 || status_code == 425 || status_code == 429 || status_code >= 500
+}
+
+pub(crate) fn is_retryable_curl_code_val(code: i32) -> bool {
+    matches!(code, 7 | 6 | 5 | 28 | 18 | 56 | 55 | 52 | 35)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mocktail_rust_update_host_matches(
+    host: *const c_char,
+    host_len: usize,
+    allowed: *const c_char,
+    allowed_len: usize,
+) -> bool {
+    if host.is_null() || allowed.is_null() || host_len == 0 || allowed_len == 0 {
+        return false;
+    }
+    let host_s = std::slice::from_raw_parts(host as *const u8, host_len);
+    let allowed_s = std::slice::from_raw_parts(allowed as *const u8, allowed_len);
+    host_matches_bytes(host_s, allowed_s)
+}
+
 #[no_mangle]
 pub extern "C" fn mocktail_rust_update_is_redirect_status(status_code: i64) -> bool {
-    status_code == 301
-        || status_code == 302
-        || status_code == 303
-        || status_code == 307
-        || status_code == 308
+    is_redirect_status_code(status_code)
 }
 
 #[no_mangle]
 pub extern "C" fn mocktail_rust_update_is_retryable_status(status_code: i64) -> bool {
-    status_code == 408 || status_code == 425 || status_code == 429 || status_code >= 500
+    is_retryable_status_code(status_code)
 }
 
 #[no_mangle]
 pub extern "C" fn mocktail_rust_update_is_retryable_curl_code(code: i32) -> bool {
-    matches!(code, 7 | 6 | 5 | 28 | 18 | 56 | 55 | 52 | 35)
+    is_retryable_curl_code_val(code)
 }
 
 pub(crate) fn evaluate_update_plan(

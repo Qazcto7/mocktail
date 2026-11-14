@@ -993,6 +993,34 @@ pub extern "C" fn mocktail_rust_pinned_apk_find_source(
 // 6. HTTP Resume ETag State Helpers
 // ============================================================================
 
+pub(crate) fn read_http_resume_etag_internal(state_path: &Path, expected_url: &str) -> Option<String> {
+    let path_str = state_path.to_str()?;
+    let (_, doc) = read_update_state_json_string(path_str)?;
+    let obj = doc.as_object()?;
+    if obj.get("url").and_then(|v| v.as_str()) != Some(expected_url) {
+        return None;
+    }
+    obj.get("etag")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+pub(crate) fn write_http_resume_state_internal(
+    state_path: &Path,
+    url: &str,
+    etag: &str,
+) -> Result<(), ()> {
+    let mut root = serde_json::Map::new();
+    root.insert("etag".into(), Value::String(etag.to_string()));
+    root.insert("url".into(), Value::String(url.to_string()));
+    let mut rendered = serde_json::to_string_pretty(&Value::Object(root)).map_err(|_| ())?;
+    rendered.push('\n');
+    if let Some(parent) = state_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent).map_err(|_| ())?;
+    }
+    write_atomic_bytes(state_path, rendered.as_bytes()).map_err(|_| ())
+}
+
 #[no_mangle]
 pub extern "C" fn mocktail_rust_http_read_resume_etag(
     state_path: *const c_char,
@@ -1006,19 +1034,10 @@ pub extern "C" fn mocktail_rust_http_read_resume_etag(
     let (Some(path_str), Some(url_str)) = (c_str_opt(state_path), c_str_opt(expected_url)) else {
         return -1;
     };
-    let Some((_, doc)) = read_update_state_json_string(path_str) else {
+    let Some(etag) = read_http_resume_etag_internal(Path::new(path_str), url_str) else {
         return 1;
     };
-    let Some(obj) = doc.as_object() else {
-        return 1;
-    };
-    if obj.get("url").and_then(|v| v.as_str()) != Some(url_str) {
-        return 1;
-    }
-    let Some(etag) = obj.get("etag").and_then(|v| v.as_str()) else {
-        return 1;
-    };
-    copy_to_c_buffer(etag, out_etag, etag_cap)
+    copy_to_c_buffer(&etag, out_etag, etag_cap)
 }
 
 #[no_mangle]
@@ -1032,20 +1051,7 @@ pub extern "C" fn mocktail_rust_http_write_resume_state(
     else {
         return -1;
     };
-    let mut root = serde_json::Map::new();
-    root.insert("etag".into(), Value::String(etag_str.to_string()));
-    root.insert("url".into(), Value::String(url_str.to_string()));
-    let Ok(mut rendered) = serde_json::to_string_pretty(&Value::Object(root)) else {
-        return -1;
-    };
-    rendered.push('\n');
-    let path = Path::new(path_str);
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        if fs::create_dir_all(parent).is_err() {
-            return -1;
-        }
-    }
-    if write_atomic_bytes(path, rendered.as_bytes()).is_err() {
+    if write_http_resume_state_internal(Path::new(path_str), url_str, etag_str).is_err() {
         return -1;
     }
     0
