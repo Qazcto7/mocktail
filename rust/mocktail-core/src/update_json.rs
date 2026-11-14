@@ -1,6 +1,4 @@
-use crate::storage_paths::{
-    c_str_opt, emit_string, is_lower_hex, slice_to_str, MocktailPayloadStoreStringCallback,
-};
+use crate::storage_paths::{c_str_opt, emit_string, is_lower_hex, MocktailPayloadStoreStringCallback};
 use crate::{
     apkpure_collect_exact_urls, compute_approval_generation_hex, copy_error, copy_to_c_buffer,
     internal_inspect_payload, mocktail_rust_pinned_apk_archive_filename_valid,
@@ -63,58 +61,6 @@ pub struct MocktailRustPayloadInfoView {
 
 pub type MocktailPayloadInfoCallback =
     Option<unsafe extern "C" fn(ctx: *mut c_void, info: *const MocktailRustPayloadInfoView)>;
-
-#[repr(C)]
-pub struct MocktailRustApkMetadataRequest {
-    pub version_name: *const c_char,
-    pub version_code: u64,
-    pub abi: *const c_char,
-    pub elf_build_id: *const c_char,
-    pub library_sha256: *const c_char,
-    pub base_apk_sha256: *const c_char,
-    pub split_apk_hash_key: *const c_char,
-    pub split_apk_sha256: *const c_char,
-    pub signing_certs: *const *const c_char,
-    pub signing_certs_count: usize,
-    pub asset_file_count: usize,
-    pub asset_tree_sha256: *const c_char,
-    pub source: *const c_char,
-    pub imported_at: *const c_char,
-    pub exact_supported: bool,
-    pub monolithic: bool,
-}
-
-pub type MocktailCandidateActivationCallback = Option<
-    unsafe extern "C" fn(
-        ctx: *mut c_void,
-        generation: *const c_char,
-        gen_len: usize,
-        approval_ref: *const c_char,
-        approval_len: usize,
-        profile_ref: *const c_char,
-        profile_len: usize,
-        compat_ref: *const c_char,
-        compat_len: usize,
-    ),
->;
-
-#[repr(C)]
-pub struct MocktailRustCandidateEvidenceRequest {
-    pub receipt_ptr: *const c_char,
-    pub receipt_len: usize,
-    pub canary1_ptr: *const c_char,
-    pub canary1_len: usize,
-    pub canary2_ptr: *const c_char,
-    pub canary2_len: usize,
-    pub payload_id: *const c_char,
-    pub generation: *const c_char,
-    pub canonical_library_path: *const c_char,
-    pub elf_build_id: *const c_char,
-    pub library_sha256: *const c_char,
-    pub fingerprint: *const c_char,
-    pub profile_sha256: *const c_char,
-    pub compatibility_sha256: *const c_char,
-}
 
 pub type MocktailTrustedUrlCallback =
     Option<unsafe extern "C" fn(ctx: *mut c_void, url: *const c_char, url_len: usize) -> bool>;
@@ -324,33 +270,6 @@ pub(crate) fn parse_trusted_certificates_internal(
     Ok(trusted)
 }
 
-#[no_mangle]
-pub extern "C" fn mocktail_rust_apk_parse_trusted_certificates(
-    json_ptr: *const c_char,
-    json_len: usize,
-    on_sha256: MocktailPayloadStoreStringCallback,
-    ctx: *mut c_void,
-    out_err: *mut c_char,
-    err_cap: usize,
-) -> c_int {
-    let Some(contents) = slice_to_str(json_ptr, json_len) else {
-        copy_error(out_err, err_cap, "Roblox signing trust manifest is invalid");
-        return -1;
-    };
-    match parse_trusted_certificates_internal(contents) {
-        Ok(trusted) => {
-            for digest in trusted {
-                emit_string(on_sha256, ctx, &digest);
-            }
-            0
-        }
-        Err(msg) => {
-            copy_error(out_err, err_cap, msg);
-            -1
-        }
-    }
-}
-
 pub(crate) struct ApkPayloadMetadataParams<'a> {
     pub version_name: &'a str,
     pub version_code: u64,
@@ -445,80 +364,6 @@ pub(crate) fn build_apk_payload_metadata_json(params: &ApkPayloadMetadataParams<
     Some(rendered)
 }
 
-#[no_mangle]
-pub extern "C" fn mocktail_rust_apk_build_payload_metadata(
-    req: *const MocktailRustApkMetadataRequest,
-    on_json: MocktailPayloadStoreStringCallback,
-    ctx: *mut c_void,
-) -> c_int {
-    if req.is_null() {
-        return -1;
-    }
-    let inp = unsafe { &*req };
-    let (
-        Some(version_name),
-        Some(abi),
-        Some(elf_build_id),
-        Some(library_sha256),
-        Some(base_apk_sha256),
-        Some(split_apk_hash_key),
-        Some(split_apk_sha256),
-        Some(asset_tree_sha256),
-        Some(source),
-        Some(imported_at),
-    ) = (
-        c_str_opt(inp.version_name),
-        c_str_opt(inp.abi),
-        c_str_opt(inp.elf_build_id),
-        c_str_opt(inp.library_sha256),
-        c_str_opt(inp.base_apk_sha256),
-        c_str_opt(inp.split_apk_hash_key),
-        c_str_opt(inp.split_apk_sha256),
-        c_str_opt(inp.asset_tree_sha256),
-        c_str_opt(inp.source),
-        c_str_opt(inp.imported_at),
-    )
-    else {
-        return -1;
-    };
-
-    let mut certs = Vec::with_capacity(inp.signing_certs_count);
-    if inp.signing_certs_count > 0 {
-        if inp.signing_certs.is_null() {
-            return -1;
-        }
-        let ptrs = unsafe { std::slice::from_raw_parts(inp.signing_certs, inp.signing_certs_count) };
-        for &cert_ptr in ptrs {
-            let Some(cert) = c_str_opt(cert_ptr) else {
-                return -1;
-            };
-            certs.push(cert);
-        }
-    }
-
-    let Some(rendered) = build_apk_payload_metadata_json(&ApkPayloadMetadataParams {
-        version_name,
-        version_code: inp.version_code,
-        abi,
-        elf_build_id,
-        library_sha256,
-        base_apk_sha256,
-        split_apk_hash_key,
-        split_apk_sha256,
-        signing_certs: &certs,
-        asset_file_count: inp.asset_file_count,
-        asset_tree_sha256,
-        source,
-        imported_at,
-        exact_supported: inp.exact_supported,
-        monolithic: inp.monolithic,
-    }) else {
-        return -1;
-    };
-    emit_string(on_json, ctx, &rendered);
-    0
-}
-
 // ============================================================================
 // 4. Candidate Approval Activation & Evidence Verification
 // ============================================================================
@@ -574,50 +419,6 @@ pub(crate) fn parse_candidate_activation_json(
         profile_ref: profile_ref.to_string(),
         compatibility_ref: compat_ref.to_string(),
     })
-}
-
-#[no_mangle]
-pub extern "C" fn mocktail_rust_candidate_approval_parse_activation(
-    activation_ptr: *const c_char,
-    activation_len: usize,
-    payload_id_ptr: *const c_char,
-    on_parsed: MocktailCandidateActivationCallback,
-    ctx: *mut c_void,
-    out_err: *mut c_char,
-    err_cap: usize,
-) -> c_int {
-    let Some(payload_id) = c_str_opt(payload_id_ptr) else {
-        copy_error(out_err, err_cap, "invalid arguments");
-        return -1;
-    };
-    let Some(json_str) = slice_to_str(activation_ptr, activation_len) else {
-        copy_error(out_err, err_cap, "approval artifact is not a JSON object");
-        return -1;
-    };
-    let refs = match parse_candidate_activation_json(json_str, payload_id) {
-        Ok(r) => r,
-        Err(msg) => {
-            copy_error(out_err, err_cap, msg);
-            return -1;
-        }
-    };
-
-    if let Some(cb) = on_parsed {
-        unsafe {
-            cb(
-                ctx,
-                refs.generation.as_ptr() as *const c_char,
-                refs.generation.len(),
-                refs.approval_ref.as_ptr() as *const c_char,
-                refs.approval_ref.len(),
-                refs.profile_ref.as_ptr() as *const c_char,
-                refs.profile_ref.len(),
-                refs.compatibility_ref.as_ptr() as *const c_char,
-                refs.compatibility_ref.len(),
-            );
-        }
-    }
-    0
 }
 
 fn sha256_lower_hex(bytes: &[u8]) -> String {
@@ -748,68 +549,6 @@ pub(crate) fn verify_candidate_evidence_json(
         return Err("approval evidence generation does not match");
     }
     Ok(())
-}
-
-#[no_mangle]
-pub extern "C" fn mocktail_rust_candidate_approval_verify_evidence(
-    req: *const MocktailRustCandidateEvidenceRequest,
-    out_err: *mut c_char,
-    err_cap: usize,
-) -> c_int {
-    if req.is_null() {
-        copy_error(out_err, err_cap, "invalid arguments");
-        return -1;
-    }
-    let inp = unsafe { &*req };
-    let (
-        Some(payload_id),
-        Some(generation),
-        Some(canonical_library_path),
-        Some(elf_build_id),
-        Some(library_sha256),
-        Some(fingerprint),
-        Some(profile_sha256),
-        Some(compatibility_sha256),
-        Some(receipt_str),
-        Some(canary1_str),
-        Some(canary2_str),
-    ) = (
-        c_str_opt(inp.payload_id),
-        c_str_opt(inp.generation),
-        c_str_opt(inp.canonical_library_path),
-        c_str_opt(inp.elf_build_id),
-        c_str_opt(inp.library_sha256),
-        c_str_opt(inp.fingerprint),
-        c_str_opt(inp.profile_sha256),
-        c_str_opt(inp.compatibility_sha256),
-        slice_to_str(inp.receipt_ptr, inp.receipt_len),
-        slice_to_str(inp.canary1_ptr, inp.canary1_len),
-        slice_to_str(inp.canary2_ptr, inp.canary2_len),
-    )
-    else {
-        copy_error(out_err, err_cap, "approval artifact is not a JSON object");
-        return -1;
-    };
-
-    match verify_candidate_evidence_json(&CandidateEvidenceParams {
-        payload_id,
-        generation,
-        canonical_library_path,
-        elf_build_id,
-        library_sha256,
-        fingerprint,
-        profile_sha256,
-        compatibility_sha256,
-        receipt_str,
-        canary1_str,
-        canary2_str,
-    }) {
-        Ok(()) => 0,
-        Err(msg) => {
-            copy_error(out_err, err_cap, msg);
-            -1
-        }
-    }
 }
 
 // ============================================================================
@@ -1019,42 +758,6 @@ pub(crate) fn write_http_resume_state_internal(
         fs::create_dir_all(parent).map_err(|_| ())?;
     }
     write_atomic_bytes(state_path, rendered.as_bytes()).map_err(|_| ())
-}
-
-#[no_mangle]
-pub extern "C" fn mocktail_rust_http_read_resume_etag(
-    state_path: *const c_char,
-    expected_url: *const c_char,
-    out_etag: *mut c_char,
-    etag_cap: usize,
-) -> c_int {
-    if !out_etag.is_null() && etag_cap > 0 {
-        unsafe { *out_etag = 0 };
-    }
-    let (Some(path_str), Some(url_str)) = (c_str_opt(state_path), c_str_opt(expected_url)) else {
-        return -1;
-    };
-    let Some(etag) = read_http_resume_etag_internal(Path::new(path_str), url_str) else {
-        return 1;
-    };
-    copy_to_c_buffer(&etag, out_etag, etag_cap)
-}
-
-#[no_mangle]
-pub extern "C" fn mocktail_rust_http_write_resume_state(
-    state_path: *const c_char,
-    url: *const c_char,
-    etag: *const c_char,
-) -> c_int {
-    let (Some(path_str), Some(url_str), Some(etag_str)) =
-        (c_str_opt(state_path), c_str_opt(url), c_str_opt(etag))
-    else {
-        return -1;
-    };
-    if write_http_resume_state_internal(Path::new(path_str), url_str, etag_str).is_err() {
-        return -1;
-    }
-    0
 }
 
 // ============================================================================
@@ -1280,20 +983,6 @@ pub extern "C" fn mocktail_rust_update_state_save_phase(
     }
     if let Some(phase_str) = c_str_opt(phase) {
         unsafe { (*state).save_phase(phase_str) };
-    }
-}
-
-/// Sets the updater metadata status field in memory.
-#[no_mangle]
-pub extern "C" fn mocktail_rust_update_state_set_metadata_status(
-    state: *mut MocktailRustUpdateState,
-    status: *const c_char,
-) {
-    if state.is_null() {
-        return;
-    }
-    if let Some(status_str) = c_str_opt(status) {
-        unsafe { (*state).set_metadata_status(status_str) };
     }
 }
 

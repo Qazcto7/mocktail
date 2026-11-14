@@ -1124,30 +1124,24 @@ ssize_t __sendto_chk(int socket_fd, const void* buf, size_t len, size_t buf_len,
   return CallHostSendto(socket_fd, buf, len, flags, dest, dest_len);
 }
 void __FD_SET_chk(int fd, fd_set* set, size_t set_len) {
-  if (set_len < sizeof(fd_set)) {
+  if (set_len < sizeof(fd_set) || fd < 0 || fd >= FD_SETSIZE) {
     errno = ERANGE;
     return;
   }
   FD_SET(fd, set);
 }
 void __FD_CLR_chk(int fd, fd_set* set, size_t set_len) {
-  if (set_len < sizeof(fd_set)) {
+  if (set_len < sizeof(fd_set) || fd < 0 || fd >= FD_SETSIZE) {
     errno = ERANGE;
     return;
   }
   FD_CLR(fd, set);
 }
 int __FD_ISSET_chk(int fd, fd_set* set, size_t set_len) {
-  if (set_len < sizeof(fd_set)) {
+  if (set_len < sizeof(fd_set) || fd < 0 || fd >= FD_SETSIZE) {
     errno = ERANGE;
     return 0;
   }
   return FD_ISSET(fd, set);
 }
-extern void* mocktail_gameactivity_on_start_native;
-extern void* mocktail_gameactivity_on_resume_native;
-extern void* mocktail_gameactivity_on_surface_created_native;
-extern void* mocktail_gameactivity_on_surface_changed_native;
-extern void* mocktail_gameactivity_on_surface_redraw_needed_native;
-extern void* mocktail_gameactivity_on_trim_memory_native;
 }  // extern "C"

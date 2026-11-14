@@ -10,7 +10,6 @@ namespace jnivm::internal {
 
 jstring MakeString(const char* utf);
 jstring MakeUtf16String(const jchar* utf16, jsize length);
-std::string_view StringViewFromJString(jstring str);
 std::string StringFromJString(jstring str);
 jbyteArray JavaStringGetUtf8Bytes(jobject obj, jstring charset_name);
 const char* StringChars(jstring str);

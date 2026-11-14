@@ -144,6 +144,8 @@ class RobloxExperienceComposition final {
   Status Shutdown();
 
   bool subscribed() const;
+  bool launch_in_progress() const;
+  bool game_active() const;
   GameSessionSnapshot Snapshot() const;
 
  private:

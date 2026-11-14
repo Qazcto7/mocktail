@@ -104,7 +104,6 @@ bool IsThreadLocalEnvValid() {
 std::list<std::string> g_method_name_storage;
 std::list<std::string> g_method_signature_storage;
 std::unordered_map<std::string, jmethodID> g_method_ids;
-std::unordered_map<jobject, jlong> g_direct_buffer_capacities;
 bool g_android_graph_ready = false;
 bool g_fmod_initialized = true;
 constexpr jlong kLocalStorageUninitializedUser = -2;
@@ -5619,6 +5618,7 @@ void VM::InitJNIFunctionTables() {
     if (g_thread_vm_instance != owner || !IsThreadLocalEnvValid()) {
       return JNI_EDETACHED;
     }
+    jnivm::internal::ReleaseAllLocalJniFrames();
     g_thread_audio_fp_mode.Restore();
     g_thread_local_env = nullptr;
     g_thread_vm_instance = nullptr;
@@ -6782,8 +6782,7 @@ void VM::InitJNIFunctionTables() {
       return nullptr;
     }
     const jobject buffer = reinterpret_cast<jobject>(address);
-    std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
-    g_direct_buffer_capacities[buffer] = capacity;
+    jnivm::internal::RegisterDirectBufferCapacity(buffer, capacity);
     return buffer;
   };
 
@@ -6794,9 +6793,7 @@ void VM::InitJNIFunctionTables() {
 
   native_interface_.GetDirectBufferCapacity = [](JNIEnv * /*env*/,
                                                  jobject buf) -> jlong {
-    std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
-    const auto found = g_direct_buffer_capacities.find(buf);
-    return found != g_direct_buffer_capacities.end() ? found->second : -1;
+    return jnivm::internal::DirectBufferCapacityValue(buf);
   };
 
   native_interface_.MonitorEnter =

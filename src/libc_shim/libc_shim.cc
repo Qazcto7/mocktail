@@ -11,6 +11,9 @@
 #include <filesystem>
 #include <iostream>
 #include <limits.h>
+#include <mutex>
+#include <shared_mutex>
+#include <string_view>
 #include <unordered_map>
 #include <unistd.h>
 #include <vector>
@@ -19,6 +22,7 @@ namespace libc_shim {
 
 namespace {
 
+std::shared_mutex g_path_mappings_mutex;
 std::unordered_map<std::string, std::string> g_path_mappings;
 std::vector<std::string> g_ca_bundle_aliases;
 
@@ -72,7 +76,7 @@ std::string DefaultDataRoot() {
   return RuntimeRoot() + "/data";
 }
 
-bool PrefixMatchesPath(const std::string& path, const std::string& prefix) {
+bool PrefixMatchesPath(std::string_view path, std::string_view prefix) {
   if (path.size() < prefix.size()) {
     return false;
   }
@@ -80,6 +84,26 @@ bool PrefixMatchesPath(const std::string& path, const std::string& prefix) {
     return false;
   }
   return path.size() == prefix.size() || path[prefix.size()] == '/';
+}
+
+bool TranslatePathLocked(std::string_view android_path,
+                         std::string* translated) {
+  const std::string* best_android_prefix = nullptr;
+  const std::string* best_host_prefix = nullptr;
+  for (const auto& [android_prefix, host_prefix] : g_path_mappings) {
+    if (PrefixMatchesPath(android_path, android_prefix) &&
+        (best_android_prefix == nullptr ||
+         android_prefix.size() > best_android_prefix->size())) {
+      best_android_prefix = &android_prefix;
+      best_host_prefix = &host_prefix;
+    }
+  }
+  if (best_android_prefix != nullptr && best_host_prefix != nullptr) {
+    translated->assign(*best_host_prefix);
+    translated->append(android_path.substr(best_android_prefix->size()));
+    return true;
+  }
+  return false;
 }
 
 bool ValidateHostCaBundle(const char* path, std::string* canonical_path) {
@@ -201,22 +225,28 @@ HostCaBundleResolution ResolveHostCaBundle() {
 }
 
 HostCaBundleResolution ConfigureHostCaBundlePathMappings() {
-  for (const auto& alias : g_ca_bundle_aliases) g_path_mappings.erase(alias);
-  g_ca_bundle_aliases.assign(kAndroidCaBundlePaths.begin(), kAndroidCaBundlePaths.end());
-  if (const char* content = GetEnvNonEmpty("MOCKTAIL_ASSET_PATH")) {
-    auto root = std::filesystem::path(content).lexically_normal();
-    if (root.filename().empty()) root = root.parent_path();
-    g_ca_bundle_aliases.push_back((root / "ssl/cacert.pem").string());
-    if (root.filename() == "content")
-      g_ca_bundle_aliases.push_back((root.parent_path() / "ssl/cacert.pem").string());
+  {
+    std::unique_lock<std::shared_mutex> lock(g_path_mappings_mutex);
+    for (const auto& alias : g_ca_bundle_aliases) g_path_mappings.erase(alias);
+    g_ca_bundle_aliases.assign(kAndroidCaBundlePaths.begin(),
+                               kAndroidCaBundlePaths.end());
+    if (const char* content = GetEnvNonEmpty("MOCKTAIL_ASSET_PATH")) {
+      auto root = std::filesystem::path(content).lexically_normal();
+      if (root.filename().empty()) root = root.parent_path();
+      g_ca_bundle_aliases.push_back((root / "ssl/cacert.pem").string());
+      if (root.filename() == "content")
+        g_ca_bundle_aliases.push_back(
+            (root.parent_path() / "ssl/cacert.pem").string());
+    }
   }
 
   HostCaBundleResolution resolution = ResolveHostCaBundle();
   if (!resolution.ok()) {
     return resolution;
   }
+  std::unique_lock<std::shared_mutex> lock(g_path_mappings_mutex);
   for (const auto& alias : g_ca_bundle_aliases)
-    RegisterPathMapping(alias, resolution.host_path);
+    g_path_mappings[alias] = resolution.host_path;
   return resolution;
 }
 
@@ -293,34 +323,32 @@ void Install() {
                       data_root + "/sdcard/Android/data/com.roblox.client");
   EnsureDefaultDataLayout(data_root);
 
+  std::size_t mapping_count = 0;
+  {
+    std::shared_lock<std::shared_mutex> lock(g_path_mappings_mutex);
+    mapping_count = g_path_mappings.size();
+  }
   std::cout << "  [libc_shim] Path shims installed ("
-            << g_path_mappings.size() << " prefix mappings)\n";
+            << mapping_count << " prefix mappings)\n";
 }
 
 std::string TranslatePath(const std::string& android_path) {
-  const std::string* best_android_prefix = nullptr;
-  const std::string* best_host_prefix = nullptr;
-  for (const auto& [android_prefix, host_prefix] : g_path_mappings) {
-    if (PrefixMatchesPath(android_path, android_prefix) &&
-        (best_android_prefix == nullptr ||
-         android_prefix.size() > best_android_prefix->size())) {
-      best_android_prefix = &android_prefix;
-      best_host_prefix = &host_prefix;
-    }
-  }
-  if (best_android_prefix != nullptr && best_host_prefix != nullptr) {
-    return *best_host_prefix +
-           android_path.substr(best_android_prefix->size());
+  std::string translated;
+  std::shared_lock<std::shared_mutex> lock(g_path_mappings_mutex);
+  if (TranslatePathLocked(android_path, &translated)) {
+    return translated;
   }
   return android_path;
 }
 
 void RegisterPathMapping(const std::string& android_prefix,
                          const std::string& host_prefix) {
+  std::unique_lock<std::shared_mutex> lock(g_path_mappings_mutex);
   g_path_mappings[android_prefix] = host_prefix;
 }
 
 void ClearPathMappings() {
+  std::unique_lock<std::shared_mutex> lock(g_path_mappings_mutex);
   g_path_mappings.clear();
   g_ca_bundle_aliases.clear();
 }
@@ -333,13 +361,19 @@ const char* HostPath(const char* path, std::string* storage) {
   if (path == nullptr) {
     return nullptr;
   }
-  *storage = libc_shim::TranslatePath(path);
+  std::shared_lock<std::shared_mutex> lock(libc_shim::g_path_mappings_mutex);
+  if (!libc_shim::TranslatePathLocked(path, storage)) {
+    return path;
+  }
   return storage->c_str();
 }
 
 bool PathTraceEnabled() {
-  const char* value = std::getenv("MOCKTAIL_PATH_TRACE");
-  return value != nullptr && value[0] != '\0' && value[0] != '0';
+  static const bool enabled = []() {
+    const char* value = std::getenv("MOCKTAIL_PATH_TRACE");
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
+  }();
+  return enabled;
 }
 
 void TracePathCall(const char* name, const char* path, const char* host_path,

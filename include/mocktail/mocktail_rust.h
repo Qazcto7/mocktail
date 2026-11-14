@@ -9,11 +9,6 @@ extern "C" {
 #endif
 
 /**
- * Returns the mocktail-core Rust library version string.
- */
-const char* mocktail_rust_version(void);
-
-/**
  * Initializes and verifies the mocktail-core Rust subsystem.
  * Returns 0 on success.
  */
@@ -55,17 +50,6 @@ int mocktail_rust_verify_file_sha256(const char* path, const char* expected_hex)
  * Returns 1 if safe, 0 if unsafe.
  */
 int mocktail_rust_is_safe_archive_path(const char* path);
-
-/**
- * Safely extracts an individual entry from a ZIP / APK archive with Zip-Slip protection
- * and atomic replacement.
- * Returns 0 on success, negative error code on failure.
- */
-int mocktail_rust_extract_zip_entry(
-    const char* archive_path,
-    const char* entry_name,
-    const char* dest_path,
-    size_t max_bytes);
 
 /**
  * Verifies whether the provided 16-byte slice matches "APK Sig Block 42".
@@ -119,18 +103,6 @@ int mocktail_rust_percent_decode(
     int plus_as_space,
     char* out_buf,
     size_t out_cap);
-
-/**
- * Validates whether a given C string is syntactically valid JSON.
- * Returns 1 if valid, 0 if invalid, -1 if null.
- */
-int mocktail_rust_is_valid_json(const char* json_str);
-
-/**
- * Validates whether a URL has a safe HTTPS scheme and valid characters.
- * Returns 1 if safe, 0 otherwise.
- */
-int mocktail_rust_is_safe_url(const char* url);
 
 // ============================================================================
 // 5. System Memory & Process Memory Monitoring
@@ -760,12 +732,6 @@ int mocktail_rust_video_driver_has_candidate(
 int mocktail_rust_runtime_paths_is_lower_hex_build_id(
     const char* build_id);
 
-int mocktail_rust_runtime_paths_resolve_adjacent_assets(
-    const char* roblox_lib_path,
-    const char* working_dir,
-    char* out_path,
-    size_t out_cap);
-
 // ============================================================================
 // 36. Host ABI Profile Loader & Payload Compatibility (Group D)
 // ============================================================================
@@ -1125,12 +1091,6 @@ int mocktail_rust_external_launch_parse_reply(
 int mocktail_rust_external_launch_reply_status_code(
     uint8_t reply_code);
 
-int mocktail_rust_external_launch_format_socket_name(
-    const char* instance_key,
-    int is_run_user,
-    char* out_buf,
-    size_t out_cap);
-
 // ============================================================================
 // 47. Split APK & Bundle Layout Resolver (Group D)
 // ============================================================================
@@ -1143,12 +1103,6 @@ int mocktail_rust_apk_guest_lib_entry_name(
 int mocktail_rust_payload_store_valid_id(
     const char* id,
     size_t len);
-
-int mocktail_rust_payload_store_validate_manifest_json(
-    const char* json,
-    size_t len,
-    char* err_buf,
-    size_t err_cap);
 
 // ============================================================================
 // 48. Audio Buffer Queue & Output Device Bridge (Group E)
@@ -2027,13 +1981,6 @@ int32_t mocktail_rust_pointer_capture_evaluate(
 // ============================================================================
 
 int32_t mocktail_rust_map_roblox_text_input_type(int32_t input_type);
-
-void mocktail_rust_clamp_text_input_area(
-    int32_t* x,
-    int32_t* y,
-    int32_t* w,
-    int32_t* h,
-    int32_t* cursor);
 
 // ============================================================================
 // 85. Bionic Sysconf Parameter Lookup
@@ -3344,10 +3291,6 @@ typedef void (*MocktailRuntimePathsFieldCallback)(void* ctx, uint32_t field_id,
                                                   const char* ptr, size_t len);
 typedef void (*MocktailPayloadStoreStringCallback)(void* ctx, const char* ptr,
                                                    size_t len);
-typedef void (*MocktailPayloadStoreApprovalPathsCallback)(
-    void* ctx, const char* profile_ptr, size_t profile_len,
-    const char* compat_ptr, size_t compat_len, const char* receipt_ptr,
-    size_t receipt_len);
 
 enum {
   MOCKTAIL_RUNTIME_PATH_FIELD_PAYLOAD_ID = 0,
@@ -3430,59 +3373,16 @@ int32_t mocktail_rust_payload_store_build_activation_manifest(
     const char* build_id, const char* library_sha256,
     const char* approval_generation, MocktailPayloadStoreStringCallback on_json,
     void* ctx);
-int32_t mocktail_rust_payload_store_inspect_manifest_json(
-    const char* json_ptr, size_t json_len, const char* expected_version_name,
-    uint64_t expected_version_code, const char* expected_build_id,
-    const char* expected_library_sha256,
-    MocktailPayloadStoreApprovalPathsCallback on_approval_paths, void* ctx,
-    uint8_t* out_has_approval, char* err_buf, size_t err_cap);
 int32_t mocktail_rust_payload_store_persist_payload_sha256(
     const char* json_ptr, size_t json_len, const char* library_sha256,
     MocktailPayloadStoreStringCallback on_updated_json, void* ctx,
     uint8_t* out_needs_write, char* err_buf, size_t err_cap);
-int32_t mocktail_rust_payload_store_build_status_json(
-    const char* update_json_path, const char* current_json_ptr,
-    size_t current_json_len, const char* previous_json_ptr,
-    size_t previous_json_len, MocktailPayloadStoreStringCallback on_json,
-    void* ctx);
 
 void mocktail_rust_host_abi_set_hashing_fault_for_testing(bool enabled);
-int32_t mocktail_rust_host_abi_sha256_hex(const uint8_t* bytes_ptr,
-                                          size_t bytes_len, size_t max_chars,
-                                          char* out_hex, size_t hex_cap);
-bool mocktail_rust_host_abi_validate_payload_id(const char* payload_id,
-                                                const char* build_id);
-bool mocktail_rust_host_abi_validate_canary_run_id(const char* run_id,
-                                                   const char* payload_id,
-                                                   size_t run);
 int32_t mocktail_rust_host_abi_parse_profile_json(
     const char* json_ptr, size_t json_len, bool is_x86_64, size_t pointer_align,
     uint64_t uintptr_max, struct MocktailRustParsedHostAbiProfile* out_profile,
     char* err_buf, size_t err_cap);
-int32_t mocktail_rust_host_abi_validate_profile_identity(
-    const char* json_ptr, size_t json_len, const char* profile_build_id,
-    const char* reference_build_id, const char* reference_payload_sha256,
-    const char* canonical_payload_path, const char* expected_launch_build_id,
-    char* out_payload_sha256, size_t sha_cap, char* out_payload_id,
-    size_t pid_cap);
-int32_t mocktail_rust_host_abi_parse_receipt_json(
-    const char* json_ptr, size_t json_len, const char* receipt_path,
-    const char* canonical_payload_path, const char* payload_sha256,
-    const char* profile_sha256, const char* payload_id, const char* build_id,
-    struct MocktailRustParsedApprovalReceipt* out_receipt, char* err_buf,
-    size_t err_cap);
-int32_t mocktail_rust_host_abi_validate_canary_attestation_json(
-    const char* json_ptr, size_t json_len, size_t expected_run,
-    const char* payload_id, const char* payload_fingerprint,
-    const char* profile_sha256, const char* compatibility_manifest_sha256,
-    const char* runtime_sha256, const char* runtime_build_id, char* out_sha256,
-    size_t sha_cap, MocktailPayloadStoreStringCallback on_run_id, void* ctx,
-    char* err_buf, size_t err_cap);
-int32_t mocktail_rust_host_abi_verify_receipt_evidence(
-    const struct MocktailRustParsedApprovalReceipt* receipt,
-    const char* profile_sha256, const char* manifest_sha256,
-    const char* canary_sha_0, const char* run_id_0, const char* canary_sha_1,
-    const char* run_id_1, char* err_buf, size_t err_cap);
 
 // ============================================================================
 // 138. Updater JSON Migration Helpers (Zip, Payload, APKPure, Pinned, State)
@@ -3513,47 +3413,6 @@ struct MocktailRustPayloadInfoView {
 typedef void (*MocktailPayloadInfoCallback)(
     void* ctx, const struct MocktailRustPayloadInfoView* info);
 
-struct MocktailRustApkMetadataRequest {
-  const char* version_name;
-  uint64_t version_code;
-  const char* abi;
-  const char* elf_build_id;
-  const char* library_sha256;
-  const char* base_apk_sha256;
-  const char* split_apk_hash_key;
-  const char* split_apk_sha256;
-  const char* const* signing_certs;
-  size_t signing_certs_count;
-  size_t asset_file_count;
-  const char* asset_tree_sha256;
-  const char* source;
-  const char* imported_at;
-  bool exact_supported;
-  bool monolithic;
-};
-
-typedef void (*MocktailCandidateActivationCallback)(
-    void* ctx, const char* generation, size_t gen_len,
-    const char* approval_ref, size_t approval_len, const char* profile_ref,
-    size_t profile_len, const char* compat_ref, size_t compat_len);
-
-struct MocktailRustCandidateEvidenceRequest {
-  const char* receipt_ptr;
-  size_t receipt_len;
-  const char* canary1_ptr;
-  size_t canary1_len;
-  const char* canary2_ptr;
-  size_t canary2_len;
-  const char* payload_id;
-  const char* generation;
-  const char* canonical_library_path;
-  const char* elf_build_id;
-  const char* library_sha256;
-  const char* fingerprint;
-  const char* profile_sha256;
-  const char* compatibility_sha256;
-};
-
 typedef bool (*MocktailTrustedUrlCallback)(void* ctx, const char* url,
                                            size_t url_len);
 
@@ -3577,20 +3436,6 @@ int mocktail_rust_apkpure_parse_exact_urls_cb(
     const uint8_t* metadata, size_t meta_len, const char* version,
     uint64_t version_code, MocktailPayloadStoreStringCallback on_url, void* ctx,
     char* out_err, size_t err_cap);
-int32_t mocktail_rust_apk_parse_trusted_certificates(
-    const char* json_ptr, size_t json_len,
-    MocktailPayloadStoreStringCallback on_sha256, void* ctx, char* out_err,
-    size_t err_cap);
-int32_t mocktail_rust_apk_build_payload_metadata(
-    const struct MocktailRustApkMetadataRequest* req,
-    MocktailPayloadStoreStringCallback on_json, void* ctx);
-int32_t mocktail_rust_candidate_approval_parse_activation(
-    const char* activation_ptr, size_t activation_len, const char* payload_id,
-    MocktailCandidateActivationCallback on_parsed, void* ctx, char* out_err,
-    size_t err_cap);
-int32_t mocktail_rust_candidate_approval_verify_evidence(
-    const struct MocktailRustCandidateEvidenceRequest* req, char* out_err,
-    size_t err_cap);
 int32_t mocktail_rust_pinned_apk_find_source(
     const char* manifest_path, const char* version_name, uint64_t version_code,
     const char* abi, uint64_t max_archive_bytes,
@@ -3598,20 +3443,12 @@ int32_t mocktail_rust_pinned_apk_find_source(
     MocktailPayloadStoreStringCallback on_build_id,
     MocktailPinnedArchiveCallback on_archive, void* ctx, char* out_err,
     size_t err_cap);
-int32_t mocktail_rust_http_read_resume_etag(const char* state_path,
-                                            const char* expected_url,
-                                            char* out_etag, size_t etag_cap);
-int32_t mocktail_rust_http_write_resume_state(const char* state_path,
-                                              const char* url,
-                                              const char* etag);
 
 struct MocktailRustUpdateState* mocktail_rust_update_state_new(
     const char* state_path);
 void mocktail_rust_update_state_free(struct MocktailRustUpdateState* state);
 void mocktail_rust_update_state_save_phase(
     struct MocktailRustUpdateState* state, const char* phase);
-void mocktail_rust_update_state_set_metadata_status(
-    struct MocktailRustUpdateState* state, const char* status);
 void mocktail_rust_update_state_record_latest_check(
     struct MocktailRustUpdateState* state, bool available,
     const char* version_name, uint64_t version_code);
@@ -3655,23 +3492,6 @@ typedef struct MocktailRustBuildProfileView {
 
 typedef void (*MocktailBuildProfileCallback)(
     void* ctx, const MocktailRustBuildProfileView* profile);
-
-typedef struct MocktailRustDiscordActivity {
-  const char* details;
-  size_t details_len;
-  const char* state;
-  size_t state_len;
-  bool has_start_timestamp;
-  int64_t start_timestamp;
-  const char* large_image;
-  size_t large_image_len;
-  const char* large_text;
-  size_t large_text_len;
-  const char* button_label;
-  size_t button_label_len;
-  const char* button_url;
-  size_t button_url_len;
-} MocktailRustDiscordActivity;
 
 typedef struct MocktailRustWebViewOpenView {
   struct MocktailRustStrSlice url;
@@ -3747,25 +3567,11 @@ int32_t mocktail_rust_platform_cache_apply_theme(
     int64_t authenticated_user_id, bool dark_theme, bool* out_changed,
     MocktailPayloadStoreStringCallback on_json, void* ctx, char* out_err,
     size_t err_cap);
-int32_t mocktail_rust_browser_tracker_read_stored_id(
-    const char* json_ptr, size_t json_len, bool* out_has_id, char* out_id,
-    size_t id_cap);
-int32_t mocktail_rust_browser_tracker_set_stored_id(
-    const char* json_ptr, size_t json_len, const char* id_ptr, size_t id_len,
-    MocktailPayloadStoreStringCallback on_json, void* ctx);
 int32_t mocktail_rust_browser_tracker_parse_init_response(
     const char* body_ptr, size_t body_len, char* out_id, size_t id_cap);
 int32_t mocktail_rust_discord_parse_rpc_error(
     const char* payload_ptr, size_t payload_len, int64_t* out_code,
     char* out_msg, size_t msg_cap);
-int32_t mocktail_rust_discord_build_handshake(
-    const char* app_id_ptr, size_t app_id_len,
-    MocktailPayloadStoreStringCallback on_json, void* ctx);
-bool mocktail_rust_discord_is_ready_event(const char* payload_ptr,
-                                          size_t payload_len);
-int32_t mocktail_rust_discord_build_set_activity(
-    int32_t pid, const struct MocktailRustDiscordActivity* activity,
-    uint64_t nonce, MocktailPayloadStoreStringCallback on_json, void* ctx);
 int32_t mocktail_rust_discord_parse_universe_id(const char* json_ptr,
                                                 size_t json_len,
                                                 int64_t* out_universe_id);
@@ -3788,13 +3594,6 @@ int32_t mocktail_rust_webview_parse_captcha_open_json(
     size_t err_cap);
 
 // 140. HostAbi Deriver JSON Helpers
-typedef void (*MocktailDeriverSpecCallback)(void* ctx, const char* name,
-                                            size_t name_len,
-                                            uint64_t reference_rva,
-                                            size_t instruction_count,
-                                            bool registry_size_may_change,
-                                            size_t minimum_anchor_bytes);
-
 typedef struct MocktailRustDeriverRuntimeAnchors {
   bool has_fullscreen_setter;
   uint64_t fullscreen_setter_rva;
@@ -3877,26 +3676,6 @@ int32_t mocktail_rust_deriver_load_runtime_anchors(
     size_t reference_build_id_len,
     MocktailRustDeriverRuntimeAnchors* out_anchors, char* out_err,
     size_t err_cap);
-int32_t mocktail_rust_deriver_validate_reference_identity(
-    const char* sidecar_ptr, size_t sidecar_len,
-    const char* ref_build_id_ptr, size_t ref_build_id_len,
-    const char* ref_sha256_ptr, size_t ref_sha256_len, char* out_err,
-    size_t err_cap);
-int32_t mocktail_rust_deriver_extract_specs(
-    const char* sidecar_ptr, size_t sidecar_len,
-    MocktailDeriverSpecCallback on_spec, void* ctx, char* out_err,
-    size_t err_cap);
-int32_t mocktail_rust_deriver_check_init_array(
-    const char* sidecar_ptr, size_t sidecar_len, size_t reference_init_len,
-    size_t candidate_init_len, size_t* out_reference_count, char* out_err,
-    size_t err_cap);
-int32_t mocktail_rust_deriver_resolve_constructors_and_seeds(
-    const char* sidecar_ptr, size_t sidecar_len,
-    const uint64_t* reference_init_ptr, size_t reference_init_len,
-    const uint64_t* candidate_init_ptr, size_t candidate_init_len,
-    const uint64_t* ctor_candidate_rvas_ptr,
-    const uint64_t* ctor_ref_first_insn_rvas_ptr,
-    MocktailRustDeriverPlan* out_plan, char* out_err, size_t err_cap);
 int32_t mocktail_rust_deriver_build_documents(
     const char* sidecar_ptr, size_t sidecar_len, const char* metadata_ptr,
     size_t metadata_len, const MocktailRustDeriverBuildInputs* inputs,

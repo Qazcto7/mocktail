@@ -53,6 +53,13 @@ void SecureClear(std::vector<std::uint8_t>* value) {
   value->clear();
 }
 
+void ClearAndShrink(std::vector<std::uint8_t>* value) {
+  SecureClear(value);
+  if (value != nullptr && value->capacity() > 0) {
+    std::vector<std::uint8_t>().swap(*value);
+  }
+}
+
 struct SensitiveString {
   ~SensitiveString() { SecureClear(&value); }
   std::string value;
@@ -84,6 +91,44 @@ SensitiveString VisibleTextWindow(
   return result;
 }
 
+const std::vector<std::string>& FontconfigFallbackFonts() {
+  static const std::vector<std::string>* cached = []() {
+    auto* list = new std::vector<std::string>();
+    if (!FcInit()) {
+      return list;
+    }
+    FcPattern* pattern = FcNameParse(reinterpret_cast<const FcChar8*>("sans"));
+    if (pattern == nullptr) {
+      return list;
+    }
+    FcConfigSubstitute(nullptr, pattern, FcMatchPattern);
+    FcDefaultSubstitute(pattern);
+    FcResult result = FcResultNoMatch;
+    FcFontSet* fonts = FcFontSort(nullptr, pattern, FcTrue, nullptr, &result);
+    FcPatternDestroy(pattern);
+    if (fonts == nullptr) {
+      return list;
+    }
+    for (int index = 0;
+         index < fonts->nfont && list->size() < kMaximumFallbackFonts;
+         ++index) {
+      FcChar8* file = nullptr;
+      if (FcPatternGetString(fonts->fonts[index], FC_FILE, 0, &file) !=
+              FcResultMatch ||
+          file == nullptr || file[0] == '\0') {
+        continue;
+      }
+      const std::string candidate(reinterpret_cast<const char*>(file));
+      if (std::find(list->begin(), list->end(), candidate) == list->end()) {
+        list->push_back(candidate);
+      }
+    }
+    FcFontSetDestroy(fonts);
+    return list;
+  }();
+  return *cached;
+}
+
 std::vector<std::string> ResolveFontFiles(
     const RobloxTextFontSelection& selection) {
   std::vector<std::string> files;
@@ -93,36 +138,14 @@ std::vector<std::string> ResolveFontFiles(
   } else if (!selection.primary_file.empty()) {
     files.push_back(selection.primary_file);
   }
-  if (!FcInit()) {
-    return files;
-  }
-
-  FcPattern* pattern = FcNameParse(reinterpret_cast<const FcChar8*>("sans"));
-  if (pattern == nullptr) {
-    return files;
-  }
-  FcConfigSubstitute(nullptr, pattern, FcMatchPattern);
-  FcDefaultSubstitute(pattern);
-  FcResult result = FcResultNoMatch;
-  FcFontSet* fonts = FcFontSort(nullptr, pattern, FcTrue, nullptr, &result);
-  FcPatternDestroy(pattern);
-  if (fonts == nullptr) {
-    return files;
-  }
-  for (int index = 0;
-       index < fonts->nfont && files.size() < kMaximumFallbackFonts; ++index) {
-    FcChar8* file = nullptr;
-    if (FcPatternGetString(fonts->fonts[index], FC_FILE, 0, &file) !=
-            FcResultMatch ||
-        file == nullptr || file[0] == '\0') {
-      continue;
+  for (const std::string& candidate : FontconfigFallbackFonts()) {
+    if (files.size() >= kMaximumFallbackFonts) {
+      break;
     }
-    const std::string candidate(reinterpret_cast<const char*>(file));
     if (std::find(files.begin(), files.end(), candidate) == files.end()) {
       files.push_back(candidate);
     }
   }
-  FcFontSetDestroy(fonts);
   return files;
 }
 
@@ -274,6 +297,7 @@ Status RobloxTextSurfaceOverlay::Shutdown() {
   }
   state_.Reset();
   ClearFrameLocked();
+  ReleaseTextResourcesLocked();
   viewport_ = {};
   initialized_ = false;
   if (owned_active_overlay) {
@@ -418,9 +442,12 @@ Status RobloxTextSurfaceOverlay::RasterizeLocked() {
   const bool wrapped_layout =
       presentation.multiline || presentation.text_wrapped;
 
-  if (!TTF_Init()) {
-    SecureClear(&candidate);
-    return RasterizationFailure("unable to initialize SDL3_ttf");
+  if (!ttf_initialized_) {
+    if (!TTF_Init()) {
+      SecureClear(&candidate);
+      return RasterizationFailure("unable to initialize SDL3_ttf");
+    }
+    ttf_initialized_ = true;
   }
   const RobloxTextFontSelection font_selection =
       ResolveRobloxTextFont(presentation.font);
@@ -432,31 +459,38 @@ Status RobloxTextSurfaceOverlay::RasterizeLocked() {
                        512.0F)
           : std::clamp(static_cast<float>(height) * 0.38F, 12.0F, 28.0F);
   const std::vector<std::string> font_files = ResolveFontFiles(font_selection);
-  std::vector<TTF_Font*> fonts;
-  fonts.reserve(font_files.size());
-  for (const std::string& file : font_files) {
-    TTF_Font* font = TTF_OpenFont(file.c_str(), point_size);
-    if (font != nullptr) {
-      fonts.push_back(font);
+  if (cached_fonts_.empty() || cached_font_files_ != font_files ||
+      std::fabs(cached_point_size_ - point_size) > 0.01F) {
+    ReleaseFontCacheLocked();
+    std::vector<TTF_Font*> opened;
+    opened.reserve(font_files.size());
+    for (const std::string& file : font_files) {
+      TTF_Font* font = TTF_OpenFont(file.c_str(), point_size);
+      if (font != nullptr) {
+        opened.push_back(font);
+      }
     }
+    if (opened.empty()) {
+      SecureClear(&candidate);
+      return RasterizationFailure("unable to open a Roblox or fallback font");
+    }
+    for (std::size_t index = 1; index < opened.size(); ++index) {
+      (void)TTF_AddFallbackFont(opened.front(), opened[index]);
+    }
+    cached_fonts_ = std::move(opened);
+    cached_font_files_ = font_files;
+    cached_point_size_ = point_size;
   }
-  if (fonts.empty()) {
-    TTF_Quit();
-    SecureClear(&candidate);
-    return RasterizationFailure("unable to open a Roblox or fallback font");
-  }
-  for (std::size_t index = 1; index < fonts.size(); ++index) {
-    (void)TTF_AddFallbackFont(fonts.front(), fonts[index]);
-  }
+  std::vector<TTF_Font*>& fonts = cached_fonts_;
+  TTF_HorizontalAlignment alignment = TTF_HORIZONTAL_ALIGN_LEFT;
   if (wrapped_layout) {
-    TTF_HorizontalAlignment alignment = TTF_HORIZONTAL_ALIGN_LEFT;
     if (presentation.x_alignment == 1) {
       alignment = TTF_HORIZONTAL_ALIGN_RIGHT;
     } else if (presentation.x_alignment == 2) {
       alignment = TTF_HORIZONTAL_ALIGN_CENTER;
     }
-    TTF_SetFontWrapAlignment(fonts.front(), alignment);
   }
+  TTF_SetFontWrapAlignment(fonts.front(), alignment);
 
   std::size_t caret_byte = 0;
   std::size_t selection_begin_byte = 0;
@@ -465,7 +499,10 @@ Status RobloxTextSurfaceOverlay::RasterizeLocked() {
       presentation, &caret_byte, &selection_begin_byte, &selection_end_byte);
   SDL_Surface* rendered = nullptr;
   const SDL_Color text_color = ResolveTextColor(presentation.text_color);
-  TTF_TextEngine* engine = TTF_CreateSurfaceTextEngine();
+  if (text_engine_ == nullptr) {
+    text_engine_ = TTF_CreateSurfaceTextEngine();
+  }
+  TTF_TextEngine* engine = text_engine_;
   TTF_Text* layout = engine != nullptr
                          ? TTF_CreateText(engine, fonts.front(), text.value.data(),
                                           text.value.size())
@@ -598,20 +635,12 @@ Status RobloxTextSurfaceOverlay::RasterizeLocked() {
   if (layout != nullptr) {
     TTF_DestroyText(layout);
   }
-  if (engine != nullptr) {
-    TTF_DestroySurfaceTextEngine(engine);
-  }
-  TTF_ClearFallbackFonts(fonts.front());
-  for (auto iterator = fonts.rbegin(); iterator != fonts.rend(); ++iterator) {
-    TTF_CloseFont(*iterator);
-  }
-  TTF_Quit();
 
   if (!status.ok()) {
     SecureClear(&candidate);
     return status;
   }
-  SecureClear(&rgba_);
+  ClearAndShrink(&rgba_);
   rgba_ = std::move(candidate);
   raster_revision_ = state_revision_;
   if (!ready_logged_) {
@@ -623,8 +652,33 @@ Status RobloxTextSurfaceOverlay::RasterizeLocked() {
   return Status::Ok();
 }
 
+void RobloxTextSurfaceOverlay::ReleaseFontCacheLocked() {
+  if (!cached_fonts_.empty()) {
+    TTF_ClearFallbackFonts(cached_fonts_.front());
+    for (auto iterator = cached_fonts_.rbegin();
+         iterator != cached_fonts_.rend(); ++iterator) {
+      TTF_CloseFont(*iterator);
+    }
+    cached_fonts_.clear();
+  }
+  cached_font_files_.clear();
+  cached_point_size_ = 0.0F;
+}
+
+void RobloxTextSurfaceOverlay::ReleaseTextResourcesLocked() {
+  ReleaseFontCacheLocked();
+  if (text_engine_ != nullptr) {
+    TTF_DestroySurfaceTextEngine(text_engine_);
+    text_engine_ = nullptr;
+  }
+  if (ttf_initialized_) {
+    TTF_Quit();
+    ttf_initialized_ = false;
+  }
+}
+
 void RobloxTextSurfaceOverlay::ClearFrameLocked() {
-  SecureClear(&rgba_);
+  ClearAndShrink(&rgba_);
   raster_revision_ = 0;
 }
 

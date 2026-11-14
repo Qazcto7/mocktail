@@ -2696,5 +2696,74 @@ TEST_F(JniVmTest, MainGameActivityReturnsNativeHelperAndTracksCallbacks) {
   EXPECT_EQ(env->GetBooleanField(helper, is_engine_initialized), JNI_TRUE);
 }
 
+TEST_F(JniVmTest, ThreadDetachAndExitReleaseThreadLocalJniReferences) {
+  JavaVM *java_vm = vm_->GetJavaVM();
+  ASSERT_NE(java_vm, nullptr);
+
+  std::string detached_value;
+  std::thread detached_worker([java_vm, &detached_value]() {
+    void *raw_env = nullptr;
+    ASSERT_EQ(java_vm->AttachCurrentThread(&raw_env, nullptr), JNI_OK);
+    JNIEnv *thread_env = static_cast<JNIEnv *>(raw_env);
+    ASSERT_NE(thread_env, nullptr);
+    jstring str = thread_env->NewStringUTF("worker-detach");
+    jclass cls =
+        thread_env->FindClass("com/roblox/client/startup/NativeHelper");
+    ASSERT_NE(cls, nullptr);
+    jobject obj = thread_env->AllocObject(cls);
+    ASSERT_NE(obj, nullptr);
+    detached_value = ReadJavaString(thread_env, str);
+    EXPECT_EQ(java_vm->DetachCurrentThread(), JNI_OK);
+  });
+  detached_worker.join();
+  EXPECT_EQ(detached_value, "worker-detach");
+
+  std::string exited_value;
+  std::thread exiting_worker([java_vm, &exited_value]() {
+    void *raw_env = nullptr;
+    ASSERT_EQ(java_vm->AttachCurrentThread(&raw_env, nullptr), JNI_OK);
+    JNIEnv *thread_env = static_cast<JNIEnv *>(raw_env);
+    ASSERT_NE(thread_env, nullptr);
+    jstring str = thread_env->NewStringUTF("worker-exit");
+    jclass cls =
+        thread_env->FindClass("com/roblox/client/startup/NativeHelper");
+    ASSERT_NE(cls, nullptr);
+    jobject obj = thread_env->AllocObject(cls);
+    ASSERT_NE(obj, nullptr);
+    exited_value = ReadJavaString(thread_env, str);
+  });
+  exiting_worker.join();
+  EXPECT_EQ(exited_value, "worker-exit");
+}
+
+TEST_F(JniVmTest, DirectByteBufferDeleteLocalRefCleansCapacitySafely) {
+  JNIEnv *env = vm_->GetJNIEnv();
+  jstring alive_str = env->NewStringUTF("alive");
+  ASSERT_NE(alive_str, nullptr);
+  jclass cls = env->FindClass("com/roblox/client/startup/NativeHelper");
+  ASSERT_NE(cls, nullptr);
+  jobject alive_obj = env->AllocObject(cls);
+  ASSERT_NE(alive_obj, nullptr);
+
+  std::vector<std::uint8_t> backing(4096, 0x5A);
+  jobject buffer =
+      env->NewDirectByteBuffer(backing.data(), static_cast<jlong>(backing.size()));
+  ASSERT_NE(buffer, nullptr);
+  EXPECT_EQ(env->GetDirectBufferCapacity(buffer), 4096);
+  EXPECT_EQ(env->GetDirectBufferAddress(buffer), backing.data());
+
+  env->DeleteLocalRef(buffer);
+  EXPECT_EQ(env->GetDirectBufferCapacity(buffer), -1);
+
+  jobject reused = env->NewDirectByteBuffer(backing.data(), 2048);
+  ASSERT_EQ(reused, buffer);
+  EXPECT_EQ(env->GetDirectBufferCapacity(reused), 2048);
+  env->DeleteLocalRef(reused);
+  EXPECT_EQ(env->GetDirectBufferCapacity(reused), -1);
+
+  EXPECT_EQ(ReadJavaString(env, alive_str), "alive");
+  EXPECT_FALSE(env->IsSameObject(alive_obj, nullptr));
+}
+
 } // namespace
 } // namespace jnivm

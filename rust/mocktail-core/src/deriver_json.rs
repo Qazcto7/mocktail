@@ -7,18 +7,6 @@ use std::collections::BTreeMap;
 use std::ffi::{c_char, c_int, c_void};
 use std::path::Path;
 
-pub type MocktailDeriverSpecCallback = Option<
-    unsafe extern "C" fn(
-        ctx: *mut c_void,
-        name: *const c_char,
-        name_len: usize,
-        reference_rva: u64,
-        instruction_count: usize,
-        registry_size_may_change: bool,
-        minimum_anchor_bytes: usize,
-    ),
->;
-
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct MocktailRustDeriverRuntimeAnchors {
@@ -761,68 +749,6 @@ pub extern "C" fn mocktail_rust_deriver_load_runtime_anchors(
     }
 }
 
-#[no_mangle]
-pub extern "C" fn mocktail_rust_deriver_validate_reference_identity(
-    sidecar_ptr: *const c_char,
-    sidecar_len: usize,
-    ref_build_id_ptr: *const c_char,
-    ref_build_id_len: usize,
-    ref_sha256_ptr: *const c_char,
-    ref_sha256_len: usize,
-    out_err: *mut c_char,
-    err_cap: usize,
-) -> c_int {
-    let Some(sidecar) = parse_sidecar_object(sidecar_ptr, sidecar_len) else {
-        copy_error(out_err, err_cap, "JSON input must contain one object");
-        return -1;
-    };
-    let ref_build_id = slice_to_str(ref_build_id_ptr, ref_build_id_len).unwrap_or("");
-    let ref_sha256 = slice_to_str(ref_sha256_ptr, ref_sha256_len).unwrap_or("");
-    if let Err(e) = validate_reference_identity_inner(&sidecar, ref_build_id, ref_sha256) {
-        copy_error(out_err, err_cap, &e);
-        return -1;
-    }
-    0
-}
-
-#[no_mangle]
-pub extern "C" fn mocktail_rust_deriver_extract_specs(
-    sidecar_ptr: *const c_char,
-    sidecar_len: usize,
-    on_spec: MocktailDeriverSpecCallback,
-    ctx: *mut c_void,
-    out_err: *mut c_char,
-    err_cap: usize,
-) -> c_int {
-    let Some(sidecar) = parse_sidecar_object(sidecar_ptr, sidecar_len) else {
-        copy_error(out_err, err_cap, "JSON input must contain one object");
-        return -1;
-    };
-    let specs = match extract_specs_inner(&sidecar) {
-        Ok(s) => s,
-        Err(e) => {
-            copy_error(out_err, err_cap, &e);
-            return -1;
-        }
-    };
-    if let Some(cb) = on_spec {
-        for spec in &specs {
-            unsafe {
-                cb(
-                    ctx,
-                    spec.name.as_ptr() as *const c_char,
-                    spec.name.len(),
-                    spec.rva,
-                    spec.instruction_count,
-                    spec.registry_size_may_change,
-                    spec.minimum_anchor_bytes,
-                );
-            }
-        }
-    }
-    0
-}
-
 pub(crate) fn check_init_array_data(
     sidecar: &Map<String, Value>,
     reference_init_len: usize,
@@ -837,33 +763,6 @@ pub(crate) fn check_init_array_data(
         return Err("init-array shape is not derivable".to_string());
     }
     Ok(ref_count)
-}
-
-#[no_mangle]
-pub extern "C" fn mocktail_rust_deriver_check_init_array(
-    sidecar_ptr: *const c_char,
-    sidecar_len: usize,
-    reference_init_len: usize,
-    candidate_init_len: usize,
-    out_reference_count: *mut usize,
-    out_err: *mut c_char,
-    err_cap: usize,
-) -> c_int {
-    let Some(sidecar) = parse_sidecar_object(sidecar_ptr, sidecar_len) else {
-        copy_error(out_err, err_cap, "JSON input must contain one object");
-        return -1;
-    };
-    let ref_count = match check_init_array_data(&sidecar, reference_init_len, candidate_init_len) {
-        Ok(c) => c,
-        Err(e) => {
-            copy_error(out_err, err_cap, &e);
-            return -1;
-        }
-    };
-    if !out_reference_count.is_null() {
-        unsafe { *out_reference_count = ref_count };
-    }
-    0
 }
 
 pub(crate) fn resolve_constructors_and_seeds_inner(
@@ -958,62 +857,6 @@ pub(crate) fn resolve_constructors_and_seeds_inner(
     plan.old_registry_initializer_rva = profile_rva(old_bootstrap, "registry_initializer")?;
     plan.old_registry_slot_rva = profile_rva(old_bootstrap, "registry_slot")?;
     Ok(plan)
-}
-
-#[no_mangle]
-pub extern "C" fn mocktail_rust_deriver_resolve_constructors_and_seeds(
-    sidecar_ptr: *const c_char,
-    sidecar_len: usize,
-    reference_init_ptr: *const u64,
-    reference_init_len: usize,
-    candidate_init_ptr: *const u64,
-    candidate_init_len: usize,
-    ctor_candidate_rvas_ptr: *const u64,
-    ctor_ref_first_insn_rvas_ptr: *const u64,
-    out_plan: *mut MocktailRustDeriverPlan,
-    out_err: *mut c_char,
-    err_cap: usize,
-) -> c_int {
-    if out_plan.is_null()
-        || ctor_candidate_rvas_ptr.is_null()
-        || ctor_ref_first_insn_rvas_ptr.is_null()
-    {
-        copy_error(out_err, err_cap, "invalid deriver plan arguments");
-        return -1;
-    }
-    let Some(sidecar) = parse_sidecar_object(sidecar_ptr, sidecar_len) else {
-        copy_error(out_err, err_cap, "JSON input must contain one object");
-        return -1;
-    };
-    let reference_init = if reference_init_len == 0 || reference_init_ptr.is_null() {
-        &[][..]
-    } else {
-        unsafe { std::slice::from_raw_parts(reference_init_ptr, reference_init_len) }
-    };
-    let candidate_init = if candidate_init_len == 0 || candidate_init_ptr.is_null() {
-        &[][..]
-    } else {
-        unsafe { std::slice::from_raw_parts(candidate_init_ptr, candidate_init_len) }
-    };
-    let ctor_cand_rvas = unsafe { std::slice::from_raw_parts(ctor_candidate_rvas_ptr, 4) };
-    let ctor_ref_first_rvas = unsafe { std::slice::from_raw_parts(ctor_ref_first_insn_rvas_ptr, 3) };
-
-    match resolve_constructors_and_seeds_inner(
-        &sidecar,
-        reference_init,
-        candidate_init,
-        ctor_cand_rvas,
-        ctor_ref_first_rvas,
-    ) {
-        Ok(plan) => {
-            unsafe { *out_plan = plan };
-            0
-        }
-        Err(e) => {
-            copy_error(out_err, err_cap, &e);
-            -1
-        }
-    }
 }
 
 pub(crate) fn build_documents_data(

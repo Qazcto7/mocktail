@@ -1,6 +1,7 @@
 #ifndef MOCKTAIL_JNIVM_JNI_REFERENCES_H_
 #define MOCKTAIL_JNIVM_JNI_REFERENCES_H_
 
+#include <cstdint>
 #include <string_view>
 #include <unordered_set>
 
@@ -38,6 +39,9 @@ void RegisterLocalRef(jobject obj);
 void UnregisterLocalRef(jobject obj);
 void RetainJniReference(jobject obj);
 void ReleaseJniReference(jobject obj);
+void ReleaseAllLocalJniFrames();
+void RegisterDirectBufferCapacity(jobject buffer, jlong capacity);
+jlong DirectBufferCapacityValue(jobject buffer);
 jobject NewLocalJniReference(jobject obj);
 void DeleteLocalJniReference(jobject obj);
 void PushLocalJniFrame();

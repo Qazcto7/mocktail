@@ -82,8 +82,6 @@ ProgramHeaderValidation ValidateBionicProgramHeaders(LibraryHandle handle);
 // alias or a host-dlopen library without Bionic image metadata.
 std::uintptr_t FindLoadedAndroidLibraryBase(const std::string& logical_name);
 
-const std::unordered_map<std::string, LibraryHandle>& GetSymbolTable();
-
 }  // namespace linker
 
 #endif  // MOCKTAIL_LINKER_LINKER_H_

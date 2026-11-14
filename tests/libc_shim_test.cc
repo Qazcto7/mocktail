@@ -3,6 +3,8 @@
 #include <atomic>
 #include <cstdlib>
 #include <string>
+#include <thread>
+#include <vector>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -285,6 +287,33 @@ TEST_F(LibcShimTest, ClearRemovesAllMappings) {
 
   const std::string input = "/data/user/0/com.roblox.client/files";
   EXPECT_EQ(TranslatePath(input), input);
+}
+
+TEST_F(LibcShimTest, TranslatePathHandlesBoundariesAndConcurrentReads) {
+  RegisterPathMapping("/data/user/0/com.roblox.client", "/host/mocktail");
+
+  EXPECT_EQ(TranslatePath("/data/user/0/com.roblox.client"), "/host/mocktail");
+  EXPECT_EQ(TranslatePath("/data/user/0/com.roblox.client/files/log.txt"),
+            "/host/mocktail/files/log.txt");
+  EXPECT_EQ(TranslatePath("/data/user/0/com.roblox.client_other/files"),
+            "/data/user/0/com.roblox.client_other/files");
+  EXPECT_EQ(TranslatePath("/proc/self/stat"), "/proc/self/stat");
+
+  std::vector<std::thread> readers;
+  readers.reserve(4);
+  for (int t = 0; t < 4; ++t) {
+    readers.emplace_back([]() {
+      for (int i = 0; i < 200; ++i) {
+        EXPECT_EQ(TranslatePath("/data/user/0/com.roblox.client/cache"),
+                  "/host/mocktail/cache");
+        EXPECT_EQ(TranslatePath("/usr/share/fonts/noto"),
+                  "/usr/share/fonts/noto");
+      }
+    });
+  }
+  for (auto& reader : readers) {
+    reader.join();
+  }
 }
 
 }  // namespace

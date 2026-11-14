@@ -101,23 +101,90 @@ static std::vector<jchar> MakeUtf16Vector(const jchar* utf16, jsize length) {
   return {};
 }
 
+bool IsNonZeroAscii(const char* input, std::size_t* length) {
+  if (input == nullptr) {
+    *length = 0;
+    return true;
+  }
+  const unsigned char* cursor = reinterpret_cast<const unsigned char*>(input);
+  while (*cursor != 0) {
+    if ((*cursor & 0x80u) != 0) {
+      return false;
+    }
+    ++cursor;
+  }
+  *length = static_cast<std::size_t>(
+      cursor - reinterpret_cast<const unsigned char*>(input));
+  return true;
+}
+
 struct PseudoStringObject : PseudoJavaObject {
   PseudoStringObject(std::shared_ptr<Class> cls, const char* utf)
-      : PseudoJavaObject(std::move(cls)),
-        chars(ModifiedUtf8ToUtf16(utf)),
-        value(Utf16ToUtf8(chars)),
-        modified_utf8(Utf16ToModifiedUtf8(chars)) {}
+      : PseudoJavaObject(std::move(cls)) {
+    std::size_t ascii_len = 0;
+    if (IsNonZeroAscii(utf, &ascii_len)) {
+      if (utf != nullptr && ascii_len != 0) {
+        value_.assign(utf, ascii_len);
+      }
+      ascii_fast_ = true;
+      has_utf8_ = true;
+      return;
+    }
+    chars_ = ModifiedUtf8ToUtf16(utf);
+    has_utf16_ = true;
+  }
 
   PseudoStringObject(std::shared_ptr<Class> cls, const jchar* utf16,
                      jsize length)
       : PseudoJavaObject(std::move(cls)),
-        chars(MakeUtf16Vector(utf16, length)),
-        value(Utf16ToUtf8(chars)),
-        modified_utf8(Utf16ToModifiedUtf8(chars)) {}
+        chars_(MakeUtf16Vector(utf16, length)),
+        has_utf16_(true) {}
 
-  std::vector<jchar> chars;
-  std::string value;
-  std::string modified_utf8;
+  const std::vector<jchar>& Utf16Chars() {
+    if (!has_utf16_) {
+      chars_.resize(value_.size());
+      for (std::size_t i = 0; i < value_.size(); ++i) {
+        chars_[i] = static_cast<unsigned char>(value_[i]);
+      }
+      has_utf16_ = true;
+    }
+    return chars_;
+  }
+
+  jsize Utf16Length() const {
+    if (ascii_fast_) {
+      return static_cast<jsize>(value_.size());
+    }
+    return static_cast<jsize>(chars_.size());
+  }
+
+  const std::string& Utf8String() {
+    if (!has_utf8_) {
+      value_ = Utf16ToUtf8(chars_);
+      has_utf8_ = true;
+    }
+    return value_;
+  }
+
+  const std::string& ModifiedUtf8String() {
+    if (ascii_fast_) {
+      return value_;
+    }
+    if (!has_mutf8_) {
+      modified_utf8_ = Utf16ToModifiedUtf8(chars_);
+      has_mutf8_ = true;
+    }
+    return modified_utf8_;
+  }
+
+ private:
+  std::vector<jchar> chars_;
+  std::string value_;
+  std::string modified_utf8_;
+  bool ascii_fast_ = false;
+  bool has_utf16_ = false;
+  bool has_utf8_ = false;
+  bool has_mutf8_ = false;
 };
 
 }  // namespace
@@ -157,7 +224,7 @@ jstring MakeUtf16String(const jchar* utf16, jsize length) {
   return str;
 }
 
-std::string_view StringViewFromJString(jstring str) {
+std::string StringFromJString(jstring str) {
   if (__builtin_expect(!str, 0)) {
     return {};
   }
@@ -166,19 +233,13 @@ std::string_view StringViewFromJString(jstring str) {
     auto* string_object = dynamic_cast<PseudoStringObject*>(
         PseudoObjectFromRef(reinterpret_cast<jobject>(str)));
     if (string_object != nullptr) {
-      return string_object->value;
+      return string_object->Utf8String();
     }
   }
   if (!IsRawStringPointer(str)) {
     return {};
   }
-  const char* utf = reinterpret_cast<const char*>(str);
-  return std::string_view(utf);
-}
-
-std::string StringFromJString(jstring str) {
-  const std::string_view sv = StringViewFromJString(str);
-  return std::string(sv);
+  return std::string(reinterpret_cast<const char*>(str));
 }
 
 bool IsUtf8CharsetName(jstring charset_name) {
@@ -229,7 +290,7 @@ jbyteArray JavaStringGetUtf8Bytes(jobject obj, jstring charset_name) {
     if (string_object == nullptr) {
       return nullptr;
     }
-    bytes = JavaStringUtf8Bytes(string_object->chars);
+    bytes = JavaStringUtf8Bytes(string_object->Utf16Chars());
   }
   if (bytes.size() >
       static_cast<std::size_t>(std::numeric_limits<jsize>::max())) {
@@ -255,7 +316,9 @@ const char* StringChars(jstring str) {
   if (g_known_strings.find(str) != g_known_strings.end()) {
     auto* string_object = dynamic_cast<PseudoStringObject*>(
         PseudoObjectFromRef(reinterpret_cast<jobject>(str)));
-    return string_object != nullptr ? string_object->modified_utf8.c_str() : "";
+    return string_object != nullptr
+               ? string_object->ModifiedUtf8String().c_str()
+               : "";
   }
   if (!IsRawStringPointer(str)) {
     return "";
@@ -271,9 +334,11 @@ const jchar* StringUtf16Chars(jstring str) {
   if (g_known_strings.find(str) != g_known_strings.end()) {
     auto* string_object = dynamic_cast<PseudoStringObject*>(
         PseudoObjectFromRef(reinterpret_cast<jobject>(str)));
-    return string_object && !string_object->chars.empty()
-               ? string_object->chars.data()
-               : kEmptyUtf16;
+    if (string_object == nullptr) {
+      return kEmptyUtf16;
+    }
+    const auto& utf16 = string_object->Utf16Chars();
+    return !utf16.empty() ? utf16.data() : kEmptyUtf16;
   }
   if (!IsRawStringPointer(str)) {
     return kEmptyUtf16;
@@ -286,9 +351,7 @@ jsize StringUtf16Length(jstring str) {
   if (g_known_strings.find(str) != g_known_strings.end()) {
     auto* string_object = dynamic_cast<PseudoStringObject*>(
         PseudoObjectFromRef(reinterpret_cast<jobject>(str)));
-    return string_object != nullptr
-               ? static_cast<jsize>(string_object->chars.size())
-               : 0;
+    return string_object != nullptr ? string_object->Utf16Length() : 0;
   }
   if (!IsRawStringPointer(str)) {
     return 0;
@@ -303,7 +366,7 @@ jsize StringModifiedUtf8Length(jstring str) {
     auto* string_object = dynamic_cast<PseudoStringObject*>(
         PseudoObjectFromRef(reinterpret_cast<jobject>(str)));
     return string_object != nullptr
-               ? static_cast<jsize>(string_object->modified_utf8.size())
+               ? static_cast<jsize>(string_object->ModifiedUtf8String().size())
                : 0;
   }
   if (!IsRawStringPointer(str)) {
@@ -320,14 +383,17 @@ void CopyStringRegion(jstring str, jsize start, jsize length, jchar* output) {
   std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
   auto* string_object = dynamic_cast<PseudoStringObject*>(
       PseudoObjectFromRef(reinterpret_cast<jobject>(str)));
-  if (string_object == nullptr ||
-      static_cast<std::size_t>(start) >= string_object->chars.size()) {
+  if (string_object == nullptr) {
+    return;
+  }
+  const auto& utf16 = string_object->Utf16Chars();
+  if (static_cast<std::size_t>(start) >= utf16.size()) {
     return;
   }
   const std::size_t count =
       std::min(static_cast<std::size_t>(length),
-               string_object->chars.size() - static_cast<std::size_t>(start));
-  std::copy_n(string_object->chars.data() + start, count, output);
+               utf16.size() - static_cast<std::size_t>(start));
+  std::copy_n(utf16.data() + start, count, output);
 }
 
 void CopyStringModifiedUtf8Region(jstring str, jsize start, jsize length,
@@ -338,15 +404,18 @@ void CopyStringModifiedUtf8Region(jstring str, jsize start, jsize length,
   std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
   auto* string_object = dynamic_cast<PseudoStringObject*>(
       PseudoObjectFromRef(reinterpret_cast<jobject>(str)));
-  if (string_object == nullptr ||
-      static_cast<std::size_t>(start) >= string_object->chars.size()) {
+  if (string_object == nullptr) {
+    return;
+  }
+  const auto& utf16 = string_object->Utf16Chars();
+  if (static_cast<std::size_t>(start) >= utf16.size()) {
     return;
   }
   const std::size_t count =
       std::min(static_cast<std::size_t>(length),
-               string_object->chars.size() - static_cast<std::size_t>(start));
-  const std::string encoded = Utf16ToModifiedUtf8(
-      string_object->chars, static_cast<std::size_t>(start), count);
+               utf16.size() - static_cast<std::size_t>(start));
+  const std::string encoded =
+      Utf16ToModifiedUtf8(utf16, static_cast<std::size_t>(start), count);
   std::memcpy(output, encoded.data(), encoded.size());
 }
 

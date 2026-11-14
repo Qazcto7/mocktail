@@ -1,5 +1,6 @@
 #include "runtime/roblox_experience_composition.h"
 
+#include <atomic>
 #include <cerrno>
 #include <charconv>
 #include <chrono>
@@ -270,6 +271,7 @@ struct RobloxExperienceComposition::LaunchTask {
   RobloxFreshGameLaunchContext context;
   std::shared_ptr<RobloxFreshGameLaunchController> controller;
   Status result = Status::Ok();
+  std::atomic<bool> completed{false};
 };
 
 struct RobloxExperienceComposition::WebSurfaceExitTarget {
@@ -1270,7 +1272,14 @@ void RobloxExperienceComposition::NotifyLuaAppDidReturn() {
 Status RobloxExperienceComposition::DrainLaunchRequests() {
   Status completed_result = Status::Ok();
   if (launch_worker_.joinable()) {
-    const OwnedPthreadWaitResult wait = launch_worker_.WaitFor(0, 1);
+    bool task_completed = false;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      task_completed = active_launch_ != nullptr &&
+                       active_launch_->completed.load(std::memory_order_acquire);
+    }
+    const OwnedPthreadWaitResult wait =
+        launch_worker_.WaitFor(task_completed ? -1 : 0, 1);
     if (wait.status == OwnedPthreadWaitStatus::kTimedOut)
       return Status::Ok();
     if (!wait.joined()) {
@@ -1488,6 +1497,7 @@ void RobloxExperienceComposition::RunActiveLaunch() {
     }
   }
   task->result = status;
+  task->completed.store(true, std::memory_order_release);
 }
 
 Status RobloxExperienceComposition::LeaveGame() {
@@ -1690,6 +1700,16 @@ Status RobloxExperienceComposition::Shutdown() {
 bool RobloxExperienceComposition::subscribed() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return subscribed_;
+}
+
+bool RobloxExperienceComposition::launch_in_progress() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return launch_in_progress_;
+}
+
+bool RobloxExperienceComposition::game_active() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return game_active_;
 }
 
 GameSessionSnapshot RobloxExperienceComposition::Snapshot() const {

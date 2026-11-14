@@ -1301,6 +1301,19 @@ void VulkanEtc2Emulation::PrepareSubmit(const VkCommandBuffer* command_buffers,
 
   static thread_local std::vector<std::uint8_t> scratch_source;
   static thread_local std::vector<std::uint8_t> scratch_decoded;
+  constexpr std::size_t kMaxRetainedScratchBytes = 4ULL * 1024ULL * 1024ULL;
+  struct ScratchTrimGuard {
+    std::vector<std::uint8_t>& source;
+    std::vector<std::uint8_t>& decoded;
+    ~ScratchTrimGuard() {
+      if (source.capacity() > kMaxRetainedScratchBytes) {
+        std::vector<std::uint8_t>().swap(source);
+      }
+      if (decoded.capacity() > kMaxRetainedScratchBytes) {
+        std::vector<std::uint8_t>().swap(decoded);
+      }
+    }
+  } scratch_trim{scratch_source, scratch_decoded};
   if (scratch_source.size() < compressed_total) {
     scratch_source.resize(compressed_total);
   }

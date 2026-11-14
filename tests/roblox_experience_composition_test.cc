@@ -485,8 +485,8 @@ void DrainUntilPresented(RobloxExperienceComposition* composition) {
   ASSERT_NE(composition, nullptr);
   for (int attempt = 0; attempt < 1000; ++attempt) {
     ASSERT_TRUE(composition->DrainLaunchRequests().ok());
-    if (composition->Snapshot().game_presented) {
-      ASSERT_TRUE(composition->DrainLaunchRequests().ok());
+    if (composition->Snapshot().game_presented &&
+        !composition->launch_in_progress()) {
       return;
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(1));

@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <string>
 #include <type_traits>
 
 #if defined(__GLIBC__)
@@ -288,13 +289,17 @@ int BionicUname(struct utsname* name) noexcept {
   const int result = ::uname(name);
   if (result != 0 || name == nullptr) return result;
 
-  const int host_errno = errno;
-  std::array<char, sizeof(name->version)> linux_version{};
-  if (ReadTextFile("/proc/sys/kernel/version", linux_version.data(),
-                   linux_version.size())) {
-    NormalizeLinuxulatorUnameVersion(name, linux_version.data());
+  if (std::strcmp(name->sysname, "Linux") == 0 &&
+      (std::strstr(name->version, "FreeBSD") != nullptr ||
+       std::strstr(name->version, "freebsd.org") != nullptr)) {
+    const int host_errno = errno;
+    std::array<char, sizeof(name->version)> linux_version{};
+    if (ReadTextFile("/proc/sys/kernel/version", linux_version.data(),
+                     linux_version.size())) {
+      NormalizeLinuxulatorUnameVersion(name, linux_version.data());
+    }
+    errno = host_errno;
   }
-  errno = host_errno;
   return result;
 }
 
@@ -310,6 +315,17 @@ uid_t BionicGetEffectiveUid() noexcept {
   return NormalizeBionicApplicationUid(::geteuid());
 }
 
+const char* UnknownHostStrErrorString() noexcept {
+  static const std::string* cached = []() {
+    std::array<char, 256> unknown_buffer{};
+    const char* msg = HostStrErrorResult(
+        ::strerror_r(-1, unknown_buffer.data(), unknown_buffer.size()),
+        unknown_buffer.data());
+    return new std::string(msg != nullptr ? msg : "");
+  }();
+  return cached->empty() ? nullptr : cached->c_str();
+}
+
 int BionicStrError(int error_number, char* buffer,
                    size_t buffer_size) noexcept {
   const int entry_errno = errno;
@@ -323,16 +339,14 @@ int BionicStrError(int error_number, char* buffer,
       ::strerror_r(error_number, host_buffer.data(), host_buffer.size());
   const char* message = HostStrErrorResult(host_result, host_buffer.data());
 
-  std::array<char, 256> unknown_buffer{};
-  const char* unknown_message = HostStrErrorResult(
-      ::strerror_r(-1, unknown_buffer.data(), unknown_buffer.size()),
-      unknown_buffer.data());
+  const char* unknown_message = UnknownHostStrErrorString();
+  std::array<char, 256> fallback_buffer{};
   if (message == nullptr ||
       (error_number != 0 && unknown_message != nullptr &&
        std::strcmp(message, unknown_message) == 0)) {
-    std::snprintf(unknown_buffer.data(), unknown_buffer.size(),
+    std::snprintf(fallback_buffer.data(), fallback_buffer.size(),
                   "Unknown error %d", error_number);
-    message = unknown_buffer.data();
+    message = fallback_buffer.data();
   }
 
   const int length = std::snprintf(buffer, buffer_size, "%s", message);
@@ -347,6 +361,10 @@ int BionicStrError(int error_number, char* buffer,
 long long BionicStrToLongLongLocale(const char* text, char** end, int base,
                                     BionicLocale locale) noexcept {
   static_cast<void>(locale);
+  const locale_t c_locale = HostCLocale();
+  if (c_locale != nullptr) {
+    return ::strtoll_l(text, end, base, c_locale);
+  }
   return ParseInHostCLocale<long long>(
       [text, end, base]() { return std::strtoll(text, end, base); });
 }
@@ -354,6 +372,10 @@ long long BionicStrToLongLongLocale(const char* text, char** end, int base,
 unsigned long long BionicStrToUnsignedLongLongLocale(
     const char* text, char** end, int base, BionicLocale locale) noexcept {
   static_cast<void>(locale);
+  const locale_t c_locale = HostCLocale();
+  if (c_locale != nullptr) {
+    return ::strtoull_l(text, end, base, c_locale);
+  }
   return ParseInHostCLocale<unsigned long long>(
       [text, end, base]() { return std::strtoull(text, end, base); });
 }

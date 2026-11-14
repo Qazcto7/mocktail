@@ -44,18 +44,6 @@ pub type MocktailRuntimePathsFieldCallback =
 pub type MocktailPayloadStoreStringCallback =
     Option<unsafe extern "C" fn(ctx: *mut c_void, ptr: *const c_char, len: usize)>;
 
-pub type MocktailPayloadStoreApprovalPathsCallback = Option<
-    unsafe extern "C" fn(
-        ctx: *mut c_void,
-        profile_ptr: *const c_char,
-        profile_len: usize,
-        compat_ptr: *const c_char,
-        compat_len: usize,
-        receipt_ptr: *const c_char,
-        receipt_len: usize,
-    ),
->;
-
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct MocktailRustHostBridgeEntry {
@@ -1533,69 +1521,6 @@ pub extern "C" fn mocktail_rust_payload_store_build_activation_manifest(
 }
 
 #[no_mangle]
-pub extern "C" fn mocktail_rust_payload_store_inspect_manifest_json(
-    json_ptr: *const c_char,
-    json_len: usize,
-    expected_version_name_ptr: *const c_char,
-    expected_version_code: u64,
-    expected_build_id_ptr: *const c_char,
-    expected_library_sha256_ptr: *const c_char,
-    on_approval_paths: MocktailPayloadStoreApprovalPathsCallback,
-    ctx: *mut c_void,
-    out_has_approval: *mut u8,
-    err_buf: *mut c_char,
-    err_cap: usize,
-) -> c_int {
-    if !out_has_approval.is_null() {
-        unsafe { *out_has_approval = 0 };
-    }
-    let Some(json_str) = slice_to_str(json_ptr, json_len) else {
-        copy_error(err_buf, err_cap, "active payload manifest is invalid");
-        return -1;
-    };
-    let (Some(exp_ver_name), Some(exp_build_id), Some(exp_sha256)) = (
-        c_str_opt(expected_version_name_ptr),
-        c_str_opt(expected_build_id_ptr),
-        c_str_opt(expected_library_sha256_ptr),
-    ) else {
-        copy_error(err_buf, err_cap, "active payload manifest is invalid");
-        return -1;
-    };
-    match inspect_manifest_json_str(
-        json_str,
-        exp_ver_name,
-        expected_version_code,
-        exp_build_id,
-        exp_sha256,
-    ) {
-        Ok(Some(paths)) => {
-            if !out_has_approval.is_null() {
-                unsafe { *out_has_approval = 1 };
-            }
-            if let Some(cb) = on_approval_paths {
-                unsafe {
-                    cb(
-                        ctx,
-                        paths.profile.as_ptr() as *const c_char,
-                        paths.profile.len(),
-                        paths.compatibility.as_ptr() as *const c_char,
-                        paths.compatibility.len(),
-                        paths.receipt.as_ptr() as *const c_char,
-                        paths.receipt.len(),
-                    );
-                }
-            }
-            0
-        }
-        Ok(None) => 0,
-        Err(msg) => {
-            copy_error(err_buf, err_cap, msg);
-            -1
-        }
-    }
-}
-
-#[no_mangle]
 pub extern "C" fn mocktail_rust_payload_store_persist_payload_sha256(
     json_ptr: *const c_char,
     json_len: usize,
@@ -1631,26 +1556,6 @@ pub extern "C" fn mocktail_rust_payload_store_persist_payload_sha256(
             -1
         }
     }
-}
-
-#[no_mangle]
-pub extern "C" fn mocktail_rust_payload_store_build_status_json(
-    update_json_path_ptr: *const c_char,
-    current_json_ptr: *const c_char,
-    current_json_len: usize,
-    previous_json_ptr: *const c_char,
-    previous_json_len: usize,
-    on_json: MocktailPayloadStoreStringCallback,
-    ctx: *mut c_void,
-) -> c_int {
-    let update_path = c_str_opt(update_json_path_ptr).map(Path::new);
-    let current_json = slice_to_str(current_json_ptr, current_json_len).unwrap_or("");
-    let previous_json = slice_to_str(previous_json_ptr, previous_json_len).unwrap_or("");
-    let Some(rendered) = build_status_json_str(update_path, current_json, previous_json) else {
-        return -1;
-    };
-    emit_string(on_json, ctx, &rendered);
-    0
 }
 
 // ============================================================================
@@ -1972,55 +1877,6 @@ pub extern "C" fn mocktail_rust_host_abi_set_hashing_fault_for_testing(enabled: 
     HOST_ABI_HASHING_FAULT_FOR_TESTING.store(enabled, Ordering::Release);
 }
 
-#[no_mangle]
-pub extern "C" fn mocktail_rust_host_abi_sha256_hex(
-    bytes_ptr: *const u8,
-    bytes_len: usize,
-    max_chars: usize,
-    out_hex: *mut c_char,
-    hex_cap: usize,
-) -> c_int {
-    if out_hex.is_null() || hex_cap == 0 {
-        return -1;
-    }
-    unsafe { *out_hex = 0 };
-    if bytes_ptr.is_null() && bytes_len > 0 {
-        return -1;
-    }
-    let input = if bytes_len == 0 {
-        &[]
-    } else {
-        unsafe { slice::from_raw_parts(bytes_ptr, bytes_len) }
-    };
-    let Some(hex_str) = compute_sha256_hex_internal(input, max_chars) else {
-        return -1;
-    };
-    copy_to_c_buffer(&hex_str, out_hex, hex_cap)
-}
-
-#[no_mangle]
-pub extern "C" fn mocktail_rust_host_abi_validate_payload_id(
-    payload_id_ptr: *const c_char,
-    build_id_ptr: *const c_char,
-) -> bool {
-    match (c_str_opt(payload_id_ptr), c_str_opt(build_id_ptr)) {
-        (Some(pid), Some(bid)) => is_valid_payload_id_with_build_id(pid, bid),
-        _ => false,
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn mocktail_rust_host_abi_validate_canary_run_id(
-    run_id_ptr: *const c_char,
-    payload_id_ptr: *const c_char,
-    run: usize,
-) -> bool {
-    match (c_str_opt(run_id_ptr), c_str_opt(payload_id_ptr)) {
-        (Some(rid), Some(pid)) => is_valid_canary_run_id(rid, pid, run),
-        _ => false,
-    }
-}
-
 fn parse_profile_json_inner(
     json_str: &str,
     is_x86_64: bool,
@@ -2313,57 +2169,6 @@ fn validate_profile_identity_inner(
     Some((encoded_sha.to_string(), payload_id.to_string()))
 }
 
-#[no_mangle]
-pub extern "C" fn mocktail_rust_host_abi_validate_profile_identity(
-    json_ptr: *const c_char,
-    json_len: usize,
-    profile_build_id_ptr: *const c_char,
-    reference_build_id_ptr: *const c_char,
-    reference_payload_sha256_ptr: *const c_char,
-    canonical_payload_path_ptr: *const c_char,
-    expected_launch_build_id_ptr: *const c_char,
-    out_payload_sha256: *mut c_char,
-    sha_cap: usize,
-    out_payload_id: *mut c_char,
-    pid_cap: usize,
-) -> c_int {
-    let (
-        Some(json_str),
-        Some(profile_build_id),
-        Some(reference_build_id),
-        Some(reference_payload_sha256),
-        Some(canonical_payload_path),
-        Some(expected_launch_build_id),
-    ) = (
-        slice_to_str(json_ptr, json_len),
-        c_str_opt(profile_build_id_ptr),
-        c_str_opt(reference_build_id_ptr),
-        c_str_opt(reference_payload_sha256_ptr),
-        c_str_opt(canonical_payload_path_ptr),
-        c_str_opt(expected_launch_build_id_ptr),
-    )
-    else {
-        return -1;
-    };
-    let Some((encoded_sha, payload_id)) = validate_profile_identity_inner(
-        json_str,
-        profile_build_id,
-        reference_build_id,
-        reference_payload_sha256,
-        canonical_payload_path,
-        expected_launch_build_id,
-    ) else {
-        return -1;
-    };
-
-    if copy_to_c_buffer(&encoded_sha, out_payload_sha256, sha_cap) != 0
-        || copy_to_c_buffer(&payload_id, out_payload_id, pid_cap) != 0
-    {
-        return -1;
-    }
-    0
-}
-
 fn parse_receipt_json_inner(
     json_str: &str,
     receipt_path: &str,
@@ -2482,72 +2287,6 @@ fn parse_receipt_json_inner(
     Ok(out)
 }
 
-#[no_mangle]
-pub extern "C" fn mocktail_rust_host_abi_parse_receipt_json(
-    json_ptr: *const c_char,
-    json_len: usize,
-    receipt_path_ptr: *const c_char,
-    canonical_payload_path_ptr: *const c_char,
-    payload_sha256_ptr: *const c_char,
-    profile_sha256_ptr: *const c_char,
-    payload_id_ptr: *const c_char,
-    build_id_ptr: *const c_char,
-    out_receipt: *mut MocktailRustParsedApprovalReceipt,
-    err_buf: *mut c_char,
-    err_cap: usize,
-) -> c_int {
-    if out_receipt.is_null() {
-        copy_error(err_buf, err_cap, "invalid arguments");
-        return -1;
-    }
-    let Some(json_str) = slice_to_str(json_ptr, json_len) else {
-        copy_error(err_buf, err_cap, "invalid JSON object");
-        return -2;
-    };
-    let (
-        Some(receipt_path),
-        Some(canonical_payload_path),
-        Some(payload_sha256),
-        Some(profile_sha256),
-        Some(payload_id),
-        Some(build_id),
-    ) = (
-        c_str_opt(receipt_path_ptr),
-        c_str_opt(canonical_payload_path_ptr),
-        c_str_opt(payload_sha256_ptr),
-        c_str_opt(profile_sha256_ptr),
-        c_str_opt(payload_id_ptr),
-        c_str_opt(build_id_ptr),
-    )
-    else {
-        copy_error(
-            err_buf,
-            err_cap,
-            "approval receipt does not authorize the exact ABI profile and payload",
-        );
-        return -1;
-    };
-
-    match parse_receipt_json_inner(
-        json_str,
-        receipt_path,
-        canonical_payload_path,
-        payload_sha256,
-        profile_sha256,
-        payload_id,
-        build_id,
-    ) {
-        Ok(out) => {
-            unsafe { *out_receipt = out };
-            0
-        }
-        Err((code, msg)) => {
-            copy_error(err_buf, err_cap, msg);
-            code
-        }
-    }
-}
-
 fn validate_canary_attestation_inner(
     json_str: &str,
     expected_run: usize,
@@ -2623,77 +2362,6 @@ fn validate_canary_attestation_inner(
     Ok((evidence_sha256, run_id.to_string()))
 }
 
-#[no_mangle]
-pub extern "C" fn mocktail_rust_host_abi_validate_canary_attestation_json(
-    json_ptr: *const c_char,
-    json_len: usize,
-    expected_run: usize,
-    payload_id_ptr: *const c_char,
-    payload_fingerprint_ptr: *const c_char,
-    profile_sha256_ptr: *const c_char,
-    compatibility_manifest_sha256_ptr: *const c_char,
-    runtime_sha256_ptr: *const c_char,
-    runtime_build_id_ptr: *const c_char,
-    out_sha256: *mut c_char,
-    sha_cap: usize,
-    on_run_id: MocktailPayloadStoreStringCallback,
-    ctx: *mut c_void,
-    err_buf: *mut c_char,
-    err_cap: usize,
-) -> c_int {
-    let Some(json_str) = slice_to_str(json_ptr, json_len) else {
-        copy_error(err_buf, err_cap, "invalid JSON object");
-        return -2;
-    };
-    let (
-        Some(payload_id),
-        Some(payload_fingerprint),
-        Some(profile_sha256),
-        Some(compat_sha256),
-        Some(runtime_sha256),
-        Some(runtime_build_id),
-    ) = (
-        c_str_opt(payload_id_ptr),
-        c_str_opt(payload_fingerprint_ptr),
-        c_str_opt(profile_sha256_ptr),
-        c_str_opt(compatibility_manifest_sha256_ptr),
-        c_str_opt(runtime_sha256_ptr),
-        c_str_opt(runtime_build_id_ptr),
-    )
-    else {
-        copy_error(
-            err_buf,
-            err_cap,
-            "canary attestation does not match the exact approval evidence",
-        );
-        return -1;
-    };
-
-    match validate_canary_attestation_inner(
-        json_str,
-        expected_run,
-        payload_id,
-        payload_fingerprint,
-        profile_sha256,
-        compat_sha256,
-        runtime_sha256,
-        runtime_build_id,
-    ) {
-        Ok((evidence_sha256, run_id)) => {
-            if copy_to_c_buffer(&evidence_sha256, out_sha256, sha_cap) != 0 {
-                copy_error(err_buf, err_cap, "cannot compute canary attestation SHA-256");
-                return -1;
-            }
-            emit_string(on_run_id, ctx, &run_id);
-            0
-        }
-        Err((code, msg)) => {
-            copy_error(err_buf, err_cap, msg);
-            code
-        }
-    }
-}
-
 fn verify_receipt_evidence_inner(
     rec: &MocktailRustParsedApprovalReceipt,
     profile_sha256: &str,
@@ -2748,60 +2416,6 @@ fn verify_receipt_evidence_inner(
         return Err("approval receipt evidence generation does not match");
     }
     Ok(())
-}
-
-#[no_mangle]
-pub extern "C" fn mocktail_rust_host_abi_verify_receipt_evidence(
-    receipt: *const MocktailRustParsedApprovalReceipt,
-    profile_sha256_ptr: *const c_char,
-    manifest_sha256_ptr: *const c_char,
-    canary_sha_0_ptr: *const c_char,
-    run_id_0_ptr: *const c_char,
-    canary_sha_1_ptr: *const c_char,
-    run_id_1_ptr: *const c_char,
-    err_buf: *mut c_char,
-    err_cap: usize,
-) -> c_int {
-    if receipt.is_null() {
-        copy_error(err_buf, err_cap, "invalid arguments");
-        return -1;
-    }
-    let rec = unsafe { &*receipt };
-    let (
-        Some(profile_sha256),
-        Some(manifest_sha256),
-        Some(canary_sha_0),
-        Some(run_id_0),
-        Some(canary_sha_1),
-        Some(run_id_1),
-    ) = (
-        c_str_opt(profile_sha256_ptr),
-        c_str_opt(manifest_sha256_ptr),
-        c_str_opt(canary_sha_0_ptr),
-        c_str_opt(run_id_0_ptr),
-        c_str_opt(canary_sha_1_ptr),
-        c_str_opt(run_id_1_ptr),
-    )
-    else {
-        copy_error(err_buf, err_cap, "invalid arguments");
-        return -1;
-    };
-
-    match verify_receipt_evidence_inner(
-        rec,
-        profile_sha256,
-        manifest_sha256,
-        canary_sha_0,
-        run_id_0,
-        canary_sha_1,
-        run_id_1,
-    ) {
-        Ok(()) => 0,
-        Err(msg) => {
-            copy_error(err_buf, err_cap, msg);
-            -1
-        }
-    }
 }
 
 // ============================================================================

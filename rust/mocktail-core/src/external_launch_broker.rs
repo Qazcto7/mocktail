@@ -6,7 +6,7 @@
 //! parsing, and FIFO pending queue management into Rust.
 
 use std::collections::VecDeque;
-use std::ffi::{c_char, c_int, c_void, CStr, CString};
+use std::ffi::{c_char, c_int, c_void, CString};
 use std::mem;
 use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
@@ -737,21 +737,6 @@ pub extern "C" fn mocktail_rust_external_launch_reply_status_code(reply_code: u8
     }
 }
 
-#[no_mangle]
-pub extern "C" fn mocktail_rust_external_launch_format_socket_name(
-    instance_key_ptr: *const c_char,
-    is_run_user: c_int,
-    out_buf: *mut c_char,
-    out_cap: usize,
-) -> c_int {
-    if instance_key_ptr.is_null() || out_buf.is_null() {
-        return -1;
-    }
-    let key = unsafe { CStr::from_ptr(instance_key_ptr).to_str().unwrap_or("") };
-    let name = format_socket_name(key, is_run_user != 0);
-    copy_to_c_buffer(&name, out_buf, out_cap)
-}
-
 // ============================================================================
 // Broker Lifecycle & Forwarding C-ABI Exports
 // ============================================================================
@@ -1364,6 +1349,7 @@ pub extern "C" fn mocktail_rust_external_launch_broker_socket_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::CStr;
     use std::fs::File;
     use std::io::Write;
     use std::os::unix::fs::{FileTypeExt, PermissionsExt};

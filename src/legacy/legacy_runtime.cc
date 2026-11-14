@@ -45,6 +45,7 @@
 #include <SDL3/SDL_video.h>
 
 #include "compat/bionic_abi_exports.h"
+#include "compat/bionic_dns_runtime.h"
 #include "compat/bionic_prctl_runtime.h"
 #include "compat/bionic_pthread_create_runtime.h"
 #include "compat/bionic_socket_runtime.h"
@@ -811,6 +812,7 @@ bool InvokeTaskSchedulerForeground(
     g_update_surface_app_recovery_in_progress = kStage6RecoveryInline;
     native_set_task_scheduler_background_mode(env, native_gl_class, JNI_FALSE,
                                               reason);
+    env->DeleteLocalRef(reason);
     g_update_surface_app_recovery_in_progress = kStage6RecoveryInactive;
     std::cout << "  [" << log_scope
               << "] NativeGLInterface.setTaskSchedulerBackgroundMode returned\n"
@@ -818,6 +820,7 @@ bool InvokeTaskSchedulerForeground(
     return true;
   }
 
+  env->DeleteLocalRef(reason);
   g_update_surface_app_recovery_in_progress = kStage6RecoveryInactive;
   std::cerr << "  [" << log_scope
             << "] setTaskSchedulerBackgroundMode recovered from crash\n"
@@ -997,116 +1000,6 @@ bool HasEnvValue(const char* name) {
   return value != nullptr && value[0] != '\0';
 }
 
-struct BionicAddrInfo {
-  int ai_flags;
-  int ai_family;
-  int ai_socktype;
-  int ai_protocol;
-  socklen_t ai_addrlen;
-  char* ai_canonname;
-  struct sockaddr* ai_addr;
-  BionicAddrInfo* ai_next;
-};
-
-static_assert(sizeof(BionicAddrInfo) == 48,
-              "unexpected bionic addrinfo size");
-
-bool DnsTraceEnabled() {
-  return IsEnabled("MOCKTAIL_DNS_TRACE");
-}
-
-addrinfo HostHintsFromBionic(const BionicAddrInfo* hints) {
-  addrinfo host_hints{};
-  if (!hints) {
-    return host_hints;
-  }
-  host_hints.ai_flags = hints->ai_flags;
-  host_hints.ai_family = hints->ai_family;
-  host_hints.ai_socktype = hints->ai_socktype;
-  host_hints.ai_protocol = hints->ai_protocol;
-  return host_hints;
-}
-
-BionicAddrInfo* BionicAddrInfoFromHost(const addrinfo* host) {
-  BionicAddrInfo* head = nullptr;
-  BionicAddrInfo* tail = nullptr;
-  for (const addrinfo* current = host; current; current = current->ai_next) {
-    auto* node =
-        static_cast<BionicAddrInfo*>(std::calloc(1, sizeof(BionicAddrInfo)));
-    if (!node) {
-      break;
-    }
-    node->ai_flags = current->ai_flags;
-    node->ai_family = current->ai_family;
-    node->ai_socktype = current->ai_socktype;
-    node->ai_protocol = current->ai_protocol;
-    node->ai_addrlen = current->ai_addrlen;
-    if (current->ai_canonname) {
-      node->ai_canonname = ::strdup(current->ai_canonname);
-    }
-    if (current->ai_addr && current->ai_addrlen > 0) {
-      node->ai_addr = static_cast<sockaddr*>(std::malloc(current->ai_addrlen));
-      if (node->ai_addr) {
-        std::memcpy(node->ai_addr, current->ai_addr, current->ai_addrlen);
-      }
-    }
-    if (!head) {
-      head = node;
-    } else {
-      tail->ai_next = node;
-    }
-    tail = node;
-  }
-  return head;
-}
-
-extern "C" int mocktail_getaddrinfo(const char* node, const char* service,
-                                    const BionicAddrInfo* hints,
-                                    BionicAddrInfo** result) {
-  if (!result) {
-    return EAI_FAIL;
-  }
-  *result = nullptr;
-  addrinfo host_hints = HostHintsFromBionic(hints);
-  addrinfo* host_result = nullptr;
-  int rc = ::getaddrinfo(node, service, hints ? &host_hints : nullptr,
-                         &host_result);
-  if (DnsTraceEnabled()) {
-    std::cout << "  [dns] getaddrinfo node=" << (node ? node : "(null)")
-              << " service=" << (service ? service : "(null)")
-              << " family=" << (hints ? hints->ai_family : 0)
-              << " socktype=" << (hints ? hints->ai_socktype : 0)
-              << " rc=" << rc
-              << " message=" << (rc == 0 ? "ok" : ::gai_strerror(rc))
-              << '\n';
-  }
-  if (rc != 0) {
-    return rc;
-  }
-  *result = BionicAddrInfoFromHost(host_result);
-  ::freeaddrinfo(host_result);
-  return *result ? 0 : EAI_MEMORY;
-}
-
-extern "C" void mocktail_freeaddrinfo(BionicAddrInfo* info) {
-  while (info) {
-    BionicAddrInfo* next = info->ai_next;
-    std::free(info->ai_canonname);
-    std::free(info->ai_addr);
-    std::free(info);
-    info = next;
-  }
-}
-
-extern "C" hostent* mocktail_gethostbyname(const char* name) {
-  hostent* result = ::gethostbyname(name);
-  if (DnsTraceEnabled()) {
-    std::cout << "  [dns] gethostbyname name=" << (name ? name : "(null)")
-              << " result=" << reinterpret_cast<void*>(result) << '\n';
-  }
-  return result;
-}
-
 extern "C" int mocktail_mprotect(void* addr, size_t len, int prot) {
   if (addr == nullptr || len == 0) {
     errno = EINVAL;
@@ -1136,11 +1029,11 @@ extern "C" int mocktail_mprotect(void* addr, size_t len, int prot) {
 
 void RegisterBionicDnsWrappers() {
   linker::RegisterSymbol("getaddrinfo",
-                         reinterpret_cast<void*>(mocktail_getaddrinfo));
-  linker::RegisterSymbol("freeaddrinfo",
-                         reinterpret_cast<void*>(mocktail_freeaddrinfo));
-  linker::RegisterSymbol("gethostbyname",
-                         reinterpret_cast<void*>(mocktail_gethostbyname));
+                         reinterpret_cast<void*>(mocktail_bionic_getaddrinfo));
+  linker::RegisterSymbol(
+      "freeaddrinfo", reinterpret_cast<void*>(mocktail_bionic_freeaddrinfo));
+  linker::RegisterSymbol(
+      "gethostbyname", reinterpret_cast<void*>(mocktail_bionic_gethostbyname));
 }
 
 void RegisterBionicPathWrappers() {

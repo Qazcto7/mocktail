@@ -4,6 +4,9 @@
 #include <netdb.h>
 #include <sys/socket.h>
 
+#include <thread>
+#include <vector>
+
 namespace mocktail {
 namespace compat {
 namespace {
@@ -56,6 +59,24 @@ TEST(BionicDnsRuntimeTest, PreservesOrdinaryLocalDnsAndBionicLayout) {
 TEST(BionicDnsRuntimeTest, RejectsMissingResultStorage) {
   EXPECT_NE(BionicGetAddressInfo("localhost", "80", nullptr, nullptr), 0);
   BionicFreeAddressInfo(nullptr);
+}
+
+TEST(BionicDnsRuntimeTest, GetHostByNameResolvesThreadSafely) {
+  std::vector<std::thread> workers;
+  workers.reserve(4);
+  for (int t = 0; t < 4; ++t) {
+    workers.emplace_back([]() {
+      for (int i = 0; i < 20; ++i) {
+        hostent* entry = BionicGetHostByName("localhost");
+        ASSERT_NE(entry, nullptr);
+        EXPECT_NE(entry->h_name, nullptr);
+        EXPECT_NE(entry->h_addr_list, nullptr);
+      }
+    });
+  }
+  for (auto& worker : workers) {
+    worker.join();
+  }
 }
 
 }  // namespace

@@ -68,13 +68,6 @@ pub use webview_helper_launcher::*;
 pub mod window_gates;
 pub use window_gates::*;
 
-/// Returns the mocktail-core Rust library version string.
-#[no_mangle]
-pub extern "C" fn mocktail_rust_version() -> *const c_char {
-    static VERSION: &[u8] = b"0.3.0-rust-core\0";
-    VERSION.as_ptr() as *const c_char
-}
-
 /// Initializes and verifies the mocktail-core Rust subsystem.
 #[no_mangle]
 pub extern "C" fn mocktail_rust_init() -> c_int {
@@ -247,117 +240,6 @@ pub extern "C" fn mocktail_rust_is_safe_archive_path(path: *const c_char) -> c_i
         is_first = false;
     }
     1
-}
-
-/// Safely extracts an individual entry from a ZIP / APK archive with Zip-Slip protection
-/// and atomic replacement.
-#[no_mangle]
-pub extern "C" fn mocktail_rust_extract_zip_entry(
-    archive_path: *const c_char,
-    entry_name: *const c_char,
-    dest_path: *const c_char,
-    max_bytes: usize,
-) -> c_int {
-    if archive_path.is_null() || entry_name.is_null() || dest_path.is_null() {
-        return -1;
-    }
-    let c_archive = unsafe { CStr::from_ptr(archive_path) };
-    let c_entry = unsafe { CStr::from_ptr(entry_name) };
-    let c_dest = unsafe { CStr::from_ptr(dest_path) };
-
-    let archive_str = match c_archive.to_str() {
-        Ok(s) => s,
-        Err(_) => return -1,
-    };
-    let entry_str = match c_entry.to_str() {
-        Ok(s) => s,
-        Err(_) => return -1,
-    };
-    let dest_str = match c_dest.to_str() {
-        Ok(s) => s,
-        Err(_) => return -1,
-    };
-
-    let file = match File::open(archive_str) {
-        Ok(f) => f,
-        Err(_) => return -2,
-    };
-
-    let mut zip = match zip::ZipArchive::new(BufReader::new(file)) {
-        Ok(z) => z,
-        Err(_) => return -3,
-    };
-
-    let mut zip_file = match zip.by_name(entry_str) {
-        Ok(zf) => zf,
-        Err(_) => return -4,
-    };
-
-    if zip_file.enclosed_name().is_none() {
-        return -5;
-    }
-
-    if zip_file.is_dir() {
-        return -6;
-    }
-
-    let uncompressed_size = zip_file.size();
-    if uncompressed_size > max_bytes as u64 {
-        return -7;
-    }
-
-    let dest = Path::new(dest_str);
-    if dest.exists() {
-        return -15;
-    }
-    if let Some(parent) = dest.parent() {
-        if let Err(_) = std::fs::create_dir_all(parent) {
-            return -8;
-        }
-    }
-
-    let tmp_path = dest.with_extension("tmp_extract");
-    let mut out_file = match File::create(&tmp_path) {
-        Ok(f) => f,
-        Err(_) => return -9,
-    };
-
-    let mut written = 0usize;
-    let mut buffer = [0u8; 32768];
-    loop {
-        match zip_file.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(n) => {
-                written += n;
-                if written > max_bytes {
-                    let _ = std::fs::remove_file(&tmp_path);
-                    return -10;
-                }
-                if let Err(_) = out_file.write_all(&buffer[..n]) {
-                    let _ = std::fs::remove_file(&tmp_path);
-                    return -11;
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => {
-                let _ = std::fs::remove_file(&tmp_path);
-                return -12;
-            }
-        }
-    }
-
-    if let Err(_) = out_file.sync_all() {
-        let _ = std::fs::remove_file(&tmp_path);
-        return -13;
-    }
-    drop(out_file);
-
-    if let Err(_) = std::fs::rename(&tmp_path, dest) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return -14;
-    }
-
-    0
 }
 
 /// Verifies whether the provided slice matches the APK Signing Block magic "APK Sig Block 42".
@@ -925,38 +807,11 @@ fn parse_jni_type(bytes: &[u8], idx: &mut usize, allow_void: bool) -> bool {
 // 8. General JSON & URL Validation
 // ============================================================================
 
-/// Validates whether a given C string is syntactically valid JSON.
-#[no_mangle]
-pub extern "C" fn mocktail_rust_is_valid_json(json_str: *const c_char) -> c_int {
-    if json_str.is_null() {
-        return -1;
-    }
-    let c_str = unsafe { CStr::from_ptr(json_str) };
-    let bytes = c_str.to_bytes();
-    if bytes.is_empty() {
-        return 0;
-    }
-    match serde_json::from_slice::<serde_json::Value>(bytes) {
-        Ok(_) => 1,
-        Err(_) => 0,
-    }
-}
-
 pub(crate) fn is_safe_url_bytes(bytes: &[u8], max_len: usize) -> bool {
     !bytes.is_empty()
         && bytes.len() <= max_len
         && bytes.starts_with(b"https://")
         && !bytes.iter().any(|&b| b < 0x20 || b == 0x7f)
-}
-
-/// Validates if a URL is safe (https scheme, max 2048 chars, valid ASCII without controls).
-#[no_mangle]
-pub extern "C" fn mocktail_rust_is_safe_url(url: *const c_char) -> c_int {
-    if url.is_null() {
-        return 0;
-    }
-    let bytes = unsafe { CStr::from_ptr(url) }.to_bytes();
-    i32::from(is_safe_url_bytes(bytes, 2048))
 }
 
 // ============================================================================
@@ -6621,46 +6476,6 @@ pub extern "C" fn mocktail_rust_runtime_paths_is_lower_hex_build_id(
     }
 }
 
-#[no_mangle]
-pub extern "C" fn mocktail_rust_runtime_paths_resolve_adjacent_assets(
-    roblox_lib_path: *const c_char,
-    working_dir: *const c_char,
-    out_path: *mut c_char,
-    out_cap: usize,
-) -> c_int {
-    if roblox_lib_path.is_null() || out_path.is_null() || out_cap == 0 {
-        return -1;
-    }
-    let lib_str = match unsafe { CStr::from_ptr(roblox_lib_path) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return -2,
-    };
-    let mut p = PathBuf::from(lib_str);
-    if !p.is_absolute() && !working_dir.is_null() {
-        if let Ok(wd) = unsafe { CStr::from_ptr(working_dir) }.to_str() {
-            p = Path::new(wd).join(p);
-        }
-    }
-    let candidate = if let Some(parent) = p.parent() {
-        parent.join("assets")
-    } else {
-        PathBuf::from("assets")
-    };
-    let res = if candidate.is_dir() {
-        candidate.to_string_lossy().to_string()
-    } else {
-        String::new()
-    };
-    if res.len() >= out_cap {
-        return -3;
-    }
-    unsafe {
-        std::ptr::copy_nonoverlapping(res.as_ptr() as *const c_char, out_path, res.len());
-        *out_path.add(res.len()) = 0;
-    }
-    0
-}
-
 // ============================================================================
 // 36. Host ABI Profile Loader & Payload Compatibility (Group D)
 // ============================================================================
@@ -8167,86 +7982,6 @@ pub extern "C" fn mocktail_rust_payload_store_valid_id(
         Ok(val) if storage_paths::is_valid_payload_id_only(val) => 1,
         _ => 0,
     }
-}
-
-#[no_mangle]
-pub extern "C" fn mocktail_rust_payload_store_validate_manifest_json(
-    json_ptr: *const c_char,
-    len: usize,
-    err_buf: *mut c_char,
-    err_cap: usize,
-) -> c_int {
-    if json_ptr.is_null() || len == 0 {
-        copy_to_c_buffer("manifest json is empty", err_buf, err_cap);
-        return -1;
-    }
-    let slice = unsafe { slice::from_raw_parts(json_ptr as *const u8, len) };
-    let s = match std::str::from_utf8(slice) {
-        Ok(val) => val,
-        Err(_) => {
-            copy_to_c_buffer("manifest json is not valid UTF-8", err_buf, err_cap);
-            return -1;
-        }
-    };
-    let v: serde_json::Value = match serde_json::from_str(s) {
-        Ok(val) => val,
-        Err(_) => {
-            copy_to_c_buffer("manifest json is not a valid JSON document", err_buf, err_cap);
-            return -1;
-        }
-    };
-    let obj = match v.as_object() {
-        Some(o) => o,
-        None => {
-            copy_to_c_buffer("manifest root must be an object", err_buf, err_cap);
-            return -1;
-        }
-    };
-    if obj.get("format").and_then(|x| x.as_i64()) != Some(1) {
-        copy_to_c_buffer("unsupported manifest format", err_buf, err_cap);
-        return -1;
-    }
-    let pid = obj.get("payload_id").and_then(|x| x.as_str()).unwrap_or("");
-    let pid_c = match CString::new(pid) {
-        Ok(c) => c,
-        Err(_) => {
-            copy_to_c_buffer("invalid payload_id", err_buf, err_cap);
-            return -1;
-        }
-    };
-    if mocktail_rust_payload_store_valid_id(pid_c.as_ptr(), pid.len()) == 0 {
-        copy_to_c_buffer("invalid payload_id format", err_buf, err_cap);
-        return -1;
-    }
-    if obj.get("version_name").and_then(|x| x.as_str()).unwrap_or("").is_empty() {
-        copy_to_c_buffer("version_name must not be empty", err_buf, err_cap);
-        return -1;
-    }
-    if obj.get("version_code").and_then(|x| x.as_u64()).unwrap_or(0) == 0 {
-        copy_to_c_buffer("version_code must be positive", err_buf, err_cap);
-        return -1;
-    }
-    let bid = obj.get("build_id").and_then(|x| x.as_str()).unwrap_or("");
-    let bid_c = match CString::new(bid) {
-        Ok(c) => c,
-        Err(_) => {
-            copy_to_c_buffer("invalid build_id", err_buf, err_cap);
-            return -1;
-        }
-    };
-    if mocktail_rust_is_lower_hex(bid_c.as_ptr(), 40) == 0 {
-        copy_to_c_buffer("build_id must be a 40-character hex string", err_buf, err_cap);
-        return -1;
-    }
-    if obj.get("staging_timestamp").and_then(|x| x.as_str()).unwrap_or("").is_empty() {
-        copy_to_c_buffer("staging_timestamp must not be empty", err_buf, err_cap);
-        return -1;
-    }
-    if obj.get("source").and_then(|x| x.as_str()).unwrap_or("").is_empty() {
-        copy_to_c_buffer("source must not be empty", err_buf, err_cap);
-        return -1;
-    }
-    0
 }
 
 // ============================================================================
@@ -12180,33 +11915,6 @@ pub extern "C" fn mocktail_rust_map_roblox_text_input_type(input_type: i32) -> i
         5 | 9 | 10 => 4,// Password
         6 => 5,         // Username
         _ => 1,         // Text
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn mocktail_rust_clamp_text_input_area(
-    x: *mut i32,
-    y: *mut i32,
-    w: *mut i32,
-    h: *mut i32,
-    cursor: *mut i32,
-) {
-    unsafe {
-        if !w.is_null() && *w <= 0 {
-            *w = 1;
-        }
-        if !h.is_null() && *h <= 0 {
-            *h = 1;
-        }
-        if !x.is_null() && *x < 0 {
-            *x = 0;
-        }
-        if !y.is_null() && *y < 0 {
-            *y = 0;
-        }
-        if !cursor.is_null() && *cursor < 0 {
-            *cursor = 0;
-        }
     }
 }
 

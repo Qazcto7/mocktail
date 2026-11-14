@@ -108,14 +108,6 @@ fn has_control_bytes(value: &str) -> bool {
     value.bytes().any(|b| b <= 0x1f || b == 0x7f)
 }
 
-fn slice_to_lossy_cow<'a>(ptr: *const c_char, len: usize) -> Cow<'a, str> {
-    if len == 0 || ptr.is_null() {
-        return Cow::Borrowed("");
-    }
-    let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) };
-    String::from_utf8_lossy(bytes)
-}
-
 /// Validates (and optionally emits compact serialized) JSON object text.
 #[no_mangle]
 pub extern "C" fn mocktail_rust_json_normalize_object(
@@ -962,55 +954,6 @@ pub(crate) fn parse_browser_tracker_init_response_str(body_str: &str) -> Option<
 }
 
 #[no_mangle]
-pub extern "C" fn mocktail_rust_browser_tracker_read_stored_id(
-    json_ptr: *const c_char,
-    json_len: usize,
-    out_has_id: *mut bool,
-    out_id: *mut c_char,
-    id_cap: usize,
-) -> i32 {
-    if !out_has_id.is_null() {
-        unsafe { *out_has_id = false };
-    }
-    let Some(s) = slice_to_str(json_ptr, json_len) else {
-        return -1;
-    };
-    match read_stored_browser_tracker_id_str(s) {
-        Ok(None) => 0,
-        Ok(Some(id_str)) => {
-            if !out_has_id.is_null() {
-                unsafe { *out_has_id = true };
-            }
-            if !out_id.is_null() && id_cap > 0 && copy_to_c_buffer(&id_str, out_id, id_cap) != 0 {
-                return -1;
-            }
-            0
-        }
-        Err(()) => -1,
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn mocktail_rust_browser_tracker_set_stored_id(
-    json_ptr: *const c_char,
-    json_len: usize,
-    id_ptr: *const c_char,
-    id_len: usize,
-    on_json: MocktailPayloadStoreStringCallback,
-    ctx: *mut c_void,
-) -> i32 {
-    let (Some(s), Some(id_str)) = (slice_to_str(json_ptr, json_len), slice_to_str(id_ptr, id_len))
-    else {
-        return -1;
-    };
-    let Some(compact) = set_stored_browser_tracker_id_str(s, id_str) else {
-        return -1;
-    };
-    emit_string(on_json, ctx, &compact);
-    0
-}
-
-#[no_mangle]
 pub extern "C" fn mocktail_rust_browser_tracker_parse_init_response(
     body_ptr: *const c_char,
     body_len: usize,
@@ -1033,24 +976,6 @@ pub extern "C" fn mocktail_rust_browser_tracker_parse_init_response(
 // Discord RPC Frame & Metadata Helpers
 // ============================================================================
 
-#[repr(C)]
-pub struct MocktailRustDiscordActivity {
-    pub details: *const c_char,
-    pub details_len: usize,
-    pub state: *const c_char,
-    pub state_len: usize,
-    pub has_start_timestamp: bool,
-    pub start_timestamp: i64,
-    pub large_image: *const c_char,
-    pub large_image_len: usize,
-    pub large_text: *const c_char,
-    pub large_text_len: usize,
-    pub button_label: *const c_char,
-    pub button_label_len: usize,
-    pub button_url: *const c_char,
-    pub button_url_len: usize,
-}
-
 #[no_mangle]
 pub extern "C" fn mocktail_rust_discord_parse_rpc_error(
     payload_ptr: *const c_char,
@@ -1069,70 +994,6 @@ pub extern "C" fn mocktail_rust_discord_parse_rpc_error(
         unsafe { *out_code = code };
     }
     copy_error(out_msg, msg_cap, &message);
-    0
-}
-
-#[no_mangle]
-pub extern "C" fn mocktail_rust_discord_build_handshake(
-    app_id_ptr: *const c_char,
-    app_id_len: usize,
-    on_json: MocktailPayloadStoreStringCallback,
-    ctx: *mut c_void,
-) -> i32 {
-    if app_id_ptr.is_null() && app_id_len > 0 {
-        return -1;
-    }
-    let app_id = slice_to_lossy_cow(app_id_ptr, app_id_len);
-    let Some(compact) = crate::discord_rpc::build_handshake_json(&app_id) else {
-        return -1;
-    };
-    emit_string(on_json, ctx, &compact);
-    0
-}
-
-#[no_mangle]
-pub extern "C" fn mocktail_rust_discord_is_ready_event(
-    payload_ptr: *const c_char,
-    payload_len: usize,
-) -> bool {
-    let Some(payload) = slice_to_str(payload_ptr, payload_len) else {
-        return false;
-    };
-    crate::discord_rpc::is_ready_event_json(payload)
-}
-
-#[no_mangle]
-pub extern "C" fn mocktail_rust_discord_build_set_activity(
-    pid: i32,
-    activity: *const MocktailRustDiscordActivity,
-    nonce: u64,
-    on_json: MocktailPayloadStoreStringCallback,
-    ctx: *mut c_void,
-) -> i32 {
-    let built = if activity.is_null() {
-        None
-    } else {
-        let act = unsafe { &*activity };
-        Some(crate::discord_rpc::BuiltActivity {
-            details: slice_to_lossy_cow(act.details, act.details_len).into_owned(),
-            state: slice_to_lossy_cow(act.state, act.state_len).into_owned(),
-            start_timestamp: if act.has_start_timestamp {
-                Some(act.start_timestamp)
-            } else {
-                None
-            },
-            large_image: slice_to_lossy_cow(act.large_image, act.large_image_len).into_owned(),
-            large_text: slice_to_lossy_cow(act.large_text, act.large_text_len).into_owned(),
-            button_label: slice_to_lossy_cow(act.button_label, act.button_label_len).into_owned(),
-            button_url: slice_to_lossy_cow(act.button_url, act.button_url_len).into_owned(),
-        })
-    };
-
-    let Some(compact) = crate::discord_rpc::build_set_activity_json(pid, built.as_ref(), nonce)
-    else {
-        return -1;
-    };
-    emit_string(on_json, ctx, &compact);
     0
 }
 

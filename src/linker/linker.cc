@@ -768,8 +768,4 @@ void UnloadLibrary(LibraryHandle handle) {
 #endif
 }
 
-const std::unordered_map<std::string, LibraryHandle>& GetSymbolTable() {
-  return g_symbol_table;
-}
-
 }  // namespace linker

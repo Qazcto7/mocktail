@@ -13,6 +13,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -186,7 +187,8 @@ struct AdapterState {
   std::vector<VkInstance> instances;
   std::vector<VkInstance> surface_maintenance_instances;
   std::vector<QueueBinding> queue_bindings;
-  std::vector<CommandBufferBinding> command_buffer_bindings;
+  std::unordered_map<VkCommandBuffer, CommandBufferBinding>
+      command_buffer_bindings;
   PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR host_surface_capabilities =
       nullptr;
   PFN_vkGetPhysicalDeviceSurfacePresentModesKHR host_surface_present_modes =
@@ -420,19 +422,15 @@ const AdapterState::DeviceDispatch& HostDispatchForCommandBuffer(
   }
   AdapterState& state = State();
   std::lock_guard<std::mutex> lock(state.mutex);
-  const auto binding = std::find_if(
-      state.command_buffer_bindings.begin(),
-      state.command_buffer_bindings.end(),
-      [command_buffer](const AdapterState::CommandBufferBinding& candidate) {
-        return candidate.command_buffer == command_buffer;
-      });
+  const auto binding = state.command_buffer_bindings.find(command_buffer);
   if (binding == state.command_buffer_bindings.end()) {
     return kEmptyDeviceDispatch;
   }
   const auto dispatch = std::find_if(
       state.device_dispatches.begin(), state.device_dispatches.end(),
-      [binding](const AdapterState::DeviceDispatch& candidate) {
-        return candidate.device == binding->device;
+      [device = binding->second.device](
+          const AdapterState::DeviceDispatch& candidate) {
+        return candidate.device == device;
       });
   if (dispatch != state.device_dispatches.end()) {
     t_command_buffer_cache.generation = gen;
@@ -542,26 +540,27 @@ void RegisterHostCommandBuffers(VkDevice device, VkCommandPool command_pool,
   }
   AdapterState& state = State();
   std::lock_guard<std::mutex> lock(state.mutex);
+  bool rebound_existing = false;
   for (std::uint32_t index = 0; index < command_buffer_count; ++index) {
     const VkCommandBuffer command_buffer = command_buffers[index];
     if (command_buffer == VK_NULL_HANDLE) {
       continue;
     }
-    const auto existing = std::find_if(
-        state.command_buffer_bindings.begin(),
-        state.command_buffer_bindings.end(),
-        [command_buffer](const AdapterState::CommandBufferBinding& candidate) {
-          return candidate.command_buffer == command_buffer;
-        });
-    if (existing != state.command_buffer_bindings.end()) {
-      existing->device = device;
-      existing->command_pool = command_pool;
-    } else {
-      state.command_buffer_bindings.push_back(
-          {command_buffer, device, command_pool});
+    auto [it, inserted] = state.command_buffer_bindings.try_emplace(
+        command_buffer,
+        AdapterState::CommandBufferBinding{command_buffer, device,
+                                           command_pool});
+    if (!inserted) {
+      if (it->second.device != device) {
+        rebound_existing = true;
+      }
+      it->second.device = device;
+      it->second.command_pool = command_pool;
     }
   }
-  InvalidateFastDispatchCaches();
+  if (rebound_existing) {
+    InvalidateFastDispatchCaches();
+  }
 }
 
 void RemoveHostCommandBuffers(VkDevice device, VkCommandPool command_pool,
@@ -572,38 +571,39 @@ void RemoveHostCommandBuffers(VkDevice device, VkCommandPool command_pool,
   }
   AdapterState& state = State();
   std::lock_guard<std::mutex> lock(state.mutex);
-  state.command_buffer_bindings.erase(
-      std::remove_if(
-          state.command_buffer_bindings.begin(),
-          state.command_buffer_bindings.end(),
-          [device, command_pool, command_buffer_count, command_buffers](
-              const AdapterState::CommandBufferBinding& binding) {
-            return binding.device == device &&
-                   binding.command_pool == command_pool &&
-                   std::find(command_buffers,
-                             command_buffers + command_buffer_count,
-                             binding.command_buffer) !=
-                       command_buffers + command_buffer_count;
-          }),
-      state.command_buffer_bindings.end());
-  InvalidateFastDispatchCaches();
+  bool removed = false;
+  for (std::uint32_t index = 0; index < command_buffer_count; ++index) {
+    const auto it = state.command_buffer_bindings.find(command_buffers[index]);
+    if (it != state.command_buffer_bindings.end() &&
+        it->second.device == device &&
+        it->second.command_pool == command_pool) {
+      state.command_buffer_bindings.erase(it);
+      removed = true;
+    }
+  }
+  if (removed) {
+    InvalidateFastDispatchCaches();
+  }
 }
 
 void RemoveHostCommandPoolBindings(VkDevice device,
                                    VkCommandPool command_pool) {
   AdapterState& state = State();
   std::lock_guard<std::mutex> lock(state.mutex);
-  state.command_buffer_bindings.erase(
-      std::remove_if(
-          state.command_buffer_bindings.begin(),
-          state.command_buffer_bindings.end(),
-          [device, command_pool](
-              const AdapterState::CommandBufferBinding& binding) {
-            return binding.device == device &&
-                   binding.command_pool == command_pool;
-          }),
-      state.command_buffer_bindings.end());
-  InvalidateFastDispatchCaches();
+  bool removed = false;
+  for (auto it = state.command_buffer_bindings.begin();
+       it != state.command_buffer_bindings.end();) {
+    if (it->second.device == device &&
+        it->second.command_pool == command_pool) {
+      it = state.command_buffer_bindings.erase(it);
+      removed = true;
+    } else {
+      ++it;
+    }
+  }
+  if (removed) {
+    InvalidateFastDispatchCaches();
+  }
 }
 
 void RemoveHostDeviceDispatch(VkDevice device) {
@@ -615,14 +615,14 @@ void RemoveHostDeviceDispatch(VkDevice device) {
                        return binding.device == device;
                      }),
       state.queue_bindings.end());
-  state.command_buffer_bindings.erase(
-      std::remove_if(
-          state.command_buffer_bindings.begin(),
-          state.command_buffer_bindings.end(),
-          [device](const AdapterState::CommandBufferBinding& binding) {
-            return binding.device == device;
-          }),
-      state.command_buffer_bindings.end());
+  for (auto it = state.command_buffer_bindings.begin();
+       it != state.command_buffer_bindings.end();) {
+    if (it->second.device == device) {
+      it = state.command_buffer_bindings.erase(it);
+    } else {
+      ++it;
+    }
+  }
   state.device_dispatches.erase(
       std::remove_if(
           state.device_dispatches.begin(), state.device_dispatches.end(),
@@ -1179,9 +1179,9 @@ void ReleaseEtc2PoolCommandBuffers(VkDevice device,
   {
     AdapterState& state = State();
     std::lock_guard<std::mutex> lock(state.mutex);
-    for (const auto& binding : state.command_buffer_bindings) {
+    for (const auto& [command_buffer, binding] : state.command_buffer_bindings) {
       if (binding.device == device && binding.command_pool == command_pool) {
-        command_buffers.push_back(binding.command_buffer);
+        command_buffers.push_back(command_buffer);
       }
     }
   }

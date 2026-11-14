@@ -12,6 +12,7 @@
 #include <cstring>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "mocktail/mocktail_rust.h"
 
@@ -199,20 +200,37 @@ hostent* BionicGetHostByName(const char* name) noexcept {
     h_errno = HOST_NOT_FOUND;
     return nullptr;
   }
-  hostent* res = ::gethostbyname(name);
-  if (res != nullptr && res->h_addrtype == AF_INET && res->h_addr_list != nullptr) {
+  thread_local hostent tls_result{};
+  thread_local std::vector<char> tls_buffer(2048);
+  hostent* res = nullptr;
+  int host_err = 0;
+  int rc = ERANGE;
+  while (true) {
+    rc = ::gethostbyname_r(name, &tls_result, tls_buffer.data(),
+                           tls_buffer.size(), &res, &host_err);
+    if (rc != ERANGE || tls_buffer.size() >= 65536) {
+      break;
+    }
+    tls_buffer.resize(tls_buffer.size() * 2);
+  }
+  if (rc != 0 || res == nullptr) {
+    h_errno = host_err != 0 ? host_err : HOST_NOT_FOUND;
+    return nullptr;
+  }
+  if (res->h_addrtype == AF_INET && res->h_addr_list != nullptr) {
     std::string_view name_view(name ? name : "");
     const bool is_roblox =
         (name_view == "roblox.com" ||
          (name_view.size() > 11 &&
           name_view.compare(name_view.size() - 11, 11, ".roblox.com") == 0));
-    for (int i = 0; res->h_addr_list[i] != nullptr; ++i) {
-      auto* addr = reinterpret_cast<in_addr*>(res->h_addr_list[i]);
-      if (addr->s_addr == inet_addr("195.175.254.2") ||
-          addr->s_addr == inet_addr("0.0.0.0") ||
-          addr->s_addr == inet_addr("127.0.0.1")) {
-        if (is_roblox) {
-          addr->s_addr = inet_addr("128.116.21.3");
+    if (is_roblox) {
+      const in_addr_t fallback_addr = inet_addr("128.116.21.3");
+      for (int i = 0; res->h_addr_list[i] != nullptr; ++i) {
+        auto* addr = reinterpret_cast<in_addr*>(res->h_addr_list[i]);
+        if (addr->s_addr == inet_addr("195.175.254.2") ||
+            addr->s_addr == inet_addr("0.0.0.0") ||
+            addr->s_addr == inet_addr("127.0.0.1")) {
+          addr->s_addr = fallback_addr;
         }
       }
     }

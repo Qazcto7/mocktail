@@ -157,6 +157,13 @@ struct VulkanTextOverlayCompositor::Impl {
     std::uint32_t index = 0;
   };
 
+  struct WorkItem {
+    SwapchainState* swapchain = nullptr;
+    ImageState* image = nullptr;
+    pl_rect2df source_rect{};
+    pl_rect2d target_rect{};
+  };
+
   struct DeviceState {
     VkInstance instance = VK_NULL_HANDLE;
     VkPhysicalDevice physical_device = VK_NULL_HANDLE;
@@ -184,13 +191,10 @@ struct VulkanTextOverlayCompositor::Impl {
     bool dispatch_failure_logged = false;
     std::vector<QueueState> queues;
     std::vector<std::unique_ptr<SwapchainState>> swapchains;
-  };
-
-  struct WorkItem {
-    SwapchainState* swapchain = nullptr;
-    ImageState* image = nullptr;
-    pl_rect2df source_rect{};
-    pl_rect2d target_rect{};
+    std::vector<WorkItem> scratch_work_items;
+    std::vector<VkSemaphore> scratch_bridge_semaphores;
+    std::vector<VkPipelineStageFlags> scratch_wait_stages;
+    std::vector<VkSemaphore> scratch_done_semaphores;
   };
 
   std::mutex mutex;
@@ -1018,7 +1022,8 @@ VkResult VulkanTextOverlayCompositor::QueuePresent(
     }
   }
 
-  std::vector<Impl::WorkItem> work_items;
+  std::vector<Impl::WorkItem>& work_items = device->scratch_work_items;
+  work_items.clear();
   work_items.reserve(present_info->swapchainCount);
   if (!impl_->BuildWorkItems(device, &queue_state, *present_info, frame,
                              &work_items)) {
@@ -1028,14 +1033,17 @@ VkResult VulkanTextOverlayCompositor::QueuePresent(
   }
   impl_->SetOverlayActive(true);
 
-  std::vector<VkSemaphore> bridge_semaphores;
+  std::vector<VkSemaphore>& bridge_semaphores =
+      device->scratch_bridge_semaphores;
+  bridge_semaphores.clear();
   bridge_semaphores.reserve(work_items.size());
   for (const Impl::WorkItem& item : work_items) {
     bridge_semaphores.push_back(item.image->bridge);
   }
-  std::vector<VkPipelineStageFlags> wait_stages(
-      present_info->waitSemaphoreCount,
-      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+  std::vector<VkPipelineStageFlags>& wait_stages =
+      device->scratch_wait_stages;
+  wait_stages.assign(present_info->waitSemaphoreCount,
+                     VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
   VkSubmitInfo bridge_submit{};
   bridge_submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
   bridge_submit.waitSemaphoreCount = present_info->waitSemaphoreCount;
@@ -1059,7 +1067,8 @@ VkResult VulkanTextOverlayCompositor::QueuePresent(
   }
 
   pl_dispatch_reset_frame(device->dispatch);
-  std::vector<VkSemaphore> done_semaphores;
+  std::vector<VkSemaphore>& done_semaphores = device->scratch_done_semaphores;
+  done_semaphores.clear();
   done_semaphores.reserve(work_items.size());
   bool all_images_held = true;
   for (Impl::WorkItem& item : work_items) {

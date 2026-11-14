@@ -21,7 +21,14 @@ enum class SegmentType : uint8_t {
 // to the same runtime class object, and class handles are never released, so
 // every FindClass/GetObjectClass used to consume a fresh permanent segment
 // slot and exhaust the table during long sessions.
-thread_local std::vector<std::vector<jobject>> g_local_frames;
+void ReleaseLocalJniFrameStorage(std::vector<std::vector<jobject>>* frames);
+
+struct LocalJniFramesOwner {
+  std::vector<std::vector<jobject>> frames;
+  ~LocalJniFramesOwner() { ReleaseLocalJniFrameStorage(&frames); }
+};
+
+thread_local LocalJniFramesOwner g_local_frames;
 std::recursive_mutex g_jni_state_mutex;
 std::unordered_map<jobject, std::unique_ptr<Object>> g_object_storage;
 std::unordered_map<jobject, uint32_t> g_jni_ref_counts;
@@ -31,17 +38,24 @@ std::shared_ptr<void> g_segment_owners[kJniSegmentCapacity];
 std::unordered_set<jclass> g_known_classes;
 std::unordered_map<std::string, jclass> g_class_handle_cache;
 std::unordered_map<std::string, jobject> g_singleton_objects;
+std::unordered_set<jobject> g_singleton_object_handles;
+std::unordered_map<jobject, jlong> g_direct_buffer_capacities;
 std::unordered_map<std::string, std::shared_ptr<Class>> g_fallback_classes;
 std::unordered_set<jstring> g_known_strings;
 std::unordered_map<jarray, std::unique_ptr<PseudoArray>> g_array_storage;
 static std::atomic<uint8_t> g_segment_types[kJniSegmentCapacity] = {};
 std::vector<int> g_free_slots;
 
-static bool g_shutting_down_jnivm = false;
+static std::atomic<bool> g_shutting_down_jnivm{false};
 
 struct JniVmShutdownHook {
   JniVmShutdownHook() {
-    std::atexit([]() { g_shutting_down_jnivm = true; });
+    std::atexit([]() {
+      g_shutting_down_jnivm.store(true, std::memory_order_release);
+    });
+  }
+  ~JniVmShutdownHook() {
+    g_shutting_down_jnivm.store(true, std::memory_order_release);
   }
 };
 static JniVmShutdownHook g_shutdown_hook;
@@ -62,8 +76,8 @@ uint32_t JniIndexFromHandle(jobject obj) {
 }
 
 void EnsureLocalFrame() {
-  if (g_local_frames.empty()) {
-    g_local_frames.emplace_back();
+  if (g_local_frames.frames.empty()) {
+    g_local_frames.frames.emplace_back();
   }
 }
 
@@ -72,15 +86,15 @@ void RegisterLocalRef(jobject obj) {
     return;
   }
   EnsureLocalFrame();
-  g_local_frames.back().push_back(obj);
+  g_local_frames.frames.back().push_back(obj);
 }
 
 void UnregisterLocalRef(jobject obj) {
   if (obj == nullptr) {
     return;
   }
-  for (auto frame = g_local_frames.rbegin(); frame != g_local_frames.rend();
-       ++frame) {
+  for (auto frame = g_local_frames.frames.rbegin();
+       frame != g_local_frames.frames.rend(); ++frame) {
     for (auto it = frame->rbegin(); it != frame->rend(); ++it) {
       if (*it == obj) {
         frame->erase(std::next(it).base());
@@ -191,12 +205,51 @@ jobject StoreObject(std::unique_ptr<Object> object) {
   return handle;
 }
 
-void ReleaseJniReference(jobject obj) {
-  if (obj == nullptr || g_shutting_down_jnivm) {
+void ReleaseLocalJniFrameStorage(std::vector<std::vector<jobject>>* frames) {
+  if (frames == nullptr || frames->empty()) {
+    return;
+  }
+  std::vector<std::vector<jobject>> drained;
+  drained.swap(*frames);
+  if (g_shutting_down_jnivm.load(std::memory_order_acquire)) {
+    return;
+  }
+  for (auto frame = drained.rbegin(); frame != drained.rend(); ++frame) {
+    for (jobject obj : *frame) {
+      ReleaseJniReference(obj);
+    }
+  }
+}
+
+void ReleaseAllLocalJniFrames() {
+  ReleaseLocalJniFrameStorage(&g_local_frames.frames);
+}
+
+void RegisterDirectBufferCapacity(jobject buffer, jlong capacity) {
+  if (buffer == nullptr || capacity < 0 ||
+      g_shutting_down_jnivm.load(std::memory_order_acquire)) {
     return;
   }
   std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
-  if (g_shutting_down_jnivm) {
+  g_direct_buffer_capacities[buffer] = capacity;
+}
+
+jlong DirectBufferCapacityValue(jobject buffer) {
+  if (buffer == nullptr ||
+      g_shutting_down_jnivm.load(std::memory_order_acquire)) {
+    return -1;
+  }
+  std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
+  const auto found = g_direct_buffer_capacities.find(buffer);
+  return found != g_direct_buffer_capacities.end() ? found->second : -1;
+}
+
+void ReleaseJniReference(jobject obj) {
+  if (obj == nullptr || g_shutting_down_jnivm.load(std::memory_order_acquire)) {
+    return;
+  }
+  std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
+  if (g_shutting_down_jnivm.load(std::memory_order_acquire)) {
     return;
   }
   auto ref_it = g_jni_ref_counts.find(obj);
@@ -218,25 +271,28 @@ void ReleaseJniReference(jobject obj) {
       g_known_classes.end()) {
     return;
   }
-  for (const auto& pair : g_singleton_objects) {
-    if (pair.second == obj) {
-      return;
-    }
+  if (g_singleton_object_handles.find(obj) != g_singleton_object_handles.end()) {
+    return;
   }
-  const uint32_t index = JniIndexFromHandle(obj);
-  if (index > 0 && index < kJniSegmentCapacity) {
-    g_segment_types[index].store(static_cast<uint8_t>(SegmentType::kEmpty),
-                                 std::memory_order_release);
-    my_segment[index] = nullptr;
-    g_segment_owners[index].reset();
-    g_free_slots.push_back(static_cast<int>(index));
-  }
+  g_direct_buffer_capacities.erase(obj);
   g_known_strings.erase(reinterpret_cast<jstring>(obj));
   std::unique_ptr<Object> dying_object;
   auto obj_it = g_object_storage.find(obj);
   if (obj_it != g_object_storage.end()) {
     dying_object = std::move(obj_it->second);
     g_object_storage.erase(obj_it);
+    if (IsSegmentHandle(obj)) {
+      const uint32_t index = JniIndexFromHandle(obj);
+      if (index > 0 && index < kJniSegmentCapacity &&
+          g_segment_types[index].load(std::memory_order_acquire) !=
+              static_cast<uint8_t>(SegmentType::kEmpty)) {
+        g_segment_types[index].store(static_cast<uint8_t>(SegmentType::kEmpty),
+                                     std::memory_order_release);
+        my_segment[index] = nullptr;
+        g_segment_owners[index].reset();
+        g_free_slots.push_back(static_cast<int>(index));
+      }
+    }
   }
 }
 
@@ -286,6 +342,7 @@ jobject SingletonObject(const std::string& class_name) {
   }
   jobject object = MakeObjectForClass(class_name);
   g_singleton_objects[class_name] = object;
+  g_singleton_object_handles.insert(object);
   return object;
 }
 
@@ -366,17 +423,17 @@ void DeleteLocalJniReference(jobject obj) {
 
 void PushLocalJniFrame() {
   EnsureLocalFrame();
-  g_local_frames.emplace_back();
+  g_local_frames.frames.emplace_back();
 }
 
 jobject PopLocalJniFrame(jobject result) {
   EnsureLocalFrame();
   RetainJniReference(result);
-  std::vector<jobject> frame = std::move(g_local_frames.back());
-  if (g_local_frames.size() > 1)
-    g_local_frames.pop_back();
+  std::vector<jobject> frame = std::move(g_local_frames.frames.back());
+  if (g_local_frames.frames.size() > 1)
+    g_local_frames.frames.pop_back();
   else
-    g_local_frames.back().clear();
+    g_local_frames.frames.back().clear();
   for (jobject obj : frame) ReleaseJniReference(obj);
   RegisterLocalRef(result);
   return result;
