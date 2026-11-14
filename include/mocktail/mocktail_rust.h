@@ -4602,6 +4602,79 @@ void mocktail_rust_run_update(
                       const MocktailRustUpdateResultView* result),
     void* ctx);
 
+// ============================================================================
+// 145. Candidate Approval Manager (Probation Attestation & Receipt Verification)
+// ============================================================================
+
+typedef struct MocktailRustCandidateApprovalOptionsView {
+  struct MocktailRustStrSlice store_root;
+  struct MocktailRustStrSlice payload_directory;
+  struct MocktailRustStrSlice profile;
+  struct MocktailRustStrSlice compatibility_manifest;
+  struct MocktailRustStrSlice runtime_binary;
+  struct MocktailRustStrSlice canary_log_0;
+  struct MocktailRustStrSlice canary_log_1;
+} MocktailRustCandidateApprovalOptionsView;
+
+int32_t mocktail_rust_candidate_approval_compute_fingerprint(
+    struct MocktailRustStrSlice payload_directory,
+    const MocktailRustPayloadInfoData* payload,
+    void (*on_result)(void* ctx, struct MocktailRustStrSlice fingerprint,
+                      struct MocktailRustStrSlice error),
+    void* ctx);
+
+void mocktail_rust_candidate_approval_create(
+    const MocktailRustCandidateApprovalOptionsView* options,
+    const MocktailRustPayloadInfoData* verified_payload,
+    void (*on_result)(void* ctx,
+                      const MocktailRustCandidateApprovalData* result),
+    void* ctx);
+
+bool mocktail_rust_candidate_approval_validate(
+    struct MocktailRustStrSlice store_root,
+    struct MocktailRustStrSlice activation_json,
+    const MocktailRustPayloadInfoData* payload,
+    void (*on_result)(void* ctx,
+                      const MocktailRustCandidateApprovalData* result),
+    void* ctx);
+
+// ============================================================================
+// 146. APK Bundle Staging, Validation & Payload Metadata Preparation
+// ============================================================================
+
+typedef struct MocktailRustExpectedPayloadIdentityView {
+  struct MocktailRustStrSlice version_name;
+  uint64_t version_code;
+  bool has_exact_build_id;
+  struct MocktailRustStrSlice exact_build_id;
+} MocktailRustExpectedPayloadIdentityView;
+
+typedef struct MocktailRustPreparedPayloadView {
+  struct MocktailRustStrSlice directory;
+  struct MocktailRustStrSlice payload_id;
+  struct MocktailRustStrSlice version_name;
+  uint64_t version_code;
+  struct MocktailRustStrSlice build_id;
+  struct MocktailRustStrSlice error;
+} MocktailRustPreparedPayloadView;
+
+typedef bool (*MocktailRustVerifyApkSignatureFn)(
+    void* ctx, struct MocktailRustStrSlice apk_path,
+    void (*emit_cert)(void* receiver_ctx,
+                      struct MocktailRustStrSlice cert_sha256),
+    void* receiver_ctx,
+    void (*set_error)(void* receiver_ctx, struct MocktailRustStrSlice error));
+
+void mocktail_rust_apk_prepare_payload_from_archives(
+    const struct MocktailRustStrSlice* archives_ptr, size_t archives_len,
+    const MocktailRustExpectedPayloadIdentityView* expected,
+    struct MocktailRustStrSlice signing_trust_manifest,
+    struct MocktailRustStrSlice workspace, struct MocktailRustStrSlice source,
+    MocktailRustVerifyApkSignatureFn verify_signature, void* verify_ctx,
+    void (*on_result)(void* ctx,
+                      const MocktailRustPreparedPayloadView* result),
+    void* ctx);
+
 #ifdef __cplusplus
 }
 #endif

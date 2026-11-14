@@ -238,6 +238,40 @@ pub(crate) fn path_from_ffi(ptr: *const libc::c_char, len: usize) -> Option<Path
     Some(PathBuf::from(OsStr::from_bytes(bytes)))
 }
 
+pub(crate) fn path_to_slice(path: &Path) -> crate::update_json::MocktailRustStrSlice {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    crate::update_json::MocktailRustStrSlice {
+        ptr: bytes.as_ptr() as *const libc::c_char,
+        len: bytes.len(),
+    }
+}
+
+pub(crate) unsafe fn slice_to_str_lossy(
+    slice: crate::update_json::MocktailRustStrSlice,
+) -> String {
+    if slice.ptr.is_null() || slice.len == 0 {
+        return String::new();
+    }
+    if let Some(s) = crate::slice_to_str(slice.ptr, slice.len) {
+        return s.to_string();
+    }
+    let raw = std::slice::from_raw_parts(slice.ptr as *const u8, slice.len);
+    String::from_utf8_lossy(raw).into_owned()
+}
+
+pub(crate) unsafe fn slice_to_opt_str(
+    slice: crate::update_json::MocktailRustStrSlice,
+) -> Option<String> {
+    if slice.ptr.is_null() && slice.len == 0 {
+        return None;
+    }
+    Some(slice_to_str_lossy(slice))
+}
+
+pub(crate) unsafe fn slice_to_pathbuf(slice: crate::update_json::MocktailRustStrSlice) -> PathBuf {
+    path_from_ffi(slice.ptr, slice.len).unwrap_or_default()
+}
+
 pub(crate) fn lexical_normalize(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
@@ -813,13 +847,17 @@ pub(crate) enum ReadFileError {
     ReadFailed,
 }
 
-/// Opens and reads a regular file bounded by `max_bytes`.
-pub(crate) fn read_regular_file_limited(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadOwnedFileError {
+    OpenFailed,
+    InvalidOwnershipOrPermissions,
+    ReadFailed,
+}
+
+fn open_and_stat_regular_fd(
     path: &Path,
-    max_bytes: usize,
     follow_symlinks: bool,
-    allow_empty: bool,
-) -> Result<Vec<u8>, ReadFileError> {
+) -> Result<(OwnedFd, libc::stat), ReadFileError> {
     let Some(cpath) = path_to_cstr(path) else {
         return Err(ReadFileError::OpenFailed(libc::EINVAL));
     };
@@ -840,15 +878,93 @@ pub(crate) fn read_regular_file_limited(
         return Err(ReadFileError::OpenFailed(libc::EBADF));
     };
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(fd.as_raw(), &mut st) } != 0
-        || (st.st_mode & libc::S_IFMT) != libc::S_IFREG
+    if unsafe { libc::fstat(fd.as_raw(), &mut st) } != 0 {
+        return Err(ReadFileError::InvalidFile);
+    }
+    Ok((fd, st))
+}
+
+fn read_bounded_regular_fd(fd: &OwnedFd, st: &libc::stat, max_bytes: usize) -> Result<Vec<u8>, ()> {
+    if st.st_size < 0 || (st.st_size as u64) > (max_bytes as u64) {
+        return Err(());
+    }
+    let bytes = read_all_fd(fd.as_raw(), st.st_size as usize).map_err(|_| ())?;
+    if bytes.len() > max_bytes {
+        return Err(());
+    }
+    Ok(bytes)
+}
+
+/// Opens and reads a regular file bounded by `max_bytes`.
+pub(crate) fn read_regular_file_limited(
+    path: &Path,
+    max_bytes: usize,
+    follow_symlinks: bool,
+    allow_empty: bool,
+) -> Result<Vec<u8>, ReadFileError> {
+    let (fd, st) = open_and_stat_regular_fd(path, follow_symlinks)?;
+    if (st.st_mode & libc::S_IFMT) != libc::S_IFREG
         || st.st_size < 0
         || (!allow_empty && st.st_size == 0)
         || (st.st_size as u64) > (max_bytes as u64)
     {
         return Err(ReadFileError::InvalidFile);
     }
-    read_all_fd(fd.as_raw(), st.st_size as usize).map_err(|_| ReadFileError::ReadFailed)
+    read_bounded_regular_fd(&fd, &st, max_bytes).map_err(|_| ReadFileError::ReadFailed)
+}
+
+/// Opens and reads a regular non-symlink file owned by the effective user and not group/world-writable.
+pub(crate) fn read_owned_regular_file_limited(
+    path: &Path,
+    max_bytes: usize,
+    require_read_only: bool,
+) -> Result<Vec<u8>, ReadOwnedFileError> {
+    let (fd, st) = open_and_stat_regular_fd(path, false).map_err(|_| ReadOwnedFileError::OpenFailed)?;
+    let write_mask = (libc::S_IWGRP | libc::S_IWOTH) as libc::mode_t;
+    let usr_write = libc::S_IWUSR as libc::mode_t;
+    if (st.st_mode & libc::S_IFMT) != libc::S_IFREG
+        || st.st_uid != current_euid()
+        || (st.st_mode & write_mask) != 0
+        || (require_read_only && (st.st_mode & usr_write) != 0)
+    {
+        return Err(ReadOwnedFileError::InvalidOwnershipOrPermissions);
+    }
+    read_bounded_regular_fd(&fd, &st, max_bytes).map_err(|_| ReadOwnedFileError::ReadFailed)
+}
+
+/// Returns current UTC timestamp in `YYYY-MM-DDTHH:MM:SSZ` ISO-8601 format.
+pub(crate) fn format_utc_iso8601_now() -> String {
+    let now = unsafe { libc::time(std::ptr::null_mut()) };
+    let mut utc: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::gmtime_r(&now, &mut utc) }.is_null() {
+        return "1970-01-01T00:00:00Z".to_string();
+    }
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        utc.tm_year + 1900,
+        utc.tm_mon + 1,
+        utc.tm_mday,
+        utc.tm_hour,
+        utc.tm_min,
+        utc.tm_sec
+    )
+}
+
+pub(crate) fn epoch_seconds_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+pub(crate) fn monotonic_nanos_now() -> i64 {
+    let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } != 0 {
+        return 0;
+    }
+    (ts.tv_sec as i64)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(ts.tv_nsec as i64)
 }
 
 /// Acquires an exclusive blocking `flock` on a non-symlink `O_WRONLY | O_CREAT` lock file.
@@ -871,11 +987,19 @@ pub(crate) fn flock_exclusive_file(path: &Path) -> Result<OwnedFd, i32> {
     Ok(fd)
 }
 
-/// Writes `bytes` to a non-symlink regular file created/truncated with mode `0600` and `fsync`s it.
-pub(crate) fn write_private_trunc_file(path: &Path, bytes: &[u8]) -> bool {
-    let Some(cpath) = path_to_cstr(path) else {
-        return false;
-    };
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WritePrivateError {
+    OpenFailed,
+    WriteFailed,
+    SyncFailed,
+}
+
+fn write_private_trunc_file_inner(
+    path: &Path,
+    bytes: &[u8],
+    require_fsync: bool,
+) -> Result<(), WritePrivateError> {
+    let cpath = path_to_cstr(path).ok_or(WritePrivateError::OpenFailed)?;
     let raw_fd = unsafe {
         libc::open(
             cpath.as_ptr(),
@@ -883,16 +1007,181 @@ pub(crate) fn write_private_trunc_file(path: &Path, bytes: &[u8]) -> bool {
             0o600,
         )
     };
-    let Some(fd) = OwnedFd::from_raw(raw_fd) else {
-        return false;
-    };
+    let fd = OwnedFd::from_raw(raw_fd).ok_or(WritePrivateError::OpenFailed)?;
     if !write_all_fd(fd.as_raw(), bytes) {
-        return false;
+        return Err(WritePrivateError::WriteFailed);
     }
-    unsafe {
-        let _ = libc::fsync(fd.as_raw());
+    if unsafe { libc::fsync(fd.as_raw()) } != 0 && require_fsync {
+        return Err(WritePrivateError::SyncFailed);
     }
-    true
+    Ok(())
+}
+
+/// Writes `bytes` to a non-symlink regular file created/truncated with mode `0600` and checks `fsync`.
+pub(crate) fn write_private_trunc_file_checked(
+    path: &Path,
+    bytes: &[u8],
+) -> Result<(), WritePrivateError> {
+    write_private_trunc_file_inner(path, bytes, true)
+}
+
+/// Writes `bytes` to a non-symlink regular file created/truncated with mode `0600` and `fsync`s it.
+pub(crate) fn write_private_trunc_file(path: &Path, bytes: &[u8]) -> bool {
+    write_private_trunc_file_inner(path, bytes, false).is_ok()
+}
+
+/// Writes an immutable artifact atomically via a temporary `O_EXCL | O_NOFOLLOW` file + `fchmod` + `fsync` + `rename`.
+/// Idempotent if an identical existing regular artifact already exists with matching mode/ownership.
+pub(crate) fn write_mode_exclusive_atomic(
+    path: &Path,
+    contents: &[u8],
+    mode: libc::mode_t,
+    max_existing_bytes: usize,
+) -> Result<(), String> {
+    if !path.as_os_str().is_empty() {
+        if let Ok(existing) = read_owned_regular_file_limited(path, max_existing_bytes, mode == 0o444)
+        {
+            if existing == contents {
+                return Ok(());
+            }
+            return Err("immutable approval generation collision".to_string());
+        }
+        if std::fs::symlink_metadata(path).is_ok() {
+            return Err("immutable approval generation collision".to_string());
+        }
+    }
+    let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
+        return Err("cannot create approval artifact directory".to_string());
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return Err("cannot create approval artifact directory".to_string());
+    }
+    let temp = parent.join(format!(
+        ".approval-{}-{}",
+        current_pid(),
+        monotonic_nanos_now()
+    ));
+    let Some(ctemp) = path_to_cstr(&temp) else {
+        return Err("cannot create approval artifact".to_string());
+    };
+    let raw_fd = unsafe {
+        libc::open(
+            ctemp.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            0o600,
+        )
+    };
+    let Some(fd) = OwnedFd::from_raw(raw_fd) else {
+        return Err("cannot create approval artifact".to_string());
+    };
+    if !write_all_fd(fd.as_raw(), contents) {
+        drop(fd);
+        let _ = std::fs::remove_file(&temp);
+        return Err("cannot write approval artifact".to_string());
+    }
+    if unsafe { libc::fchmod(fd.as_raw(), mode) } != 0 {
+        drop(fd);
+        let _ = std::fs::remove_file(&temp);
+        return Err("cannot make approval artifact immutable".to_string());
+    }
+    if unsafe { libc::fsync(fd.as_raw()) } != 0 {
+        drop(fd);
+        let _ = std::fs::remove_file(&temp);
+        return Err("cannot write approval artifact".to_string());
+    }
+    drop(fd);
+    if std::fs::rename(&temp, path).is_err() {
+        let _ = std::fs::remove_file(&temp);
+        return Err("cannot publish approval artifact".to_string());
+    }
+    Ok(())
+}
+
+/// Snapshots a bounded non-symlink regular file to `destination`, preferring a hard link.
+pub(crate) fn hard_link_or_copy_regular_bounded(
+    source: &Path,
+    destination: &Path,
+    max_bytes: u64,
+) -> Result<(), &'static str> {
+    let Ok(meta) = std::fs::symlink_metadata(source) else {
+        return Err("APK candidate is not a regular file");
+    };
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return Err("APK candidate is not a regular file");
+    }
+    let size = meta.len();
+    if size == 0 || size > max_bytes {
+        return Err("APK candidate exceeds its size limit");
+    }
+    if std::fs::hard_link(source, destination).is_ok() {
+        return Ok(());
+    }
+    if std::fs::copy(source, destination).is_err() {
+        return Err("cannot snapshot APK candidate");
+    }
+    Ok(())
+}
+
+/// Read-only memory-mapped regular file guard (`O_NOFOLLOW` + `MAP_PRIVATE`).
+pub(crate) struct MappedReadOnlyFile {
+    _fd: OwnedFd,
+    ptr: *const u8,
+    len: usize,
+}
+
+impl MappedReadOnlyFile {
+    pub(crate) fn open(path: &Path) -> Result<Self, ()> {
+        let (fd, st) = open_and_stat_regular_fd(path, false).map_err(|_| ())?;
+        if (st.st_mode & libc::S_IFMT) != libc::S_IFREG || st.st_size < 0 {
+            return Err(());
+        }
+        let Ok(len) = usize::try_from(st.st_size) else {
+            return Err(());
+        };
+        if len == 0 {
+            return Ok(Self {
+                _fd: fd,
+                ptr: std::ptr::null(),
+                len: 0,
+            });
+        }
+        let mapped = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ,
+                libc::MAP_PRIVATE,
+                fd.as_raw(),
+                0,
+            )
+        };
+        if mapped == libc::MAP_FAILED {
+            return Err(());
+        }
+        Ok(Self {
+            _fd: fd,
+            ptr: mapped.cast::<u8>(),
+            len,
+        })
+    }
+
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        if self.len == 0 || self.ptr.is_null() {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+        }
+    }
+}
+
+impl Drop for MappedReadOnlyFile {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() && self.len > 0 {
+            unsafe {
+                let _ = libc::munmap(self.ptr.cast_mut().cast(), self.len);
+            }
+        }
+    }
 }
 
 pub(crate) fn filter_env_slices(entries: &[&[u8]], excluded_names: &[&[u8]]) -> Vec<CString> {

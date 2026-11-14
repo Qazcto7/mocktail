@@ -153,8 +153,10 @@ add_custom_command(
   COMMAND "${CARGO_EXECUTABLE}" build --release --manifest-path "${MOCKTAIL_RUST_CORE_DIR}/Cargo.toml" --target-dir "${CMAKE_BINARY_DIR}/cargo-target"
   WORKING_DIRECTORY "${MOCKTAIL_RUST_CORE_DIR}"
   DEPENDS
+    "${MOCKTAIL_RUST_CORE_DIR}/src/apk_bundle.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/apk_signature_rs.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/browser_tracker_service.rs"
+    "${MOCKTAIL_RUST_CORE_DIR}/src/candidate_approval.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/deriver_json.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/discord_rpc.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/external_launch_broker.rs"

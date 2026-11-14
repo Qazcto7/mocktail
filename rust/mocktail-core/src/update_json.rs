@@ -291,7 +291,9 @@ pub extern "C" fn mocktail_rust_apkpure_parse_exact_urls_cb(
 // 3. APK Bundle Signing Trust & Payload Metadata JSON
 // ============================================================================
 
-fn parse_trusted_certificates_internal(contents: &str) -> Result<BTreeSet<String>, &'static str> {
+pub(crate) fn parse_trusted_certificates_internal(
+    contents: &str,
+) -> Result<BTreeSet<String>, &'static str> {
     let doc: Value = serde_json::from_str(contents)
         .map_err(|_| "Roblox signing trust manifest is invalid")?;
     let obj = doc
@@ -349,6 +351,100 @@ pub extern "C" fn mocktail_rust_apk_parse_trusted_certificates(
     }
 }
 
+pub(crate) struct ApkPayloadMetadataParams<'a> {
+    pub version_name: &'a str,
+    pub version_code: u64,
+    pub abi: &'a str,
+    pub elf_build_id: &'a str,
+    pub library_sha256: &'a str,
+    pub base_apk_sha256: &'a str,
+    pub split_apk_hash_key: &'a str,
+    pub split_apk_sha256: &'a str,
+    pub signing_certs: &'a [&'a str],
+    pub asset_file_count: usize,
+    pub asset_tree_sha256: &'a str,
+    pub source: &'a str,
+    pub imported_at: &'a str,
+    pub exact_supported: bool,
+    pub monolithic: bool,
+}
+
+pub(crate) fn build_apk_payload_metadata_json(params: &ApkPayloadMetadataParams<'_>) -> Option<String> {
+    let certs: Vec<Value> = params
+        .signing_certs
+        .iter()
+        .map(|s| Value::String((*s).to_string()))
+        .collect();
+
+    let mut sha_map = BTreeMap::new();
+    sha_map.insert("base_apk", Value::String(params.base_apk_sha256.to_string()));
+    sha_map.insert("libroblox", Value::String(params.library_sha256.to_string()));
+    sha_map.insert(
+        params.split_apk_hash_key,
+        Value::String(params.split_apk_sha256.to_string()),
+    );
+
+    let mut assets_map = BTreeMap::new();
+    assets_map.insert("file_count", Value::from(params.asset_file_count as u64));
+    assets_map.insert(
+        "sha256_tree",
+        Value::String(params.asset_tree_sha256.to_string()),
+    );
+
+    let compat_status = if params.exact_supported {
+        "exact-supported"
+    } else {
+        "verified-candidate"
+    };
+    let apk_layout = if params.monolithic {
+        "monolithic"
+    } else {
+        "split"
+    };
+
+    let mut root = serde_json::Map::new();
+    root.insert("schema_version".into(), Value::from(1));
+    root.insert("package".into(), Value::String("com.roblox.client".into()));
+    root.insert(
+        "version_name".into(),
+        Value::String(params.version_name.to_string()),
+    );
+    root.insert("version_code".into(), Value::from(params.version_code));
+    root.insert("abi".into(), Value::String(params.abi.to_string()));
+    root.insert(
+        "elf_build_id".into(),
+        Value::String(params.elf_build_id.to_string()),
+    );
+    root.insert(
+        "sha256".into(),
+        Value::Object(sha_map.into_iter().map(|(k, v)| (k.to_string(), v)).collect()),
+    );
+    root.insert("signing_certificates_sha256".into(), Value::Array(certs));
+    root.insert(
+        "assets".into(),
+        Value::Object(
+            assets_map
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+        ),
+    );
+    root.insert("source".into(), Value::String(params.source.to_string()));
+    root.insert(
+        "imported_at".into(),
+        Value::String(params.imported_at.to_string()),
+    );
+    root.insert(
+        "compatibility_status".into(),
+        Value::String(compat_status.to_string()),
+    );
+    root.insert("apk_layout".into(), Value::String(apk_layout.to_string()));
+
+    let mut rendered = serde_json::to_string_pretty(&Value::Object(root)).ok()?;
+    rendered.push('\n');
+    Some(rendered)
+}
+
 #[no_mangle]
 pub extern "C" fn mocktail_rust_apk_build_payload_metadata(
     req: *const MocktailRustApkMetadataRequest,
@@ -396,71 +492,29 @@ pub extern "C" fn mocktail_rust_apk_build_payload_metadata(
             let Some(cert) = c_str_opt(cert_ptr) else {
                 return -1;
             };
-            certs.push(Value::String(cert.to_string()));
+            certs.push(cert);
         }
     }
 
-    let mut sha_map = BTreeMap::new();
-    sha_map.insert("base_apk", Value::String(base_apk_sha256.to_string()));
-    sha_map.insert("libroblox", Value::String(library_sha256.to_string()));
-    sha_map.insert(split_apk_hash_key, Value::String(split_apk_sha256.to_string()));
-
-    let mut assets_map = BTreeMap::new();
-    assets_map.insert("file_count", Value::from(inp.asset_file_count as u64));
-    assets_map.insert(
-        "sha256_tree",
-        Value::String(asset_tree_sha256.to_string()),
-    );
-
-    let compat_status = if inp.exact_supported {
-        "exact-supported"
-    } else {
-        "verified-candidate"
-    };
-    let apk_layout = if inp.monolithic {
-        "monolithic"
-    } else {
-        "split"
-    };
-
-    let mut root = serde_json::Map::new();
-    root.insert("schema_version".into(), Value::from(1));
-    root.insert("package".into(), Value::String("com.roblox.client".into()));
-    root.insert("version_name".into(), Value::String(version_name.to_string()));
-    root.insert("version_code".into(), Value::from(inp.version_code));
-    root.insert("abi".into(), Value::String(abi.to_string()));
-    root.insert("elf_build_id".into(), Value::String(elf_build_id.to_string()));
-    root.insert(
-        "sha256".into(),
-        Value::Object(
-            sha_map
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), v))
-                .collect(),
-        ),
-    );
-    root.insert("signing_certificates_sha256".into(), Value::Array(certs));
-    root.insert(
-        "assets".into(),
-        Value::Object(
-            assets_map
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), v))
-                .collect(),
-        ),
-    );
-    root.insert("source".into(), Value::String(source.to_string()));
-    root.insert("imported_at".into(), Value::String(imported_at.to_string()));
-    root.insert(
-        "compatibility_status".into(),
-        Value::String(compat_status.to_string()),
-    );
-    root.insert("apk_layout".into(), Value::String(apk_layout.to_string()));
-
-    let Ok(mut rendered) = serde_json::to_string_pretty(&Value::Object(root)) else {
+    let Some(rendered) = build_apk_payload_metadata_json(&ApkPayloadMetadataParams {
+        version_name,
+        version_code: inp.version_code,
+        abi,
+        elf_build_id,
+        library_sha256,
+        base_apk_sha256,
+        split_apk_hash_key,
+        split_apk_sha256,
+        signing_certs: &certs,
+        asset_file_count: inp.asset_file_count,
+        asset_tree_sha256,
+        source,
+        imported_at,
+        exact_supported: inp.exact_supported,
+        monolithic: inp.monolithic,
+    }) else {
         return -1;
     };
-    rendered.push('\n');
     emit_string(on_json, ctx, &rendered);
     0
 }
@@ -477,6 +531,49 @@ fn extract_generation(relative: &str, directory: &str, payload_id: &str) -> Opti
         return None;
     }
     Some(generation.to_string())
+}
+
+pub(crate) struct CandidateActivationRefs {
+    pub generation: String,
+    pub approval_ref: String,
+    pub profile_ref: String,
+    pub compatibility_ref: String,
+}
+
+pub(crate) fn parse_candidate_activation_json(
+    json_str: &str,
+    payload_id: &str,
+) -> Result<CandidateActivationRefs, &'static str> {
+    let doc: Value =
+        serde_json::from_str(json_str).map_err(|_| "approval artifact is not a JSON object")?;
+    let obj = doc
+        .as_object()
+        .ok_or("approval artifact is not a JSON object")?;
+
+    let approval_ref = obj.get("approval_path").and_then(|v| v.as_str()).unwrap_or("");
+    let profile_ref = obj
+        .get("host_abi_profile_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let compat_ref = obj
+        .get("compatibility_manifest_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let generation = extract_generation(approval_ref, "approvals", payload_id)
+        .ok_or("approved payload manifest has invalid approval references")?;
+    let expected_profile = format!("host_abi_profiles/{}-{}.json", payload_id, generation);
+    let expected_compat = format!("compatibility_profiles/{}-{}.json", payload_id, generation);
+    if profile_ref != expected_profile || compat_ref != expected_compat {
+        return Err("approved payload manifest has invalid approval references");
+    }
+
+    Ok(CandidateActivationRefs {
+        generation,
+        approval_ref: approval_ref.to_string(),
+        profile_ref: profile_ref.to_string(),
+        compatibility_ref: compat_ref.to_string(),
+    })
 }
 
 #[no_mangle]
@@ -497,59 +594,26 @@ pub extern "C" fn mocktail_rust_candidate_approval_parse_activation(
         copy_error(out_err, err_cap, "approval artifact is not a JSON object");
         return -1;
     };
-    let Ok(doc) = serde_json::from_str::<Value>(json_str) else {
-        copy_error(out_err, err_cap, "approval artifact is not a JSON object");
-        return -1;
+    let refs = match parse_candidate_activation_json(json_str, payload_id) {
+        Ok(r) => r,
+        Err(msg) => {
+            copy_error(out_err, err_cap, msg);
+            return -1;
+        }
     };
-    let Some(obj) = doc.as_object() else {
-        copy_error(out_err, err_cap, "approval artifact is not a JSON object");
-        return -1;
-    };
-
-    let approval_ref = obj
-        .get("approval_path")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let profile_ref = obj
-        .get("host_abi_profile_path")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let compat_ref = obj
-        .get("compatibility_manifest_path")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-
-    let Some(generation) = extract_generation(approval_ref, "approvals", payload_id) else {
-        copy_error(
-            out_err,
-            err_cap,
-            "approved payload manifest has invalid approval references",
-        );
-        return -1;
-    };
-    let expected_profile = format!("host_abi_profiles/{}-{}.json", payload_id, generation);
-    let expected_compat = format!("compatibility_profiles/{}-{}.json", payload_id, generation);
-    if profile_ref != expected_profile || compat_ref != expected_compat {
-        copy_error(
-            out_err,
-            err_cap,
-            "approved payload manifest has invalid approval references",
-        );
-        return -1;
-    }
 
     if let Some(cb) = on_parsed {
         unsafe {
             cb(
                 ctx,
-                generation.as_ptr() as *const c_char,
-                generation.len(),
-                approval_ref.as_ptr() as *const c_char,
-                approval_ref.len(),
-                profile_ref.as_ptr() as *const c_char,
-                profile_ref.len(),
-                compat_ref.as_ptr() as *const c_char,
-                compat_ref.len(),
+                refs.generation.as_ptr() as *const c_char,
+                refs.generation.len(),
+                refs.approval_ref.as_ptr() as *const c_char,
+                refs.approval_ref.len(),
+                refs.profile_ref.as_ptr() as *const c_char,
+                refs.profile_ref.len(),
+                refs.compatibility_ref.as_ptr() as *const c_char,
+                refs.compatibility_ref.len(),
             );
         }
     }
@@ -558,6 +622,132 @@ pub extern "C" fn mocktail_rust_candidate_approval_parse_activation(
 
 fn sha256_lower_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
+}
+
+pub(crate) struct CandidateEvidenceParams<'a> {
+    pub payload_id: &'a str,
+    pub generation: &'a str,
+    pub canonical_library_path: &'a str,
+    pub elf_build_id: &'a str,
+    pub library_sha256: &'a str,
+    pub fingerprint: &'a str,
+    pub profile_sha256: &'a str,
+    pub compatibility_sha256: &'a str,
+    pub receipt_str: &'a str,
+    pub canary1_str: &'a str,
+    pub canary2_str: &'a str,
+}
+
+pub(crate) fn verify_candidate_evidence_json(
+    p: &CandidateEvidenceParams<'_>,
+) -> Result<(), &'static str> {
+    let receipt_doc: Value = serde_json::from_str(p.receipt_str)
+        .map_err(|_| "approval artifact is not a JSON object")?;
+    let receipt = receipt_doc
+        .as_object()
+        .ok_or("approval artifact is not a JSON object")?;
+
+    let canary_runtime_sha256 = receipt
+        .get("canary_runtime_sha256")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let runtime_sha256 = receipt
+        .get("runtime_sha256")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let runtime_build_id = receipt
+        .get("runtime_build_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let attestations = receipt
+        .get("canary_attestation_sha256")
+        .and_then(|v| v.as_array());
+
+    let receipt_ok = receipt.get("schema_version").and_then(|v| v.as_i64()) == Some(1)
+        && receipt.get("status").and_then(|v| v.as_str()) == Some("approved")
+        && receipt.get("payload_id").and_then(|v| v.as_str()) == Some(p.payload_id)
+        && receipt.get("generation").and_then(|v| v.as_str()) == Some(p.generation)
+        && receipt.get("payload_path").and_then(|v| v.as_str()) == Some(p.canonical_library_path)
+        && receipt.get("elf_build_id").and_then(|v| v.as_str()) == Some(p.elf_build_id)
+        && receipt.get("payload_sha256").and_then(|v| v.as_str()) == Some(p.library_sha256)
+        && receipt.get("payload_fingerprint").and_then(|v| v.as_str()) == Some(p.fingerprint)
+        && receipt.get("profile_sha256").and_then(|v| v.as_str()) == Some(p.profile_sha256)
+        && receipt
+            .get("compatibility_manifest_sha256")
+            .and_then(|v| v.as_str())
+            == Some(p.compatibility_sha256)
+        && is_lower_hex(canary_runtime_sha256, 64)
+        && runtime_sha256 == canary_runtime_sha256
+        && is_lower_hex(runtime_build_id, 40)
+        && receipt.get("canary_tier").and_then(|v| v.as_str()) == Some("C")
+        && receipt.get("successful_runs").and_then(|v| v.as_u64()) == Some(2)
+        && attestations.is_some_and(|arr| arr.len() == 2);
+
+    if !receipt_ok {
+        return Err("approval receipt does not authorize exact payload evidence");
+    }
+    let attestations = attestations.unwrap();
+
+    let canary_inputs = [p.canary1_str, p.canary2_str];
+    let mut attestation_hashes = [String::new(), String::new()];
+    let mut run_ids = [String::new(), String::new()];
+
+    for index in 0..2 {
+        let bytes_str = canary_inputs[index];
+        let att_doc: Value = serde_json::from_str(bytes_str)
+            .map_err(|_| "approval artifact is not a JSON object")?;
+        let att = att_doc
+            .as_object()
+            .ok_or("approval artifact is not a JSON object")?;
+        attestation_hashes[index] = sha256_lower_hex(bytes_str.as_bytes());
+        run_ids[index] = att
+            .get("run_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let att_ok = att.get("schema_version").and_then(|v| v.as_i64()) == Some(1)
+            && att.get("status").and_then(|v| v.as_str()) == Some("passed")
+            && att.get("canary_tier").and_then(|v| v.as_str()) == Some("C")
+            && att.get("run").and_then(|v| v.as_u64()) == Some(index as u64 + 1)
+            && att.get("payload_id").and_then(|v| v.as_str()) == Some(p.payload_id)
+            && att.get("payload_fingerprint").and_then(|v| v.as_str()) == Some(p.fingerprint)
+            && att.get("profile_sha256").and_then(|v| v.as_str()) == Some(p.profile_sha256)
+            && att
+                .get("compatibility_manifest_sha256")
+                .and_then(|v| v.as_str())
+                == Some(p.compatibility_sha256)
+            && att.get("runtime_sha256").and_then(|v| v.as_str()) == Some(canary_runtime_sha256)
+            && att.get("runtime_build_id").and_then(|v| v.as_str()) == Some(runtime_build_id)
+            && is_lower_hex(
+                att.get("readiness_log_sha256")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
+                64,
+            )
+            && attestations[index].as_str() == Some(attestation_hashes[index].as_str());
+
+        if !att_ok {
+            return Err("canary attestation does not match approval evidence");
+        }
+    }
+
+    if run_ids[0].is_empty() || run_ids[0] == run_ids[1] {
+        return Err("approval canaries do not have distinct run identities");
+    }
+
+    let computed = compute_approval_generation_hex(
+        runtime_build_id,
+        p.fingerprint,
+        p.profile_sha256,
+        p.compatibility_sha256,
+        &attestation_hashes[0],
+        &attestation_hashes[1],
+    );
+    if computed != p.generation {
+        return Err("approval evidence generation does not match");
+    }
+    Ok(())
 }
 
 #[no_mangle]
@@ -601,135 +791,25 @@ pub extern "C" fn mocktail_rust_candidate_approval_verify_evidence(
         return -1;
     };
 
-    let Ok(receipt_doc) = serde_json::from_str::<Value>(receipt_str) else {
-        copy_error(out_err, err_cap, "approval artifact is not a JSON object");
-        return -1;
-    };
-    let Some(receipt) = receipt_doc.as_object() else {
-        copy_error(out_err, err_cap, "approval artifact is not a JSON object");
-        return -1;
-    };
-
-    let canary_runtime_sha256 = receipt
-        .get("canary_runtime_sha256")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let runtime_sha256 = receipt
-        .get("runtime_sha256")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let runtime_build_id = receipt
-        .get("runtime_build_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let attestations = receipt
-        .get("canary_attestation_sha256")
-        .and_then(|v| v.as_array());
-
-    let receipt_ok = receipt.get("schema_version").and_then(|v| v.as_i64()) == Some(1)
-        && receipt.get("status").and_then(|v| v.as_str()) == Some("approved")
-        && receipt.get("payload_id").and_then(|v| v.as_str()) == Some(payload_id)
-        && receipt.get("generation").and_then(|v| v.as_str()) == Some(generation)
-        && receipt.get("payload_path").and_then(|v| v.as_str()) == Some(canonical_library_path)
-        && receipt.get("elf_build_id").and_then(|v| v.as_str()) == Some(elf_build_id)
-        && receipt.get("payload_sha256").and_then(|v| v.as_str()) == Some(library_sha256)
-        && receipt.get("payload_fingerprint").and_then(|v| v.as_str()) == Some(fingerprint)
-        && receipt.get("profile_sha256").and_then(|v| v.as_str()) == Some(profile_sha256)
-        && receipt
-            .get("compatibility_manifest_sha256")
-            .and_then(|v| v.as_str())
-            == Some(compatibility_sha256)
-        && is_lower_hex(canary_runtime_sha256, 64)
-        && runtime_sha256 == canary_runtime_sha256
-        && is_lower_hex(runtime_build_id, 40)
-        && receipt.get("canary_tier").and_then(|v| v.as_str()) == Some("C")
-        && receipt.get("successful_runs").and_then(|v| v.as_u64()) == Some(2)
-        && attestations.is_some_and(|arr| arr.len() == 2);
-
-    if !receipt_ok {
-        copy_error(
-            out_err,
-            err_cap,
-            "approval receipt does not authorize exact payload evidence",
-        );
-        return -1;
-    }
-    let attestations = attestations.unwrap();
-
-    let canary_inputs = [canary1_str, canary2_str];
-    let mut attestation_hashes = [String::new(), String::new()];
-    let mut run_ids = [String::new(), String::new()];
-
-    for index in 0..2 {
-        let bytes_str = canary_inputs[index];
-        let Ok(att_doc) = serde_json::from_str::<Value>(bytes_str) else {
-            copy_error(out_err, err_cap, "approval artifact is not a JSON object");
-            return -1;
-        };
-        let Some(att) = att_doc.as_object() else {
-            copy_error(out_err, err_cap, "approval artifact is not a JSON object");
-            return -1;
-        };
-        attestation_hashes[index] = sha256_lower_hex(bytes_str.as_bytes());
-        run_ids[index] = att
-            .get("run_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        let att_ok = att.get("schema_version").and_then(|v| v.as_i64()) == Some(1)
-            && att.get("status").and_then(|v| v.as_str()) == Some("passed")
-            && att.get("canary_tier").and_then(|v| v.as_str()) == Some("C")
-            && att.get("run").and_then(|v| v.as_u64()) == Some(index as u64 + 1)
-            && att.get("payload_id").and_then(|v| v.as_str()) == Some(payload_id)
-            && att.get("payload_fingerprint").and_then(|v| v.as_str()) == Some(fingerprint)
-            && att.get("profile_sha256").and_then(|v| v.as_str()) == Some(profile_sha256)
-            && att
-                .get("compatibility_manifest_sha256")
-                .and_then(|v| v.as_str())
-                == Some(compatibility_sha256)
-            && att.get("runtime_sha256").and_then(|v| v.as_str()) == Some(canary_runtime_sha256)
-            && att.get("runtime_build_id").and_then(|v| v.as_str()) == Some(runtime_build_id)
-            && is_lower_hex(
-                att.get("readiness_log_sha256")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(""),
-                64,
-            )
-            && attestations[index].as_str() == Some(attestation_hashes[index].as_str());
-
-        if !att_ok {
-            copy_error(
-                out_err,
-                err_cap,
-                "canary attestation does not match approval evidence",
-            );
-            return -1;
-        }
-    }
-
-    if run_ids[0].is_empty() || run_ids[0] == run_ids[1] {
-        copy_error(
-            out_err,
-            err_cap,
-            "approval canaries do not have distinct run identities",
-        );
-        return -1;
-    }
-
-    let computed = compute_approval_generation_hex(
-        runtime_build_id,
+    match verify_candidate_evidence_json(&CandidateEvidenceParams {
+        payload_id,
+        generation,
+        canonical_library_path,
+        elf_build_id,
+        library_sha256,
         fingerprint,
         profile_sha256,
         compatibility_sha256,
-        &attestation_hashes[0],
-        &attestation_hashes[1],
-    );
-    if computed != generation {
-        copy_error(out_err, err_cap, "approval evidence generation does not match");
-        return -1;
+        receipt_str,
+        canary1_str,
+        canary2_str,
+    }) {
+        Ok(()) => 0,
+        Err(msg) => {
+            copy_error(out_err, err_cap, msg);
+            -1
+        }
     }
-    0
 }
 
 // ============================================================================

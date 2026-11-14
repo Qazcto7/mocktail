@@ -9,10 +9,14 @@ use std::slice;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
+pub mod apk_bundle;
+pub use apk_bundle::*;
 pub mod apk_signature_rs;
 pub use apk_signature_rs::*;
 pub mod browser_tracker_service;
 pub use browser_tracker_service::*;
+pub mod candidate_approval;
+pub use candidate_approval::*;
 pub mod deriver_json;
 pub use deriver_json::*;
 pub mod discord_rpc;
@@ -378,6 +382,14 @@ fn write_c_buf(dst: &mut [c_char], s: &str) {
     dst[len] = 0;
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct ParsedAndroidManifest {
+    pub package_name: String,
+    pub version_name: String,
+    pub split_name: String,
+    pub version_code: u64,
+}
+
 #[no_mangle]
 pub extern "C" fn mocktail_rust_parse_android_manifest(
     data: *const u8,
@@ -395,14 +407,22 @@ pub extern "C" fn mocktail_rust_parse_android_manifest(
     res.error[0] = 0;
 
     let bytes = unsafe { slice::from_raw_parts(data, len) };
-    if let Err(e) = parse_manifest_internal(bytes, res) {
-        write_c_buf(&mut res.error, &e);
-        return 0; // Parsed with error recorded
+    match parse_android_manifest_bytes(bytes) {
+        Ok(parsed) => {
+            write_c_buf(&mut res.package_name, &parsed.package_name);
+            write_c_buf(&mut res.version_name, &parsed.version_name);
+            write_c_buf(&mut res.split_name, &parsed.split_name);
+            res.version_code = parsed.version_code;
+            1
+        }
+        Err(e) => {
+            write_c_buf(&mut res.error, &e);
+            0
+        }
     }
-    1 // Success
 }
 
-fn parse_manifest_internal(bytes: &[u8], res: &mut MocktailRustManifestResult) -> Result<(), String> {
+pub(crate) fn parse_android_manifest_bytes(bytes: &[u8]) -> Result<ParsedAndroidManifest, String> {
     const RES_XML_TYPE: u16 = 0x0003;
     const RES_STRING_POOL_TYPE: u16 = 0x0001;
     const RES_XML_START_ELEMENT_TYPE: u16 = 0x0102;
@@ -419,6 +439,7 @@ fn parse_manifest_internal(bytes: &[u8], res: &mut MocktailRustManifestResult) -
         return Err("AndroidManifest.xml is not valid binary XML".to_string());
     }
 
+    let mut out = ParsedAndroidManifest::default();
     let mut pool: Vec<String> = Vec::new();
     let mut has_pool = false;
     let mut offset = xml_header_size;
@@ -484,13 +505,11 @@ fn parse_manifest_internal(bytes: &[u8], res: &mut MocktailRustManifestResult) -
                 }
                 let mut cursor = str_pos;
                 if is_utf8 {
-                    // skip char len
                     if cursor < bytes.len() && (bytes[cursor] & 0x80) != 0 {
                         cursor += 2;
                     } else {
                         cursor += 1;
                     }
-                    // read byte len
                     let byte_len = if cursor < bytes.len() && (bytes[cursor] & 0x80) != 0 {
                         let len = ((bytes[cursor] as usize & 0x7f) << 8) | bytes[cursor + 1] as usize;
                         cursor += 2;
@@ -509,7 +528,6 @@ fn parse_manifest_internal(bytes: &[u8], res: &mut MocktailRustManifestResult) -
                         pool.push(String::new());
                     }
                 } else {
-                    // UTF-16
                     let mut u16_len = if cursor + 2 <= bytes.len() {
                         let l = u16::from_le_bytes([bytes[cursor], bytes[cursor + 1]]) as usize;
                         cursor += 2;
@@ -589,31 +607,31 @@ fn parse_manifest_internal(bytes: &[u8], res: &mut MocktailRustManifestResult) -
                     match attr_name {
                         "package" => {
                             if let Some(v) = str_val {
-                                write_c_buf(&mut res.package_name, v);
+                                out.package_name = v.clone();
                             }
                         }
                         "versionName" => {
                             if let Some(v) = str_val {
-                                write_c_buf(&mut res.version_name, v);
+                                out.version_name = v.clone();
                             }
                         }
                         "split" => {
                             if let Some(v) = str_val {
-                                write_c_buf(&mut res.split_name, v);
+                                out.split_name = v.clone();
                             }
                         }
                         "versionCode" => {
                             if (0x10..=0x1f).contains(&data_type) {
-                                res.version_code = typed_data as u64;
+                                out.version_code = typed_data as u64;
                             }
                         }
                         _ => {}
                     }
                 }
-                if res.package_name[0] == 0 || res.version_code == 0 {
+                if out.package_name.is_empty() || out.version_code == 0 {
                     return Err("Android manifest has no package or versionCode".to_string());
                 }
-                return Ok(());
+                return Ok(out);
             }
         }
         offset += chunk_size;
@@ -4495,7 +4513,7 @@ pub extern "C" fn mocktail_rust_decode_etc_image_block_rows(
 // 27. ZIP Archive Manager
 // ============================================================================
 
-fn is_safe_archive_path(path: &str) -> bool {
+pub(crate) fn is_safe_archive_path(path: &str) -> bool {
     let bytes = path.as_bytes();
     if bytes.is_empty() || bytes[0] == b'/' {
         return false;
@@ -4530,14 +4548,14 @@ pub struct MocktailRustZipEntryInfo {
     pub symbolic_link: bool,
 }
 
-pub(crate) fn zip_list_entries_internal(
-    path: &str,
+pub(crate) fn zip_list_entries_path(
+    path: &Path,
     max_entries: usize,
 ) -> Result<Vec<MocktailRustZipEntryInfo>, (c_int, String)> {
-    let file = std::fs::File::open(path)
-        .map_err(|e| (-3, format!("cannot open ZIP archive: {}: {}", path, e)))?;
-    let mut zip = zip::ZipArchive::new(file)
-        .map_err(|e| (-4, format!("cannot parse ZIP archive: {}", e)))?;
+    let file =
+        std::fs::File::open(path).map_err(|e| (-3, format!("cannot open ZIP archive: {}: {}", path.display(), e)))?;
+    let mut zip =
+        zip::ZipArchive::new(file).map_err(|e| (-4, format!("cannot parse ZIP archive: {}", e)))?;
     if zip.len() > max_entries {
         return Err((-5, "ZIP archive has an invalid or excessive entry count".to_string()));
     }
@@ -4562,6 +4580,13 @@ pub(crate) fn zip_list_entries_internal(
         });
     }
     Ok(entries)
+}
+
+pub(crate) fn zip_list_entries_internal(
+    path: &str,
+    max_entries: usize,
+) -> Result<Vec<MocktailRustZipEntryInfo>, (c_int, String)> {
+    zip_list_entries_path(Path::new(path), max_entries)
 }
 
 #[no_mangle]
@@ -4612,6 +4637,38 @@ pub extern "C" fn mocktail_rust_zip_list_entries(
     0
 }
 
+pub(crate) fn zip_read_entry_bytes(
+    archive_path: &Path,
+    target_name: &str,
+    max_bytes: usize,
+) -> Result<Vec<u8>, (c_int, String)> {
+    let file = std::fs::File::open(archive_path)
+        .map_err(|e| (-4, format!("cannot open ZIP archive: {}: {}", archive_path.display(), e)))?;
+    let mut zip =
+        zip::ZipArchive::new(file).map_err(|e| (-5, format!("cannot parse ZIP archive: {}", e)))?;
+    let mut entry = zip
+        .by_name(target_name)
+        .map_err(|_| (-6, format!("ZIP entry is missing: {}", target_name)))?;
+    if entry.size() > max_bytes as u64 {
+        return Err((-7, "decompressed ZIP data exceeds its size limit".to_string()));
+    }
+    let mut out = Vec::with_capacity((entry.size() as usize).min(max_bytes));
+    let mut chunk = [0u8; 16384];
+    loop {
+        match entry.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                if out.len().saturating_add(n) > max_bytes {
+                    return Err((-8, "decompressed ZIP data exceeds its size limit".to_string()));
+                }
+                out.extend_from_slice(&chunk[..n]);
+            }
+            Err(e) => return Err((-9, format!("cannot decompress ZIP entry: {}", e))),
+        }
+    }
+    Ok(out)
+}
+
 #[no_mangle]
 pub extern "C" fn mocktail_rust_zip_read_entry(
     archive_path: *const c_char,
@@ -4644,54 +4701,79 @@ pub extern "C" fn mocktail_rust_zip_read_entry(
             return -3;
         }
     };
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(e) => {
-            set_err(&format!("cannot open ZIP archive: {}: {}", path, e));
-            return -4;
+    let bytes = match zip_read_entry_bytes(Path::new(path), target_name, max_bytes.min(buf_cap)) {
+        Ok(b) => b,
+        Err((code, msg)) => {
+            set_err(&msg);
+            return code;
         }
     };
-    let mut zip = match zip::ZipArchive::new(file) {
-        Ok(z) => z,
-        Err(e) => {
-            set_err(&format!("cannot parse ZIP archive: {}", e));
-            return -5;
+    unsafe {
+        if !bytes.is_empty() {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());
         }
-    };
-    let mut entry = match zip.by_name(target_name) {
-        Ok(e) => e,
-        Err(_) => {
-            set_err(&format!("ZIP entry is missing: {}", target_name));
-            return -6;
-        }
-    };
-    if entry.size() > max_bytes as u64 || entry.size() > buf_cap as u64 {
-        set_err("decompressed ZIP data exceeds its size limit");
-        return -7;
+        *out_read_len = bytes.len();
     }
-    use std::io::Read;
-    let mut total_read = 0;
-    let slice = unsafe { std::slice::from_raw_parts_mut(out_buf, buf_cap) };
-    while total_read < slice.len() {
-        match entry.read(&mut slice[total_read..]) {
+    0
+}
+
+pub(crate) fn zip_extract_entry_file(
+    archive_path: &Path,
+    target_name: &str,
+    dest: &Path,
+    max_bytes: usize,
+) -> Result<(), (c_int, String)> {
+    let file = std::fs::File::open(archive_path)
+        .map_err(|e| (-5, format!("cannot open ZIP archive: {}: {}", archive_path.display(), e)))?;
+    let mut zip =
+        zip::ZipArchive::new(file).map_err(|e| (-6, format!("cannot parse ZIP archive: {}", e)))?;
+    let mut entry = zip
+        .by_name(target_name)
+        .map_err(|_| (-7, format!("ZIP entry is missing: {}", target_name)))?;
+    if entry.size() > max_bytes as u64 {
+        return Err((-8, "decompressed ZIP data exceeds its size limit".to_string()));
+    }
+    let parent = dest.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|e| (-9, format!("cannot create directory: {}", e)))?;
+    let tmp_path = parent.join(format!(
+        ".tmp_extract_{}_{}",
+        std::process::id(),
+        target_name.replace('/', "_")
+    ));
+    let mut out_file = std::fs::File::create(&tmp_path)
+        .map_err(|e| (-10, format!("cannot create temporary file: {}", e)))?;
+    let mut total_written = 0usize;
+    let mut buffer = [0u8; 16384];
+    loop {
+        match entry.read(&mut buffer) {
             Ok(0) => break,
             Ok(n) => {
-                total_read += n;
-                if total_read > max_bytes {
-                    set_err("decompressed ZIP data exceeds its size limit");
-                    return -8;
+                total_written += n;
+                if total_written > max_bytes {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    return Err((-11, "decompressed ZIP data exceeds its size limit".to_string()));
+                }
+                if let Err(e) = out_file.write_all(&buffer[..n]) {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    return Err((-12, format!("cannot write temporary file: {}", e)));
                 }
             }
             Err(e) => {
-                set_err(&format!("cannot decompress ZIP entry: {}", e));
-                return -9;
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err((-13, format!("cannot decompress ZIP entry: {}", e)));
             }
         }
     }
-    unsafe {
-        *out_read_len = total_read;
+    if let Err(e) = out_file.sync_all() {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err((-14, format!("cannot sync file: {}", e)));
     }
-    0
+    drop(out_file);
+    if let Err(e) = std::fs::rename(&tmp_path, dest) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err((-15, format!("cannot rename to destination: {}", e)));
+    }
+    Ok(())
 }
 
 #[no_mangle]
@@ -4731,82 +4813,70 @@ pub extern "C" fn mocktail_rust_zip_extract_entry(
             return -4;
         }
     };
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(e) => {
-            set_err(&format!("cannot open ZIP archive: {}: {}", path, e));
-            return -5;
-        }
-    };
-    let mut zip = match zip::ZipArchive::new(file) {
-        Ok(z) => z,
-        Err(e) => {
-            set_err(&format!("cannot parse ZIP archive: {}", e));
-            return -6;
-        }
-    };
-    let mut entry = match zip.by_name(target_name) {
-        Ok(e) => e,
-        Err(_) => {
-            set_err(&format!("ZIP entry is missing: {}", target_name));
-            return -7;
-        }
-    };
-    if entry.size() > max_bytes as u64 {
-        set_err("decompressed ZIP data exceeds its size limit");
-        return -8;
-    }
-    let parent = dest.parent().unwrap_or_else(|| Path::new("."));
-    if let Err(e) = std::fs::create_dir_all(parent) {
-        set_err(&format!("cannot create directory: {}", e));
-        return -9;
-    }
-    let tmp_path = parent.join(format!(".tmp_extract_{}_{}", std::process::id(), target_name.replace('/', "_")));
-    let mut out_file = match std::fs::File::create(&tmp_path) {
-        Ok(f) => f,
-        Err(e) => {
-            set_err(&format!("cannot create temporary file: {}", e));
-            return -10;
-        }
-    };
-    use std::io::{Read, Write};
-    let mut total_written = 0;
-    let mut buffer = [0u8; 16384];
-    loop {
-        match entry.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(n) => {
-                total_written += n;
-                if total_written > max_bytes {
-                    let _ = std::fs::remove_file(&tmp_path);
-                    set_err("decompressed ZIP data exceeds its size limit");
-                    return -11;
-                }
-                if let Err(e) = out_file.write_all(&buffer[..n]) {
-                    let _ = std::fs::remove_file(&tmp_path);
-                    set_err(&format!("cannot write temporary file: {}", e));
-                    return -12;
-                }
-            }
-            Err(e) => {
-                let _ = std::fs::remove_file(&tmp_path);
-                set_err(&format!("cannot decompress ZIP entry: {}", e));
-                return -13;
-            }
-        }
-    }
-    if let Err(e) = out_file.sync_all() {
-        let _ = std::fs::remove_file(&tmp_path);
-        set_err(&format!("cannot sync file: {}", e));
-        return -14;
-    }
-    drop(out_file);
-    if let Err(e) = std::fs::rename(&tmp_path, dest) {
-        let _ = std::fs::remove_file(&tmp_path);
-        set_err(&format!("cannot rename to destination: {}", e));
-        return -15;
+    if let Err((code, msg)) = zip_extract_entry_file(Path::new(path), target_name, dest, max_bytes) {
+        set_err(&msg);
+        return code;
     }
     0
+}
+
+pub(crate) fn zip_extract_prefix_dir(
+    archive_path: &Path,
+    pref: &str,
+    dest_base: &Path,
+    max_total_bytes: usize,
+) -> Result<usize, (c_int, String)> {
+    let file = std::fs::File::open(archive_path)
+        .map_err(|e| (-5, format!("cannot open ZIP archive: {}: {}", archive_path.display(), e)))?;
+    let mut zip =
+        zip::ZipArchive::new(file).map_err(|e| (-6, format!("cannot parse ZIP archive: {}", e)))?;
+    let mut total_bytes = 0usize;
+    let mut count = 0usize;
+    for i in 0..zip.len() {
+        let mut entry = zip
+            .by_index(i)
+            .map_err(|e| (-7, format!("cannot read ZIP entry: {}", e)))?;
+        let name = entry.name().to_string();
+        if !name.starts_with(pref) {
+            continue;
+        }
+        let rel_name = &name[pref.len()..];
+        if rel_name.is_empty() {
+            continue;
+        }
+        if !is_safe_archive_path(rel_name) {
+            return Err((-8, format!("unsafe entry path in prefix extract: {}", rel_name)));
+        }
+        let target_path = dest_base.join(rel_name);
+        if entry.is_dir() || rel_name.ends_with('/') {
+            std::fs::create_dir_all(&target_path)
+                .map_err(|e| (-9, format!("cannot create directory {}: {}", target_path.display(), e)))?;
+            continue;
+        }
+        if let Some(p) = target_path.parent() {
+            std::fs::create_dir_all(p)
+                .map_err(|e| (-10, format!("cannot create parent directory {}: {}", p.display(), e)))?;
+        }
+        let mut out = std::fs::File::create(&target_path)
+            .map_err(|e| (-11, format!("cannot create file {}: {}", target_path.display(), e)))?;
+        let mut buf = [0u8; 16384];
+        loop {
+            match entry.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    total_bytes += n;
+                    if total_bytes > max_total_bytes {
+                        return Err((-12, "total extracted size exceeded limit".to_string()));
+                    }
+                    out.write_all(&buf[..n])
+                        .map_err(|e| (-13, format!("cannot write file {}: {}", target_path.display(), e)))?;
+                }
+                Err(e) => return Err((-14, format!("cannot read entry {}: {}", name, e))),
+            }
+        }
+        count += 1;
+    }
+    Ok(count)
 }
 
 #[no_mangle]
@@ -4847,91 +4917,18 @@ pub extern "C" fn mocktail_rust_zip_extract_prefix(
             return -4;
         }
     };
-    let file = match std::fs::File::open(arc_p) {
-        Ok(f) => f,
-        Err(e) => {
-            set_err(&format!("cannot open ZIP archive: {}: {}", arc_p, e));
-            return -5;
-        }
-    };
-    let mut zip = match zip::ZipArchive::new(file) {
-        Ok(z) => z,
-        Err(e) => {
-            set_err(&format!("cannot parse ZIP archive: {}", e));
-            return -6;
-        }
-    };
-    use std::io::{Read, Write};
-    let mut total_bytes = 0;
-    let mut count = 0;
-    for i in 0..zip.len() {
-        let mut entry = match zip.by_index(i) {
-            Ok(e) => e,
-            Err(e) => {
-                set_err(&format!("cannot read ZIP entry: {}", e));
-                return -7;
+    match zip_extract_prefix_dir(Path::new(arc_p), pref, dest_base, max_total_bytes) {
+        Ok(count) => {
+            unsafe {
+                *out_extracted_count = count;
             }
-        };
-        let name = entry.name().to_string();
-        if !name.starts_with(pref) {
-            continue;
+            0
         }
-        let rel_name = &name[pref.len()..];
-        if rel_name.is_empty() {
-            continue;
+        Err((code, msg)) => {
+            set_err(&msg);
+            code
         }
-        if !is_safe_archive_path(rel_name) {
-            set_err(&format!("unsafe entry path in prefix extract: {}", rel_name));
-            return -8;
-        }
-        let target_path = dest_base.join(rel_name);
-        if entry.is_dir() || rel_name.ends_with('/') {
-            if let Err(e) = std::fs::create_dir_all(&target_path) {
-                set_err(&format!("cannot create directory {}: {}", target_path.display(), e));
-                return -9;
-            }
-            continue;
-        }
-        if let Some(p) = target_path.parent() {
-            if let Err(e) = std::fs::create_dir_all(p) {
-                set_err(&format!("cannot create parent directory {}: {}", p.display(), e));
-                return -10;
-            }
-        }
-        let mut out = match std::fs::File::create(&target_path) {
-            Ok(f) => f,
-            Err(e) => {
-                set_err(&format!("cannot create file {}: {}", target_path.display(), e));
-                return -11;
-            }
-        };
-        let mut buf = [0u8; 16384];
-        loop {
-            match entry.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    total_bytes += n;
-                    if total_bytes > max_total_bytes {
-                        set_err("total extracted size exceeded limit");
-                        return -12;
-                    }
-                    if let Err(e) = out.write_all(&buf[..n]) {
-                        set_err(&format!("cannot write file {}: {}", target_path.display(), e));
-                        return -13;
-                    }
-                }
-                Err(e) => {
-                    set_err(&format!("cannot read entry {}: {}", name, e));
-                    return -14;
-                }
-            }
-        }
-        count += 1;
     }
-    unsafe {
-        *out_extracted_count = count;
-    }
-    0
 }
 
 // ============================================================================
@@ -4972,6 +4969,84 @@ fn walk_asset_tree(
     Ok(())
 }
 
+pub(crate) fn sha256_regular_file_strict(
+    path: &Path,
+    display_label: Option<&str>,
+) -> Result<String, String> {
+    let label = display_label
+        .map(str::to_string)
+        .unwrap_or_else(|| path.display().to_string());
+    let Some(cpath) = unix_ipc::path_to_cstr(path) else {
+        return Err(format!("cannot open regular file: {}", label));
+    };
+    let raw_fd = unsafe {
+        libc::open(
+            cpath.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    let Some(fd) = unix_ipc::OwnedFd::from_raw(raw_fd) else {
+        return Err(format!("cannot open regular file: {}", label));
+    };
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd.as_raw(), &mut st) } != 0
+        || (st.st_mode & libc::S_IFMT) != libc::S_IFREG
+        || st.st_size < 0
+    {
+        return Err(format!("cannot open regular file: {}", label));
+    }
+    use std::os::unix::io::FromRawFd;
+    let mut file = unsafe { File::from_raw_fd(fd.release()) };
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 16384];
+    loop {
+        match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => hasher.update(&buf[..n]),
+            Err(_) => return Err(format!("cannot read regular file: {}", label)),
+        }
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+pub(crate) fn hash_asset_tree_dir(root_path: &Path) -> Result<(String, usize), (c_int, String)> {
+    let sym_meta = std::fs::symlink_metadata(root_path)
+        .map_err(|_| (-3, "asset root is not a real directory".to_string()))?;
+    if sym_meta.file_type().is_symlink() || !sym_meta.is_dir() {
+        return Err((-4, "asset root is not a real directory".to_string()));
+    }
+
+    let mut files = Vec::new();
+    walk_asset_tree(root_path, root_path, &mut files).map_err(|e| (-5, e))?;
+
+    files.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
+
+    let mut tree_hasher = Sha256::new();
+
+    for rel_path in &files {
+        let full_path = root_path.join(rel_path);
+        let mut file = File::open(&full_path)
+            .map_err(|_| (-6, format!("cannot open file {}", full_path.display())))?;
+        let mut file_hasher = Sha256::new();
+        let mut buf = [0u8; 16384];
+        loop {
+            match file.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => file_hasher.update(&buf[..n]),
+                Err(_) => return Err((-7, format!("cannot read file {}", full_path.display()))),
+            }
+        }
+        let file_sha = hex::encode(file_hasher.finalize());
+        let rel_unix_str = rel_path.to_string_lossy().replace('\\', "/");
+        tree_hasher.update(file_sha.as_bytes());
+        tree_hasher.update(b"  ");
+        tree_hasher.update(rel_unix_str.as_bytes());
+        tree_hasher.update(&[0u8]);
+    }
+
+    Ok((hex::encode(tree_hasher.finalize()), files.len()))
+}
+
 #[no_mangle]
 pub extern "C" fn mocktail_rust_payload_hash_asset_tree(
     root_dir: *const c_char,
@@ -4995,69 +5070,26 @@ pub extern "C" fn mocktail_rust_payload_hash_asset_tree(
             return -2;
         }
     };
-    let root_path = Path::new(root_str);
-    let sym_meta = match std::fs::symlink_metadata(root_path) {
-        Ok(m) => m,
-        Err(_) => {
-            set_err("asset root is not a real directory");
-            return -3;
-        }
-    };
-    if sym_meta.file_type().is_symlink() || !sym_meta.is_dir() {
-        set_err("asset root is not a real directory");
-        return -4;
-    }
-
-    let mut files = Vec::new();
-    if let Err(e) = walk_asset_tree(root_path, root_path, &mut files) {
-        set_err(&e);
-        return -5;
-    }
-
-    files.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
-
-    use sha2::{Digest, Sha256};
-    let mut tree_hasher = Sha256::new();
-
-    for rel_path in &files {
-        let full_path = root_path.join(rel_path);
-        let mut file = match std::fs::File::open(&full_path) {
-            Ok(f) => f,
-            Err(_) => {
-                set_err(&format!("cannot open file {}", full_path.display()));
-                return -6;
-            }
-        };
-        let mut file_hasher = Sha256::new();
-        let mut buf = [0u8; 16384];
-        use std::io::Read;
-        loop {
-            match file.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => file_hasher.update(&buf[..n]),
-                Err(_) => {
-                    set_err(&format!("cannot read file {}", full_path.display()));
-                    return -7;
+    match hash_asset_tree_dir(Path::new(root_str)) {
+        Ok((final_hex, count)) => {
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    final_hex.as_ptr() as *const c_char,
+                    out_hex,
+                    final_hex.len(),
+                );
+                *out_hex.add(final_hex.len()) = 0;
+                if !out_file_count.is_null() {
+                    *out_file_count = count;
                 }
             }
+            0
         }
-        let file_sha = hex::encode(file_hasher.finalize());
-        let rel_unix_str = rel_path.to_string_lossy().replace('\\', "/");
-        tree_hasher.update(file_sha.as_bytes());
-        tree_hasher.update(b"  ");
-        tree_hasher.update(rel_unix_str.as_bytes());
-        tree_hasher.update(&[0u8]);
-    }
-
-    let final_hex = hex::encode(tree_hasher.finalize());
-    unsafe {
-        std::ptr::copy_nonoverlapping(final_hex.as_ptr() as *const c_char, out_hex, final_hex.len());
-        *out_hex.add(final_hex.len()) = 0;
-        if !out_file_count.is_null() {
-            *out_file_count = files.len();
+        Err((code, msg)) => {
+            set_err(&msg);
+            code
         }
     }
-    0
 }
 
 #[derive(Serialize, Deserialize)]
@@ -5248,24 +5280,8 @@ pub extern "C" fn mocktail_rust_payload_inspect(
 pub(crate) fn verify_payload_internal(dir: &Path) -> Result<MocktailRustPayloadInfo, (c_int, String)> {
     let info = internal_inspect_payload(dir).map_err(|e| (-3, e))?;
 
-    use sha2::{Digest, Sha256};
     let check_file_sha = |rel: &str, expected: &str| -> Result<(), String> {
-        let f_path = dir.join(rel);
-        let mut file = match std::fs::File::open(&f_path) {
-            Ok(f) => f,
-            Err(_) => return Err(format!("cannot open regular file: {}", rel)),
-        };
-        let mut hasher = Sha256::new();
-        let mut buf = [0u8; 16384];
-        use std::io::Read;
-        loop {
-            match file.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => hasher.update(&buf[..n]),
-                Err(_) => return Err(format!("cannot read regular file: {}", rel)),
-            }
-        }
-        let actual = hex::encode(hasher.finalize());
+        let actual = sha256_regular_file_strict(&dir.join(rel), Some(rel))?;
         if actual != expected {
             return Err(format!("payload hash mismatch: {}", rel));
         }
@@ -5283,26 +5299,8 @@ pub(crate) fn verify_payload_internal(dir: &Path) -> Result<MocktailRustPayloadI
     };
     check_file_sha(split_file, &info.split_apk_sha256).map_err(|e| (-6, e))?;
 
-    let mut actual_count = 0;
-    let mut tree_hex = [0 as c_char; 65];
-    let mut tree_err = [0 as c_char; 256];
-    let assets_cstr = CString::new(dir.join("assets").to_string_lossy().as_bytes())
-        .map_err(|_| (-7, "invalid assets path".to_string()))?;
-    let rc = mocktail_rust_payload_hash_asset_tree(
-        assets_cstr.as_ptr(),
-        tree_hex.as_mut_ptr(),
-        65,
-        &mut actual_count,
-        tree_err.as_mut_ptr(),
-        256,
-    );
-    if rc != 0 {
-        let err_msg = unsafe { CStr::from_ptr(tree_err.as_ptr()) }
-            .to_str()
-            .unwrap_or("asset tree error");
-        return Err((-8, err_msg.to_string()));
-    }
-    let actual_tree_hex = unsafe { CStr::from_ptr(tree_hex.as_ptr()) }.to_str().unwrap_or("");
+    let (actual_tree_hex, actual_count) =
+        hash_asset_tree_dir(&dir.join("assets")).map_err(|(_, msg)| (-8, msg))?;
     if actual_count != info.asset_file_count || actual_tree_hex != info.asset_tree_sha256 {
         return Err((-9, "payload asset tree does not match metadata".to_string()));
     }
@@ -9809,6 +9807,41 @@ unsafe fn c_to_str<'a>(ptr: *const c_char, len: usize) -> Result<&'a str, ()> {
     }
 }
 
+pub(crate) fn compute_approval_fingerprint_hex(
+    payload_id: &str,
+    metadata_sha256: &str,
+    library_sha256: &str,
+    base_apk_sha256: &str,
+    guest_abi: &str,
+    split_apk_sha256: &str,
+    asset_tree_sha256: &str,
+) -> Result<String, i32> {
+    if payload_id.is_empty() {
+        return Err(-2);
+    }
+    let mut evidence = String::with_capacity(512);
+    evidence.push_str("payload_id=");
+    evidence.push_str(payload_id);
+    evidence.push('\n');
+    evidence.push_str("metadata=");
+    evidence.push_str(metadata_sha256);
+    evidence.push('\n');
+    evidence.push_str("libroblox=");
+    evidence.push_str(library_sha256);
+    evidence.push('\n');
+    evidence.push_str("base_apk=");
+    evidence.push_str(base_apk_sha256);
+    evidence.push('\n');
+    evidence.push_str(guest_abi);
+    evidence.push_str("_split=");
+    evidence.push_str(split_apk_sha256);
+    evidence.push('\n');
+    evidence.push_str("assets=");
+    evidence.push_str(asset_tree_sha256);
+    evidence.push('\n');
+    Ok(sha256_bytes_hex(evidence.as_bytes()))
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn mocktail_rust_candidate_approval_fingerprint(
     input: *const MocktailRustPayloadFingerprintInput,
@@ -9823,9 +9856,6 @@ pub unsafe extern "C" fn mocktail_rust_candidate_approval_fingerprint(
         Ok(s) => s,
         Err(_) => return -1,
     };
-    if payload_id.is_empty() {
-        return -2;
-    }
     let metadata_sha256 = match c_to_str(inp.metadata_sha256, inp.metadata_sha256_len) {
         Ok(s) => s,
         Err(_) => return -1,
@@ -9851,29 +9881,18 @@ pub unsafe extern "C" fn mocktail_rust_candidate_approval_fingerprint(
         Err(_) => return -1,
     };
 
-    let mut evidence = String::with_capacity(512);
-    evidence.push_str("payload_id=");
-    evidence.push_str(payload_id);
-    evidence.push('\n');
-    evidence.push_str("metadata=");
-    evidence.push_str(metadata_sha256);
-    evidence.push('\n');
-    evidence.push_str("libroblox=");
-    evidence.push_str(library_sha256);
-    evidence.push('\n');
-    evidence.push_str("base_apk=");
-    evidence.push_str(base_apk_sha256);
-    evidence.push('\n');
-    evidence.push_str(guest_abi);
-    evidence.push_str("_split=");
-    evidence.push_str(split_apk_sha256);
-    evidence.push('\n');
-    evidence.push_str("assets=");
-    evidence.push_str(asset_tree_sha256);
-    evidence.push('\n');
-
-    let digest = Sha256::digest(evidence.as_bytes());
-    let hex_str = hex::encode(digest);
+    let hex_str = match compute_approval_fingerprint_hex(
+        payload_id,
+        metadata_sha256,
+        library_sha256,
+        base_apk_sha256,
+        guest_abi,
+        split_apk_sha256,
+        asset_tree_sha256,
+    ) {
+        Ok(h) => h,
+        Err(rc) => return rc,
+    };
     std::ptr::copy_nonoverlapping(hex_str.as_ptr(), out_sha256 as *mut u8, 64);
     *out_sha256.add(64) = 0;
     0
@@ -9968,6 +9987,59 @@ unsafe fn write_err_msg(out_err: *mut c_char, err_cap: usize, msg: &str) {
     copy_error(out_err, err_cap, msg);
 }
 
+pub(crate) fn validate_approval_binding_bytes(
+    profile_bytes: &[u8],
+    compat_bytes: &[u8],
+    payload_id: &str,
+    elf_build_id: &str,
+    library_sha256: &str,
+    version_name: &str,
+    version_code: u64,
+) -> Result<(), &'static str> {
+    if profile_bytes.is_empty() || compat_bytes.is_empty() {
+        return Err("derived approval profile is not bound to exact payload bytes");
+    }
+    let profile: serde_json::Value = serde_json::from_slice(profile_bytes)
+        .map_err(|_| "derived approval profile is not bound to exact payload bytes")?;
+    let compatibility: serde_json::Value = serde_json::from_slice(compat_bytes)
+        .map_err(|_| "derived approval profile is not bound to exact payload bytes")?;
+
+    let expected_payload_path = format!("payloads/{}", payload_id);
+
+    let profile_valid = profile.is_object()
+        && profile.get("schema_version").and_then(|v| v.as_i64()) == Some(1)
+        && profile.get("payload_id").and_then(|v| v.as_str()) == Some(payload_id)
+        && profile.get("payload_path").and_then(|v| v.as_str()) == Some(&expected_payload_path)
+        && profile.get("elf_build_id").and_then(|v| v.as_str()) == Some(elf_build_id)
+        && profile.get("payload_sha256").and_then(|v| v.as_str()) == Some(library_sha256)
+        && profile.get("profile").is_some_and(|v| v.is_object())
+        && profile.get("profile").and_then(|p| p.get("elf_build_id")).and_then(|v| v.as_str()) == Some(elf_build_id)
+        && profile.get("reference").is_some_and(|v| v.is_object())
+        && compatibility.is_object()
+        && compatibility.get("schema_version").and_then(|v| v.as_i64()) == Some(1)
+        && compatibility.get("profiles").and_then(|v| v.as_array()).is_some_and(|arr| arr.len() == 1);
+
+    if !profile_valid {
+        return Err("derived approval profile is not bound to exact payload bytes");
+    }
+
+    let entry = &compatibility.get("profiles").unwrap().as_array().unwrap()[0];
+    let entry_valid = entry.is_object()
+        && entry.get("version_name").and_then(|v| v.as_str()) == Some(version_name)
+        && entry.get("version_code").and_then(|v| v.as_u64()) == Some(version_code)
+        && entry.get("elf_build_id").and_then(|v| v.as_str()) == Some(elf_build_id)
+        && entry.get("status").and_then(|v| v.as_str()) == Some("experimental")
+        && entry.get("default_allowed").and_then(|v| v.as_bool()) == Some(true)
+        && entry.get("allow_legacy_binary_patches").map_or(true, |v| v.as_bool().unwrap_or(true)) == false
+        && entry.get("allow_host_abi_bridges").and_then(|v| v.as_bool()) == Some(true)
+        && entry.get("allow_host_constructor_replay").and_then(|v| v.as_bool()) == Some(true);
+
+    if !entry_valid {
+        return Err("candidate compatibility manifest is not exact probation metadata");
+    }
+    Ok(())
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn mocktail_rust_candidate_approval_validate_binding(
     profile_json: *const c_char,
@@ -10006,71 +10078,26 @@ pub unsafe extern "C" fn mocktail_rust_candidate_approval_validate_binding(
     let p_slice = if !profile_json.is_null() && p_len > 0 {
         std::slice::from_raw_parts(profile_json as *const u8, p_len)
     } else {
-        write_err_msg(out_err, err_cap, "derived approval profile is not bound to exact payload bytes");
-        return 1;
+        &[]
     };
-
     let c_slice = if !compatibility_json.is_null() && c_len > 0 {
         std::slice::from_raw_parts(compatibility_json as *const u8, c_len)
     } else {
-        write_err_msg(out_err, err_cap, "derived approval profile is not bound to exact payload bytes");
-        return 1;
+        &[]
     };
 
-    let profile: serde_json::Value = match serde_json::from_slice(p_slice) {
-        Ok(v) => v,
-        Err(_) => {
-            write_err_msg(out_err, err_cap, "derived approval profile is not bound to exact payload bytes");
-            return 1;
-        }
-    };
-
-    let compatibility: serde_json::Value = match serde_json::from_slice(c_slice) {
-        Ok(v) => v,
-        Err(_) => {
-            write_err_msg(out_err, err_cap, "derived approval profile is not bound to exact payload bytes");
-            return 1;
-        }
-    };
-
-    let expected_payload_path = format!("payloads/{}", payload_id_str);
-
-    let profile_valid = profile.is_object()
-        && profile.get("schema_version").and_then(|v| v.as_i64()) == Some(1)
-        && profile.get("payload_id").and_then(|v| v.as_str()) == Some(payload_id_str)
-        && profile.get("payload_path").and_then(|v| v.as_str()) == Some(&expected_payload_path)
-        && profile.get("elf_build_id").and_then(|v| v.as_str()) == Some(elf_build_id_str)
-        && profile.get("payload_sha256").and_then(|v| v.as_str()) == Some(lib_sha_str)
-        && profile.get("profile").map_or(false, |v| v.is_object())
-        && profile.get("profile").and_then(|p| p.get("elf_build_id")).and_then(|v| v.as_str()) == Some(elf_build_id_str)
-        && profile.get("reference").map_or(false, |v| v.is_object())
-        && compatibility.is_object()
-        && compatibility.get("schema_version").and_then(|v| v.as_i64()) == Some(1)
-        && compatibility.get("profiles").and_then(|v| v.as_array()).map_or(false, |arr| arr.len() == 1);
-
-    if !profile_valid {
-        write_err_msg(out_err, err_cap, "derived approval profile is not bound to exact payload bytes");
+    if let Err(msg) = validate_approval_binding_bytes(
+        p_slice,
+        c_slice,
+        payload_id_str,
+        elf_build_id_str,
+        lib_sha_str,
+        ver_name_str,
+        version_code,
+    ) {
+        write_err_msg(out_err, err_cap, msg);
         return 1;
     }
-
-    let profiles = compatibility.get("profiles").unwrap().as_array().unwrap();
-    let entry = &profiles[0];
-
-    let entry_valid = entry.is_object()
-        && entry.get("version_name").and_then(|v| v.as_str()) == Some(ver_name_str)
-        && entry.get("version_code").and_then(|v| v.as_u64()) == Some(version_code)
-        && entry.get("elf_build_id").and_then(|v| v.as_str()) == Some(elf_build_id_str)
-        && entry.get("status").and_then(|v| v.as_str()) == Some("experimental")
-        && entry.get("default_allowed").and_then(|v| v.as_bool()) == Some(true)
-        && entry.get("allow_legacy_binary_patches").map_or(true, |v| v.as_bool().unwrap_or(true)) == false
-        && entry.get("allow_host_abi_bridges").and_then(|v| v.as_bool()) == Some(true)
-        && entry.get("allow_host_constructor_replay").and_then(|v| v.as_bool()) == Some(true);
-
-    if !entry_valid {
-        write_err_msg(out_err, err_cap, "candidate compatibility manifest is not exact probation metadata");
-        return 1;
-    }
-
     0
 }
 
@@ -10098,6 +10125,42 @@ pub struct MocktailRustCanaryAttestationInput {
     pub runtime_build_id_len: usize,
     pub log_sha256: *const c_char,
     pub log_sha256_len: usize,
+}
+
+pub(crate) fn build_canary_attestation_json(
+    run: usize,
+    run_id: &str,
+    payload_id: &str,
+    payload_fingerprint: &str,
+    profile_sha256: &str,
+    compatibility_manifest_sha256: &str,
+    runtime_sha256: &str,
+    runtime_build_id: &str,
+    log_sha256: &str,
+) -> Option<String> {
+    let mut map = std::collections::BTreeMap::new();
+    map.insert("canary_tier", serde_json::Value::String("C".into()));
+    map.insert(
+        "compatibility_manifest_sha256",
+        serde_json::Value::String(compatibility_manifest_sha256.into()),
+    );
+    map.insert(
+        "payload_fingerprint",
+        serde_json::Value::String(payload_fingerprint.into()),
+    );
+    map.insert("payload_id", serde_json::Value::String(payload_id.into()));
+    map.insert("profile_sha256", serde_json::Value::String(profile_sha256.into()));
+    map.insert("readiness_log_sha256", serde_json::Value::String(log_sha256.into()));
+    map.insert("run", serde_json::Value::Number(serde_json::Number::from(run)));
+    map.insert("run_id", serde_json::Value::String(run_id.into()));
+    map.insert("runtime_build_id", serde_json::Value::String(runtime_build_id.into()));
+    map.insert("runtime_sha256", serde_json::Value::String(runtime_sha256.into()));
+    map.insert("schema_version", serde_json::Value::Number(serde_json::Number::from(1)));
+    map.insert("status", serde_json::Value::String("passed".into()));
+
+    let mut json_str = serde_json::to_string_pretty(&map).ok()?;
+    json_str.push('\n');
+    Some(json_str)
 }
 
 #[no_mangle]
@@ -10147,25 +10210,19 @@ pub unsafe extern "C" fn mocktail_rust_candidate_approval_build_attestation(
         Err(_) => return -1,
     };
 
-    let mut map = std::collections::BTreeMap::new();
-    map.insert("canary_tier", serde_json::Value::String("C".into()));
-    map.insert("compatibility_manifest_sha256", serde_json::Value::String(compatibility_manifest_sha256.into()));
-    map.insert("payload_fingerprint", serde_json::Value::String(payload_fingerprint.into()));
-    map.insert("payload_id", serde_json::Value::String(payload_id.into()));
-    map.insert("profile_sha256", serde_json::Value::String(profile_sha256.into()));
-    map.insert("readiness_log_sha256", serde_json::Value::String(log_sha256.into()));
-    map.insert("run", serde_json::Value::Number(serde_json::Number::from(inp.run)));
-    map.insert("run_id", serde_json::Value::String(run_id.into()));
-    map.insert("runtime_build_id", serde_json::Value::String(runtime_build_id.into()));
-    map.insert("runtime_sha256", serde_json::Value::String(runtime_sha256.into()));
-    map.insert("schema_version", serde_json::Value::Number(serde_json::Number::from(1)));
-    map.insert("status", serde_json::Value::String("passed".into()));
-
-    let mut json_str = match serde_json::to_string_pretty(&map) {
-        Ok(s) => s,
-        Err(_) => return -1,
+    let Some(json_str) = build_canary_attestation_json(
+        inp.run,
+        run_id,
+        payload_id,
+        payload_fingerprint,
+        profile_sha256,
+        compatibility_manifest_sha256,
+        runtime_sha256,
+        runtime_build_id,
+        log_sha256,
+    ) else {
+        return -1;
     };
-    json_str.push('\n');
 
     let bytes = json_str.as_bytes();
     if bytes.len() >= cap {
@@ -10208,6 +10265,57 @@ pub struct MocktailRustApprovalReceiptInput {
     pub canary_2_sha256_len: usize,
     pub approved_at_utc: *const c_char,
     pub approved_at_utc_len: usize,
+}
+
+pub(crate) fn build_approval_receipt_json(
+    payload_id: &str,
+    generation: &str,
+    payload_path: &str,
+    elf_build_id: &str,
+    library_sha256: &str,
+    payload_fingerprint: &str,
+    profile_sha256: &str,
+    compatibility_manifest_sha256: &str,
+    runtime_sha256: &str,
+    runtime_build_id: &str,
+    canary_1: &str,
+    canary_2: &str,
+    approved_at: &str,
+) -> Option<String> {
+    let mut map = std::collections::BTreeMap::new();
+    map.insert("approved_at", serde_json::Value::String(approved_at.into()));
+    map.insert(
+        "canary_attestation_sha256",
+        serde_json::Value::Array(vec![
+            serde_json::Value::String(canary_1.into()),
+            serde_json::Value::String(canary_2.into()),
+        ]),
+    );
+    map.insert("canary_runtime_sha256", serde_json::Value::String(runtime_sha256.into()));
+    map.insert("canary_tier", serde_json::Value::String("C".into()));
+    map.insert(
+        "compatibility_manifest_sha256",
+        serde_json::Value::String(compatibility_manifest_sha256.into()),
+    );
+    map.insert("elf_build_id", serde_json::Value::String(elf_build_id.into()));
+    map.insert("generation", serde_json::Value::String(generation.into()));
+    map.insert(
+        "payload_fingerprint",
+        serde_json::Value::String(payload_fingerprint.into()),
+    );
+    map.insert("payload_id", serde_json::Value::String(payload_id.into()));
+    map.insert("payload_path", serde_json::Value::String(payload_path.into()));
+    map.insert("payload_sha256", serde_json::Value::String(library_sha256.into()));
+    map.insert("profile_sha256", serde_json::Value::String(profile_sha256.into()));
+    map.insert("runtime_build_id", serde_json::Value::String(runtime_build_id.into()));
+    map.insert("runtime_sha256", serde_json::Value::String(runtime_sha256.into()));
+    map.insert("schema_version", serde_json::Value::Number(serde_json::Number::from(1)));
+    map.insert("status", serde_json::Value::String("approved".into()));
+    map.insert("successful_runs", serde_json::Value::Number(serde_json::Number::from(2)));
+
+    let mut json_str = serde_json::to_string_pretty(&map).ok()?;
+    json_str.push('\n');
+    Some(json_str)
 }
 
 #[no_mangle]
@@ -10277,33 +10385,23 @@ pub unsafe extern "C" fn mocktail_rust_candidate_approval_build_receipt(
         Err(_) => return -1,
     };
 
-    let mut map = std::collections::BTreeMap::new();
-    map.insert("approved_at", serde_json::Value::String(approved_at.into()));
-    map.insert("canary_attestation_sha256", serde_json::Value::Array(vec![
-        serde_json::Value::String(canary_1.into()),
-        serde_json::Value::String(canary_2.into()),
-    ]));
-    map.insert("canary_runtime_sha256", serde_json::Value::String(runtime_sha256.into()));
-    map.insert("canary_tier", serde_json::Value::String("C".into()));
-    map.insert("compatibility_manifest_sha256", serde_json::Value::String(compatibility_manifest_sha256.into()));
-    map.insert("elf_build_id", serde_json::Value::String(elf_build_id.into()));
-    map.insert("generation", serde_json::Value::String(generation.into()));
-    map.insert("payload_fingerprint", serde_json::Value::String(payload_fingerprint.into()));
-    map.insert("payload_id", serde_json::Value::String(payload_id.into()));
-    map.insert("payload_path", serde_json::Value::String(payload_path.into()));
-    map.insert("payload_sha256", serde_json::Value::String(library_sha256.into()));
-    map.insert("profile_sha256", serde_json::Value::String(profile_sha256.into()));
-    map.insert("runtime_build_id", serde_json::Value::String(runtime_build_id.into()));
-    map.insert("runtime_sha256", serde_json::Value::String(runtime_sha256.into()));
-    map.insert("schema_version", serde_json::Value::Number(serde_json::Number::from(1)));
-    map.insert("status", serde_json::Value::String("approved".into()));
-    map.insert("successful_runs", serde_json::Value::Number(serde_json::Number::from(2)));
-
-    let mut json_str = match serde_json::to_string_pretty(&map) {
-        Ok(s) => s,
-        Err(_) => return -1,
+    let Some(json_str) = build_approval_receipt_json(
+        payload_id,
+        generation,
+        payload_path,
+        elf_build_id,
+        library_sha256,
+        payload_fingerprint,
+        profile_sha256,
+        compatibility_manifest_sha256,
+        runtime_sha256,
+        runtime_build_id,
+        canary_1,
+        canary_2,
+        approved_at,
+    ) else {
+        return -1;
     };
-    json_str.push('\n');
 
     let bytes = json_str.as_bytes();
     if bytes.len() >= cap {
