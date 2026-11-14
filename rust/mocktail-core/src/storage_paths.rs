@@ -7,14 +7,20 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
+use crate::elf_reader::{
+    parse_elf64_header, parse_elf64_phdrs, parse_elf64_shdrs, ELFCLASS64, ELFDATA2LSB, ET_DYN,
+    PF_R, PF_W, PF_X, PT_LOAD, SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE, SHT_INIT_ARRAY,
+};
 use crate::unix_ipc::{
-    current_pid, is_real_dir_no_symlink, is_real_file_no_symlink, path_to_slice,
-    read_regular_file_limited, slice_to_opt_str, slice_to_pathbuf, weakly_canonical,
+    canonical_regular_path_strict, current_pid, is_real_dir_no_symlink, is_real_file_no_symlink,
+    path_to_slice, read_owned_regular_file_strict_error, read_regular_file_limited,
+    slice_to_opt_str, slice_to_pathbuf, slice_to_str_lossy, weakly_canonical, MappedReadOnlyFile,
+    ReadFileError,
 };
 use crate::update_json::MocktailRustStrSlice;
 use crate::{
-    copy_error, copy_to_c_buffer, guest_abi, read_update_state_json_string,
-    MocktailRustConstructorRange,
+    copy_error, copy_to_c_buffer, guest_abi, read_elf_build_id_file,
+    read_update_state_json_string, sha256_file_hex, MocktailRustConstructorRange,
 };
 
 pub const K_RUNTIME_PATH_FIELD_PAYLOAD_ID: u32 = 0;
@@ -2015,36 +2021,15 @@ pub extern "C" fn mocktail_rust_host_abi_validate_canary_run_id(
     }
 }
 
-#[no_mangle]
-pub extern "C" fn mocktail_rust_host_abi_parse_profile_json(
-    json_ptr: *const c_char,
-    json_len: usize,
+fn parse_profile_json_inner(
+    json_str: &str,
     is_x86_64: bool,
     pointer_align: usize,
     uintptr_max: u64,
-    out_profile: *mut MocktailRustParsedHostAbiProfile,
-    err_buf: *mut c_char,
-    err_cap: usize,
-) -> c_int {
-    if out_profile.is_null() || pointer_align == 0 {
-        copy_error(err_buf, err_cap, "invalid arguments");
-        return -1;
-    }
-    let Some(json_str) = slice_to_str(json_ptr, json_len) else {
-        copy_error(err_buf, err_cap, "invalid JSON object");
-        return -2;
-    };
-    let root: serde_json::Value = match serde_json::from_str(json_str) {
-        Ok(v) => v,
-        Err(_) => {
-            copy_error(err_buf, err_cap, "invalid JSON object");
-            return -2;
-        }
-    };
-    let Some(root_obj) = root.as_object() else {
-        copy_error(err_buf, err_cap, "invalid JSON object");
-        return -2;
-    };
+) -> Result<MocktailRustParsedHostAbiProfile, (c_int, &'static str)> {
+    let root: serde_json::Value =
+        serde_json::from_str(json_str).map_err(|_| (-2, "invalid JSON object"))?;
+    let root_obj = root.as_object().ok_or((-2, "invalid JSON object"))?;
 
     let schema_ok = root_obj
         .get("schema_version")
@@ -2058,74 +2043,32 @@ pub extern "C" fn mocktail_rust_host_abi_parse_profile_json(
         derivation,
         profile_json,
     ) else {
-        copy_error(
-            err_buf,
-            err_cap,
-            "unsupported external host ABI profile schema",
-        );
-        return -1;
+        return Err((-1, "unsupported external host ABI profile schema"));
     };
     if reference_obj.is_empty() || derivation_obj.is_empty() {
-        copy_error(
-            err_buf,
-            err_cap,
-            "unsupported external host ABI profile schema",
-        );
-        return -1;
+        return Err((-1, "unsupported external host ABI profile schema"));
     }
 
-    let Some(build_id) = read_required_str(root_obj, "elf_build_id") else {
-        copy_error(
-            err_buf,
-            err_cap,
-            "external host ABI profile has an invalid exact Build ID",
-        );
-        return -1;
-    };
-    let Some(nested_build_id) = read_required_str(profile_obj, "elf_build_id") else {
-        copy_error(
-            err_buf,
-            err_cap,
-            "external host ABI profile has an invalid exact Build ID",
-        );
-        return -1;
-    };
+    let build_id = read_required_str(root_obj, "elf_build_id")
+        .ok_or((-1, "external host ABI profile has an invalid exact Build ID"))?;
+    let nested_build_id = read_required_str(profile_obj, "elf_build_id")
+        .ok_or((-1, "external host ABI profile has an invalid exact Build ID"))?;
     if !is_valid_lower_build_id(build_id) || nested_build_id != build_id {
-        copy_error(
-            err_buf,
-            err_cap,
-            "external host ABI profile has an invalid exact Build ID",
-        );
-        return -1;
+        return Err((-1, "external host ABI profile has an invalid exact Build ID"));
     }
 
     let (Some(ref_build_id), Some(ref_payload_sha256)) = (
         read_required_str(reference_obj, "elf_build_id"),
         read_required_str(reference_obj, "payload_sha256"),
     ) else {
-        copy_error(
-            err_buf,
-            err_cap,
-            "external host ABI profile has invalid reference identity",
-        );
-        return -1;
+        return Err((-1, "external host ABI profile has invalid reference identity"));
     };
     if !is_valid_lower_build_id(ref_build_id) || !is_lower_hex(ref_payload_sha256, 64) {
-        copy_error(
-            err_buf,
-            err_cap,
-            "external host ABI profile has invalid reference identity",
-        );
-        return -1;
+        return Err((-1, "external host ABI profile has invalid reference identity"));
     }
 
     if read_required_size(derivation_obj, "signature_version", 1) != Some(1) {
-        copy_error(
-            err_buf,
-            err_cap,
-            "external host ABI profile has unsupported derivation anchors",
-        );
-        return -1;
+        return Err((-1, "external host ABI profile has unsupported derivation anchors"));
     }
 
     let mut out = MocktailRustParsedHostAbiProfile::default();
@@ -2133,8 +2076,7 @@ pub extern "C" fn mocktail_rust_host_abi_parse_profile_json(
         || !copy_fixed_str(&mut out.reference_build_id, ref_build_id)
         || !copy_fixed_str(&mut out.reference_payload_sha256, ref_payload_sha256)
     {
-        copy_error(err_buf, err_cap, "external host ABI profile field too long");
-        return -1;
+        return Err((-1, "external host ABI profile field too long"));
     }
 
     for name in [
@@ -2142,112 +2084,59 @@ pub extern "C" fn mocktail_rust_host_abi_parse_profile_json(
         "empty_string_initializer_rva",
         "jni_singleton_initializer_rva",
     ] {
-        let Some(rva) = read_hex_rva(derivation_obj, name, uintptr_max) else {
-            copy_error(
-                err_buf,
-                err_cap,
-                "external host ABI profile is missing a derivation anchor",
-            );
-            return -1;
-        };
+        let rva = read_hex_rva(derivation_obj, name, uintptr_max)
+            .ok_or((-1, "external host ABI profile is missing a derivation anchor"))?;
         out.derivation_code_rvas[out.derivation_code_rva_count] = rva;
         out.derivation_code_rva_count += 1;
     }
 
     let mut bridges_supported = true;
     if let Some(supported) = profile_obj.get("host_allocator_bridges_supported") {
-        let Some(b) = supported.as_bool() else {
-            copy_error(
-                err_buf,
-                err_cap,
-                "host allocator bridge support must be boolean",
-            );
-            return -1;
-        };
-        bridges_supported = b;
+        bridges_supported = supported
+            .as_bool()
+            .ok_or((-1, "host allocator bridge support must be boolean"))?;
     }
     out.host_allocator_bridges_supported = if bridges_supported { 1 } else { 0 };
 
     let mut constructor_indices = [2usize, 3, 4, 5];
     let indices_val = derivation_obj.get("constructor_indices");
     if indices_val.is_some() || !bridges_supported {
-        let Some(indices_obj) = indices_val.and_then(|v| v.as_object()) else {
-            copy_error(
-                err_buf,
-                err_cap,
-                "external host ABI profile has invalid constructor indices",
-            );
-            return -1;
-        };
+        let indices_obj = indices_val
+            .and_then(|v| v.as_object())
+            .ok_or((-1, "external host ABI profile has invalid constructor indices"))?;
         if indices_obj.len() != 4 {
-            copy_error(
-                err_buf,
-                err_cap,
-                "external host ABI profile has invalid constructor indices",
-            );
-            return -1;
+            return Err((-1, "external host ABI profile has invalid constructor indices"));
         }
         for (role, key) in ["2", "3", "4", "5"].iter().enumerate() {
-            let Some(val) = read_required_size(indices_obj, key, K_MAXIMUM_INIT_ARRAY_ENTRIES - 1)
-            else {
-                copy_error(
-                    err_buf,
-                    err_cap,
-                    "external host ABI profile has invalid constructor indices",
-                );
-                return -1;
-            };
-            constructor_indices[role] = val;
+            constructor_indices[role] =
+                read_required_size(indices_obj, key, K_MAXIMUM_INIT_ARRAY_ENTRIES - 1)
+                    .ok_or((-1, "external host ABI profile has invalid constructor indices"))?;
         }
     }
 
-    let Some(constructor_anchors) = derivation_obj
+    let constructor_anchors = derivation_obj
         .get("constructor_rvas")
         .and_then(|v| v.as_object())
-    else {
-        copy_error(
-            err_buf,
-            err_cap,
-            "external host ABI profile has invalid constructor anchors",
-        );
-        return -1;
-    };
+        .ok_or((-1, "external host ABI profile has invalid constructor anchors"))?;
     for key in ["2", "3", "4", "5"] {
-        let Some(rva) = read_hex_rva(constructor_anchors, key, uintptr_max) else {
-            copy_error(
-                err_buf,
-                err_cap,
-                "external host ABI profile is missing a constructor anchor",
-            );
-            return -1;
-        };
+        let rva = read_hex_rva(constructor_anchors, key, uintptr_max)
+            .ok_or((-1, "external host ABI profile is missing a constructor anchor"))?;
         out.derivation_code_rvas[out.derivation_code_rva_count] = rva;
         out.derivation_code_rva_count += 1;
     }
 
-    let (primary_allocate_rva, free_rva) = match parse_bridge_entries(profile_obj, uintptr_max, &mut out) {
-        Ok(rvas) => rvas,
-        Err(msg) => {
-            copy_error(err_buf, err_cap, msg);
-            return -1;
-        }
-    };
-
-    let seed_slots = match parse_data_seeds(profile_obj, uintptr_max, &mut out) {
-        Ok(slots) => slots,
-        Err(msg) => {
-            copy_error(err_buf, err_cap, msg);
-            return -1;
-        }
-    };
+    let (primary_allocate_rva, free_rva) =
+        parse_bridge_entries(profile_obj, uintptr_max, &mut out).map_err(|msg| (-1, msg))?;
+    let seed_slots =
+        parse_data_seeds(profile_obj, uintptr_max, &mut out).map_err(|msg| (-1, msg))?;
 
     let allocator = profile_obj.get("native_allocator").and_then(|v| v.as_object());
     let bootstrap = profile_obj
         .get("native_pre_jni_bootstrap")
         .and_then(|v| v.as_object());
     let (
-        Some(alloc_obj),
-        Some(boot_obj),
+        Some(_alloc_obj),
+        Some(_boot_obj),
         Some(nat_alloc),
         Some(nat_dealloc),
         Some(reg_init),
@@ -2266,14 +2155,8 @@ pub extern "C" fn mocktail_rust_host_abi_parse_profile_json(
             .filter(|&c| c > 0),
     )
     else {
-        copy_error(
-            err_buf,
-            err_cap,
-            "external host ABI profile has invalid native bootstrap fields",
-        );
-        return -1;
+        return Err((-1, "external host ABI profile has invalid native bootstrap fields"));
     };
-    let _ = (alloc_obj, boot_obj);
 
     let (
         Some((ctor_ranges, ctor_count)),
@@ -2293,12 +2176,7 @@ pub extern "C" fn mocktail_rust_host_abi_parse_profile_json(
         ),
     )
     else {
-        copy_error(
-            err_buf,
-            err_cap,
-            "external host ABI profile has invalid native bootstrap fields",
-        );
-        return -1;
+        return Err((-1, "external host ABI profile has invalid native bootstrap fields"));
     };
 
     out.native_allocator_allocate = nat_alloc;
@@ -2314,12 +2192,10 @@ pub extern "C" fn mocktail_rust_host_abi_parse_profile_json(
     out.native_mimalloc_thread_initializer_after_constructor = thread_init_after;
 
     if nat_alloc != primary_allocate_rva || nat_dealloc != free_rva {
-        copy_error(
-            err_buf,
-            err_cap,
+        return Err((
+            -1,
             "external host ABI profile native allocator disagrees with bridges",
-        );
-        return -1;
+        ));
     }
 
     let mut writable_slots = [
@@ -2330,47 +2206,111 @@ pub extern "C" fn mocktail_rust_host_abi_parse_profile_json(
         seed_slots[4],
         reg_slot,
     ];
-    if writable_slots.iter().any(|&rva| rva % (pointer_align as u64) != 0) {
-        copy_error(
-            err_buf,
-            err_cap,
+    if writable_slots
+        .iter()
+        .any(|&rva| rva % (pointer_align as u64) != 0)
+    {
+        return Err((
+            -1,
             "external host ABI profile contains an unaligned writable slot",
-        );
-        return -1;
+        ));
     }
     writable_slots.sort_unstable();
     if writable_slots.windows(2).any(|w| w[0] == w[1]) {
-        copy_error(
-            err_buf,
-            err_cap,
+        return Err((
+            -1,
             "external host ABI profile aliases writable state slots",
-        );
-        return -1;
+        ));
     }
 
     if read_required_str(profile_obj, "default_allocator_strategy") != Some("native_mimalloc") {
-        copy_error(
-            err_buf,
-            err_cap,
-            "external host ABI profile must retain native mimalloc",
-        );
-        return -1;
+        return Err((-1, "external host ABI profile must retain native mimalloc"));
     }
     out.default_allocator_strategy = 1; // kNativeMimalloc
 
-    if let Err(msg) = validate_constructor_policy(
+    validate_constructor_policy(
         is_x86_64,
         bridges_supported,
         indices_val.is_some(),
         constructor_indices,
         &out,
-    ) {
-        copy_error(err_buf, err_cap, msg);
+    )
+    .map_err(|msg| (-1, msg))?;
+
+    Ok(out)
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_host_abi_parse_profile_json(
+    json_ptr: *const c_char,
+    json_len: usize,
+    is_x86_64: bool,
+    pointer_align: usize,
+    uintptr_max: u64,
+    out_profile: *mut MocktailRustParsedHostAbiProfile,
+    err_buf: *mut c_char,
+    err_cap: usize,
+) -> c_int {
+    if out_profile.is_null() || pointer_align == 0 {
+        copy_error(err_buf, err_cap, "invalid arguments");
         return -1;
     }
+    let Some(json_str) = slice_to_str(json_ptr, json_len) else {
+        copy_error(err_buf, err_cap, "invalid JSON object");
+        return -2;
+    };
+    match parse_profile_json_inner(json_str, is_x86_64, pointer_align, uintptr_max) {
+        Ok(out) => {
+            unsafe { *out_profile = out };
+            0
+        }
+        Err((code, msg)) => {
+            copy_error(err_buf, err_cap, msg);
+            code
+        }
+    }
+}
 
-    unsafe { *out_profile = out };
-    0
+fn validate_profile_identity_inner(
+    json_str: &str,
+    profile_build_id: &str,
+    reference_build_id: &str,
+    reference_payload_sha256: &str,
+    canonical_payload_path: &str,
+    expected_launch_build_id: &str,
+) -> Option<(String, String)> {
+    let doc = serde_json::from_str::<serde_json::Value>(json_str).ok()?;
+    let obj = doc.as_object()?;
+    let encoded_sha = read_required_str(obj, "payload_sha256")?;
+    let encoded_path = read_required_str(obj, "payload_path")?;
+    let payload_id = read_required_str(obj, "payload_id")?;
+
+    let lib_path = Path::new(canonical_payload_path);
+    let stored_path_ok = encoded_path == format!("payloads/{}", payload_id)
+        && lib_path.file_name().and_then(|s| s.to_str()) == Some("libroblox.so")
+        && lib_path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+            == Some(payload_id)
+        && lib_path
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+            == Some("payloads");
+
+    if !is_lower_hex(encoded_sha, 64)
+        || !is_valid_payload_id_with_build_id(payload_id, profile_build_id)
+        || !stored_path_ok
+        || reference_build_id == profile_build_id
+        || reference_payload_sha256 == encoded_sha
+        || profile_build_id != expected_launch_build_id.to_ascii_lowercase()
+    {
+        return None;
+    }
+
+    Some((encoded_sha.to_string(), payload_id.to_string()))
 }
 
 #[no_mangle]
@@ -2405,110 +2345,37 @@ pub extern "C" fn mocktail_rust_host_abi_validate_profile_identity(
     else {
         return -1;
     };
-    let Ok(doc) = serde_json::from_str::<serde_json::Value>(json_str) else {
-        return -1;
-    };
-    let Some(obj) = doc.as_object() else {
-        return -1;
-    };
-    let (Some(encoded_sha), Some(encoded_path), Some(payload_id)) = (
-        read_required_str(obj, "payload_sha256"),
-        read_required_str(obj, "payload_path"),
-        read_required_str(obj, "payload_id"),
+    let Some((encoded_sha, payload_id)) = validate_profile_identity_inner(
+        json_str,
+        profile_build_id,
+        reference_build_id,
+        reference_payload_sha256,
+        canonical_payload_path,
+        expected_launch_build_id,
     ) else {
         return -1;
     };
 
-    let lib_path = Path::new(canonical_payload_path);
-    let stored_path_ok = encoded_path == format!("payloads/{}", payload_id)
-        && lib_path.file_name().and_then(|s| s.to_str()) == Some("libroblox.so")
-        && lib_path
-            .parent()
-            .and_then(|p| p.file_name())
-            .and_then(|s| s.to_str())
-            == Some(payload_id)
-        && lib_path
-            .parent()
-            .and_then(|p| p.parent())
-            .and_then(|p| p.file_name())
-            .and_then(|s| s.to_str())
-            == Some("payloads");
-
-    if !is_lower_hex(encoded_sha, 64)
-        || !is_valid_payload_id_with_build_id(payload_id, profile_build_id)
-        || !stored_path_ok
-        || reference_build_id == profile_build_id
-        || reference_payload_sha256 == encoded_sha
-        || profile_build_id != expected_launch_build_id.to_ascii_lowercase()
-    {
-        return -1;
-    }
-
-    if copy_to_c_buffer(encoded_sha, out_payload_sha256, sha_cap) != 0
-        || copy_to_c_buffer(payload_id, out_payload_id, pid_cap) != 0
+    if copy_to_c_buffer(&encoded_sha, out_payload_sha256, sha_cap) != 0
+        || copy_to_c_buffer(&payload_id, out_payload_id, pid_cap) != 0
     {
         return -1;
     }
     0
 }
 
-#[no_mangle]
-pub extern "C" fn mocktail_rust_host_abi_parse_receipt_json(
-    json_ptr: *const c_char,
-    json_len: usize,
-    receipt_path_ptr: *const c_char,
-    canonical_payload_path_ptr: *const c_char,
-    payload_sha256_ptr: *const c_char,
-    profile_sha256_ptr: *const c_char,
-    payload_id_ptr: *const c_char,
-    build_id_ptr: *const c_char,
-    out_receipt: *mut MocktailRustParsedApprovalReceipt,
-    err_buf: *mut c_char,
-    err_cap: usize,
-) -> c_int {
-    if out_receipt.is_null() {
-        copy_error(err_buf, err_cap, "invalid arguments");
-        return -1;
-    }
-    let Some(json_str) = slice_to_str(json_ptr, json_len) else {
-        copy_error(err_buf, err_cap, "invalid JSON object");
-        return -2;
-    };
-    let doc: serde_json::Value = match serde_json::from_str(json_str) {
-        Ok(v) => v,
-        Err(_) => {
-            copy_error(err_buf, err_cap, "invalid JSON object");
-            return -2;
-        }
-    };
-    let Some(obj) = doc.as_object() else {
-        copy_error(err_buf, err_cap, "invalid JSON object");
-        return -2;
-    };
-
-    let (
-        Some(receipt_path),
-        Some(canonical_payload_path),
-        Some(payload_sha256),
-        Some(profile_sha256),
-        Some(payload_id),
-        Some(build_id),
-    ) = (
-        c_str_opt(receipt_path_ptr),
-        c_str_opt(canonical_payload_path_ptr),
-        c_str_opt(payload_sha256_ptr),
-        c_str_opt(profile_sha256_ptr),
-        c_str_opt(payload_id_ptr),
-        c_str_opt(build_id_ptr),
-    )
-    else {
-        copy_error(
-            err_buf,
-            err_cap,
-            "approval receipt does not authorize the exact ABI profile and payload",
-        );
-        return -1;
-    };
+fn parse_receipt_json_inner(
+    json_str: &str,
+    receipt_path: &str,
+    canonical_payload_path: &str,
+    payload_sha256: &str,
+    profile_sha256: &str,
+    payload_id: &str,
+    build_id: &str,
+) -> Result<MocktailRustParsedApprovalReceipt, (c_int, &'static str)> {
+    let doc: serde_json::Value =
+        serde_json::from_str(json_str).map_err(|_| (-2, "invalid JSON object"))?;
+    let obj = doc.as_object().ok_or((-2, "invalid JSON object"))?;
 
     let schema_ok = obj.get("schema_version").and_then(|v| read_size(v, 1)) == Some(1);
     let (
@@ -2547,12 +2414,10 @@ pub extern "C" fn mocktail_rust_host_abi_parse_receipt_json(
         read_required_size(obj, "successful_runs", 2),
     )
     else {
-        copy_error(
-            err_buf,
-            err_cap,
+        return Err((
+            -1,
             "approval receipt does not authorize the exact ABI profile and payload",
-        );
-        return -1;
+        ));
     };
 
     if status != "approved"
@@ -2569,23 +2434,20 @@ pub extern "C" fn mocktail_rust_host_abi_parse_receipt_json(
         || r_runtime_sha != canary_runtime_sha
         || !is_lower_hex(payload_fingerprint, 64)
     {
-        copy_error(
-            err_buf,
-            err_cap,
+        return Err((
+            -1,
             "approval receipt does not authorize the exact ABI profile and payload",
-        );
-        return -1;
+        ));
     }
 
     let expected_filename = format!("{}-{}.json", payload_id, generation);
-    if Path::new(receipt_path).file_name().and_then(|s| s.to_str()) != Some(expected_filename.as_str())
+    if Path::new(receipt_path).file_name().and_then(|s| s.to_str())
+        != Some(expected_filename.as_str())
     {
-        copy_error(
-            err_buf,
-            err_cap,
+        return Err((
+            -1,
             "approval receipt filename does not match its evidence generation",
-        );
-        return -1;
+        ));
     }
 
     let mut out = MocktailRustParsedApprovalReceipt::default();
@@ -2595,12 +2457,10 @@ pub extern "C" fn mocktail_rust_host_abi_parse_receipt_json(
         || !copy_fixed_str(&mut out.compatibility_manifest_sha256, r_manifest_sha)
         || !copy_fixed_str(&mut out.payload_fingerprint, payload_fingerprint)
     {
-        copy_error(
-            err_buf,
-            err_cap,
+        return Err((
+            -1,
             "approval receipt does not authorize the exact ABI profile and payload",
-        );
-        return -1;
+        ));
     }
 
     if let Some(hashes) = obj
@@ -2619,67 +2479,88 @@ pub extern "C" fn mocktail_rust_host_abi_parse_receipt_json(
         }
     }
 
-    unsafe { *out_receipt = out };
-    0
+    Ok(out)
 }
 
 #[no_mangle]
-pub extern "C" fn mocktail_rust_host_abi_validate_canary_attestation_json(
+pub extern "C" fn mocktail_rust_host_abi_parse_receipt_json(
     json_ptr: *const c_char,
     json_len: usize,
-    expected_run: usize,
-    payload_id_ptr: *const c_char,
-    payload_fingerprint_ptr: *const c_char,
+    receipt_path_ptr: *const c_char,
+    canonical_payload_path_ptr: *const c_char,
+    payload_sha256_ptr: *const c_char,
     profile_sha256_ptr: *const c_char,
-    compatibility_manifest_sha256_ptr: *const c_char,
-    runtime_sha256_ptr: *const c_char,
-    runtime_build_id_ptr: *const c_char,
-    out_sha256: *mut c_char,
-    sha_cap: usize,
-    on_run_id: MocktailPayloadStoreStringCallback,
-    ctx: *mut c_void,
+    payload_id_ptr: *const c_char,
+    build_id_ptr: *const c_char,
+    out_receipt: *mut MocktailRustParsedApprovalReceipt,
     err_buf: *mut c_char,
     err_cap: usize,
 ) -> c_int {
+    if out_receipt.is_null() {
+        copy_error(err_buf, err_cap, "invalid arguments");
+        return -1;
+    }
     let Some(json_str) = slice_to_str(json_ptr, json_len) else {
         copy_error(err_buf, err_cap, "invalid JSON object");
         return -2;
     };
-    let doc: serde_json::Value = match serde_json::from_str(json_str) {
-        Ok(v) => v,
-        Err(_) => {
-            copy_error(err_buf, err_cap, "invalid JSON object");
-            return -2;
-        }
-    };
-    let Some(obj) = doc.as_object() else {
-        copy_error(err_buf, err_cap, "invalid JSON object");
-        return -2;
-    };
-
     let (
-        Some(payload_id),
-        Some(payload_fingerprint),
+        Some(receipt_path),
+        Some(canonical_payload_path),
+        Some(payload_sha256),
         Some(profile_sha256),
-        Some(compat_sha256),
-        Some(runtime_sha256),
-        Some(runtime_build_id),
+        Some(payload_id),
+        Some(build_id),
     ) = (
-        c_str_opt(payload_id_ptr),
-        c_str_opt(payload_fingerprint_ptr),
+        c_str_opt(receipt_path_ptr),
+        c_str_opt(canonical_payload_path_ptr),
+        c_str_opt(payload_sha256_ptr),
         c_str_opt(profile_sha256_ptr),
-        c_str_opt(compatibility_manifest_sha256_ptr),
-        c_str_opt(runtime_sha256_ptr),
-        c_str_opt(runtime_build_id_ptr),
+        c_str_opt(payload_id_ptr),
+        c_str_opt(build_id_ptr),
     )
     else {
         copy_error(
             err_buf,
             err_cap,
-            "canary attestation does not match the exact approval evidence",
+            "approval receipt does not authorize the exact ABI profile and payload",
         );
         return -1;
     };
+
+    match parse_receipt_json_inner(
+        json_str,
+        receipt_path,
+        canonical_payload_path,
+        payload_sha256,
+        profile_sha256,
+        payload_id,
+        build_id,
+    ) {
+        Ok(out) => {
+            unsafe { *out_receipt = out };
+            0
+        }
+        Err((code, msg)) => {
+            copy_error(err_buf, err_cap, msg);
+            code
+        }
+    }
+}
+
+fn validate_canary_attestation_inner(
+    json_str: &str,
+    expected_run: usize,
+    payload_id: &str,
+    payload_fingerprint: &str,
+    profile_sha256: &str,
+    compat_sha256: &str,
+    runtime_sha256: &str,
+    runtime_build_id: &str,
+) -> Result<(String, String), (c_int, &'static str)> {
+    let doc: serde_json::Value =
+        serde_json::from_str(json_str).map_err(|_| (-2, "invalid JSON object"))?;
+    let obj = doc.as_object().ok_or((-2, "invalid JSON object"))?;
 
     let schema_ok = obj.get("schema_version").and_then(|v| read_size(v, 1)) == Some(1);
     let (
@@ -2712,12 +2593,10 @@ pub extern "C" fn mocktail_rust_host_abi_validate_canary_attestation_json(
         read_required_str(obj, "readiness_log_sha256"),
     )
     else {
-        copy_error(
-            err_buf,
-            err_cap,
+        return Err((
+            -1,
             "canary attestation does not match the exact approval evidence",
-        );
-        return -1;
+        ));
     };
 
     if status != "passed"
@@ -2732,24 +2611,143 @@ pub extern "C" fn mocktail_rust_host_abi_validate_canary_attestation_json(
         || a_rbid != runtime_build_id
         || !is_lower_hex(readiness_log_sha, 64)
     {
+        return Err((
+            -1,
+            "canary attestation does not match the exact approval evidence",
+        ));
+    }
+
+    let Some(evidence_sha256) = compute_sha256_hex_internal(json_str.as_bytes(), 0) else {
+        return Err((-1, "cannot compute canary attestation SHA-256"));
+    };
+    Ok((evidence_sha256, run_id.to_string()))
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_host_abi_validate_canary_attestation_json(
+    json_ptr: *const c_char,
+    json_len: usize,
+    expected_run: usize,
+    payload_id_ptr: *const c_char,
+    payload_fingerprint_ptr: *const c_char,
+    profile_sha256_ptr: *const c_char,
+    compatibility_manifest_sha256_ptr: *const c_char,
+    runtime_sha256_ptr: *const c_char,
+    runtime_build_id_ptr: *const c_char,
+    out_sha256: *mut c_char,
+    sha_cap: usize,
+    on_run_id: MocktailPayloadStoreStringCallback,
+    ctx: *mut c_void,
+    err_buf: *mut c_char,
+    err_cap: usize,
+) -> c_int {
+    let Some(json_str) = slice_to_str(json_ptr, json_len) else {
+        copy_error(err_buf, err_cap, "invalid JSON object");
+        return -2;
+    };
+    let (
+        Some(payload_id),
+        Some(payload_fingerprint),
+        Some(profile_sha256),
+        Some(compat_sha256),
+        Some(runtime_sha256),
+        Some(runtime_build_id),
+    ) = (
+        c_str_opt(payload_id_ptr),
+        c_str_opt(payload_fingerprint_ptr),
+        c_str_opt(profile_sha256_ptr),
+        c_str_opt(compatibility_manifest_sha256_ptr),
+        c_str_opt(runtime_sha256_ptr),
+        c_str_opt(runtime_build_id_ptr),
+    )
+    else {
         copy_error(
             err_buf,
             err_cap,
             "canary attestation does not match the exact approval evidence",
         );
         return -1;
+    };
+
+    match validate_canary_attestation_inner(
+        json_str,
+        expected_run,
+        payload_id,
+        payload_fingerprint,
+        profile_sha256,
+        compat_sha256,
+        runtime_sha256,
+        runtime_build_id,
+    ) {
+        Ok((evidence_sha256, run_id)) => {
+            if copy_to_c_buffer(&evidence_sha256, out_sha256, sha_cap) != 0 {
+                copy_error(err_buf, err_cap, "cannot compute canary attestation SHA-256");
+                return -1;
+            }
+            emit_string(on_run_id, ctx, &run_id);
+            0
+        }
+        Err((code, msg)) => {
+            copy_error(err_buf, err_cap, msg);
+            code
+        }
+    }
+}
+
+fn verify_receipt_evidence_inner(
+    rec: &MocktailRustParsedApprovalReceipt,
+    profile_sha256: &str,
+    manifest_sha256: &str,
+    canary_sha_0: &str,
+    run_id_0: &str,
+    canary_sha_1: &str,
+    run_id_1: &str,
+) -> Result<(), &'static str> {
+    let (
+        Some(generation),
+        Some(runtime_build_id),
+        Some(payload_fingerprint),
+        Some(expected_h0),
+        Some(expected_h1),
+    ) = (
+        c_str_opt(rec.generation.as_ptr()),
+        c_str_opt(rec.runtime_build_id.as_ptr()),
+        c_str_opt(rec.payload_fingerprint.as_ptr()),
+        c_str_opt(rec.attestation_sha256_0.as_ptr()),
+        c_str_opt(rec.attestation_sha256_1.as_ptr()),
+    )
+    else {
+        return Err("invalid arguments");
+    };
+
+    if run_id_0 == run_id_1 {
+        return Err("approval receipt canary attestations reuse one run ID");
+    }
+    if rec.attestation_hashes_valid_array == 0 {
+        return Err("approval receipt must bind exactly two canary attestations");
+    }
+    if rec.attestation_hash_0_is_string == 0
+        || rec.attestation_hash_1_is_string == 0
+        || expected_h0 != canary_sha_0
+        || expected_h1 != canary_sha_1
+    {
+        return Err("approval receipt canary attestation hash does not match");
     }
 
-    let Some(evidence_sha256) = compute_sha256_hex_internal(json_str.as_bytes(), 0) else {
-        copy_error(err_buf, err_cap, "cannot compute canary attestation SHA-256");
-        return -1;
-    };
-    if copy_to_c_buffer(&evidence_sha256, out_sha256, sha_cap) != 0 {
-        copy_error(err_buf, err_cap, "cannot compute canary attestation SHA-256");
-        return -1;
+    let evidence = format!(
+        "runtime_build_id={}\npayload={}\nprofile={}\ncompatibility={}\ncanary_1={}\ncanary_2={}\n",
+        runtime_build_id,
+        payload_fingerprint,
+        profile_sha256,
+        manifest_sha256,
+        canary_sha_0,
+        canary_sha_1,
+    );
+    let expected_generation = compute_sha256_hex_internal(evidence.as_bytes(), 40).unwrap_or_default();
+    if generation != expected_generation {
+        return Err("approval receipt evidence generation does not match");
     }
-    emit_string(on_run_id, ctx, run_id);
-    0
+    Ok(())
 }
 
 #[no_mangle]
@@ -2770,11 +2768,6 @@ pub extern "C" fn mocktail_rust_host_abi_verify_receipt_evidence(
     }
     let rec = unsafe { &*receipt };
     let (
-        Some(generation),
-        Some(runtime_build_id),
-        Some(payload_fingerprint),
-        Some(expected_h0),
-        Some(expected_h1),
         Some(profile_sha256),
         Some(manifest_sha256),
         Some(canary_sha_0),
@@ -2782,11 +2775,6 @@ pub extern "C" fn mocktail_rust_host_abi_verify_receipt_evidence(
         Some(canary_sha_1),
         Some(run_id_1),
     ) = (
-        c_str_opt(rec.generation.as_ptr()),
-        c_str_opt(rec.runtime_build_id.as_ptr()),
-        c_str_opt(rec.payload_fingerprint.as_ptr()),
-        c_str_opt(rec.attestation_sha256_0.as_ptr()),
-        c_str_opt(rec.attestation_sha256_1.as_ptr()),
         c_str_opt(profile_sha256_ptr),
         c_str_opt(manifest_sha256_ptr),
         c_str_opt(canary_sha_0_ptr),
@@ -2799,54 +2787,625 @@ pub extern "C" fn mocktail_rust_host_abi_verify_receipt_evidence(
         return -1;
     };
 
-    if run_id_0 == run_id_1 {
-        copy_error(
-            err_buf,
-            err_cap,
-            "approval receipt canary attestations reuse one run ID",
-        );
-        return -1;
-    }
-    if rec.attestation_hashes_valid_array == 0 {
-        copy_error(
-            err_buf,
-            err_cap,
-            "approval receipt must bind exactly two canary attestations",
-        );
-        return -1;
-    }
-    if rec.attestation_hash_0_is_string == 0
-        || rec.attestation_hash_1_is_string == 0
-        || expected_h0 != canary_sha_0
-        || expected_h1 != canary_sha_1
-    {
-        copy_error(
-            err_buf,
-            err_cap,
-            "approval receipt canary attestation hash does not match",
-        );
-        return -1;
-    }
-
-    let evidence = format!(
-        "runtime_build_id={}\npayload={}\nprofile={}\ncompatibility={}\ncanary_1={}\ncanary_2={}\n",
-        runtime_build_id,
-        payload_fingerprint,
+    match verify_receipt_evidence_inner(
+        rec,
         profile_sha256,
         manifest_sha256,
         canary_sha_0,
+        run_id_0,
         canary_sha_1,
-    );
-    let expected_generation = compute_sha256_hex_internal(evidence.as_bytes(), 40).unwrap_or_default();
-    if generation != expected_generation {
-        copy_error(
-            err_buf,
-            err_cap,
-            "approval receipt evidence generation does not match",
+        run_id_1,
+    ) {
+        Ok(()) => 0,
+        Err(msg) => {
+            copy_error(err_buf, err_cap, msg);
+            -1
+        }
+    }
+}
+
+// ============================================================================
+// 4. External Host ABI Profile Loader Engine (Pure-Rust ELF + Attestation)
+// ============================================================================
+
+const K_MAXIMUM_PROFILE_BYTES: usize = 1024 * 1024;
+const K_MAXIMUM_RECEIPT_BYTES: usize = 64 * 1024;
+
+#[repr(C)]
+pub struct MocktailRustExternalHostAbiRequestView {
+    pub profile_file: MocktailRustStrSlice,
+    pub payload_path: MocktailRustStrSlice,
+    pub compatibility_manifest_path: MocktailRustStrSlice,
+    pub expected_build_id: MocktailRustStrSlice,
+    pub approval_receipt_path: MocktailRustStrSlice,
+    pub candidate_canary: bool,
+    pub candidate_process_authorization: bool,
+    pub explicit_unverified_authorization: bool,
+}
+
+pub type MocktailHostAbiBuiltInConflictFn =
+    Option<unsafe extern "C" fn(ctx: *mut c_void, build_id: MocktailRustStrSlice) -> bool>;
+
+pub type MocktailHostAbiLoadedCallback = Option<
+    unsafe extern "C" fn(
+        ctx: *mut c_void,
+        profile: *const MocktailRustParsedHostAbiProfile,
+        canonical_payload_path: MocktailRustStrSlice,
+        payload_sha256: MocktailRustStrSlice,
+        profile_sha256: MocktailRustStrSlice,
+    ),
+>;
+
+pub type MocktailHostAbiErrorCallback =
+    Option<unsafe extern "C" fn(ctx: *mut c_void, error: MocktailRustStrSlice)>;
+
+fn str_slice(value: &str) -> MocktailRustStrSlice {
+    MocktailRustStrSlice {
+        ptr: value.as_ptr() as *const c_char,
+        len: value.len(),
+    }
+}
+
+struct LoadSegment {
+    begin: u64,
+    end: u64,
+    flags: u32,
+}
+
+fn range_in_segment(
+    segments: &[LoadSegment],
+    begin: u64,
+    size: u64,
+    required_flags: u32,
+    forbidden_flags: u32,
+) -> bool {
+    if size == 0 || begin > u64::MAX - size {
+        return false;
+    }
+    let end = begin + size;
+    segments.iter().any(|segment| {
+        (segment.flags & required_flags) == required_flags
+            && (segment.flags & forbidden_flags) == 0
+            && segment.begin <= begin
+            && end <= segment.end
+    })
+}
+
+fn open_elf_for_profile_validation(payload_path: &Path) -> Result<MappedReadOnlyFile, String> {
+    match MappedReadOnlyFile::open_bounded(payload_path, true, 0, None) {
+        Ok(file) => Ok(file),
+        Err(ReadFileError::NotFound) => Err(format!(
+            "cannot open payload ELF: {}",
+            std::io::Error::from_raw_os_error(libc::ENOENT)
+                .to_string()
+                .split(" (os error")
+                .next()
+                .unwrap_or("No such file or directory")
+        )),
+        Err(ReadFileError::OpenFailed(errno)) => Err(format!(
+            "cannot open payload ELF: {}",
+            std::io::Error::from_raw_os_error(errno)
+                .to_string()
+                .split(" (os error")
+                .next()
+                .unwrap_or("open failed")
+        )),
+        Err(_) => Err("payload is not a readable ELF object".to_string()),
+    }
+}
+
+pub(crate) fn validate_profile_against_elf_rs(
+    payload_path: &Path,
+    profile: &MocktailRustParsedHostAbiProfile,
+) -> Result<(), String> {
+    let mapped = open_elf_for_profile_validation(payload_path)?;
+    let bytes = mapped.as_slice();
+    let Some(hdr) = parse_elf64_header(bytes) else {
+        return Err("payload is not a readable ELF object".to_string());
+    };
+    if hdr.ei_class != ELFCLASS64
+        || hdr.ei_data != ELFDATA2LSB
+        || hdr.e_machine != guest_abi::ELF_MACHINE
+        || hdr.e_type != ET_DYN
+    {
+        return Err(format!("payload must be a {} ET_DYN ELF object", guest_abi::ABI));
+    }
+
+    let phdrs = parse_elf64_phdrs(bytes, &hdr)
+        .map_err(|()| "cannot read payload ELF program header".to_string())?;
+    let mut segments: Vec<LoadSegment> = Vec::with_capacity(phdrs.len());
+    for ph in &phdrs {
+        if ph.p_type == PT_LOAD && ph.p_memsz > 0 && ph.p_vaddr <= u64::MAX - ph.p_memsz {
+            segments.push(LoadSegment {
+                begin: ph.p_vaddr,
+                end: ph.p_vaddr + ph.p_memsz,
+                flags: ph.p_flags,
+            });
+        }
+    }
+
+    let mut code_rvas = vec![
+        profile.arena_initializer,
+        profile.allocator_thread_initializer,
+        profile.native_allocator_allocate,
+        profile.native_allocator_deallocate,
+        profile.native_pre_jni_registry_initializer,
+    ];
+    for idx in 0..profile.bridge_entry_count {
+        code_rvas.push(profile.bridge_entries[idx].rva);
+    }
+    for idx in 0..profile.derivation_code_rva_count {
+        code_rvas.push(profile.derivation_code_rvas[idx]);
+    }
+    for rva in code_rvas {
+        if !range_in_segment(&segments, rva, 1, PF_R | PF_X, PF_W) {
+            return Err(
+                "host ABI profile contains a code RVA outside executable ELF segments"
+                    .to_string(),
+            );
+        }
+    }
+
+    let data_rvas = [
+        profile.allocator_object_slot,
+        profile.empty_string_slot,
+        profile.jni_singleton_slot,
+        profile.arena_guard_slot,
+        profile.arena_table_slot,
+        profile.native_pre_jni_registry_slot,
+    ];
+    for rva in data_rvas {
+        if !range_in_segment(
+            &segments,
+            rva,
+            std::mem::size_of::<usize>() as u64,
+            PF_R | PF_W,
+            PF_X,
+        ) {
+            return Err(
+                "host ABI profile contains a data RVA outside writable ELF segments".to_string(),
+            );
+        }
+    }
+
+    let shdrs = parse_elf64_shdrs(bytes, &hdr, false)
+        .map_err(|_| "cannot read payload ELF section".to_string())?;
+    let expected_size = (profile.init_array_count as u64)
+        .checked_mul(std::mem::size_of::<u64>() as u64)
+        .ok_or_else(|| "host ABI profile does not match the payload .init_array".to_string())?;
+    let exact_init_array = shdrs.iter().any(|sh| {
+        sh.sh_type == SHT_INIT_ARRAY
+            && sh.sh_addr == profile.init_array_offset
+            && (sh.sh_entsize == 0 || sh.sh_entsize == std::mem::size_of::<u64>() as u64)
+            && sh.sh_size == expected_size
+            && (sh.sh_flags & (SHF_ALLOC | SHF_WRITE)) == (SHF_ALLOC | SHF_WRITE)
+            && (sh.sh_flags & SHF_EXECINSTR) == 0
+    });
+    if !exact_init_array {
+        return Err("host ABI profile does not match the payload .init_array".to_string());
+    }
+    Ok(())
+}
+
+fn validate_canary_attestation_file(
+    attestation_path: &Path,
+    expected_run: usize,
+    payload_id: &str,
+    payload_fingerprint: &str,
+    profile_sha256: &str,
+    compatibility_manifest_sha256: &str,
+    runtime_sha256: &str,
+    runtime_build_id: &str,
+) -> Result<(String, String), String> {
+    let bytes = read_owned_regular_file_strict_error(attestation_path, K_MAXIMUM_RECEIPT_BYTES, true)?;
+    let json_str = std::str::from_utf8(&bytes)
+        .map_err(|_| format!("invalid JSON object: {}", attestation_path.display()))?;
+    validate_canary_attestation_inner(
+        json_str,
+        expected_run,
+        payload_id,
+        payload_fingerprint,
+        profile_sha256,
+        compatibility_manifest_sha256,
+        runtime_sha256,
+        runtime_build_id,
+    )
+    .map_err(|(code, msg)| {
+        if code == -2 {
+            format!("invalid JSON object: {}", attestation_path.display())
+        } else {
+            msg.to_string()
+        }
+    })
+}
+
+fn validate_receipt_file(
+    receipt_path: &Path,
+    canonical_payload_path: &str,
+    payload_sha256: &str,
+    profile_sha256: &str,
+    payload_id: &str,
+    build_id: &str,
+    compatibility_manifest_path: &Path,
+) -> Result<(), String> {
+    let receipt_bytes =
+        read_owned_regular_file_strict_error(receipt_path, K_MAXIMUM_RECEIPT_BYTES, true)?;
+    let receipt_str = std::str::from_utf8(&receipt_bytes)
+        .map_err(|_| format!("invalid JSON object: {}", receipt_path.display()))?;
+    let receipt_path_str = receipt_path.to_str().unwrap_or("");
+    let parsed = parse_receipt_json_inner(
+        receipt_str,
+        receipt_path_str,
+        canonical_payload_path,
+        payload_sha256,
+        profile_sha256,
+        payload_id,
+        build_id,
+    )
+    .map_err(|(code, msg)| {
+        if code == -2 {
+            format!("invalid JSON object: {}", receipt_path.display())
+        } else {
+            msg.to_string()
+        }
+    })?;
+
+    let manifest_sha256 = sha256_file_hex(compatibility_manifest_path)
+        .ok_or_else(|| "cannot hash compatibility manifest for approval receipt".to_string())?;
+    let rec_manifest_sha = c_str_opt(parsed.compatibility_manifest_sha256.as_ptr()).unwrap_or("");
+    if rec_manifest_sha != manifest_sha256 {
+        return Err("approval receipt belongs to different compatibility bytes".to_string());
+    }
+
+    let generation = c_str_opt(parsed.generation.as_ptr()).unwrap_or("");
+    let payload_fingerprint = c_str_opt(parsed.payload_fingerprint.as_ptr()).unwrap_or("");
+    let canary_runtime_sha256 = c_str_opt(parsed.canary_runtime_sha256.as_ptr()).unwrap_or("");
+    let runtime_build_id = c_str_opt(parsed.runtime_build_id.as_ptr()).unwrap_or("");
+
+    let receipt_dir = receipt_path.parent().unwrap_or_else(|| Path::new(""));
+    let evidence_prefix = format!("{}-{}", payload_id, generation);
+    let mut canary_evidence: [(String, String); 2] = Default::default();
+    for (idx, slot) in canary_evidence.iter_mut().enumerate() {
+        let filename = format!("{}.canary-{}.json", evidence_prefix, idx + 1);
+        let candidate = receipt_dir.join(&filename);
+        let canonical_attestation = canonical_regular_path_strict(&candidate)
+            .map_err(|_| "approval receipt is missing an adjacent canary attestation".to_string())?;
+        if canonical_attestation.parent() != Some(receipt_dir)
+            || canonical_attestation.file_name().and_then(|s| s.to_str())
+                != Some(filename.as_str())
+        {
+            return Err(
+                "approval receipt is missing an adjacent canary attestation".to_string(),
+            );
+        }
+        *slot = validate_canary_attestation_file(
+            &canonical_attestation,
+            idx + 1,
+            payload_id,
+            payload_fingerprint,
+            profile_sha256,
+            &manifest_sha256,
+            canary_runtime_sha256,
+            runtime_build_id,
+        )?;
+    }
+
+    verify_receipt_evidence_inner(
+        &parsed,
+        profile_sha256,
+        &manifest_sha256,
+        &canary_evidence[0].0,
+        &canary_evidence[0].1,
+        &canary_evidence[1].0,
+        &canary_evidence[1].1,
+    )
+    .map_err(str::to_string)
+}
+
+#[derive(Clone, Copy)]
+struct ExternalHostAbiRequest<'a> {
+    profile_file: &'a str,
+    payload_path: &'a str,
+    compatibility_manifest_path: &'a str,
+    expected_build_id: &'a str,
+    approval_receipt_path: &'a str,
+    candidate_canary: bool,
+    candidate_process_authorization: bool,
+    explicit_unverified_authorization: bool,
+}
+
+struct LoadedExternalProfile {
+    profile: MocktailRustParsedHostAbiProfile,
+    canonical_payload_path: String,
+    payload_sha256: String,
+    profile_sha256: String,
+}
+
+fn load_external_host_abi_profile_rs<F>(
+    req: &ExternalHostAbiRequest<'_>,
+    conflicts_with_built_in: F,
+) -> Result<LoadedExternalProfile, String>
+where
+    F: FnOnce(&str) -> bool,
+{
+    if req.profile_file.is_empty()
+        || req.payload_path.is_empty()
+        || req.expected_build_id.is_empty()
+    {
+        return Err("external host ABI profile request is incomplete".to_string());
+    }
+    if req.candidate_canary {
+        if !req.candidate_process_authorization
+            || !req.explicit_unverified_authorization
+            || !req.approval_receipt_path.is_empty()
+        {
+            return Err(
+                "candidate ABI profile requires isolated canary authorization".to_string(),
+            );
+        }
+    } else if req.candidate_process_authorization || req.approval_receipt_path.is_empty() {
+        return Err("normal ABI profile loading requires an approval receipt".to_string());
+    }
+
+    let canonical_profile = canonical_regular_path_strict(Path::new(req.profile_file))?;
+    let canonical_payload = canonical_regular_path_strict(Path::new(req.payload_path))?;
+    let canonical_manifest =
+        canonical_regular_path_strict(Path::new(req.compatibility_manifest_path))?;
+
+    let profile_bytes =
+        read_owned_regular_file_strict_error(&canonical_profile, K_MAXIMUM_PROFILE_BYTES, false)?;
+    let profile_str = std::str::from_utf8(&profile_bytes)
+        .map_err(|_| format!("invalid JSON object: {}", canonical_profile.display()))?;
+    let parsed_profile = parse_profile_json_inner(
+        profile_str,
+        cfg!(target_arch = "x86_64"),
+        std::mem::align_of::<*const c_void>(),
+        usize::MAX as u64,
+    )
+    .map_err(|(code, msg)| {
+        if code == -2 {
+            format!("invalid JSON object: {}", canonical_profile.display())
+        } else {
+            msg.to_string()
+        }
+    })?;
+
+    let build_id = c_str_opt(parsed_profile.build_id.as_ptr()).unwrap_or("");
+    let ref_build_id = c_str_opt(parsed_profile.reference_build_id.as_ptr()).unwrap_or("");
+    let ref_payload_sha256 =
+        c_str_opt(parsed_profile.reference_payload_sha256.as_ptr()).unwrap_or("");
+    let canonical_payload_str = canonical_payload
+        .to_str()
+        .ok_or_else(|| "external host ABI profile payload identity does not match the launch".to_string())?;
+
+    let Some((encoded_payload_sha256, payload_id)) = validate_profile_identity_inner(
+        profile_str,
+        build_id,
+        ref_build_id,
+        ref_payload_sha256,
+        canonical_payload_str,
+        req.expected_build_id,
+    ) else {
+        return Err("external host ABI profile payload identity does not match the launch".to_string());
+    };
+
+    if read_elf_build_id_file(&canonical_payload).as_deref() != Some(build_id) {
+        return Err("external host ABI profile Build ID does not match payload ELF".to_string());
+    }
+    let Some(payload_sha256) = sha256_file_hex(&canonical_payload) else {
+        return Err("external host ABI profile SHA-256 does not match payload bytes".to_string());
+    };
+    if payload_sha256 != encoded_payload_sha256 {
+        return Err("external host ABI profile SHA-256 does not match payload bytes".to_string());
+    }
+
+    let Some(profile_sha256) = compute_sha256_hex_internal(profile_bytes.as_slice(), 0) else {
+        return Err("cannot compute external host ABI profile SHA-256".to_string());
+    };
+
+    validate_profile_against_elf_rs(&canonical_payload, &parsed_profile)?;
+
+    if conflicts_with_built_in(build_id) {
+        return Err("external host ABI profile cannot override a built-in Build ID".to_string());
+    }
+
+    if !req.candidate_canary {
+        let canonical_receipt =
+            canonical_regular_path_strict(Path::new(req.approval_receipt_path))?;
+        validate_receipt_file(
+            &canonical_receipt,
+            canonical_payload_str,
+            &payload_sha256,
+            &profile_sha256,
+            &payload_id,
+            build_id,
+            &canonical_manifest,
+        )?;
+    }
+
+    Ok(LoadedExternalProfile {
+        profile: parsed_profile,
+        canonical_payload_path: canonical_payload_str.to_string(),
+        payload_sha256,
+        profile_sha256,
+    })
+}
+
+fn non_empty_env_var(name: &str) -> Option<String> {
+    let val = std::env::var_os(name)?;
+    if val.is_empty() {
+        return None;
+    }
+    Some(val.to_string_lossy().into_owned())
+}
+
+fn initialize_host_abi_profile_from_env_rs<F>(
+    payload_path: &str,
+    compatibility_manifest_path: &str,
+    expected_build_id: &str,
+    explicit_unverified_authorization: bool,
+    conflicts_with_built_in: F,
+) -> Result<Option<LoadedExternalProfile>, String>
+where
+    F: FnOnce(&str) -> bool,
+{
+    let profile_file = non_empty_env_var("MOCKTAIL_HOST_ABI_PROFILE_FILE");
+    let canary = non_empty_env_var("MOCKTAIL_HOST_ABI_CANARY");
+    let candidate_process = non_empty_env_var("MOCKTAIL_ALLOW_CANDIDATE_HOST_ABI");
+    let receipt = non_empty_env_var("MOCKTAIL_HOST_ABI_APPROVAL_RECEIPT");
+
+    let has_canary_marker = canary.is_some();
+    let candidate_canary = canary.as_deref() == Some("1");
+    let has_candidate_process_marker = candidate_process.is_some();
+    let candidate_process_authorization = candidate_process.as_deref() == Some("1");
+    let has_receipt = receipt.is_some();
+
+    let Some(profile_path) = profile_file.as_deref() else {
+        if has_canary_marker || has_candidate_process_marker || has_receipt {
+            return Err("host ABI authorization was set without a profile file".to_string());
+        }
+        return Ok(None);
+    };
+
+    if has_canary_marker != candidate_canary
+        || has_candidate_process_marker != candidate_process_authorization
+    {
+        return Err("host ABI canary markers must use the exact value 1".to_string());
+    }
+    if candidate_canary == has_receipt || candidate_canary != candidate_process_authorization {
+        return Err(
+            "external host ABI profile requires exactly one authorization mode".to_string(),
         );
+    }
+
+    let req = ExternalHostAbiRequest {
+        profile_file: profile_path,
+        payload_path,
+        compatibility_manifest_path,
+        expected_build_id,
+        approval_receipt_path: receipt.as_deref().unwrap_or(""),
+        candidate_canary,
+        candidate_process_authorization,
+        explicit_unverified_authorization,
+    };
+    load_external_host_abi_profile_rs(&req, conflicts_with_built_in).map(Some)
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_host_abi_load_external_profile(
+    request: *const MocktailRustExternalHostAbiRequestView,
+    conflicts_with_built_in: MocktailHostAbiBuiltInConflictFn,
+    on_loaded: MocktailHostAbiLoadedCallback,
+    on_error: MocktailHostAbiErrorCallback,
+    ctx: *mut c_void,
+) -> c_int {
+    let emit_err = |msg: &str| {
+        if let Some(cb) = on_error {
+            unsafe { cb(ctx, str_slice(msg)) };
+        }
+    };
+    if request.is_null() {
+        emit_err("external host ABI profile request is incomplete");
         return -1;
     }
-    0
+    let req_view = unsafe { &*request };
+    let profile_file = unsafe { slice_to_str_lossy(req_view.profile_file) };
+    let payload_path = unsafe { slice_to_str_lossy(req_view.payload_path) };
+    let compatibility_manifest_path =
+        unsafe { slice_to_str_lossy(req_view.compatibility_manifest_path) };
+    let expected_build_id = unsafe { slice_to_str_lossy(req_view.expected_build_id) };
+    let approval_receipt_path = unsafe { slice_to_str_lossy(req_view.approval_receipt_path) };
+
+    let req = ExternalHostAbiRequest {
+        profile_file: &profile_file,
+        payload_path: &payload_path,
+        compatibility_manifest_path: &compatibility_manifest_path,
+        expected_build_id: &expected_build_id,
+        approval_receipt_path: &approval_receipt_path,
+        candidate_canary: req_view.candidate_canary,
+        candidate_process_authorization: req_view.candidate_process_authorization,
+        explicit_unverified_authorization: req_view.explicit_unverified_authorization,
+    };
+    let conflict_check = |build_id: &str| -> bool {
+        if let Some(cb) = conflicts_with_built_in {
+            unsafe { cb(ctx, str_slice(build_id)) }
+        } else {
+            false
+        }
+    };
+    match load_external_host_abi_profile_rs(&req, conflict_check) {
+        Ok(loaded) => {
+            if let Some(cb) = on_loaded {
+                unsafe {
+                    cb(
+                        ctx,
+                        &loaded.profile,
+                        str_slice(&loaded.canonical_payload_path),
+                        str_slice(&loaded.payload_sha256),
+                        str_slice(&loaded.profile_sha256),
+                    );
+                }
+            }
+            0
+        }
+        Err(msg) => {
+            emit_err(&msg);
+            -1
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_host_abi_initialize_from_env(
+    payload_path: MocktailRustStrSlice,
+    compatibility_manifest_path: MocktailRustStrSlice,
+    expected_build_id: MocktailRustStrSlice,
+    explicit_unverified_authorization: bool,
+    conflicts_with_built_in: MocktailHostAbiBuiltInConflictFn,
+    on_loaded: MocktailHostAbiLoadedCallback,
+    on_error: MocktailHostAbiErrorCallback,
+    ctx: *mut c_void,
+) -> c_int {
+    let payload_path = unsafe { slice_to_str_lossy(payload_path) };
+    let compatibility_manifest_path =
+        unsafe { slice_to_str_lossy(compatibility_manifest_path) };
+    let expected_build_id = unsafe { slice_to_str_lossy(expected_build_id) };
+    let conflict_check = |build_id: &str| -> bool {
+        if let Some(cb) = conflicts_with_built_in {
+            unsafe { cb(ctx, str_slice(build_id)) }
+        } else {
+            false
+        }
+    };
+    match initialize_host_abi_profile_from_env_rs(
+        &payload_path,
+        &compatibility_manifest_path,
+        &expected_build_id,
+        explicit_unverified_authorization,
+        conflict_check,
+    ) {
+        Ok(Some(loaded)) => {
+            if let Some(cb) = on_loaded {
+                unsafe {
+                    cb(
+                        ctx,
+                        &loaded.profile,
+                        str_slice(&loaded.canonical_payload_path),
+                        str_slice(&loaded.payload_sha256),
+                        str_slice(&loaded.profile_sha256),
+                    );
+                }
+            }
+            0
+        }
+        Ok(None) => 1,
+        Err(msg) => {
+            if let Some(cb) = on_error {
+                unsafe { cb(ctx, str_slice(&msg)) };
+            }
+            -1
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3226,6 +3785,265 @@ mod tests {
         let err = prepare_managed_payload_symlinks(&data, &active.root).unwrap_err();
         assert!(err.contains("refusing to replace non-symlink"));
 
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn build_loader_test_elf(build_id_bytes: &[u8; 20], init_count: usize) -> Vec<u8> {
+        let ehdr_sz = 64usize;
+        let phdr_sz = 56usize;
+        let shdr_sz = 64usize;
+        let note_off = ehdr_sz + phdr_sz * 2 + shdr_sz * 2;
+        let mut note = Vec::new();
+        note.extend_from_slice(&4u32.to_le_bytes());
+        note.extend_from_slice(&(build_id_bytes.len() as u32).to_le_bytes());
+        note.extend_from_slice(&3u32.to_le_bytes());
+        note.extend_from_slice(b"GNU\0");
+        note.extend_from_slice(build_id_bytes);
+        let init_off = note_off + note.len();
+        let init_size = init_count * 8;
+        let total = init_off + init_size;
+
+        let mut buf = vec![0u8; total];
+        buf[0..4].copy_from_slice(b"\x7fELF");
+        buf[4] = ELFCLASS64;
+        buf[5] = ELFDATA2LSB;
+        buf[6] = 1;
+        buf[16..18].copy_from_slice(&ET_DYN.to_le_bytes());
+        buf[18..20].copy_from_slice(&guest_abi::ELF_MACHINE.to_le_bytes());
+        buf[20..24].copy_from_slice(&1u32.to_le_bytes());
+        buf[32..40].copy_from_slice(&(ehdr_sz as u64).to_le_bytes());
+        buf[40..48].copy_from_slice(&((ehdr_sz + phdr_sz * 2) as u64).to_le_bytes());
+        buf[52..54].copy_from_slice(&(ehdr_sz as u16).to_le_bytes());
+        buf[54..56].copy_from_slice(&(phdr_sz as u16).to_le_bytes());
+        buf[56..58].copy_from_slice(&2u16.to_le_bytes());
+        buf[58..60].copy_from_slice(&(shdr_sz as u16).to_le_bytes());
+        buf[60..62].copy_from_slice(&2u16.to_le_bytes());
+
+        // Phdr 0: RX segment [0x1000..0x3000)
+        let p0 = ehdr_sz;
+        buf[p0..p0 + 4].copy_from_slice(&PT_LOAD.to_le_bytes());
+        buf[p0 + 4..p0 + 8].copy_from_slice(&(PF_R | PF_X).to_le_bytes());
+        buf[p0 + 16..p0 + 24].copy_from_slice(&0x1000u64.to_le_bytes());
+        buf[p0 + 40..p0 + 48].copy_from_slice(&0x2000u64.to_le_bytes());
+
+        // Phdr 1: RW segment [0x4000..0x6000)
+        let p1 = ehdr_sz + phdr_sz;
+        buf[p1..p1 + 4].copy_from_slice(&PT_LOAD.to_le_bytes());
+        buf[p1 + 4..p1 + 8].copy_from_slice(&(PF_R | PF_W).to_le_bytes());
+        buf[p1 + 16..p1 + 24].copy_from_slice(&0x4000u64.to_le_bytes());
+        buf[p1 + 40..p1 + 48].copy_from_slice(&0x2000u64.to_le_bytes());
+
+        // Shdr 0: SHT_NOTE
+        let s0 = ehdr_sz + phdr_sz * 2;
+        buf[s0 + 4..s0 + 8].copy_from_slice(&7u32.to_le_bytes());
+        buf[s0 + 24..s0 + 32].copy_from_slice(&(note_off as u64).to_le_bytes());
+        buf[s0 + 32..s0 + 40].copy_from_slice(&(note.len() as u64).to_le_bytes());
+        buf[note_off..note_off + note.len()].copy_from_slice(&note);
+
+        // Shdr 1: SHT_INIT_ARRAY at 0x4800
+        let s1 = s0 + shdr_sz;
+        buf[s1 + 4..s1 + 8].copy_from_slice(&SHT_INIT_ARRAY.to_le_bytes());
+        buf[s1 + 8..s1 + 16].copy_from_slice(&(SHF_ALLOC | SHF_WRITE).to_le_bytes());
+        buf[s1 + 16..s1 + 24].copy_from_slice(&0x4800u64.to_le_bytes());
+        buf[s1 + 24..s1 + 32].copy_from_slice(&(init_off as u64).to_le_bytes());
+        buf[s1 + 32..s1 + 40].copy_from_slice(&(init_size as u64).to_le_bytes());
+        buf[s1 + 56..s1 + 64].copy_from_slice(&8u64.to_le_bytes());
+        buf
+    }
+
+    #[test]
+    fn external_host_abi_loader_validates_elf_and_receipt_chain() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static TEST_SEQ: AtomicU64 = AtomicU64::new(0);
+        let uniq = TEST_SEQ.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "mocktail-ext-loader-test-{}-{}",
+            unsafe { libc::getpid() },
+            uniq
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let payload_id_bid = [0xabu8; 20];
+        let build_id = hex::encode(payload_id_bid);
+        let payload_id = format!("2500-{}", build_id);
+        let ref_build_id = "cccccccccccccccccccccccccccccccccccccccc";
+        let runtime_build_id = "dddddddddddddddddddddddddddddddddddddddd";
+        let runtime_sha = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        let ref_sha = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        let fp_sha = "9999999999999999999999999999999999999999999999999999999999999999";
+
+        let payload_dir = root.join("payloads").join(&payload_id);
+        let approvals_dir = root.join("approvals");
+        fs::create_dir_all(&payload_dir).unwrap();
+        fs::create_dir_all(&approvals_dir).unwrap();
+
+        let elf_bytes = build_loader_test_elf(&payload_id_bid, 10);
+        let elf_path = payload_dir.join("libroblox.so");
+        fs::write(&elf_path, &elf_bytes).unwrap();
+        let payload_sha = compute_sha256_hex_internal(&elf_bytes, 0).unwrap();
+
+        let compat_path = root.join("compat.json");
+        fs::write(&compat_path, b"{\"profiles\":[]}").unwrap();
+        let compat_sha = compute_sha256_hex_internal(b"{\"profiles\":[]}", 0).unwrap();
+
+        let profile_doc = serde_json::json!({
+            "schema_version": 1,
+            "elf_build_id": build_id,
+            "payload_id": payload_id,
+            "payload_path": format!("payloads/{}", payload_id),
+            "payload_sha256": payload_sha,
+            "reference": {
+                "elf_build_id": ref_build_id,
+                "payload_sha256": ref_sha
+            },
+            "derivation_anchors": {
+                "signature_version": 1,
+                "allocator_object_initializer_rva": "0x1100",
+                "empty_string_initializer_rva": "0x1110",
+                "jni_singleton_initializer_rva": "0x1120",
+                "constructor_indices": { "2": 2, "3": 3, "4": 4, "5": 5 },
+                "constructor_rvas": {
+                    "2": "0x1200", "3": "0x1210", "4": "0x1220", "5": "0x1230"
+                }
+            },
+            "profile": {
+                "elf_build_id": build_id,
+                "host_allocator_bridges_supported": true,
+                "default_allocator_strategy": "native_mimalloc",
+                "bridge_entries": [
+                    { "rva": "0x1300", "kind": "allocate", "label": "small-allocate" },
+                    { "rva": "0x1310", "kind": "allocate", "label": "allocate" },
+                    { "rva": "0x1320", "kind": "reallocate", "label": "reallocate" },
+                    { "rva": "0x1330", "kind": "aligned_allocate", "label": "aligned-allocate-direct" },
+                    { "rva": "0x1340", "kind": "free", "label": "free" },
+                    { "rva": "0x1350", "kind": "usable_size", "label": "usable-size" }
+                ],
+                "data_seeds": {
+                    "allocator_object_slot": "0x4100",
+                    "empty_string_slot": "0x4110",
+                    "jni_singleton_slot": "0x4120",
+                    "jni_singleton_bytes": 1024,
+                    "arena_initializer": "0x1400",
+                    "allocator_thread_initializer": "0x1410",
+                    "arena_guard_slot": "0x4130",
+                    "arena_table_slot": "0x4140",
+                    "arena_table_slot_count": 0x400000
+                },
+                "native_allocator": {
+                    "allocate": "0x1310",
+                    "deallocate": "0x1340"
+                },
+                "native_pre_jni_bootstrap": {
+                    "registry_initializer": "0x1420",
+                    "registry_slot": "0x4150"
+                },
+                "init_array_offset": "0x4800",
+                "init_array_count": 10,
+                "constructor_run_ranges": [
+                    { "begin": 2, "end_exclusive": 3 },
+                    { "begin": 5, "end_exclusive": 10 }
+                ],
+                "native_mimalloc_constructor_run_ranges": [
+                    { "begin": 2, "end_exclusive": 10 }
+                ],
+                "native_mimalloc_thread_initializer_after_constructor": 2
+            }
+        });
+        let profile_path = root.join("profile.json");
+        let profile_bytes = serde_json::to_vec(&profile_doc).unwrap();
+        fs::write(&profile_path, &profile_bytes).unwrap();
+        let profile_sha = compute_sha256_hex_internal(&profile_bytes, 0).unwrap();
+
+        let make_attestation = |run: usize| -> (Vec<u8>, String, String) {
+            let run_id = format!("{}-{}-100-{}", payload_id, run, run + 10);
+            let doc = serde_json::json!({
+                "schema_version": 1,
+                "status": "passed",
+                "canary_tier": "C",
+                "run": run,
+                "run_id": run_id,
+                "payload_id": payload_id,
+                "payload_fingerprint": fp_sha,
+                "profile_sha256": profile_sha,
+                "compatibility_manifest_sha256": compat_sha,
+                "runtime_sha256": runtime_sha,
+                "runtime_build_id": runtime_build_id,
+                "readiness_log_sha256": ref_sha
+            });
+            let bytes = serde_json::to_vec(&doc).unwrap();
+            let sha = compute_sha256_hex_internal(&bytes, 0).unwrap();
+            (bytes, sha, run_id)
+        };
+        let (c1_bytes, c1_sha, _) = make_attestation(1);
+        let (c2_bytes, c2_sha, _) = make_attestation(2);
+        let evidence = format!(
+            "runtime_build_id={}\npayload={}\nprofile={}\ncompatibility={}\ncanary_1={}\ncanary_2={}\n",
+            runtime_build_id, fp_sha, profile_sha, compat_sha, c1_sha, c2_sha
+        );
+        let generation = compute_sha256_hex_internal(evidence.as_bytes(), 40).unwrap();
+
+        let c1_path = approvals_dir.join(format!("{}-{}.canary-1.json", payload_id, generation));
+        let c2_path = approvals_dir.join(format!("{}-{}.canary-2.json", payload_id, generation));
+        fs::write(&c1_path, &c1_bytes).unwrap();
+        fs::write(&c2_path, &c2_bytes).unwrap();
+
+        let canonical_elf = fs::canonicalize(&elf_path).unwrap();
+        let receipt_doc = serde_json::json!({
+            "schema_version": 1,
+            "status": "approved",
+            "payload_id": payload_id,
+            "generation": generation,
+            "elf_build_id": build_id,
+            "payload_path": canonical_elf.to_string_lossy(),
+            "payload_sha256": payload_sha,
+            "profile_sha256": profile_sha,
+            "runtime_build_id": runtime_build_id,
+            "canary_runtime_sha256": runtime_sha,
+            "runtime_sha256": runtime_sha,
+            "compatibility_manifest_sha256": compat_sha,
+            "payload_fingerprint": fp_sha,
+            "canary_tier": "C",
+            "successful_runs": 2,
+            "canary_attestation_sha256": [c1_sha, c2_sha]
+        });
+        let receipt_path = approvals_dir.join(format!("{}-{}.json", payload_id, generation));
+        fs::write(&receipt_path, serde_json::to_vec(&receipt_doc).unwrap()).unwrap();
+
+        for immutable in [&c1_path, &c2_path, &receipt_path] {
+            let mut perms = fs::metadata(immutable).unwrap().permissions();
+            perms.set_mode(0o444);
+            fs::set_permissions(immutable, perms).unwrap();
+        }
+
+        let req = ExternalHostAbiRequest {
+            profile_file: profile_path.to_str().unwrap(),
+            payload_path: elf_path.to_str().unwrap(),
+            compatibility_manifest_path: compat_path.to_str().unwrap(),
+            expected_build_id: &build_id,
+            approval_receipt_path: receipt_path.to_str().unwrap(),
+            candidate_canary: false,
+            candidate_process_authorization: false,
+            explicit_unverified_authorization: false,
+        };
+        let loaded = load_external_host_abi_profile_rs(&req, |_| false).unwrap();
+        assert_eq!(loaded.payload_sha256, payload_sha);
+        assert_eq!(loaded.profile_sha256, profile_sha);
+
+        // Mismatched init_array count rejects during pure-Rust ELF validation
+        let bad_elf = build_loader_test_elf(&payload_id_bid, 9);
+        let mut bad_prof = loaded.profile;
+        bad_prof.init_array_count = 10;
+        let bad_elf_path = payload_dir.join("bad.so");
+        fs::write(&bad_elf_path, bad_elf).unwrap();
+        let elf_err = validate_profile_against_elf_rs(&bad_elf_path, &bad_prof).unwrap_err();
+        assert!(elf_err.contains(".init_array"));
+
+        for immutable in [&c1_path, &c2_path, &receipt_path] {
+            let mut perms = fs::metadata(immutable).unwrap().permissions();
+            perms.set_mode(0o644);
+            fs::set_permissions(immutable, perms).unwrap();
+        }
         let _ = fs::remove_dir_all(&root);
     }
 }

@@ -4849,6 +4849,109 @@ void mocktail_rust_http_download_file(
                       const MocktailRustHttpDownloadResultView* result),
     void* ctx);
 
+// ============================================================================
+// 149. External HostAbi Profile Loader Engine (storage_paths)
+// ============================================================================
+
+typedef struct MocktailRustExternalHostAbiRequestView {
+  struct MocktailRustStrSlice profile_file;
+  struct MocktailRustStrSlice payload_path;
+  struct MocktailRustStrSlice compatibility_manifest_path;
+  struct MocktailRustStrSlice expected_build_id;
+  struct MocktailRustStrSlice approval_receipt_path;
+  bool candidate_canary;
+  bool candidate_process_authorization;
+  bool explicit_unverified_authorization;
+} MocktailRustExternalHostAbiRequestView;
+
+typedef bool (*MocktailHostAbiBuiltInConflictFn)(
+    void* ctx, struct MocktailRustStrSlice build_id);
+typedef void (*MocktailHostAbiLoadedCallback)(
+    void* ctx, const struct MocktailRustParsedHostAbiProfile* profile,
+    struct MocktailRustStrSlice canonical_payload_path,
+    struct MocktailRustStrSlice payload_sha256,
+    struct MocktailRustStrSlice profile_sha256);
+typedef void (*MocktailHostAbiErrorCallback)(
+    void* ctx, struct MocktailRustStrSlice error);
+
+int32_t mocktail_rust_host_abi_load_external_profile(
+    const MocktailRustExternalHostAbiRequestView* request,
+    MocktailHostAbiBuiltInConflictFn conflicts_with_built_in,
+    MocktailHostAbiLoadedCallback on_loaded,
+    MocktailHostAbiErrorCallback on_error, void* ctx);
+
+int32_t mocktail_rust_host_abi_initialize_from_env(
+    struct MocktailRustStrSlice payload_path,
+    struct MocktailRustStrSlice compatibility_manifest_path,
+    struct MocktailRustStrSlice expected_build_id,
+    bool explicit_unverified_authorization,
+    MocktailHostAbiBuiltInConflictFn conflicts_with_built_in,
+    MocktailHostAbiLoadedCallback on_loaded,
+    MocktailHostAbiErrorCallback on_error, void* ctx);
+
+// ============================================================================
+// 150. HostAbi Static Deriver Engine (host_abi_deriver)
+// ============================================================================
+
+typedef struct MocktailRustDeriverOptionsView {
+  struct MocktailRustStrSlice reference_library;
+  struct MocktailRustStrSlice reference_profile;
+  const struct MocktailRustStrSlice* reference_compatibility_manifests_ptr;
+  size_t reference_compatibility_manifests_len;
+  struct MocktailRustStrSlice candidate_payload_directory;
+  struct MocktailRustStrSlice output_directory;
+} MocktailRustDeriverOptionsView;
+
+typedef struct MocktailRustDecodedOperandView {
+  uint8_t kind;
+  uint8_t size;
+  bool rip_relative;
+  int32_t scale;
+  int64_t value;
+  struct MocktailRustStrSlice reg_name;
+  struct MocktailRustStrSlice seg_name;
+  struct MocktailRustStrSlice base_name;
+  struct MocktailRustStrSlice index_name;
+} MocktailRustDecodedOperandView;
+
+typedef struct MocktailRustDecodedInsnView {
+  uint64_t address;
+  uint16_t size;
+  uint8_t imm_offset;
+  uint8_t imm_size;
+  uint8_t disp_offset;
+  uint8_t disp_size;
+  bool control_flow;
+  bool returns;
+  struct MocktailRustStrSlice mnemonic;
+  const MocktailRustDecodedOperandView* operands_ptr;
+  size_t operand_count;
+} MocktailRustDecodedInsnView;
+
+typedef int32_t (*MocktailDeriverOpenX86Fn)(void* ctx);
+typedef bool (*MocktailDeriverOnInsnFn)(void* ctx,
+                                        const MocktailRustDecodedInsnView* insn);
+typedef int32_t (*MocktailDeriverDecodeX86Fn)(
+    void* disasm_ctx, uint64_t rva, const uint8_t* bytes_ptr, size_t bytes_len,
+    size_t count, MocktailDeriverOnInsnFn on_insn, void* recv_ctx);
+typedef void (*MocktailDeriverSidecarIdentityCallback)(
+    void* ctx, struct MocktailRustStrSlice elf_build_id,
+    struct MocktailRustStrSlice payload_id);
+typedef void (*MocktailDeriverResultCallback)(
+    void* ctx, struct MocktailRustStrSlice profile_path,
+    struct MocktailRustStrSlice compatibility_path);
+
+int32_t mocktail_rust_deriver_read_sidecar_identity_file(
+    struct MocktailRustStrSlice sidecar_path,
+    MocktailDeriverSidecarIdentityCallback on_identity,
+    MocktailHostAbiErrorCallback on_error, void* ctx);
+
+int32_t mocktail_rust_deriver_derive_host_abi_profile(
+    const MocktailRustDeriverOptionsView* options,
+    MocktailDeriverOpenX86Fn open_disasm, MocktailDeriverDecodeX86Fn decode_x86,
+    void* disasm_ctx, MocktailDeriverResultCallback on_result,
+    MocktailHostAbiErrorCallback on_error, void* ctx);
+
 #ifdef __cplusplus
 }
 #endif

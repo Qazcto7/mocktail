@@ -1,2133 +1,236 @@
 #include "update/host_abi_deriver.h"
 
 #include <capstone.h>
-#include <elf.h>
-#include <fcntl.h>
-#include <gelf.h>
-#include <libelf.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
-#include <algorithm>
-#include <array>
 #include <cstdint>
-#include <cstring>
-#include <filesystem>
-#include <iterator>
-#include <map>
-#include <optional>
-#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
-#include "compat/elf_build_id.h"
-#include "compat/fmod_output_device_contract.h"
-#include "compat/guest_abi.h"
 #include "mocktail/mocktail_rust.h"
-#include "update/payload_integrity.h"
 
 namespace mocktail::update {
+
 namespace {
 
-constexpr std::uint64_t kMaximumElfBytes = 512ULL * 1024ULL * 1024ULL;
-constexpr std::uint64_t kMaximumJsonBytes = 1024ULL * 1024ULL;
-constexpr std::size_t kMaximumRelocations = 4U * 1024U * 1024U;
-constexpr std::size_t kMaximumInitArrayEntries = 64U * 1024U;
-constexpr std::size_t kRegistryInitializerMaximumBytes = 0x1000;
-constexpr std::uint32_t kAndroidRelaSection = 0x60000002U;
-constexpr std::uint32_t kRelativeRelocation = 8U;
-constexpr std::int64_t kGroupedByInfo = 1;
-constexpr std::int64_t kGroupedByOffsetDelta = 2;
-constexpr std::int64_t kGroupedByAddend = 4;
-constexpr std::int64_t kGroupHasAddend = 8;
-
-constexpr std::array<std::string_view, 7> kRequiredExports = {
-    "JNI_OnLoad",
-    "Java_com_roblox_engine_jni_NativeGLInterface_nativeGameGlobalInit",
-    "Java_com_roblox_engine_jni_NativeGLInterface_nativeUpdateAdapterInit",
-    "Java_com_roblox_engine_jni_NativeGLInterface_"
-    "nativeAppBridgeV2InitWithParams",
-    "Java_com_roblox_engine_jni_NativeGLInterface_"
-    "nativeAppBridgeStartLuaAppDM",
-    "Java_com_roblox_engine_jni_NativeGLInterface_"
-    "nativeAppBridgeV2StartAppWithParams",
-    "Java_com_roblox_engine_jni_NativeGLInterface_"
-    "nativeCallMessagesFromMainThread",
-};
-
-constexpr std::array<std::string_view, 2> kToolchainMarkers = {
-    "Android (13624864, +pgo, +bolt, +lto, +mlgo, based on r530567e) "
-    "clang version 19.0.1",
-    "Linker: LLD 19.0.1",
-};
-
-bool IsLowerHex(std::string_view value, std::size_t size) {
-  return value.size() == size &&
-         std::all_of(value.begin(), value.end(), [](unsigned char character) {
-           return (character >= '0' && character <= '9') ||
-                  (character >= 'a' && character <= 'f');
-         });
+MocktailRustStrSlice ToSlice(std::string_view value) noexcept {
+  return MocktailRustStrSlice{value.data(), value.size()};
 }
 
-bool CheckedRange(std::uint64_t offset, std::uint64_t size,
-                  std::uint64_t limit) {
-  return offset <= limit && size <= limit - offset;
+MocktailRustStrSlice CStrToSlice(const char* value) noexcept {
+  if (value == nullptr) {
+    return MocktailRustStrSlice{nullptr, 0};
+  }
+  return ToSlice(std::string_view(value));
 }
 
-std::string ReadSmallRegular(const std::filesystem::path& path,
-                             std::uint64_t maximum, std::string* error) {
-  const int descriptor = open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-  if (descriptor < 0) {
-    *error = "cannot open JSON input: " + path.string();
+std::string FromSlice(MocktailRustStrSlice slice) {
+  if (slice.ptr == nullptr || slice.len == 0) {
     return {};
   }
-  struct stat metadata = {};
-  if (fstat(descriptor, &metadata) != 0 || !S_ISREG(metadata.st_mode) ||
-      metadata.st_size <= 0 ||
-      static_cast<std::uint64_t>(metadata.st_size) > maximum) {
-    close(descriptor);
-    *error = "JSON input is not a bounded regular file";
-    return {};
-  }
-  std::string contents(static_cast<std::size_t>(metadata.st_size), '\0');
-  std::size_t offset = 0;
-  while (offset < contents.size()) {
-    const ssize_t read_size =
-        read(descriptor, contents.data() + offset, contents.size() - offset);
-    if (read_size < 0 && errno == EINTR) continue;
-    if (read_size <= 0) {
-      close(descriptor);
-      *error = "cannot read JSON input";
-      return {};
-    }
-    offset += static_cast<std::size_t>(read_size);
-  }
-  close(descriptor);
-  return contents;
+  return std::string(slice.ptr, slice.len);
 }
 
-bool WritePrivate(const std::filesystem::path& path, std::string_view contents,
-                  std::string* error) {
-  const int descriptor = open(
-      path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
-  if (descriptor < 0) {
-    *error = "cannot create derived HostAbi artifact";
-    return false;
-  }
-  std::size_t offset = 0;
-  while (offset < contents.size()) {
-    const ssize_t written =
-        write(descriptor, contents.data() + offset, contents.size() - offset);
-    if (written < 0 && errno == EINTR) continue;
-    if (written <= 0) {
-      close(descriptor);
-      *error = "cannot write derived HostAbi artifact";
-      return false;
+struct CapstoneDisasmState {
+  csh handle = 0;
+
+  ~CapstoneDisasmState() {
+    if (handle != 0) {
+      cs_close(&handle);
     }
-    offset += static_cast<std::size_t>(written);
   }
-  const bool durable = fsync(descriptor) == 0;
-  close(descriptor);
-  if (!durable) *error = "cannot persist derived HostAbi artifact";
-  return durable;
+};
+
+int32_t OpenX86Callback(void* ctx) {
+  auto* state = static_cast<CapstoneDisasmState*>(ctx);
+  if (state == nullptr) {
+    return -1;
+  }
+  if (state->handle != 0) {
+    return 0;
+  }
+  int major = 0;
+  int minor = 0;
+  cs_version(&major, &minor);
+  if (major != 5 || cs_open(CS_ARCH_X86, CS_MODE_64, &state->handle) != CS_ERR_OK ||
+      cs_option(state->handle, CS_OPT_DETAIL, CS_OPT_ON) != CS_ERR_OK) {
+    if (state->handle != 0) {
+      cs_close(&state->handle);
+      state->handle = 0;
+    }
+    return -1;
+  }
+  return 0;
 }
 
-struct Segment {
-  std::uint64_t offset = 0;
-  std::uint64_t address = 0;
-  std::uint64_t file_size = 0;
-  std::uint64_t memory_size = 0;
-  std::uint32_t flags = 0;
-
-  bool ContainsMemory(std::uint64_t rva, std::uint64_t size) const {
-    return rva >= address && CheckedRange(rva - address, size, memory_size);
+int32_t DecodeX86Callback(void* disasm_ctx, uint64_t rva,
+                          const uint8_t* bytes_ptr, size_t bytes_len,
+                          size_t count, MocktailDeriverOnInsnFn on_insn,
+                          void* recv_ctx) {
+  auto* state = static_cast<CapstoneDisasmState*>(disasm_ctx);
+  if (state == nullptr || state->handle == 0) {
+    return 1;
+  }
+  if (on_insn == nullptr) {
+    return 2;
   }
 
-  bool ContainsFile(std::uint64_t rva, std::uint64_t size) const {
-    return rva >= address && CheckedRange(rva - address, size, file_size);
-  }
-};
-
-struct Section {
-  std::size_t index = 0;
-  std::string name;
-  std::uint32_t type = 0;
-  std::uint64_t flags = 0;
-  std::uint64_t address = 0;
-  std::uint64_t offset = 0;
-  std::uint64_t size = 0;
-  std::size_t link = 0;
-  std::uint64_t entry_size = 0;
-};
-
-class ElfImage final {
- public:
-  ~ElfImage() {
-    if (elf_ != nullptr) elf_end(elf_);
-    if (mapping_ != MAP_FAILED) munmap(mapping_, file_size_);
-    if (descriptor_ >= 0) close(descriptor_);
+  cs_insn* decoded = nullptr;
+  const std::size_t decoded_count =
+      cs_disasm(state->handle, bytes_ptr, bytes_len, rva, count, &decoded);
+  if (decoded_count != count || decoded == nullptr) {
+    if (decoded != nullptr) {
+      cs_free(decoded, decoded_count);
+    }
+    return 2;
   }
 
-  ElfImage(const ElfImage&) = delete;
-  ElfImage& operator=(const ElfImage&) = delete;
-  ElfImage() = default;
+  std::vector<MocktailRustDecodedOperandView> operands;
+  for (std::size_t index = 0; index < count; ++index) {
+    const cs_insn& source = decoded[index];
+    if (source.size == 0 || source.detail == nullptr) {
+      cs_free(decoded, decoded_count);
+      return 3;
+    }
 
-  bool Open(const std::filesystem::path& path, std::string* error) {
-    path_ = path;
-    descriptor_ = open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (descriptor_ < 0) {
-      *error = "cannot open ELF input: " + path.string();
-      return false;
-    }
-    struct stat metadata = {};
-    if (fstat(descriptor_, &metadata) != 0 || !S_ISREG(metadata.st_mode) ||
-        metadata.st_size < static_cast<off_t>(sizeof(Elf64_Ehdr)) ||
-        static_cast<std::uint64_t>(metadata.st_size) > kMaximumElfBytes) {
-      *error = "ELF input is not a bounded regular file";
-      return false;
-    }
-    file_size_ = static_cast<std::size_t>(metadata.st_size);
-    mapping_ =
-        mmap(nullptr, file_size_, PROT_READ, MAP_PRIVATE, descriptor_, 0);
-    if (mapping_ == MAP_FAILED) {
-      *error = "cannot map ELF input";
-      return false;
-    }
-    if (elf_version(EV_CURRENT) == EV_NONE) {
-      *error = "libelf cannot initialise";
-      return false;
-    }
-    elf_ = elf_begin(descriptor_, ELF_C_READ, nullptr);
-    GElf_Ehdr header{};
-    if (elf_ == nullptr || elf_kind(elf_) != ELF_K_ELF ||
-        gelf_getehdr(elf_, &header) == nullptr ||
-        gelf_getclass(elf_) != ELFCLASS64 || header.e_type != ET_DYN ||
-        header.e_machine != compat::kGuestElfMachine ||
-        header.e_version != EV_CURRENT ||
-        header.e_ident[EI_DATA] != ELFDATA2LSB) {
-      *error = "candidate must be a little-endian guest-abi ET_DYN ELF";
-      return false;
-    }
-    std::size_t program_count = 0;
-    if (elf_getphdrnum(elf_, &program_count) != 0 || program_count == 0) {
-      *error = "ELF has no program headers";
-      return false;
-    }
-    for (std::size_t index = 0; index < program_count; ++index) {
-      GElf_Phdr program{};
-      if (gelf_getphdr(elf_, index, &program) == nullptr) {
-        *error = "cannot inspect ELF program header";
-        return false;
-      }
-      if (program.p_type == PT_GNU_RELRO) {
-        if (program.p_memsz == 0 ||
-            program.p_vaddr > UINT64_MAX - program.p_memsz) {
-          *error = "ELF PT_GNU_RELRO range is invalid";
-          return false;
-        }
-        relro_ranges_.emplace_back(program.p_vaddr, program.p_memsz);
-      }
-      if (program.p_type != PT_LOAD) continue;
-      if (program.p_filesz > program.p_memsz ||
-          !CheckedRange(program.p_offset, program.p_filesz, file_size_)) {
-        *error = "ELF PT_LOAD exceeds file bounds";
-        return false;
-      }
-      segments_.push_back({program.p_offset, program.p_vaddr, program.p_filesz,
-                           program.p_memsz, program.p_flags});
-    }
-    if (segments_.empty()) {
-      *error = "ELF has no PT_LOAD segments";
-      return false;
-    }
-    std::size_t section_count = 0;
-    std::size_t names_index = 0;
-    if (elf_getshdrnum(elf_, &section_count) != 0 || section_count == 0 ||
-        elf_getshdrstrndx(elf_, &names_index) != 0) {
-      *error = "cannot enumerate ELF sections";
-      return false;
-    }
-    sections_.reserve(section_count);
-    for (std::size_t index = 0; index < section_count; ++index) {
-      Elf_Scn* section = elf_getscn(elf_, index);
-      GElf_Shdr header_value{};
-      if (section == nullptr ||
-          gelf_getshdr(section, &header_value) == nullptr) {
-        *error = "cannot inspect ELF section";
-        return false;
-      }
-      const char* name = elf_strptr(elf_, names_index, header_value.sh_name);
-      if (name == nullptr ||
-          (header_value.sh_type != SHT_NOBITS &&
-           !CheckedRange(header_value.sh_offset, header_value.sh_size,
-                         file_size_))) {
-        *error = "ELF section exceeds file bounds";
-        return false;
-      }
-      Section parsed{index,
-                     name,
-                     header_value.sh_type,
-                     header_value.sh_flags,
-                     header_value.sh_addr,
-                     header_value.sh_offset,
-                     header_value.sh_size,
-                     header_value.sh_link,
-                     header_value.sh_entsize};
-      if (!parsed.name.empty() &&
-          by_name_.find(parsed.name) != by_name_.end()) {
-        *error = "ELF contains duplicate section " + parsed.name;
-        return false;
-      }
-      if (!parsed.name.empty()) by_name_[parsed.name] = sections_.size();
-      sections_.push_back(std::move(parsed));
-    }
-    if (!ValidateSections(error)) return false;
-    const compat::BuildIdResult identity =
-        compat::ReadElfBuildId(path.string());
-    if (!identity || !IsLowerHex(identity.build_id, 40)) {
-      *error = identity ? "ELF Build ID is not 20 bytes" : identity.error;
-      return false;
-    }
-    build_id_ = identity.build_id;
-    sha256_ = HashRegularFile(path, error);
-    return error->empty();
-  }
-
-  const std::string& build_id() const { return build_id_; }
-  const std::string& sha256() const { return sha256_; }
-  std::size_t file_size() const { return file_size_; }
-
-  const Section* FindSection(std::string_view name) const {
-    const auto found = by_name_.find(std::string(name));
-    return found == by_name_.end() ? nullptr : &sections_[found->second];
-  }
-
-  std::string_view Bytes(std::uint64_t offset, std::uint64_t size,
-                         std::string* error) const {
-    if (!CheckedRange(offset, size, file_size_)) {
-      *error = "ELF byte range exceeds file bounds";
-      return {};
-    }
-    return {static_cast<const char*>(mapping_) + offset,
-            static_cast<std::size_t>(size)};
-  }
-
-  std::string_view SectionBytes(const Section& section,
-                                std::string* error) const {
-    return Bytes(section.offset, section.size, error);
-  }
-
-  const Segment* SegmentForMemory(std::uint64_t rva, std::uint64_t size) const {
-    const Segment* result = nullptr;
-    for (const Segment& segment : segments_) {
-      if (!segment.ContainsMemory(rva, size)) continue;
-      if (result != nullptr) return nullptr;
-      result = &segment;
-    }
-    return result;
-  }
-
-  bool RequireCode(std::uint64_t rva, std::uint64_t size,
-                   std::string* error) const {
-    const Segment* segment = SegmentForMemory(rva, size);
-    if (segment == nullptr || !segment->ContainsFile(rva, size) ||
-        (segment->flags & (PF_R | PF_X)) != (PF_R | PF_X) ||
-        (segment->flags & PF_W) != 0) {
-      *error = "RVA is not in a read/execute ELF segment";
-      return false;
-    }
-    return true;
-  }
-
-  bool RequireWritable(std::uint64_t rva, std::uint64_t size,
-                       std::string* error) const {
-    const Segment* segment = SegmentForMemory(rva, size);
-    if (segment == nullptr ||
-        (segment->flags & (PF_R | PF_W)) != (PF_R | PF_W) ||
-        (segment->flags & PF_X) != 0) {
-      *error = "RVA is not in a non-executable read/write ELF segment";
-      return false;
-    }
-    return true;
-  }
-
-  bool RequireRelro(std::uint64_t rva, std::uint64_t size,
-                    std::string* error) const {
-    std::size_t matches = 0;
-    for (const auto& [begin, length] : relro_ranges_) {
-      if (rva >= begin && CheckedRange(rva - begin, size, length)) ++matches;
-    }
-    if (matches != 1) {
-      *error = "RVA is not in a unique PT_GNU_RELRO range";
-      return false;
-    }
-    return true;
-  }
-
-  std::optional<std::uint64_t> OffsetForRva(std::uint64_t rva,
-                                            std::uint64_t size,
-                                            std::string* error) const {
-    const Segment* selected = nullptr;
-    for (const Segment& segment : segments_) {
-      if (!segment.ContainsFile(rva, size)) continue;
-      if (selected != nullptr) {
-        *error = "RVA has no unique file mapping";
-        return std::nullopt;
-      }
-      selected = &segment;
-    }
-    if (selected == nullptr) {
-      *error = "RVA has no file mapping";
-      return std::nullopt;
-    }
-    return selected->offset + rva - selected->address;
-  }
-
-  bool ValidateToolchain(std::string* error) const {
-    const Section* comment = FindSection(".comment");
-    if (comment == nullptr) {
-      *error = "ELF is missing .comment";
-      return false;
-    }
-    const std::string_view bytes = SectionBytes(*comment, error);
-    if (!error->empty()) return false;
-    for (const std::string_view marker : kToolchainMarkers) {
-      if (bytes.find(marker) == bytes.npos) {
-        *error = "ELF compiler/linker family differs from approved reference";
-        return false;
-      }
-    }
-    return true;
-  }
-
-  bool HasRequiredExports(std::string* error) const {
-    const Section* symbols = FindSection(".dynsym");
-    if (symbols == nullptr || symbols->link >= sections_.size()) {
-      *error = "ELF dynamic symbols are invalid";
-      return false;
-    }
-    const Section& strings = sections_[symbols->link];
-    if (strings.name != ".dynstr") {
-      *error = "ELF .dynsym does not reference .dynstr";
-      return false;
-    }
-    std::set<std::string> exported;
-    Elf_Scn* section = elf_getscn(elf_, symbols->index);
-    Elf_Data* data =
-        section == nullptr ? nullptr : elf_getdata(section, nullptr);
-    if (data == nullptr || symbols->entry_size == 0) {
-      *error = "cannot read ELF dynamic symbols";
-      return false;
-    }
-    const std::size_t count = symbols->size / symbols->entry_size;
-    for (std::size_t index = 0; index < count; ++index) {
-      GElf_Sym symbol{};
-      if (gelf_getsym(data, index, &symbol) == nullptr) {
-        *error = "cannot decode ELF dynamic symbol";
-        return false;
-      }
-      if (GELF_ST_TYPE(symbol.st_info) != STT_FUNC ||
-          (GELF_ST_BIND(symbol.st_info) != STB_GLOBAL &&
-           GELF_ST_BIND(symbol.st_info) != STB_WEAK) ||
-          symbol.st_shndx == SHN_UNDEF || symbol.st_name == 0) {
-        continue;
-      }
-      const char* name = elf_strptr(elf_, symbols->link, symbol.st_name);
-      if (name != nullptr) exported.insert(name);
-    }
-    for (const std::string_view required : kRequiredExports) {
-      if (exported.find(std::string(required)) == exported.end()) {
-        *error = "candidate is missing required JNI export: " +
-                 std::string(required);
-        return false;
-      }
-    }
-    return true;
-  }
-
-  std::optional<std::vector<std::uint64_t>> InitArray(std::string* error) const;
-  std::optional<std::map<std::uint64_t, std::uint64_t>> RelativeRelocations(
-      std::string* error) const;
-
- private:
-  bool ValidateSections(std::string* error) const {
-    const Section* text = FindSection(".text");
-    const Section* init = FindSection(".init_array");
-    const Section* rela = FindSection(".rela.dyn");
-    const Section* dynsym = FindSection(".dynsym");
-    const Section* dynstr = FindSection(".dynstr");
-    const Section* note = FindSection(".note.gnu.build-id");
-    const Section* comment = FindSection(".comment");
-    if (text == nullptr || text->type != SHT_PROGBITS ||
-        (text->flags & (SHF_ALLOC | SHF_EXECINSTR)) !=
-            (SHF_ALLOC | SHF_EXECINSTR) ||
-        (text->flags & SHF_WRITE) != 0 || init == nullptr ||
-        init->type != SHT_INIT_ARRAY ||
-        (init->flags & (SHF_ALLOC | SHF_WRITE)) != (SHF_ALLOC | SHF_WRITE) ||
-        (init->flags & SHF_EXECINSTR) != 0 || init->size == 0 ||
-        init->size % sizeof(std::uint64_t) != 0 ||
-        init->size / sizeof(std::uint64_t) > kMaximumInitArrayEntries ||
-        (init->entry_size != 0 && init->entry_size != sizeof(std::uint64_t)) ||
-        rela == nullptr || rela->type != kAndroidRelaSection ||
-        dynsym == nullptr || dynsym->type != SHT_DYNSYM || dynstr == nullptr ||
-        dynstr->type != SHT_STRTAB || note == nullptr ||
-        note->type != SHT_NOTE || comment == nullptr ||
-        comment->type != SHT_PROGBITS) {
-      *error = "ELF required section layout is unsupported";
-      return false;
-    }
-    return RequireCode(text->address, text->size, error) &&
-           RequireWritable(init->address, init->size, error);
-  }
-
-  std::filesystem::path path_;
-  int descriptor_ = -1;
-  std::size_t file_size_ = 0;
-  void* mapping_ = MAP_FAILED;
-  Elf* elf_ = nullptr;
-  std::vector<Segment> segments_;
-  std::vector<std::pair<std::uint64_t, std::uint64_t>> relro_ranges_;
-  std::vector<Section> sections_;
-  std::map<std::string, std::size_t> by_name_;
-  std::string build_id_;
-  std::string sha256_;
-};
-
-class SlebReader final {
- public:
-  explicit SlebReader(std::string_view bytes) : bytes_(bytes) {}
-
-  std::optional<std::int64_t> Pop(std::string* error) {
-    std::uint64_t value = 0;
-    unsigned shift = 0;
-    unsigned char byte = 0;
-    do {
-      if (position_ >= bytes_.size() || shift >= 70) {
-        *error = "invalid or truncated APS2 SLEB128 value";
-        return std::nullopt;
-      }
-      byte = static_cast<unsigned char>(bytes_[position_++]);
-      value |= static_cast<std::uint64_t>(byte & 0x7fU) << shift;
-      shift += 7;
-    } while ((byte & 0x80U) != 0);
-    if (shift < 64 && (byte & 0x40U) != 0) value |= ~0ULL << shift;
-    return static_cast<std::int64_t>(value);
-  }
-
-  bool at_end() const { return position_ == bytes_.size(); }
-
- private:
-  std::string_view bytes_;
-  std::size_t position_ = 0;
-};
-
-struct Relocation {
-  std::uint64_t offset = 0;
-  std::uint64_t info = 0;
-  std::uint64_t addend = 0;
-};
-
-std::optional<std::vector<Relocation>> DecodeAps2(std::string_view encoded,
-                                                  std::string* error) {
-  if (encoded.size() < 4 || encoded.substr(0, 4) != "APS2") {
-    *error = ".rela.dyn does not use APS2 encoding";
-    return std::nullopt;
-  }
-  SlebReader reader(encoded.substr(4));
-  const auto count_value = reader.Pop(error);
-  const auto first_offset = reader.Pop(error);
-  if (!count_value.has_value() || !first_offset.has_value() ||
-      *count_value < 0 ||
-      static_cast<std::uint64_t>(*count_value) > kMaximumRelocations ||
-      *first_offset < 0) {
-    if (error->empty()) *error = "APS2 relocation header is invalid";
-    return std::nullopt;
-  }
-  const std::size_t count = static_cast<std::size_t>(*count_value);
-  std::int64_t relocation_offset = *first_offset;
-  std::int64_t relocation_info = 0;
-  std::int64_t relocation_addend = 0;
-  std::vector<Relocation> result;
-  result.reserve(count);
-  while (result.size() < count) {
-    const auto group_size_value = reader.Pop(error);
-    const auto flags_value = reader.Pop(error);
-    if (!group_size_value.has_value() || !flags_value.has_value() ||
-        *group_size_value <= 0 ||
-        static_cast<std::uint64_t>(*group_size_value) > count - result.size() ||
-        *flags_value < 0 || (*flags_value & ~0x0fLL) != 0) {
-      if (error->empty()) *error = "APS2 relocation group is invalid";
-      return std::nullopt;
-    }
-    const std::int64_t flags = *flags_value;
-    std::int64_t offset_delta = 0;
-    if ((flags & kGroupedByOffsetDelta) != 0) {
-      const auto value = reader.Pop(error);
-      if (!value.has_value()) return std::nullopt;
-      offset_delta = *value;
-    }
-    if ((flags & kGroupedByInfo) != 0) {
-      const auto value = reader.Pop(error);
-      if (!value.has_value()) return std::nullopt;
-      relocation_info = *value;
-    }
-    const std::int64_t addend_mode =
-        flags & (kGroupHasAddend | kGroupedByAddend);
-    if (addend_mode == (kGroupHasAddend | kGroupedByAddend)) {
-      const auto value = reader.Pop(error);
-      if (!value.has_value()) return std::nullopt;
-      relocation_addend += *value;
-    } else if (addend_mode != kGroupHasAddend) {
-      relocation_addend = 0;
-    }
-    for (std::int64_t index = 0; index < *group_size_value; ++index) {
-      if ((flags & kGroupedByOffsetDelta) != 0) {
-        relocation_offset += offset_delta;
+    const cs_x86& x86 = source.detail->x86;
+    operands.clear();
+    operands.reserve(x86.op_count);
+    for (std::uint8_t op_idx = 0; op_idx < x86.op_count; ++op_idx) {
+      const cs_x86_op& src_op = x86.operands[op_idx];
+      MocktailRustDecodedOperandView op{};
+      op.size = src_op.size;
+      if (src_op.type == X86_OP_REG) {
+        op.kind = 0;
+        op.reg_name = CStrToSlice(cs_reg_name(state->handle, src_op.reg));
+      } else if (src_op.type == X86_OP_IMM) {
+        op.kind = 1;
+        op.value = src_op.imm;
+      } else if (src_op.type == X86_OP_MEM) {
+        op.kind = 2;
+        const x86_op_mem& mem = src_op.mem;
+        op.seg_name = CStrToSlice(cs_reg_name(state->handle, mem.segment));
+        op.base_name = CStrToSlice(cs_reg_name(state->handle, mem.base));
+        op.index_name = CStrToSlice(cs_reg_name(state->handle, mem.index));
+        op.scale = mem.scale;
+        op.value = mem.disp;
+        op.rip_relative = mem.base == X86_REG_RIP;
       } else {
-        const auto value = reader.Pop(error);
-        if (!value.has_value()) return std::nullopt;
-        relocation_offset += *value;
-      }
-      if ((flags & kGroupedByInfo) == 0) {
-        const auto value = reader.Pop(error);
-        if (!value.has_value()) return std::nullopt;
-        relocation_info = *value;
-      }
-      if (addend_mode == kGroupHasAddend) {
-        const auto value = reader.Pop(error);
-        if (!value.has_value()) return std::nullopt;
-        relocation_addend += *value;
-      }
-      if (relocation_offset < 0 || relocation_info < 0 ||
-          relocation_addend < 0) {
-        *error = "APS2 relocation exceeds unsigned bounds";
-        return std::nullopt;
-      }
-      result.push_back({static_cast<std::uint64_t>(relocation_offset),
-                        static_cast<std::uint64_t>(relocation_info),
-                        static_cast<std::uint64_t>(relocation_addend)});
-    }
-  }
-  if (!reader.at_end()) {
-    *error = "APS2 relocation stream contains trailing bytes";
-    return std::nullopt;
-  }
-  return result;
-}
-
-std::optional<std::map<std::uint64_t, std::uint64_t>>
-ElfImage::RelativeRelocations(std::string* error) const {
-  const Section* rela = FindSection(".rela.dyn");
-  if (rela == nullptr) {
-    *error = "ELF relative relocation metadata is unavailable";
-    return std::nullopt;
-  }
-  const auto decoded = DecodeAps2(SectionBytes(*rela, error), error);
-  if (!decoded.has_value()) return std::nullopt;
-  std::map<std::uint64_t, std::uint64_t> result;
-  for (const Relocation& relocation : *decoded) {
-    if ((relocation.info & 0xffffffffULL) != kRelativeRelocation ||
-        (relocation.info >> 32U) != 0) {
-      continue;
-    }
-    if (!result.emplace(relocation.offset, relocation.addend).second) {
-      *error = "ELF contains duplicate relative relocations";
-      return std::nullopt;
-    }
-  }
-  return result;
-}
-
-std::optional<std::vector<std::uint64_t>> ElfImage::InitArray(
-    std::string* error) const {
-  const Section* init = FindSection(".init_array");
-  const Section* rela = FindSection(".rela.dyn");
-  if (init == nullptr || rela == nullptr) {
-    *error = "ELF init-array metadata is unavailable";
-    return std::nullopt;
-  }
-  const auto decoded = DecodeAps2(SectionBytes(*rela, error), error);
-  if (!decoded.has_value()) return std::nullopt;
-  const std::size_t count = init->size / sizeof(std::uint64_t);
-  std::vector<std::optional<std::uint64_t>> selected(count);
-  for (const Relocation& relocation : *decoded) {
-    if (relocation.offset < init->address ||
-        relocation.offset >= init->address + init->size) {
-      continue;
-    }
-    if (relocation.offset % sizeof(std::uint64_t) != 0 ||
-        (relocation.info & 0xffffffffULL) != kRelativeRelocation ||
-        (relocation.info >> 32U) != 0) {
-      *error = ".init_array contains a non-relative relocation";
-      return std::nullopt;
-    }
-    const std::size_t index = static_cast<std::size_t>(
-        (relocation.offset - init->address) / sizeof(std::uint64_t));
-    if (selected[index].has_value() ||
-        !RequireCode(relocation.addend, 1, error)) {
-      if (error->empty()) *error = ".init_array relocation is duplicated";
-      return std::nullopt;
-    }
-    selected[index] = relocation.addend;
-  }
-  std::vector<std::uint64_t> result;
-  result.reserve(count);
-  for (const auto& entry : selected) {
-    if (!entry.has_value()) {
-      *error = ".init_array is not fully covered by APS2 relocations";
-      return std::nullopt;
-    }
-    result.push_back(*entry);
-  }
-  return result;
-}
-
-struct Operand {
-  enum class Type { kRegister, kImmediate, kMemory };
-  Type type = Type::kRegister;
-  std::string register_name;
-  std::string segment_name;
-  std::string base_name;
-  std::string index_name;
-  int scale = 0;
-  std::int64_t value = 0;
-  std::uint8_t size = 0;
-  bool rip_relative = false;
-};
-
-struct Instruction {
-  std::uint64_t address = 0;
-  std::uint16_t size = 0;
-  std::string mnemonic;
-  std::vector<Operand> operands;
-  std::uint8_t immediate_offset = 0;
-  std::uint8_t immediate_size = 0;
-  std::uint8_t displacement_offset = 0;
-  std::uint8_t displacement_size = 0;
-  bool control_flow = false;
-  bool returns = false;
-};
-
-class Disassembler final {
- public:
-  ~Disassembler() {
-    if (handle_ != 0) cs_close(&handle_);
-  }
-
-  bool Open(std::string* error) {
-    int major = 0;
-    int minor = 0;
-    cs_version(&major, &minor);
-    if (major != 5 || cs_open(CS_ARCH_X86, CS_MODE_64, &handle_) != CS_ERR_OK ||
-        cs_option(handle_, CS_OPT_DETAIL, CS_OPT_ON) != CS_ERR_OK) {
-      *error = "native Capstone major version 5 is required";
-      return false;
-    }
-    return true;
-  }
-
-  std::optional<std::vector<Instruction>> Decode(const ElfImage& image,
-                                                 std::uint64_t rva,
-                                                 std::size_t count,
-                                                 std::size_t maximum_bytes,
-                                                 std::string* error) const {
-    if (count == 0 || count > 256 || !image.RequireCode(rva, 1, error)) {
-      if (error->empty()) *error = "signature instruction count is invalid";
-      return std::nullopt;
-    }
-    const auto offset = image.OffsetForRva(rva, 1, error);
-    if (!offset.has_value()) return std::nullopt;
-    const std::size_t available =
-        std::min(maximum_bytes, image.file_size() - *offset);
-    const std::string_view bytes = image.Bytes(*offset, available, error);
-    if (!error->empty()) return std::nullopt;
-    cs_insn* decoded = nullptr;
-    const std::size_t decoded_count =
-        cs_disasm(handle_, reinterpret_cast<const std::uint8_t*>(bytes.data()),
-                  bytes.size(), rva, count, &decoded);
-    if (decoded_count != count || decoded == nullptr) {
-      if (decoded != nullptr) cs_free(decoded, decoded_count);
-      *error = "cannot decode normalized instruction signature";
-      return std::nullopt;
-    }
-    std::vector<Instruction> result;
-    result.reserve(count);
-    std::uint64_t expected_address = rva;
-    for (std::size_t index = 0; index < count; ++index) {
-      const cs_insn& source = decoded[index];
-      if (source.address != expected_address || source.size == 0 ||
-          source.detail == nullptr) {
         cs_free(decoded, decoded_count);
-        *error = "instruction signature is not contiguous";
-        return std::nullopt;
+        return 4;
       }
-      Instruction target;
-      target.address = source.address;
-      target.size = source.size;
-      target.mnemonic = source.mnemonic;
-      target.control_flow = cs_insn_group(handle_, &source, CS_GRP_CALL) ||
-                            cs_insn_group(handle_, &source, CS_GRP_JUMP);
-      target.returns = cs_insn_group(handle_, &source, CS_GRP_RET);
-      const cs_x86& x86 = source.detail->x86;
-      target.immediate_offset = x86.encoding.imm_offset;
-      target.immediate_size = x86.encoding.imm_size;
-      target.displacement_offset = x86.encoding.disp_offset;
-      target.displacement_size = x86.encoding.disp_size;
-      for (std::uint8_t operand_index = 0; operand_index < x86.op_count;
-           ++operand_index) {
-        const cs_x86_op& source_operand = x86.operands[operand_index];
-        Operand operand;
-        operand.size = source_operand.size;
-        if (source_operand.type == X86_OP_REG) {
-          operand.type = Operand::Type::kRegister;
-          const char* name = cs_reg_name(handle_, source_operand.reg);
-          operand.register_name = name == nullptr ? "" : name;
-        } else if (source_operand.type == X86_OP_IMM) {
-          operand.type = Operand::Type::kImmediate;
-          operand.value = source_operand.imm;
-        } else if (source_operand.type == X86_OP_MEM) {
-          operand.type = Operand::Type::kMemory;
-          const x86_op_mem& memory = source_operand.mem;
-          const char* segment = cs_reg_name(handle_, memory.segment);
-          const char* base = cs_reg_name(handle_, memory.base);
-          const char* memory_index = cs_reg_name(handle_, memory.index);
-          operand.segment_name = segment == nullptr ? "" : segment;
-          operand.base_name = base == nullptr ? "" : base;
-          operand.index_name = memory_index == nullptr ? "" : memory_index;
-          operand.scale = memory.scale;
-          operand.value = memory.disp;
-          operand.rip_relative = memory.base == X86_REG_RIP;
-        } else {
-          cs_free(decoded, decoded_count);
-          *error = "signature contains an unsupported x86 operand";
-          return std::nullopt;
-        }
-        target.operands.push_back(std::move(operand));
-      }
-      result.push_back(std::move(target));
-      expected_address += source.size;
+      operands.push_back(op);
     }
-    cs_free(decoded, decoded_count);
-    if (!image.RequireCode(rva, expected_address - rva, error)) {
-      return std::nullopt;
+
+    MocktailRustDecodedInsnView insn_view{};
+    insn_view.address = source.address;
+    insn_view.size = source.size;
+    insn_view.imm_offset = x86.encoding.imm_offset;
+    insn_view.imm_size = x86.encoding.imm_size;
+    insn_view.disp_offset = x86.encoding.disp_offset;
+    insn_view.disp_size = x86.encoding.disp_size;
+    insn_view.control_flow =
+        cs_insn_group(state->handle, &source, CS_GRP_CALL) ||
+        cs_insn_group(state->handle, &source, CS_GRP_JUMP);
+    insn_view.returns = cs_insn_group(state->handle, &source, CS_GRP_RET);
+    insn_view.mnemonic = CStrToSlice(source.mnemonic);
+    insn_view.operands_ptr = operands.empty() ? nullptr : operands.data();
+    insn_view.operand_count = operands.size();
+    if (!on_insn(recv_ctx, &insn_view)) {
+      cs_free(decoded, decoded_count);
+      return 2;
     }
-    return result;
   }
 
- private:
-  csh handle_ = 0;
-};
-
-struct SignatureSpec {
-  std::string name;
-  std::uint64_t reference_rva = 0;
-  std::size_t instruction_count = 0;
-  bool registry_size_may_change = false;
-  std::size_t minimum_anchor_bytes = 6;
-  std::array<std::size_t, 2> registry_size_indices = {8, 12};
-};
-
-struct SignatureMatch {
-  std::uint64_t rva = 0;
-  std::vector<Instruction> reference;
-  std::vector<Instruction> candidate;
-};
-
-bool SameSemanticOperand(const Operand& left, const Operand& right,
-                         bool control_flow, bool wildcard_size) {
-  if (left.type != right.type || left.size != right.size) return false;
-  if (left.type == Operand::Type::kRegister) {
-    return left.register_name == right.register_name;
-  }
-  if (left.type == Operand::Type::kImmediate) {
-    return control_flow || wildcard_size || left.value == right.value;
-  }
-  return left.segment_name == right.segment_name &&
-         left.base_name == right.base_name &&
-         left.index_name == right.index_name && left.scale == right.scale &&
-         left.rip_relative == right.rip_relative &&
-         (left.rip_relative || left.value == right.value);
+  cs_free(decoded, decoded_count);
+  return 0;
 }
 
-bool ValidateSemantics(const std::vector<Instruction>& reference,
-                       const std::vector<Instruction>& candidate,
-                       const SignatureSpec& spec, std::string* error) {
-  if (reference.size() != candidate.size()) {
-    *error = "normalized signature instruction count changed";
-    return false;
+void OnSidecarIdentity(void* ctx, MocktailRustStrSlice elf_build_id,
+                       MocktailRustStrSlice payload_id) {
+  auto* out = static_cast<HostAbiSidecarIdentity*>(ctx);
+  if (out == nullptr) {
+    return;
   }
-  for (std::size_t index = 0; index < reference.size(); ++index) {
-    const Instruction& left = reference[index];
-    const Instruction& right = candidate[index];
-    const bool wildcard =
-        spec.registry_size_may_change &&
-        (index == spec.registry_size_indices[0] ||
-         index == spec.registry_size_indices[1]);
-    if (left.mnemonic != right.mnemonic ||
-        left.operands.size() != right.operands.size()) {
-      *error = "normalized instruction semantics changed at index " +
-               std::to_string(index);
-      return false;
-    }
-    for (std::size_t operand = 0; operand < left.operands.size(); ++operand) {
-      if (!SameSemanticOperand(left.operands[operand], right.operands[operand],
-                               left.control_flow, wildcard)) {
-        *error = "normalized instruction operand changed at index " +
-                 std::to_string(index);
-        return false;
-      }
-    }
-  }
-  if (spec.registry_size_may_change) {
-    std::array<std::int64_t, 2> sizes{};
-    for (std::size_t output = 0; output < sizes.size(); ++output) {
-      const std::size_t index = spec.registry_size_indices[output];
-      if (index >= candidate.size()) {
-        *error = "registry initializer size index is outside its signature";
-        return false;
-      }
-      const Instruction& instruction = candidate[index];
-      if (instruction.operands.size() != 2 ||
-          instruction.operands[1].type != Operand::Type::kImmediate) {
-        *error = "registry initializer size operands changed";
-        return false;
-      }
-      sizes[output] = instruction.operands[1].value;
-    }
-    if (sizes[0] != sizes[1] || sizes[0] < 0x100 || sizes[0] > 0x1000 ||
-        sizes[0] % 8 != 0) {
-      *error = "registry initializer object size is inconsistent";
-      return false;
-    }
-  }
-  return true;
+  out->elf_build_id = FromSlice(elf_build_id);
+  out->payload_id = FromSlice(payload_id);
 }
 
-std::optional<std::vector<SignatureMatch>> FindSignatureMatches(
-    const ElfImage& reference, const ElfImage& candidate,
-    const Disassembler& disassembler, const SignatureSpec& spec,
-    bool allow_multiple_candidates, std::string* error) {
-  const auto reference_instructions = disassembler.Decode(
-      reference, spec.reference_rva, spec.instruction_count, 4096, error);
-  if (!reference_instructions.has_value()) return std::nullopt;
-  const std::uint64_t signature_size = reference_instructions->back().address +
-                                       reference_instructions->back().size -
-                                       spec.reference_rva;
-  const auto reference_offset =
-      reference.OffsetForRva(spec.reference_rva, signature_size, error);
-  if (!reference_offset.has_value()) return std::nullopt;
-  const std::string_view encoded =
-      reference.Bytes(*reference_offset, signature_size, error);
-  if (!error->empty()) return std::nullopt;
-  std::vector<bool> mask(encoded.size(), true);
-  for (const Instruction& instruction : *reference_instructions) {
-    const std::size_t base =
-        static_cast<std::size_t>(instruction.address - spec.reference_rva);
-    for (const auto [offset, size] :
-         {std::pair{instruction.immediate_offset, instruction.immediate_size},
-          std::pair{instruction.displacement_offset,
-                    instruction.displacement_size}}) {
-      if (size == 0) continue;
-      if (offset == 0 ||
-          static_cast<std::size_t>(offset) + size > instruction.size) {
-        *error = "Capstone returned an invalid operand encoding range";
-        return std::nullopt;
-      }
-      for (std::size_t index = offset; index < offset + size; ++index) {
-        mask[base + index] = false;
-      }
-    }
+void OnSidecarError(void* ctx, MocktailRustStrSlice error) {
+  auto* out = static_cast<HostAbiSidecarIdentity*>(ctx);
+  if (out == nullptr) {
+    return;
   }
-  std::size_t anchor_offset = 0;
-  std::size_t anchor_size = 0;
-  std::size_t run_start = 0;
-  bool running = false;
-  for (std::size_t index = 0; index <= mask.size(); ++index) {
-    const bool enabled = index < mask.size() && mask[index];
-    if (enabled && !running) {
-      run_start = index;
-      running = true;
-    } else if (!enabled && running) {
-      if (index - run_start > anchor_size) {
-        anchor_offset = run_start;
-        anchor_size = index - run_start;
-      }
-      running = false;
-    }
-  }
-  if (anchor_size < spec.minimum_anchor_bytes) {
-    *error = "normalized signature has no selective fixed anchor";
-    return std::nullopt;
-  }
-  const Section* text = candidate.FindSection(".text");
-  if (text == nullptr) {
-    *error = "candidate has no .text section";
-    return std::nullopt;
-  }
-  const std::string_view candidate_text = candidate.SectionBytes(*text, error);
-  if (!error->empty()) return std::nullopt;
-  const std::string_view anchor = encoded.substr(anchor_offset, anchor_size);
-  std::vector<std::size_t> matches;
-  auto search = candidate_text.begin();
-  while (search != candidate_text.end()) {
-    const auto found =
-        std::search(search, candidate_text.end(), anchor.begin(), anchor.end());
-    if (found == candidate_text.end()) break;
-    const std::size_t anchor_position =
-        static_cast<std::size_t>(found - candidate_text.begin());
-    if (anchor_position >= anchor_offset) {
-      const std::size_t signature_offset = anchor_position - anchor_offset;
-      if (CheckedRange(signature_offset, encoded.size(),
-                       candidate_text.size())) {
-        bool same = true;
-        for (std::size_t index = 0; index < encoded.size(); ++index) {
-          if (mask[index] &&
-              candidate_text[signature_offset + index] != encoded[index]) {
-            same = false;
-            break;
-          }
-        }
-        if (same) matches.push_back(signature_offset);
-      }
-    }
-    search = found + 1;
-  }
-  if (matches.empty()) {
-    *error = "signature " + spec.name + " matched " +
-             "0 candidate locations";
-    return std::nullopt;
-  }
-  std::vector<SignatureMatch> semantic_matches;
-  std::string first_semantic_error;
-  for (const std::size_t match : matches) {
-    const std::uint64_t match_rva = text->address + match;
-    std::string semantic_error;
-    const auto candidate_instructions = disassembler.Decode(
-        candidate, match_rva, spec.instruction_count, 4096, &semantic_error);
-    if (!candidate_instructions.has_value() ||
-        !ValidateSemantics(*reference_instructions, *candidate_instructions,
-                           spec, &semantic_error)) {
-      if (first_semantic_error.empty()) {
-        first_semantic_error = std::move(semantic_error);
-      }
-      continue;
-    }
-    semantic_matches.push_back(SignatureMatch{
-        match_rva, *reference_instructions, *candidate_instructions});
-  }
-  if (semantic_matches.empty() && matches.size() == 1U &&
-      !first_semantic_error.empty()) {
-    *error = std::move(first_semantic_error);
-    return std::nullopt;
-  }
-  if (!allow_multiple_candidates && semantic_matches.size() != 1U) {
-    *error = "signature " + spec.name + " matched " +
-             std::to_string(semantic_matches.size()) +
-             " semantic candidate locations";
-    return std::nullopt;
-  }
-  return semantic_matches;
+  out->error = FromSlice(error);
 }
 
-std::optional<SignatureMatch> FindSignatureMatch(
-    const ElfImage& reference, const ElfImage& candidate,
-    const Disassembler& disassembler, const SignatureSpec& spec,
-    std::string* error) {
-  auto matches =
-      FindSignatureMatches(reference, candidate, disassembler, spec, false,
-                           error);
-  if (!matches.has_value()) return std::nullopt;
-  if (matches->size() != 1U) {
-    *error = "signature " + spec.name + " matched " +
-             std::to_string(matches->size()) + " candidate locations";
-    return std::nullopt;
+void OnDeriveResult(void* ctx, MocktailRustStrSlice profile_path,
+                    MocktailRustStrSlice compatibility_path) {
+  auto* out = static_cast<HostAbiDerivationResult*>(ctx);
+  if (out == nullptr) {
+    return;
   }
-  return std::move(matches->front());
+  out->profile = FromSlice(profile_path);
+  out->compatibility_manifest = FromSlice(compatibility_path);
 }
 
-std::optional<SignatureMatch> FindUniqueSemanticSignatureMatch(
-    const ElfImage& reference, const ElfImage& candidate,
-    const Disassembler& disassembler, const SignatureSpec& spec,
-    std::string* error) {
-  auto matches = FindSignatureMatches(reference, candidate, disassembler, spec,
-                                      true, error);
-  if (!matches.has_value()) return std::nullopt;
-  if (matches->size() != 1U) {
-    *error = "signature " + spec.name + " matched " +
-             std::to_string(matches->size()) +
-             " semantic candidate locations";
-    return std::nullopt;
+void OnDeriveError(void* ctx, MocktailRustStrSlice error) {
+  auto* out = static_cast<HostAbiDerivationResult*>(ctx);
+  if (out == nullptr) {
+    return;
   }
-  return std::move(matches->front());
-}
-
-struct FmodRuntimeAnchors {
-  std::uint64_t vtable = 0;
-  std::uint64_t string_constructor = 0;
-  std::uint64_t count_method = 0;
-  std::uint64_t info_method = 0;
-  std::uint64_t current_method = 0;
-  std::uint64_t select_method = 0;
-  int layout_version = 1;
-  std::array<std::uint64_t, 4> input_methods{};
-  std::array<std::size_t, 4> input_indexes() const {
-    return layout_version == 2 ? std::array<std::size_t, 4>{9, 10, 12, 18}
-                               : std::array<std::size_t, 4>{8, 9, 10, 16};
-  }
-
-  std::size_t current_index() const { return layout_version == 2 ? 8 : 7; }
-  std::size_t select_index() const { return layout_version == 2 ? 19 : 17; }
-};
-
-struct RuntimeCompatibilityAnchors {
-  std::optional<std::uint64_t> fullscreen_setter;
-  std::optional<FmodRuntimeAnchors> fmod;
-};
-
-std::optional<RuntimeCompatibilityAnchors> LoadRuntimeCompatibilityAnchors(
-    const std::vector<std::filesystem::path>& paths,
-    std::string_view reference_build_id, std::string* error) {
-  std::vector<std::string> contents;
-  std::vector<std::string> path_strings;
-  contents.reserve(paths.size());
-  path_strings.reserve(paths.size());
-  for (const std::filesystem::path& path : paths) {
-    error->clear();
-    std::string raw = ReadSmallRegular(path, kMaximumJsonBytes, error);
-    if (!error->empty()) return std::nullopt;
-    contents.push_back(std::move(raw));
-    path_strings.push_back(path.string());
-  }
-  std::vector<MocktailRustStrSlice> json_slices;
-  std::vector<MocktailRustStrSlice> path_slices;
-  json_slices.reserve(contents.size());
-  path_slices.reserve(path_strings.size());
-  for (std::size_t i = 0; i < contents.size(); ++i) {
-    json_slices.push_back({contents[i].data(), contents[i].size()});
-    path_slices.push_back({path_strings[i].data(), path_strings[i].size()});
-  }
-  MocktailRustDeriverRuntimeAnchors raw_anchors{};
-  char err_buf[512] = {};
-  if (mocktail_rust_deriver_load_runtime_anchors(
-          json_slices.data(), path_slices.data(), contents.size(),
-          reference_build_id.data(), reference_build_id.size(), &raw_anchors,
-          err_buf, sizeof(err_buf)) != 0) {
-    *error = err_buf;
-    return std::nullopt;
-  }
-  RuntimeCompatibilityAnchors result;
-  if (raw_anchors.has_fullscreen_setter) {
-    result.fullscreen_setter = raw_anchors.fullscreen_setter_rva;
-  }
-  if (raw_anchors.has_fmod) {
-    FmodRuntimeAnchors fmod{
-        raw_anchors.fmod_vtable_rva,
-        raw_anchors.fmod_string_constructor_rva,
-        raw_anchors.fmod_count_method_rva,
-        raw_anchors.fmod_info_method_rva,
-        raw_anchors.fmod_current_method_rva,
-        raw_anchors.fmod_select_method_rva,
-        raw_anchors.fmod_layout_version,
-    };
-    for (std::size_t i = 0; i < 4; ++i) {
-      fmod.input_methods[i] = raw_anchors.fmod_input_methods[i];
-    }
-    result.fmod = fmod;
-  }
-  return result;
-}
-
-bool ContainsBytes(std::string_view bytes, std::string_view expected,
-                   std::size_t limit = std::string_view::npos) {
-  if (limit < bytes.size()) bytes = bytes.substr(0, limit);
-  return !expected.empty() && bytes.find(expected) != bytes.npos;
-}
-
-bool HasFullscreenSetterContract(const ElfImage& image, std::uint64_t rva) {
-  constexpr std::size_t kContractBytes = 96;
-  std::string local_error;
-  if (!image.RequireCode(rva, kContractBytes, &local_error)) return false;
-  const auto offset = image.OffsetForRva(rva, kContractBytes, &local_error);
-  if (!offset.has_value()) return false;
-  const std::string_view code =
-      image.Bytes(*offset, kContractBytes, &local_error);
-  if (!local_error.empty() || code.substr(0, 4) != "\x55\x48\x89\xe5" ||
-      !ContainsBytes(code, "\x89\xf3", 24)) {
-    return false;
-  }
-  return (ContainsBytes(
-              code, std::string_view("\x38\x98\x59\x01\x00\x00", 6)) &&
-          ContainsBytes(
-              code, std::string_view("\x88\x98\x59\x01\x00\x00", 6))) ||
-         (ContainsBytes(
-              code, std::string_view("\x38\x98\x61\x01\x00\x00", 6)) &&
-          ContainsBytes(
-              code, std::string_view("\x88\x98\x61\x01\x00\x00", 6)));
-}
-
-bool HasFmodStringConstructorContract(const ElfImage& image,
-                                      std::uint64_t rva) {
-  constexpr std::string_view kExpected =
-      "\x55\x48\x89\xe5\x41\x57\x41\x56\x41\x54\x53\x48"
-      "\x89\xd3\x49\x89\xf6\x49\x89\xff\x48\x83\xfa\x16";
-  std::string local_error;
-  if (!image.RequireCode(rva, kExpected.size(), &local_error)) return false;
-  const auto offset = image.OffsetForRva(rva, kExpected.size(), &local_error);
-  return offset.has_value() &&
-         image.Bytes(*offset, kExpected.size(), &local_error) == kExpected &&
-         local_error.empty();
-}
-
-bool HasFmodDeviceListsSelectContract(const ElfImage& image,
-                                      std::uint64_t rva) {
-  constexpr std::size_t kSize = compat::kFmodDeviceListsSelectContractSize;
-  std::string local_error;
-  if (!image.RequireCode(rva, kSize, &local_error)) return false;
-  const auto offset = image.OffsetForRva(rva, kSize, &local_error);
-  return offset.has_value() &&
-         compat::HasFmodDeviceListsSelectContract(
-             image.Bytes(*offset, kSize, &local_error)) &&
-         local_error.empty();
-}
-
-std::optional<RuntimeCompatibilityAnchors> DeriveRuntimeCompatibility(
-    const ElfImage& reference, const ElfImage& candidate,
-    const Disassembler& disassembler,
-    const RuntimeCompatibilityAnchors& source, std::string* error) {
-  RuntimeCompatibilityAnchors result;
-  if (source.fullscreen_setter.has_value()) {
-    if (!HasFullscreenSetterContract(reference, *source.fullscreen_setter)) {
-      *error = "reference fullscreen setter contract changed";
-      return std::nullopt;
-    }
-    const auto setter = FindUniqueSemanticSignatureMatch(
-        reference, candidate, disassembler,
-        {"fullscreen-setter", *source.fullscreen_setter, 32, false, 3},
-        error);
-    if (!setter.has_value()) return std::nullopt;
-    if (!HasFullscreenSetterContract(candidate, setter->rva)) {
-      *error = "candidate fullscreen setter contract changed";
-      return std::nullopt;
-    }
-    result.fullscreen_setter = setter->rva;
-  }
-  if (!source.fmod.has_value()) return result;
-
-  constexpr std::size_t kCountIndex = 5;
-  constexpr std::size_t kInfoIndex = 6;
-  const FmodRuntimeAnchors& old = *source.fmod;
-  if (!reference.RequireRelro(old.vtable, (old.select_index() + 1) * 8, error)) {
-    return std::nullopt;
-  }
-  const auto reference_relocations = reference.RelativeRelocations(error);
-  if (!reference_relocations.has_value()) return std::nullopt;
-  for (const auto [index, method] :
-       {std::pair{kCountIndex, old.count_method},
-        std::pair{kInfoIndex, old.info_method},
-        std::pair{old.current_index(), old.current_method},
-        std::pair{old.select_index(), old.select_method}}) {
-    const auto found = reference_relocations->find(old.vtable + index * 8);
-    if (found == reference_relocations->end() || found->second != method ||
-        !reference.RequireCode(method, 1, error)) {
-      if (error->empty()) {
-        *error = "reference FMOD vtable does not match its methods";
-      }
-      return std::nullopt;
-    }
-  }
-  if (!HasFmodStringConstructorContract(reference, old.string_constructor)) {
-    *error = "reference FMOD string constructor contract changed";
-    return std::nullopt;
-  }
-  const auto string_constructor = FindUniqueSemanticSignatureMatch(
-      reference, candidate, disassembler,
-      {"fmod-string-constructor", old.string_constructor, 32, false, 3},
-      error);
-  const auto info_method = FindUniqueSemanticSignatureMatch(
-      reference, candidate, disassembler,
-      {"fmod-output-info", old.info_method, 18, false, 3}, error);
-  // A missing legacy selector is expected at the device-list ABI transition.
-  // The new layout is accepted only with its own complete selector contract.
-  std::string select_error;
-  const auto select_method = FindUniqueSemanticSignatureMatch(
-      reference, candidate, disassembler,
-      {"fmod-output-select", old.select_method, 18, false, 3}, &select_error);
-  if (!string_constructor.has_value() || !info_method.has_value()) {
-    return std::nullopt;
-  }
-  const auto count_matches = FindSignatureMatches(
-      reference, candidate, disassembler,
-      {"fmod-output-count", old.count_method, 24, false, 3}, true, error);
-  const auto current_matches = FindSignatureMatches(
-      reference, candidate, disassembler,
-      {"fmod-output-current", old.current_method, 24, false, 3}, true,
-      error);
-  if (!count_matches.has_value() || !current_matches.has_value()) {
-    return std::nullopt;
-  }
-  std::set<std::uint64_t> count_candidates;
-  std::set<std::uint64_t> current_candidates;
-  for (const SignatureMatch& match : *count_matches)
-    count_candidates.insert(match.rva);
-  for (const SignatureMatch& match : *current_matches)
-    current_candidates.insert(match.rva);
-  if (count_candidates.empty() || current_candidates.empty()) {
-    *error = "FMOD count/current method signatures have no candidates";
-    return std::nullopt;
-  }
-  const auto relocations = candidate.RelativeRelocations(error);
-  if (!relocations.has_value()) return std::nullopt;
-  std::vector<FmodRuntimeAnchors> candidates;
-  for (const auto& [offset, addend] : *relocations) {
-    if (addend != info_method->rva || offset < kInfoIndex * 8) continue;
-    const std::uint64_t vtable = offset - kInfoIndex * 8;
-    const auto count = relocations->find(vtable + kCountIndex * 8);
-    for (const int layout : {1, 2}) {
-      FmodRuntimeAnchors derived;
-      derived.layout_version = layout;
-      const auto current = relocations->find(vtable + derived.current_index() * 8);
-      const auto select = relocations->find(vtable + derived.select_index() * 8);
-      std::string relro_error;
-      if (vtable % 8 != 0 || count == relocations->end() ||
-          current == relocations->end() || select == relocations->end() ||
-          count_candidates.find(count->second) == count_candidates.end() ||
-          current_candidates.find(current->second) == current_candidates.end() ||
-          count->second == current->second ||
-          !candidate.RequireRelro(vtable, (derived.select_index() + 1) * 8,
-                                  &relro_error)) {
-        continue;
-      }
-      if (layout == 1) {
-        if (old.layout_version != 1 || !select_method.has_value() ||
-            select->second != select_method->rva) continue;
-      } else if (!HasFmodDeviceListsSelectContract(candidate, select->second)) {
-        continue;
-      }
-      candidates.push_back({vtable, string_constructor->rva, count->second,
-                            info_method->rva, current->second, select->second,
-                            layout});
-    }
-  }
-  if (candidates.size() != 1U) {
-    *error = "FMOD output vtable matched " +
-             std::to_string(candidates.size()) + " candidate locations";
-    return std::nullopt;
-  }
-  FmodRuntimeAnchors output = candidates.front();
-  if (!HasFmodStringConstructorContract(candidate,
-                                        output.string_constructor)) {
-    *error = "candidate FMOD string constructor contract changed";
-    return std::nullopt;
-  }
-  if (old.input_methods[0] != 0) {
-    constexpr std::array<std::string_view, 4> fields = {
-        "input_count_method_rva", "input_info_method_rva",
-        "input_current_method_rva", "input_select_method_rva"};
-    constexpr std::array<std::size_t, 4> lengths = {4, 16, 12, 16};
-    const auto old_slots = old.input_indexes();
-    const auto new_slots = output.input_indexes();
-    for (std::size_t i = 0; i < fields.size(); ++i) {
-      const auto old_method =
-          reference_relocations->find(old.vtable + old_slots[i] * 8);
-      const auto new_method =
-          relocations->find(output.vtable + new_slots[i] * 8);
-      if (old_method == reference_relocations->end() ||
-          old_method->second != old.input_methods[i] ||
-          new_method == relocations->end()) {
-        *error = "FMOD input vtable does not match its methods";
-        return std::nullopt;
-      }
-      const auto matches = FindSignatureMatches(
-          reference, candidate, disassembler,
-          {std::string(fields[i]), old.input_methods[i], lengths[i], false, 3},
-          true, error);
-      if (!matches || !std::any_of(matches->begin(), matches->end(),
-                                   [&](const auto &match) {
-                                     return match.rva == new_method->second;
-                                   })) {
-        if (error->empty())
-          *error = "candidate FMOD input contract changed";
-        return std::nullopt;
-      }
-      output.input_methods[i] = new_method->second;
-    }
-  }
-  result.fmod = output;
-  return result;
-}
-
-std::optional<std::uint64_t> FindRegistryFunctionEntry(
-    const ElfImage& image, const Disassembler& disassembler,
-    std::uint64_t body_rva,
-    const std::vector<Instruction>& reference_prologue, std::string* error) {
-  constexpr std::size_t kPrologueInstructionCount = 8;
-  constexpr std::uint64_t kMaximumPrologueBytes = 64;
-  if (reference_prologue.size() != kPrologueInstructionCount ||
-      body_rva < kMaximumPrologueBytes) {
-    *error = "reference registry prologue shape is invalid";
-    return std::nullopt;
-  }
-  std::vector<std::uint64_t> entries;
-  for (std::uint64_t rva = body_rva - kMaximumPrologueBytes; rva < body_rva;
-       ++rva) {
-    std::string decode_error;
-    const auto candidate = disassembler.Decode(
-        image, rva, kPrologueInstructionCount,
-        static_cast<std::size_t>(body_rva - rva), &decode_error);
-    if (!candidate.has_value() ||
-        candidate->back().address + candidate->back().size != body_rva) {
-      continue;
-    }
-    bool same = true;
-    for (std::size_t index = 0; index < candidate->size() && same; ++index) {
-      const Instruction& left = reference_prologue[index];
-      const Instruction& right = (*candidate)[index];
-      if (left.mnemonic != right.mnemonic ||
-          left.operands.size() != right.operands.size()) {
-        same = false;
-        break;
-      }
-      for (std::size_t operand = 0; operand < left.operands.size(); ++operand) {
-        if (!SameSemanticOperand(left.operands[operand],
-                                 right.operands[operand], left.control_flow,
-                                 index == 7)) {
-          same = false;
-          break;
-        }
-      }
-    }
-    const Instruction& frame = candidate->back();
-    if (same && frame.mnemonic == "sub" && frame.operands.size() == 2 &&
-        frame.operands[0].type == Operand::Type::kRegister &&
-        frame.operands[0].register_name == "rsp" &&
-        frame.operands[1].type == Operand::Type::kImmediate &&
-        frame.operands[1].value >= 0x20 &&
-        frame.operands[1].value <= 0x400 &&
-        frame.operands[1].value % 8 == 0) {
-      entries.push_back(rva);
-    }
-  }
-  if (entries.size() != 1U) {
-    *error = "registry initializer body has no unique bounded prologue";
-    return std::nullopt;
-  }
-  return entries.front();
-}
-
-bool NormalizeRegistryRegisters(std::vector<Instruction>* instructions) {
-  if (instructions->size() != 11) return false;
-  auto& zero = (*instructions)[3];
-  auto& factor = (*instructions)[8];
-  auto& store = (*instructions)[9];
-  auto& begin = (*instructions)[10];
-  const auto reg = [](const Instruction& instruction, std::size_t index,
-                      std::size_t size) -> std::string {
-    if (index >= instruction.operands.size() ||
-        instruction.operands[index].type != Operand::Type::kRegister ||
-        instruction.operands[index].size != size)
-      return {};
-    return instruction.operands[index].register_name;
-  };
-  const std::string zero_reg = reg(zero, 0, 4);
-  const std::string factor_reg = reg(factor, 0, 4);
-  const std::string begin_reg = reg(begin, 0, 8);
-  const std::set<std::string> saved32 = {"r12d", "r13d", "r14d", "r15d"};
-  const std::set<std::string> pointers = {"rcx", "r12", "r13", "r14", "r15"};
-  if (zero.mnemonic != "xor" || saved32.count(zero_reg) != 1 ||
-      reg(zero, 1, 4) != zero_reg || factor.mnemonic != "mov" ||
-      (factor_reg != "eax" && saved32.count(factor_reg) != 1) ||
-      store.mnemonic != "mov" || reg(store, 1, 4) != factor_reg ||
-      begin.mnemonic != "lea" || pointers.count(begin_reg) != 1 ||
-      zero_reg == factor_reg || zero_reg == begin_reg + "d" ||
-      factor_reg == begin_reg + "d")
-    return false;
-  zero.operands[0].register_name = "registry-zero";
-  zero.operands[1].register_name = "registry-zero";
-  factor.operands[0].register_name = "registry-factor";
-  store.operands[1].register_name = "registry-factor";
-  begin.operands[0].register_name = "registry-begin";
-  return true;
-}
-
-std::optional<SignatureMatch> FindRegistrySignatureMatch(
-    const ElfImage& reference, const ElfImage& candidate,
-    const Disassembler& disassembler, const SignatureSpec& spec,
-    std::string* error) {
-  constexpr std::size_t kBodyInstructionIndex = 8;
-  constexpr std::size_t kBodyInstructionCount = 11;
-  const auto reference_full = disassembler.Decode(
-      reference, spec.reference_rva, spec.instruction_count, 4096, error);
-  if (!reference_full.has_value() ||
-      reference_full->size() < kBodyInstructionIndex + kBodyInstructionCount) {
-    if (error->empty()) *error = "reference registry signature is incomplete";
-    return std::nullopt;
-  }
-  const SignatureSpec body_spec{
-      "registry-initializer-body",
-      (*reference_full)[kBodyInstructionIndex].address,
-      kBodyInstructionCount,
-      true,
-      spec.minimum_anchor_bytes,
-      {0, 4},
-  };
-  const std::vector<Instruction> reference_prologue(
-      reference_full->begin(),
-      std::next(reference_full->begin(), kBodyInstructionIndex));
-  std::optional<SignatureMatch> body_match;
-  std::vector<Instruction> normalized_reference(
-      reference_full->begin() + kBodyInstructionIndex,
-      reference_full->begin() + kBodyInstructionIndex + kBodyInstructionCount);
-  if (NormalizeRegistryRegisters(&normalized_reference)) {
-    const SignatureSpec clear_spec{"registry-size-and-clear",
-                                   (*reference_full)[12].address,
-                                   4,
-                                   true,
-                                   spec.minimum_anchor_bytes,
-                                   {0, 0}};
-    const auto clear_matches = FindSignatureMatches(
-        reference, candidate, disassembler, clear_spec, true, error);
-    if (!clear_matches.has_value()) return std::nullopt;
-    std::vector<SignatureMatch> valid;
-    for (const auto& clear : *clear_matches) {
-      if (clear.rva < 16) continue;
-      std::string candidate_error;
-      const auto body =
-          disassembler.Decode(candidate, clear.rva - 16, kBodyInstructionCount,
-                              4096, &candidate_error);
-      if (!body.has_value() || (*body)[4].address != clear.rva) continue;
-      auto normalized = *body;
-      if (!NormalizeRegistryRegisters(&normalized) ||
-          !ValidateSemantics(normalized_reference, normalized, body_spec,
-                             &candidate_error) ||
-          !FindRegistryFunctionEntry(candidate, disassembler, clear.rva - 16,
-                                     reference_prologue, &candidate_error))
-        continue;
-      valid.push_back({clear.rva - 16, normalized_reference, *body});
-    }
-    if (valid.size() != 1) {
-      *error = "registry register contract matched " +
-               std::to_string(valid.size()) + " candidate locations";
-      return std::nullopt;
-    }
-    body_match = std::move(valid.front());
-  } else {
-    body_match = FindSignatureMatch(reference, candidate, disassembler,
-                                    body_spec, error);
-    if (!body_match.has_value()) return std::nullopt;
-  }
-  const auto candidate_entry = FindRegistryFunctionEntry(
-      candidate, disassembler, body_match->rva, reference_prologue, error);
-  if (!candidate_entry.has_value()) return std::nullopt;
-  const auto candidate_full = disassembler.Decode(
-      candidate, *candidate_entry, spec.instruction_count, 4096, error);
-  if (!candidate_full.has_value() ||
-      (*candidate_full)[kBodyInstructionIndex].address != body_match->rva) {
-    if (error->empty()) *error = "candidate registry signature is incomplete";
-    return std::nullopt;
-  }
-  return SignatureMatch{*candidate_entry, *reference_full, *candidate_full};
-}
-
-std::optional<std::uint64_t> DirectCallTarget(
-    const Instruction& instruction, std::string_view description,
-    std::string* error) {
-  if (instruction.mnemonic != "call" || instruction.operands.size() != 1U ||
-      instruction.operands[0].type != Operand::Type::kImmediate ||
-      instruction.operands[0].value < 0) {
-    *error = std::string(description) + " is not one direct call";
-    return std::nullopt;
-  }
-  return static_cast<std::uint64_t>(instruction.operands[0].value);
-}
-
-std::optional<std::uint64_t> DirectJumpTarget(
-    const Instruction& instruction, std::string_view description,
-    std::string* error) {
-  if (instruction.mnemonic != "jmp" || instruction.operands.size() != 1U ||
-      instruction.operands[0].type != Operand::Type::kImmediate ||
-      instruction.operands[0].value < 0) {
-    *error = std::string(description) + " is not one direct jump";
-    return std::nullopt;
-  }
-  return static_cast<std::uint64_t>(instruction.operands[0].value);
-}
-
-std::optional<SignatureMatch> FindConstructorBoundaryMatch(
-    const ElfImage& reference, const ElfImage& candidate,
-    const Disassembler& disassembler, const SignatureSpec& spec,
-    std::uint64_t reference_entry,
-    const std::vector<std::uint64_t>& candidate_entries, std::string* error) {
-  if (reference_entry != spec.reference_rva) {
-    *error = "reference constructor boundary moved outside init-array index 4";
-    return std::nullopt;
-  }
-  const auto reference_wrapper =
-      disassembler.Decode(reference, reference_entry, 1, 16, error);
-  if (!reference_wrapper.has_value()) return std::nullopt;
-  const auto reference_target = DirectJumpTarget(
-      reference_wrapper->front(), "reference constructor boundary", error);
-  if (!reference_target.has_value()) return std::nullopt;
-  const SignatureSpec target_spec{"constructor-4-target", *reference_target,
-                                  spec.instruction_count};
-  const auto target_match = FindSignatureMatch(
-      reference, candidate, disassembler, target_spec, error);
-  if (!target_match.has_value()) return std::nullopt;
-  std::vector<SignatureMatch> matches;
-  for (const auto entry : candidate_entries) {
-    std::string ignored;
-    const auto wrapper = disassembler.Decode(candidate, entry, 1, 16, &ignored);
-    if (!wrapper) continue;
-    const auto target =
-        DirectJumpTarget(wrapper->front(), "constructor boundary", &ignored);
-    if (target && *target == target_match->rva) {
-      matches.push_back({entry, *reference_wrapper, *wrapper});
-    }
-  }
-  if (matches.size() != 1) {
-    *error = "constructor boundary has no unique init-array entry";
-    return std::nullopt;
-  }
-  return std::move(matches.front());
-}
-
-std::vector<std::uint64_t> RipTargets(const Instruction& instruction) {
-  std::vector<std::uint64_t> result;
-  for (const Operand& operand : instruction.operands) {
-    if (operand.type == Operand::Type::kMemory && operand.rip_relative) {
-      result.push_back(instruction.address + instruction.size + operand.value);
-    }
-  }
-  return result;
-}
-
-std::optional<std::uint64_t> SingletonBodyRva(const ElfImage& image,
-                                              const Disassembler& disassembler,
-                                              std::uint64_t entry,
-                                              std::string* error) {
-  const auto prefix = disassembler.Decode(image, entry, 2, 32, error);
-  if (!prefix) return std::nullopt;
-  if ((*prefix)[0].mnemonic != "push") return entry;
-  const auto& push = (*prefix)[0];
-  const auto& move = (*prefix)[1];
-  if (push.operands.size() != 1 || push.operands[0].register_name != "rbp" ||
-      move.mnemonic != "mov" || move.operands.size() != 2 ||
-      move.operands[0].register_name != "rbp" ||
-      move.operands[1].register_name != "rsp") {
-    *error = "JNI singleton has an unsupported prologue";
-    return std::nullopt;
-  }
-  return move.address + move.size;
-}
-
-bool HasSingletonLinks(const std::vector<Instruction>& instructions) {
-  if (instructions.size() != 3 || instructions[0].mnemonic != "lea" ||
-      instructions[1].mnemonic != "xchg" || instructions[2].mnemonic != "mov")
-    return false;
-  const auto head = RipTargets(instructions[0]);
-  const auto slot = RipTargets(instructions[1]);
-  const auto next = RipTargets(instructions[2]);
-  return head.size() == 1 && slot.size() == 1 && next.size() == 1 &&
-         slot[0] % 8 == 0 && head[0] == slot[0] + 8 && next[0] == head[0];
-}
-
-std::optional<SignatureMatch> FindSingletonSignatureMatch(
-    const ElfImage& reference, const ElfImage& candidate,
-    const Disassembler& disassembler, const SignatureSpec& spec,
-    const std::vector<std::uint64_t>& candidate_entries, std::string* error) {
-  const auto body =
-      SingletonBodyRva(reference, disassembler, spec.reference_rva, error);
-  if (!body) return std::nullopt;
-  const auto matches = FindSignatureMatches(
-      reference, candidate, disassembler,
-      {"jni-singleton-links", *body, 3, false, 3}, true, error);
-  if (!matches) return std::nullopt;
-  std::vector<SignatureMatch> valid;
-  for (const auto& match : *matches) {
-    if (!HasSingletonLinks(match.reference) ||
-        !HasSingletonLinks(match.candidate))
-      continue;
-    for (const auto entry : candidate_entries) {
-      if (entry != match.rva && (match.rva < 4 || entry != match.rva - 4))
-        continue;
-      std::string ignored;
-      const auto candidate_body =
-          SingletonBodyRva(candidate, disassembler, entry, &ignored);
-      if (candidate_body && *candidate_body == match.rva) {
-        valid.push_back({entry, match.reference, match.candidate});
-      }
-    }
-  }
-  if (valid.size() != 1) {
-    *error = "JNI singleton links have no unique init-array entry";
-    return std::nullopt;
-  }
-  return std::move(valid.front());
-}
-
-std::optional<std::uint64_t> MappedRipTarget(const SignatureMatch& match,
-                                             std::uint64_t reference_target,
-                                             std::string_view description,
-                                             std::string* error) {
-  std::set<std::uint64_t> candidates;
-  for (std::size_t instruction = 0; instruction < match.reference.size();
-       ++instruction) {
-    const auto reference_targets = RipTargets(match.reference[instruction]);
-    const auto candidate_targets = RipTargets(match.candidate[instruction]);
-    if (reference_targets.size() != candidate_targets.size()) {
-      *error = std::string(description) + " RIP-relative operand count changed";
-      return std::nullopt;
-    }
-    for (std::size_t operand = 0; operand < reference_targets.size();
-         ++operand) {
-      if (reference_targets[operand] == reference_target) {
-        candidates.insert(candidate_targets[operand]);
-      }
-    }
-  }
-  if (candidates.size() != 1) {
-    *error = std::string(description) + " has no unique mapped RIP target";
-    return std::nullopt;
-  }
-  return *candidates.begin();
-}
-
-std::optional<std::uint64_t> DeriveRegistrySlot(
-    const ElfImage& image, const Disassembler& disassembler,
-    std::uint64_t initializer, std::string* error) {
-  // A 256-instruction cap is safely inside the bounded 0x1000 byte window and
-  // includes the first return for every accepted reference/candidate to date.
-  const auto instructions = disassembler.Decode(
-      image, initializer, 256, kRegistryInitializerMaximumBytes, error);
-  if (!instructions.has_value()) return std::nullopt;
-  std::vector<std::uint64_t> stores;
-  bool found_return = false;
-  for (const Instruction& instruction : *instructions) {
-    if (instruction.mnemonic == "mov" && instruction.operands.size() == 2 &&
-        instruction.operands[0].type == Operand::Type::kMemory &&
-        instruction.operands[0].rip_relative &&
-        instruction.operands[0].size == 8 &&
-        instruction.operands[1].type == Operand::Type::kRegister &&
-        instruction.operands[1].register_name == "rbx") {
-      stores.push_back(instruction.address + instruction.size +
-                       instruction.operands[0].value);
-    }
-    if (instruction.returns) {
-      found_return = true;
-      break;
-    }
-  }
-  if (!found_return || stores.size() != 1 || stores[0] % 8 != 0 ||
-      !image.RequireWritable(stores[0], 8, error)) {
-    if (error->empty()) {
-      *error = "pre-JNI registry initializer does not publish one slot";
-    }
-    return std::nullopt;
-  }
-  return stores[0];
-}
-
-struct DeriverSpecCollectCtx {
-  std::vector<SignatureSpec>* specs;
-};
-
-void OnDeriverSpec(void* raw_ctx, const char* name, size_t name_len,
-                   uint64_t reference_rva, size_t instruction_count,
-                   bool registry_size_may_change, size_t minimum_anchor_bytes) {
-  auto* ctx = static_cast<DeriverSpecCollectCtx*>(raw_ctx);
-  SignatureSpec spec{};
-  spec.name.assign(name, name_len);
-  spec.reference_rva = reference_rva;
-  spec.instruction_count = instruction_count;
-  spec.registry_size_may_change = registry_size_may_change;
-  spec.minimum_anchor_bytes = minimum_anchor_bytes;
-  ctx->specs->push_back(std::move(spec));
-}
-
-struct DeriverDocumentsCaptureCtx {
-  std::string profile_json;
-  std::string compatibility_json;
-};
-
-void OnDerivedProfileJson(void* raw_ctx, const char* ptr, size_t len) {
-  auto* ctx = static_cast<DeriverDocumentsCaptureCtx*>(raw_ctx);
-  ctx->profile_json.assign(ptr, len);
-}
-
-void OnDerivedCompatibilityJson(void* raw_ctx, const char* ptr, size_t len) {
-  auto* ctx = static_cast<DeriverDocumentsCaptureCtx*>(raw_ctx);
-  ctx->compatibility_json.assign(ptr, len);
-}
-
-std::optional<std::vector<SignatureSpec>> SignatureSpecs(
-    const std::string& sidecar_json, std::string* error) {
-  std::vector<SignatureSpec> result;
-  DeriverSpecCollectCtx ctx{&result};
-  char err_buf[512] = {};
-  if (mocktail_rust_deriver_extract_specs(
-          sidecar_json.data(), sidecar_json.size(), OnDeriverSpec, &ctx,
-          err_buf, sizeof(err_buf)) != 0) {
-    *error = err_buf;
-    return std::nullopt;
-  }
-  return result;
-}
-
-bool ValidateReferenceIdentity(const std::string& sidecar_json,
-                               const ElfImage& reference, std::string* error) {
-  char err_buf[512] = {};
-  if (mocktail_rust_deriver_validate_reference_identity(
-          sidecar_json.data(), sidecar_json.size(), reference.build_id().data(),
-          reference.build_id().size(), reference.sha256().data(),
-          reference.sha256().size(), err_buf, sizeof(err_buf)) != 0) {
-    *error = err_buf;
-    return false;
-  }
-  return true;
-}
-
-std::optional<std::string> LoadCandidateMetadata(
-    const std::filesystem::path& root, const ElfImage& candidate,
-    std::string* error) {
-  const std::filesystem::path metadata_path = root / "roblox_payload.json";
-  error->clear();
-  std::string metadata_json =
-      ReadSmallRegular(metadata_path, kMaximumJsonBytes, error);
-  if (!error->empty()) return std::nullopt;
-  const std::string path_str = metadata_path.string();
-  const std::string dir_name = root.filename().string();
-  char version_name_buf[256] = {};
-  std::uint64_t version_code = 0;
-  char err_buf[512] = {};
-  if (mocktail_rust_deriver_load_candidate_metadata(
-          metadata_json.data(), metadata_json.size(), path_str.data(),
-          path_str.size(), dir_name.data(), dir_name.size(),
-          candidate.build_id().data(), candidate.build_id().size(),
-          candidate.sha256().data(), candidate.sha256().size(),
-          compat::kGuestAbi.data(), compat::kGuestAbi.size(), version_name_buf,
-          sizeof(version_name_buf), &version_code, err_buf,
-          sizeof(err_buf)) != 0) {
-    *error = err_buf;
-    return std::nullopt;
-  }
-  return metadata_json;
-}
-
-std::optional<std::pair<std::string, std::string>> DeriveDocuments(
-    const ElfImage& reference, const ElfImage& candidate,
-    const std::string& sidecar_json, const std::string& metadata_json,
-    const RuntimeCompatibilityAnchors& runtime_source, std::string* error) {
-  if (!ValidateReferenceIdentity(sidecar_json, reference, error) ||
-      reference.build_id() == candidate.build_id() ||
-      reference.sha256() == candidate.sha256() ||
-      !reference.ValidateToolchain(error) ||
-      !candidate.ValidateToolchain(error) ||
-      !candidate.HasRequiredExports(error)) {
-    return std::nullopt;
-  }
-  Disassembler disassembler;
-  if (!disassembler.Open(error)) return std::nullopt;
-  const auto specs = SignatureSpecs(sidecar_json, error);
-  if (!specs.has_value()) return std::nullopt;
-  const auto reference_init = reference.InitArray(error);
-  const auto candidate_init = candidate.InitArray(error);
-  if (!reference_init.has_value() || !candidate_init.has_value()) {
-    return std::nullopt;
-  }
-  std::size_t reference_count = 0;
-  char err_buf[512] = {};
-  if (mocktail_rust_deriver_check_init_array(
-          sidecar_json.data(), sidecar_json.size(), reference_init->size(),
-          candidate_init->size(), &reference_count, err_buf,
-          sizeof(err_buf)) != 0) {
-    *error = err_buf;
-    return std::nullopt;
-  }
-  std::map<std::string, SignatureMatch> matches;
-  std::vector<SignatureMatch> allocate_matches;
-  for (const SignatureSpec& spec : *specs) {
-    if (spec.name == "allocate") {
-      auto candidates = FindSignatureMatches(reference, candidate,
-                                             disassembler, spec, true, error);
-      if (!candidates.has_value()) return std::nullopt;
-      allocate_matches = std::move(*candidates);
-      continue;
-    }
-    auto match = [&]() -> std::optional<SignatureMatch> {
-      if (spec.name == "registry-initializer") {
-        return FindRegistrySignatureMatch(reference, candidate, disassembler,
-                                          spec, error);
-      }
-      if (spec.name == "jni-singleton-initializer") {
-        return FindSingletonSignatureMatch(reference, candidate, disassembler,
-                                           spec, *candidate_init, error);
-      }
-      if (spec.name == "constructor-4") {
-        return FindConstructorBoundaryMatch(reference, candidate, disassembler,
-                                            spec, spec.reference_rva,
-                                            *candidate_init, error);
-      }
-      return FindSignatureMatch(reference, candidate, disassembler, spec,
-                                error);
-    }();
-    if (!match.has_value()) return std::nullopt;
-    matches.emplace(spec.name, std::move(*match));
-  }
-  // 2904 contains two semantically equivalent allocate wrappers. Select the
-  // one independently referenced by the registry initializer instead of
-  // weakening signature uniqueness globally.
-  const SignatureMatch& registry_match = matches.at("registry-initializer");
-  if (allocate_matches.empty() || registry_match.reference.size() <= 9U ||
-      registry_match.candidate.size() <= 9U) {
-    *error = "allocator signatures are incomplete";
-    return std::nullopt;
-  }
-  const auto reference_allocate = DirectCallTarget(
-      registry_match.reference[9], "reference registry allocator call", error);
-  if (!reference_allocate.has_value() ||
-      *reference_allocate !=
-          allocate_matches.front().reference.front().address) {
-    if (error->empty()) {
-      *error =
-          "reference registry initializer does not call its allocator bridge";
-    }
-    return std::nullopt;
-  }
-  const auto candidate_allocate = DirectCallTarget(
-      registry_match.candidate[9], "candidate registry allocator call", error);
-  if (!candidate_allocate.has_value()) return std::nullopt;
-  auto selected_allocate = std::find_if(
-      allocate_matches.begin(), allocate_matches.end(),
-      [&](const SignatureMatch& match) {
-        return match.rva == *candidate_allocate;
-      });
-  if (selected_allocate == allocate_matches.end() ||
-      std::find_if(std::next(selected_allocate), allocate_matches.end(),
-                   [&](const SignatureMatch& match) {
-                     return match.rva == *candidate_allocate;
-                   }) != allocate_matches.end()) {
-    *error = "signature allocate candidates do not identify exactly one "
-             "registry allocator call";
-    return std::nullopt;
-  }
-  matches.emplace("allocate", std::move(*selected_allocate));
-  const auto& ctor2 = matches.at("constructor-2");
-  const auto& ctor3 = matches.at("constructor-3");
-  const auto& ctor4 = matches.at("constructor-4");
-  const auto& singleton = matches.at("jni-singleton-initializer");
-  if (ctor2.reference.empty() || ctor3.reference.empty() ||
-      ctor4.reference.empty()) {
-    *error = "constructor role signature has no reference instructions";
-    return std::nullopt;
-  }
-  const std::array<std::uint64_t, 4> ctor_cand_rvas{
-      ctor2.rva, ctor3.rva, ctor4.rva, singleton.rva};
-  const std::array<std::uint64_t, 3> ctor_ref_first_rvas{
-      ctor2.reference.front().address, ctor3.reference.front().address,
-      ctor4.reference.front().address};
-  MocktailRustDeriverPlan plan{};
-  if (mocktail_rust_deriver_resolve_constructors_and_seeds(
-          sidecar_json.data(), sidecar_json.size(), reference_init->data(),
-          reference_init->size(), candidate_init->data(),
-          candidate_init->size(), ctor_cand_rvas.data(),
-          ctor_ref_first_rvas.data(), &plan, err_buf, sizeof(err_buf)) != 0) {
-    *error = err_buf;
-    return std::nullopt;
-  }
-
-  const auto mapped = [&](const std::string& match_name,
-                          std::uint64_t old_target,
-                          std::string_view field) -> std::optional<std::uint64_t> {
-    return MappedRipTarget(matches.at(match_name), old_target, field, error);
-  };
-  const auto allocator_slot =
-      mapped("allocator-object-initializer", plan.allocator_object_slot_rva,
-             "allocator_object_slot");
-  const auto empty_slot = mapped("empty-string-initializer",
-                                 plan.empty_string_slot_rva, "empty_string_slot");
-  const auto jni_slot = mapped("jni-singleton-initializer",
-                               plan.jni_singleton_slot_rva, "jni_singleton_slot");
-  const auto arena_guard =
-      mapped("arena-initializer", plan.arena_guard_slot_rva, "arena_guard_slot");
-  const auto arena_table =
-      mapped("usable-size", plan.arena_table_slot_rva, "arena_table_slot");
-  if (!allocator_slot.has_value() || !empty_slot.has_value() ||
-      !jni_slot.has_value() || !arena_guard.has_value() ||
-      !arena_table.has_value()) {
-    return std::nullopt;
-  }
-  for (const std::uint64_t slot :
-       {*allocator_slot, *empty_slot, *jni_slot, *arena_guard, *arena_table}) {
-    if (!candidate.RequireWritable(slot, 8, error)) return std::nullopt;
-  }
-
-  const auto verified_old_slot = DeriveRegistrySlot(
-      reference, disassembler, plan.old_registry_initializer_rva, error);
-  if (!verified_old_slot.has_value() ||
-      *verified_old_slot != plan.old_registry_slot_rva) {
-    if (error->empty()) *error = "reference registry slot does not match ELF";
-    return std::nullopt;
-  }
-  const std::uint64_t registry_initializer =
-      matches.at("registry-initializer").rva;
-  const auto registry_slot =
-      DeriveRegistrySlot(candidate, disassembler, registry_initializer, error);
-  if (!registry_slot.has_value()) return std::nullopt;
-  const Instruction& registry_call =
-      matches.at("registry-initializer").candidate[9];
-  const std::uint64_t allocate_rva = matches.at("allocate").rva;
-  if (registry_call.operands.size() != 1 ||
-      registry_call.operands[0].type != Operand::Type::kImmediate ||
-      static_cast<std::uint64_t>(registry_call.operands[0].value) !=
-          allocate_rva) {
-    *error = "registry initializer no longer calls native allocator";
-    return std::nullopt;
-  }
-
-  const Section* init_section = candidate.FindSection(".init_array");
-  if (init_section == nullptr) {
-    *error = "candidate init-array section is unavailable";
-    return std::nullopt;
-  }
-  const auto runtime_compatibility = DeriveRuntimeCompatibility(
-      reference, candidate, disassembler, runtime_source, error);
-  if (!runtime_compatibility.has_value()) return std::nullopt;
-
-  MocktailRustDeriverBuildInputs inputs{};
-  inputs.ref_build_id = {reference.build_id().data(),
-                         reference.build_id().size()};
-  inputs.ref_sha256 = {reference.sha256().data(), reference.sha256().size()};
-  inputs.cand_build_id = {candidate.build_id().data(),
-                          candidate.build_id().size()};
-  inputs.cand_sha256 = {candidate.sha256().data(), candidate.sha256().size()};
-  inputs.reference_init_count = reference_count;
-  inputs.candidate_init_count = candidate_init->size();
-  inputs.init_array_offset = init_section->address;
-  inputs.bridge_rvas[0] = matches.at("small-allocate").rva;
-  inputs.bridge_rvas[1] = matches.at("usable-size").rva;
-  inputs.bridge_rvas[2] = matches.at("reallocate").rva;
-  inputs.bridge_rvas[3] = allocate_rva;
-  inputs.bridge_rvas[4] = matches.at("aligned-allocate-direct").rva;
-  inputs.bridge_rvas[5] = matches.at("free").rva;
-  inputs.arena_initializer_rva = matches.at("arena-initializer").rva;
-  inputs.allocator_thread_initializer_rva =
-      matches.at("allocator-thread-initializer").rva;
-  inputs.registry_initializer_rva = registry_initializer;
-  inputs.registry_slot_rva = *registry_slot;
-  inputs.allocator_object_initializer_rva =
-      matches.at("allocator-object-initializer").rva;
-  inputs.empty_string_initializer_rva =
-      matches.at("empty-string-initializer").rva;
-  inputs.jni_singleton_initializer_rva = singleton.rva;
-  inputs.allocator_object_slot_rva = *allocator_slot;
-  inputs.empty_string_slot_rva = *empty_slot;
-  inputs.jni_singleton_slot_rva = *jni_slot;
-  inputs.arena_guard_slot_rva = *arena_guard;
-  inputs.arena_table_slot_rva = *arena_table;
-  for (std::size_t i = 0; i < 4; ++i) {
-    inputs.candidate_constructor_rvas[i] = plan.candidate_constructor_rvas[i];
-    inputs.candidate_constructor_indices[i] =
-        plan.candidate_constructor_indices[i];
-  }
-  inputs.has_derived_fullscreen_setter =
-      runtime_compatibility->fullscreen_setter.has_value();
-  inputs.derived_fullscreen_setter_rva =
-      runtime_compatibility->fullscreen_setter.value_or(0);
-  if (runtime_compatibility->fmod.has_value()) {
-    const FmodRuntimeAnchors& fmod = *runtime_compatibility->fmod;
-    inputs.has_derived_fmod = true;
-    inputs.derived_fmod_vtable_rva = fmod.vtable;
-    inputs.derived_fmod_string_constructor_rva = fmod.string_constructor;
-    inputs.derived_fmod_count_method_rva = fmod.count_method;
-    inputs.derived_fmod_info_method_rva = fmod.info_method;
-    inputs.derived_fmod_current_method_rva = fmod.current_method;
-    inputs.derived_fmod_select_method_rva = fmod.select_method;
-    inputs.derived_fmod_layout_version = fmod.layout_version;
-    inputs.derived_fmod_has_input =
-        runtime_source.fmod.has_value() &&
-        runtime_source.fmod->input_methods[0] != 0;
-    for (std::size_t i = 0; i < 4; ++i) {
-      inputs.derived_fmod_input_methods[i] = fmod.input_methods[i];
-    }
-  }
-
-  DeriverDocumentsCaptureCtx docs{};
-  if (mocktail_rust_deriver_build_documents(
-          sidecar_json.data(), sidecar_json.size(), metadata_json.data(),
-          metadata_json.size(), &inputs, OnDerivedProfileJson,
-          OnDerivedCompatibilityJson, &docs, err_buf, sizeof(err_buf)) != 0) {
-    *error = err_buf;
-    return std::nullopt;
-  }
-  return std::pair<std::string, std::string>{
-      std::move(docs.profile_json), std::move(docs.compatibility_json)};
+  out->error = FromSlice(error);
 }
 
 }  // namespace
 
 HostAbiSidecarIdentity ReadHostAbiSidecarIdentity(
     const std::filesystem::path& sidecar) {
-  HostAbiSidecarIdentity result;
-  std::string raw =
-      ReadSmallRegular(sidecar, kMaximumJsonBytes, &result.error);
-  if (!result.error.empty()) return result;
+  HostAbiSidecarIdentity identity;
   const std::string sidecar_path = sidecar.string();
-  char build_id_buf[64] = {};
-  char payload_id_buf[256] = {};
-  char err_buf[512] = {};
-  if (mocktail_rust_deriver_read_sidecar_identity(
-          raw.data(), raw.size(), sidecar_path.data(), sidecar_path.size(),
-          build_id_buf, sizeof(build_id_buf), payload_id_buf,
-          sizeof(payload_id_buf), err_buf, sizeof(err_buf)) != 0) {
-    result.error = err_buf;
-    return result;
+  const int32_t rc = mocktail_rust_deriver_read_sidecar_identity_file(
+      ToSlice(sidecar_path), &OnSidecarIdentity, &OnSidecarError, &identity);
+  if (rc != 0 && identity.error.empty()) {
+    identity.error = "cannot read HostAbi sidecar identity";
   }
-  result.elf_build_id = build_id_buf;
-  result.payload_id = payload_id_buf;
-  return result;
+  return identity;
 }
 
 HostAbiDerivationResult DeriveHostAbiProfile(
     const HostAbiDerivationOptions& options) {
+  const std::string ref_lib = options.reference_library.string();
+  const std::string ref_profile = options.reference_profile.string();
+  const std::string cand_dir = options.candidate_payload_directory.string();
+  const std::string out_dir = options.output_directory.string();
+
+  std::vector<std::string> manifest_strings;
+  manifest_strings.reserve(options.reference_compatibility_manifests.size());
+  for (const auto& path : options.reference_compatibility_manifests) {
+    manifest_strings.push_back(path.string());
+  }
+  std::vector<MocktailRustStrSlice> manifest_slices;
+  manifest_slices.reserve(manifest_strings.size());
+  for (const auto& str : manifest_strings) {
+    manifest_slices.push_back(ToSlice(str));
+  }
+
+  const MocktailRustDeriverOptionsView opts_view{
+      ToSlice(ref_lib),
+      ToSlice(ref_profile),
+      manifest_slices.empty() ? nullptr : manifest_slices.data(),
+      manifest_slices.size(),
+      ToSlice(cand_dir),
+      ToSlice(out_dir),
+  };
+
+  CapstoneDisasmState disasm_state;
   HostAbiDerivationResult result;
-  std::error_code filesystem_error;
-  std::filesystem::create_directories(options.output_directory,
-                                      filesystem_error);
-  if (filesystem_error ||
-      !std::filesystem::is_empty(options.output_directory, filesystem_error)) {
-    result.error = "HostAbi derivation output directory must be empty";
-    return result;
-  }
-  ElfImage reference;
-  ElfImage candidate;
-  if (!reference.Open(options.reference_library, &result.error) ||
-      !candidate.Open(options.candidate_payload_directory / "libroblox.so",
-                      &result.error)) {
-    return result;
-  }
-  const std::string sidecar_json = ReadSmallRegular(
-      options.reference_profile, kMaximumJsonBytes, &result.error);
-  if (!result.error.empty()) return result;
-  const auto metadata_json = LoadCandidateMetadata(
-      options.candidate_payload_directory, candidate, &result.error);
-  if (!metadata_json.has_value()) return result;
-  const auto runtime_source = LoadRuntimeCompatibilityAnchors(
-      options.reference_compatibility_manifests, reference.build_id(),
-      &result.error);
-  if (!runtime_source.has_value()) return result;
-  const auto documents = DeriveDocuments(
-      reference, candidate, sidecar_json, *metadata_json, *runtime_source,
-      &result.error);
-  if (!documents.has_value()) return result;
-  result.profile = options.output_directory / "host_abi_profile.json";
-  result.compatibility_manifest =
-      options.output_directory / "compatibility.json";
-  if (!WritePrivate(result.profile, documents->first, &result.error) ||
-      !WritePrivate(result.compatibility_manifest, documents->second,
-                    &result.error)) {
-    return result;
+  const int32_t rc = mocktail_rust_deriver_derive_host_abi_profile(
+      &opts_view, &OpenX86Callback, &DecodeX86Callback, &disasm_state,
+      &OnDeriveResult, &OnDeriveError, &result);
+  if (rc != 0 && result.error.empty()) {
+    result.error = "HostAbi profile derivation failed";
   }
   return result;
 }

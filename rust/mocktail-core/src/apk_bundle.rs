@@ -3,6 +3,10 @@ use std::ffi::c_void;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::elf_reader::{
+    cstr_slice_at, parse_elf64_header, parse_elf64_shdrs, read_u16_le, read_u32_le, ELFCLASS64,
+    ELFDATA2LSB, SHT_DYNSYM,
+};
 use crate::unix_ipc::{
     format_utc_iso8601_now, hard_link_or_copy_regular_bounded, path_to_slice,
     read_regular_file_limited, slice_to_opt_str, slice_to_pathbuf, slice_to_str_lossy,
@@ -213,119 +217,57 @@ fn common_trusted_certificates(
     Ok(accepted)
 }
 
-fn read_u16_le(bytes: &[u8], off: usize) -> Option<u16> {
-    let slice = bytes.get(off..off + 2)?;
-    Some(u16::from_le_bytes([slice[0], slice[1]]))
-}
-
-fn read_u32_le(bytes: &[u8], off: usize) -> Option<u32> {
-    let slice = bytes.get(off..off + 4)?;
-    Some(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
-}
-
-fn read_u64_le(bytes: &[u8], off: usize) -> Option<u64> {
-    let slice = bytes.get(off..off + 8)?;
-    Some(u64::from_le_bytes([
-        slice[0], slice[1], slice[2], slice[3], slice[4], slice[5], slice[6], slice[7],
-    ]))
-}
-
-fn cstr_slice_at(table: &[u8], off: usize) -> Option<&[u8]> {
-    let tail = table.get(off..)?;
-    let nul = tail.iter().position(|&b| b == 0)?;
-    Some(&tail[..nul])
-}
-
 /// Validates an ELF64 guest `libroblox.so` (header architecture, `.note.android.ident`,
 /// 7 required `SHT_DYNSYM` JNI exports, and 20-byte GNU Build-ID) without `libelf`.
 pub(crate) fn validate_elf64_guest_so_bytes(bytes: &[u8]) -> Result<String, String> {
-    const ELFCLASS64: u8 = 2;
-    const ELFDATA2LSB: u8 = 1;
-    const SHN_XINDEX: u16 = 0xffff;
-    const SHT_DYNSYM: u32 = 11;
-
-    if bytes.len() < 64 || &bytes[0..4] != b"\x7fELF" || bytes[4] != ELFCLASS64 || bytes[5] != ELFDATA2LSB {
+    let Some(hdr) = parse_elf64_header(bytes) else {
+        return Err("extracted libroblox.so is not ELF".to_string());
+    };
+    if hdr.ei_class != ELFCLASS64 || hdr.ei_data != ELFDATA2LSB {
         return Err("extracted libroblox.so is not ELF".to_string());
     }
-    let e_machine = read_u16_le(bytes, 18).ok_or_else(|| "extracted libroblox.so is not ELF".to_string())?;
-    if e_machine != guest_abi::ELF_MACHINE {
+    if hdr.e_machine != guest_abi::ELF_MACHINE {
         return Err(format!("libroblox.so is not a {} ELF", host_guest_abi()));
     }
 
-    let e_shoff = usize::try_from(read_u64_le(bytes, 40).unwrap_or(0))
-        .map_err(|_| "cannot inspect libroblox.so sections".to_string())?;
-    let e_shentsize = read_u16_le(bytes, 58).unwrap_or(0) as usize;
-    let raw_shnum = read_u16_le(bytes, 60).unwrap_or(0);
-    let raw_shstrndx = read_u16_le(bytes, 62).unwrap_or(0);
-
-    if e_shoff == 0 || e_shentsize < 64 || e_shoff.checked_add(e_shentsize).is_none_or(|end| end > bytes.len()) {
-        return Err("cannot inspect libroblox.so sections".to_string());
-    }
-
-    let shnum: usize = if raw_shnum == 0 {
-        usize::try_from(read_u64_le(bytes, e_shoff + 32).unwrap_or(0))
-            .map_err(|_| "cannot inspect libroblox.so sections".to_string())?
+    let shdrs = parse_elf64_shdrs(bytes, &hdr, false).map_err(|err| match err {
+        crate::elf_reader::ShdrError::TableInvalid => "cannot inspect libroblox.so sections",
+        crate::elf_reader::ShdrError::SectionOutOfBounds => "cannot inspect libroblox.so section",
+    })?;
+    let shstrndx = usize::try_from(if hdr.raw_shstrndx == crate::elf_reader::SHN_XINDEX {
+        read_u32_le(bytes, hdr.e_shoff + 40).unwrap_or(u32::MAX) as usize
     } else {
-        raw_shnum as usize
-    };
-    let shstrndx: usize = if raw_shstrndx == SHN_XINDEX {
-        read_u32_le(bytes, e_shoff + 40).unwrap_or(u32::MAX) as usize
-    } else {
-        raw_shstrndx as usize
-    };
-
-    let shdr_table_bytes = shnum
-        .checked_mul(e_shentsize)
-        .and_then(|sz| e_shoff.checked_add(sz))
+        hdr.raw_shstrndx as usize
+    })
+    .unwrap_or(usize::MAX);
+    let shstr_sec = shdrs
+        .get(shstrndx)
         .ok_or_else(|| "cannot inspect libroblox.so sections".to_string())?;
-    if shnum == 0 || shstrndx >= shnum || shdr_table_bytes > bytes.len() {
-        return Err("cannot inspect libroblox.so sections".to_string());
-    }
-
-    let section_slice = |idx: usize| -> Result<(u32, u32, usize, usize, u32, usize), &'static str> {
-        let base = e_shoff + idx * e_shentsize;
-        let sh_name = read_u32_le(bytes, base).ok_or("cannot inspect libroblox.so section")?;
-        let sh_type = read_u32_le(bytes, base + 4).ok_or("cannot inspect libroblox.so section")?;
-        let sh_off = usize::try_from(read_u64_le(bytes, base + 24).ok_or("cannot inspect libroblox.so section")?)
-            .map_err(|_| "cannot inspect libroblox.so section")?;
-        let sh_size = usize::try_from(read_u64_le(bytes, base + 32).ok_or("cannot inspect libroblox.so section")?)
-            .map_err(|_| "cannot inspect libroblox.so section")?;
-        let sh_link = read_u32_le(bytes, base + 40).ok_or("cannot inspect libroblox.so section")?;
-        let sh_entsize = usize::try_from(read_u64_le(bytes, base + 56).ok_or("cannot inspect libroblox.so section")?)
-            .map_err(|_| "cannot inspect libroblox.so section")?;
-        if sh_type != 8 /* SHT_NOBITS */ {
-            let end = sh_off.checked_add(sh_size).ok_or("cannot inspect libroblox.so section")?;
-            if end > bytes.len() {
-                return Err("cannot inspect libroblox.so section");
-            }
-        }
-        Ok((sh_name, sh_type, sh_off, sh_size, sh_link, sh_entsize))
-    };
-
-    let (_, _, shstr_off, shstr_size, _, _) =
-        section_slice(shstrndx).map_err(|e| e.to_string())?;
-    let shstrtab = &bytes[shstr_off..shstr_off + shstr_size];
+    let shstrtab = &bytes[shstr_sec.sh_offset as usize..(shstr_sec.sh_offset + shstr_sec.sh_size) as usize];
 
     let mut has_android_ident = false;
     let mut found_exports = [false; 7];
 
-    for idx in 0..shnum {
-        let (sh_name, sh_type, sh_off, sh_size, sh_link, sh_entsize) =
-            section_slice(idx).map_err(|e| e.to_string())?;
-        if let Some(sec_name) = cstr_slice_at(shstrtab, sh_name as usize) {
+    for sec in &shdrs {
+        if let Some(sec_name) = cstr_slice_at(shstrtab, sec.sh_name as usize) {
             if sec_name == b".note.android.ident" {
                 has_android_ident = true;
             }
         }
-        if sh_type == SHT_DYNSYM {
-            let sym_entsize = if sh_entsize == 0 { 24 } else { sh_entsize };
-            if sym_entsize < 24 || (sh_link as usize) >= shnum {
-                return Err("cannot inspect libroblox.so section".to_string());
-            }
-            let (_, _, str_off, str_size, _, _) =
-                section_slice(sh_link as usize).map_err(|e| e.to_string())?;
-            let strtab = &bytes[str_off..str_off + str_size];
-            let count = sh_size / sym_entsize;
+        if sec.sh_type == SHT_DYNSYM {
+            let sym_entsize = if sec.sh_entsize == 0 {
+                24
+            } else {
+                sec.sh_entsize as usize
+            };
+            let str_sec = shdrs
+                .get(sec.sh_link as usize)
+                .filter(|_| sym_entsize >= 24)
+                .ok_or_else(|| "cannot inspect libroblox.so section".to_string())?;
+            let strtab =
+                &bytes[str_sec.sh_offset as usize..(str_sec.sh_offset + str_sec.sh_size) as usize];
+            let sh_off = sec.sh_offset as usize;
+            let count = sec.sh_size as usize / sym_entsize;
             for sym_idx in 0..count {
                 let sym_base = sh_off + sym_idx * sym_entsize;
                 let st_name = read_u32_le(bytes, sym_base).unwrap_or(0);

@@ -932,6 +932,98 @@ pub(crate) fn read_owned_regular_file_limited(
     read_bounded_regular_fd(&fd, &st, max_bytes).map_err(|_| ReadOwnedFileError::ReadFailed)
 }
 
+/// Validates ownership, immutability, non-symlink regularity, and size bounds with exact error text.
+pub(crate) fn read_owned_regular_file_strict_error(
+    path: &Path,
+    max_bytes: usize,
+    require_immutable: bool,
+) -> Result<Vec<u8>, String> {
+    let Some(cpath) = path_to_cstr(path) else {
+        return Err(format!("lstat({}): invalid path", path.display()));
+    };
+    let mut lstat_st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::lstat(cpath.as_ptr(), &mut lstat_st) } != 0 {
+        let msg = std::io::Error::last_os_error()
+            .to_string()
+            .split(" (os error")
+            .next()
+            .unwrap_or("lstat failed")
+            .to_string();
+        return Err(format!("lstat({}): {}", path.display(), msg));
+    }
+    if (lstat_st.st_mode & libc::S_IFMT) != libc::S_IFREG {
+        return Err(format!("not a regular non-symlink file: {}", path.display()));
+    }
+    if lstat_st.st_uid != current_euid() {
+        return Err(format!(
+            "file is not owned by the current user: {}",
+            path.display()
+        ));
+    }
+    if (lstat_st.st_mode & ((libc::S_IWGRP | libc::S_IWOTH) as libc::mode_t)) != 0 {
+        return Err(format!(
+            "file is group- or world-writable: {}",
+            path.display()
+        ));
+    }
+    if require_immutable && (lstat_st.st_mode & (libc::S_IWUSR as libc::mode_t)) != 0 {
+        return Err(format!(
+            "approval evidence is owner-writable: {}",
+            path.display()
+        ));
+    }
+    if lstat_st.st_size < 0 || (lstat_st.st_size as u64) > (max_bytes as u64) {
+        return Err(format!(
+            "file exceeds the accepted size limit: {}",
+            path.display()
+        ));
+    }
+    let (fd, st) = open_and_stat_regular_fd(path, false)
+        .map_err(|_| format!("cannot open file: {}", path.display()))?;
+    if (st.st_mode & libc::S_IFMT) != libc::S_IFREG
+        || st.st_dev != lstat_st.st_dev
+        || st.st_ino != lstat_st.st_ino
+        || st.st_uid != current_euid()
+        || (st.st_mode & ((libc::S_IWGRP | libc::S_IWOTH) as libc::mode_t)) != 0
+        || (require_immutable && (st.st_mode & (libc::S_IWUSR as libc::mode_t)) != 0)
+    {
+        return Err(format!("not a regular non-symlink file: {}", path.display()));
+    }
+    read_bounded_regular_fd(&fd, &st, max_bytes)
+        .map_err(|_| format!("cannot read file: {}", path.display()))
+}
+
+/// Canonicalizes an absolute non-symlink regular file path with exact diagnostics.
+pub(crate) fn canonical_regular_path_strict(path: &Path) -> Result<PathBuf, String> {
+    if path.as_os_str().is_empty() || !path.is_absolute() {
+        return Err(format!("path must be absolute: {}", path.display()));
+    }
+    let cpath =
+        path_to_cstr(path).ok_or_else(|| format!("lstat({}): invalid path", path.display()))?;
+    let mut lstat_st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::lstat(cpath.as_ptr(), &mut lstat_st) } != 0 {
+        let msg = std::io::Error::last_os_error()
+            .to_string()
+            .split(" (os error")
+            .next()
+            .unwrap_or("lstat failed")
+            .to_string();
+        return Err(format!("lstat({}): {}", path.display(), msg));
+    }
+    if (lstat_st.st_mode & libc::S_IFMT) == libc::S_IFLNK {
+        return Err(format!("symlink paths are not accepted: {}", path.display()));
+    }
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|e| format!("cannot canonicalize {}: {}", path.display(), e))?;
+    match std::fs::metadata(&canonical) {
+        Ok(meta) if meta.is_file() => Ok(canonical),
+        _ => Err(format!(
+            "canonical path is not a regular file: {}",
+            canonical.display()
+        )),
+    }
+}
+
 /// Returns current UTC timestamp in `YYYY-MM-DDTHH:MM:SSZ` ISO-8601 format.
 pub(crate) fn format_utc_iso8601_now() -> String {
     let now = unsafe { libc::time(std::ptr::null_mut()) };
@@ -994,16 +1086,17 @@ pub(crate) enum WritePrivateError {
     SyncFailed,
 }
 
-fn write_private_trunc_file_inner(
+fn write_private_file_inner(
     path: &Path,
     bytes: &[u8],
+    extra_open_flags: i32,
     require_fsync: bool,
 ) -> Result<(), WritePrivateError> {
     let cpath = path_to_cstr(path).ok_or(WritePrivateError::OpenFailed)?;
     let raw_fd = unsafe {
         libc::open(
             cpath.as_ptr(),
-            libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            libc::O_WRONLY | libc::O_CREAT | extra_open_flags | libc::O_CLOEXEC | libc::O_NOFOLLOW,
             0o600,
         )
     };
@@ -1022,12 +1115,20 @@ pub(crate) fn write_private_trunc_file_checked(
     path: &Path,
     bytes: &[u8],
 ) -> Result<(), WritePrivateError> {
-    write_private_trunc_file_inner(path, bytes, true)
+    write_private_file_inner(path, bytes, libc::O_TRUNC, true)
+}
+
+/// Atomically creates a new non-symlink file (`O_EXCL | O_NOFOLLOW`, `0600`) and checks `fsync`.
+pub(crate) fn write_private_excl_file_checked(
+    path: &Path,
+    bytes: &[u8],
+) -> Result<(), WritePrivateError> {
+    write_private_file_inner(path, bytes, libc::O_EXCL, true)
 }
 
 /// Writes `bytes` to a non-symlink regular file created/truncated with mode `0600` and `fsync`s it.
 pub(crate) fn write_private_trunc_file(path: &Path, bytes: &[u8]) -> bool {
-    write_private_trunc_file_inner(path, bytes, false).is_ok()
+    write_private_file_inner(path, bytes, libc::O_TRUNC, false).is_ok()
 }
 
 /// Writes an immutable artifact atomically via a temporary `O_EXCL | O_NOFOLLOW` file + `fchmod` + `fsync` + `rename`.
@@ -1131,12 +1232,25 @@ pub(crate) struct MappedReadOnlyFile {
 
 impl MappedReadOnlyFile {
     pub(crate) fn open(path: &Path) -> Result<Self, ()> {
-        let (fd, st) = open_and_stat_regular_fd(path, false).map_err(|_| ())?;
-        if (st.st_mode & libc::S_IFMT) != libc::S_IFREG || st.st_size < 0 {
-            return Err(());
+        Self::open_bounded(path, false, 0, None).map_err(|_| ())
+    }
+
+    pub(crate) fn open_bounded(
+        path: &Path,
+        follow_symlinks: bool,
+        min_bytes: u64,
+        max_bytes: Option<u64>,
+    ) -> Result<Self, ReadFileError> {
+        let (fd, st) = open_and_stat_regular_fd(path, follow_symlinks)?;
+        if (st.st_mode & libc::S_IFMT) != libc::S_IFREG
+            || st.st_size < 0
+            || (st.st_size as u64) < min_bytes
+            || max_bytes.is_some_and(|max| (st.st_size as u64) > max)
+        {
+            return Err(ReadFileError::InvalidFile);
         }
         let Ok(len) = usize::try_from(st.st_size) else {
-            return Err(());
+            return Err(ReadFileError::InvalidFile);
         };
         if len == 0 {
             return Ok(Self {
@@ -1156,7 +1270,7 @@ impl MappedReadOnlyFile {
             )
         };
         if mapped == libc::MAP_FAILED {
-            return Err(());
+            return Err(ReadFileError::ReadFailed);
         }
         Ok(Self {
             _fd: fd,

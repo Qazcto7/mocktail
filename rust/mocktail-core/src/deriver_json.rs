@@ -198,7 +198,7 @@ fn parse_sidecar_object(json_ptr: *const c_char, json_len: usize) -> Option<Map<
     parse_json_object_str(raw, true)
 }
 
-fn validate_reference_identity_inner(
+pub(crate) fn validate_reference_identity_inner(
     sidecar: &Map<String, Value>,
     ref_build_id: &str,
     ref_sha256: &str,
@@ -227,15 +227,16 @@ fn validate_reference_identity_inner(
     Ok(())
 }
 
-struct ParsedSpec {
-    name: &'static str,
-    rva: u64,
-    instruction_count: usize,
-    registry_size_may_change: bool,
-    minimum_anchor_bytes: usize,
+#[derive(Clone, Copy)]
+pub(crate) struct ParsedSpec {
+    pub(crate) name: &'static str,
+    pub(crate) rva: u64,
+    pub(crate) instruction_count: usize,
+    pub(crate) registry_size_may_change: bool,
+    pub(crate) minimum_anchor_bytes: usize,
 }
 
-fn extract_specs_inner(sidecar: &Map<String, Value>) -> Result<Vec<ParsedSpec>, String> {
+pub(crate) fn extract_specs_inner(sidecar: &Map<String, Value>) -> Result<Vec<ParsedSpec>, String> {
     let profile = sidecar
         .get("profile")
         .and_then(Value::as_object)
@@ -407,26 +408,25 @@ pub(crate) fn parse_sidecar_identity(
     Ok((build_id, payload_id.to_string()))
 }
 
+pub(crate) fn read_bounded_regular_json_bytes(path: &Path) -> Result<Vec<u8>, String> {
+    match crate::unix_ipc::read_regular_file_limited(path, 1024 * 1024, false, false) {
+        Ok(bytes) => Ok(bytes),
+        Err(crate::unix_ipc::ReadFileError::NotFound | crate::unix_ipc::ReadFileError::OpenFailed(_)) => {
+            Err(format!("cannot open JSON input: {}", path.display()))
+        }
+        Err(crate::unix_ipc::ReadFileError::InvalidFile) => {
+            Err("JSON input is not a bounded regular file".to_string())
+        }
+        Err(crate::unix_ipc::ReadFileError::ReadFailed) => {
+            Err("cannot read JSON input".to_string())
+        }
+    }
+}
+
 pub(crate) fn read_host_abi_sidecar_identity_file(
     sidecar_path: &Path,
 ) -> Result<(String, String), String> {
-    let raw = match crate::unix_ipc::read_regular_file_limited(
-        sidecar_path,
-        1024 * 1024,
-        false,
-        false,
-    ) {
-        Ok(bytes) => bytes,
-        Err(crate::unix_ipc::ReadFileError::NotFound | crate::unix_ipc::ReadFileError::OpenFailed(_)) => {
-            return Err(format!("cannot open JSON input: {}", sidecar_path.display()));
-        }
-        Err(crate::unix_ipc::ReadFileError::InvalidFile) => {
-            return Err("JSON input is not a bounded regular file".to_string());
-        }
-        Err(crate::unix_ipc::ReadFileError::ReadFailed) => {
-            return Err("cannot read JSON input".to_string());
-        }
-    };
+    let raw = read_bounded_regular_json_bytes(sidecar_path)?;
     parse_sidecar_identity(&raw, sidecar_path)
 }
 
@@ -469,6 +469,37 @@ pub extern "C" fn mocktail_rust_deriver_read_sidecar_identity(
     0
 }
 
+pub(crate) fn load_candidate_metadata_data(
+    metadata_json: &str,
+    metadata_path: &str,
+    dir_filename: &str,
+    cand_build_id: &str,
+    cand_sha256: &str,
+    guest_abi: &str,
+) -> Result<(String, u64), String> {
+    let Some(map) = parse_json_object_str(metadata_json, true) else {
+        return Err(format!("JSON input must contain one object: {metadata_path}"));
+    };
+    let version_name = json_str_or_empty(&map, "version_name");
+    let version_code = map.get("version_code").and_then(Value::as_u64).unwrap_or(0);
+    let hashes = map.get("sha256").and_then(Value::as_object);
+    let valid = json_int_eq_one(&map, "schema_version")
+        && json_str_or_empty(&map, "package") == "com.roblox.client"
+        && json_str_or_empty(&map, "abi") == guest_abi
+        && !version_name.is_empty()
+        && version_code != 0
+        && json_str_or_empty(&map, "elf_build_id") == cand_build_id
+        && hashes.is_some_and(|h| json_str_or_empty(h, "libroblox") == cand_sha256);
+    if !valid {
+        return Err("payload metadata does not match candidate ELF bytes".to_string());
+    }
+    let payload_id = format!("{version_code}-{cand_build_id}");
+    if dir_filename != payload_id {
+        return Err("candidate ELF parent is not the canonical payload ID".to_string());
+    }
+    Ok((version_name.to_string(), version_code))
+}
+
 #[no_mangle]
 pub extern "C" fn mocktail_rust_deriver_load_candidate_metadata(
     json_ptr: *const c_char,
@@ -490,7 +521,7 @@ pub extern "C" fn mocktail_rust_deriver_load_candidate_metadata(
     err_cap: usize,
 ) -> c_int {
     let metadata_path = slice_to_str(metadata_path_ptr, metadata_path_len).unwrap_or("");
-    let Some(map) = parse_sidecar_object(json_ptr, json_len) else {
+    let Some(metadata_json) = slice_to_str(json_ptr, json_len) else {
         copy_error(
             out_err,
             err_cap,
@@ -503,46 +534,32 @@ pub extern "C" fn mocktail_rust_deriver_load_candidate_metadata(
     let cand_sha256 = slice_to_str(candidate_sha256_ptr, candidate_sha256_len).unwrap_or("");
     let guest_abi = slice_to_str(guest_abi_ptr, guest_abi_len).unwrap_or("");
 
-    let version_name = json_str_or_empty(&map, "version_name");
-    let version_code = map.get("version_code").and_then(Value::as_u64).unwrap_or(0);
-    let hashes = map.get("sha256").and_then(Value::as_object);
-    let valid = json_int_eq_one(&map, "schema_version")
-        && json_str_or_empty(&map, "package") == "com.roblox.client"
-        && json_str_or_empty(&map, "abi") == guest_abi
-        && !version_name.is_empty()
-        && version_code != 0
-        && json_str_or_empty(&map, "elf_build_id") == cand_build_id
-        && hashes.is_some_and(|h| json_str_or_empty(h, "libroblox") == cand_sha256);
-    if !valid {
-        copy_error(
-            out_err,
-            err_cap,
-            "payload metadata does not match candidate ELF bytes",
-        );
-        return -1;
-    }
-    let payload_id = format!("{version_code}-{cand_build_id}");
-    if dir_filename != payload_id {
-        copy_error(
-            out_err,
-            err_cap,
-            "candidate ELF parent is not the canonical payload ID",
-        );
-        return -1;
-    }
+    let (version_name, version_code) = match load_candidate_metadata_data(
+        metadata_json,
+        metadata_path,
+        dir_filename,
+        cand_build_id,
+        cand_sha256,
+        guest_abi,
+    ) {
+        Ok(v) => v,
+        Err(msg) => {
+            copy_error(out_err, err_cap, &msg);
+            return -1;
+        }
+    };
     if !out_version_code.is_null() {
         unsafe { *out_version_code = version_code };
     }
-    if copy_to_c_buffer(version_name, out_version_name, version_name_cap) < 0 {
+    if copy_to_c_buffer(&version_name, out_version_name, version_name_cap) < 0 {
         copy_error(out_err, err_cap, "candidate version_name exceeds buffer");
         return -1;
     }
     0
 }
 
-fn load_runtime_anchors_inner(
-    jsons: &[MocktailRustStrSlice],
-    paths: &[MocktailRustStrSlice],
+pub(crate) fn load_runtime_anchors_data<'a>(
+    manifests: &[(&'a str, &'a str)],
     ref_build_id: &str,
 ) -> Result<MocktailRustDeriverRuntimeAnchors, String> {
     const CORE_FIELDS: [&str; 6] = [
@@ -563,10 +580,7 @@ fn load_runtime_anchors_inner(
     let mut result = MocktailRustDeriverRuntimeAnchors::default();
     let mut prev_fmod: Option<MocktailRustDeriverRuntimeAnchors> = None;
 
-    for (raw_slice, path_slice) in jsons.iter().zip(paths.iter()) {
-        let path_str = slice_from_raw(*path_slice).unwrap_or("");
-        let raw = slice_from_raw(*raw_slice)
-            .ok_or_else(|| format!("JSON input must contain one object: {path_str}"))?;
+    for &(raw, path_str) in manifests {
         let doc = parse_json_object_str(raw, true)
             .ok_or_else(|| format!("JSON input must contain one object: {path_str}"))?;
         let profiles = doc
@@ -684,6 +698,21 @@ fn load_runtime_anchors_inner(
     Ok(result)
 }
 
+fn load_runtime_anchors_inner(
+    jsons: &[MocktailRustStrSlice],
+    paths: &[MocktailRustStrSlice],
+    ref_build_id: &str,
+) -> Result<MocktailRustDeriverRuntimeAnchors, String> {
+    let mut pairs = Vec::with_capacity(jsons.len());
+    for (raw_slice, path_slice) in jsons.iter().zip(paths.iter()) {
+        let path_str = slice_from_raw(*path_slice).unwrap_or("");
+        let raw = slice_from_raw(*raw_slice)
+            .ok_or_else(|| format!("JSON input must contain one object: {path_str}"))?;
+        pairs.push((raw, path_str));
+    }
+    load_runtime_anchors_data(&pairs, ref_build_id)
+}
+
 #[no_mangle]
 pub extern "C" fn mocktail_rust_deriver_load_runtime_anchors(
     manifest_jsons_ptr: *const MocktailRustStrSlice,
@@ -794,6 +823,22 @@ pub extern "C" fn mocktail_rust_deriver_extract_specs(
     0
 }
 
+pub(crate) fn check_init_array_data(
+    sidecar: &Map<String, Value>,
+    reference_init_len: usize,
+    candidate_init_len: usize,
+) -> Result<usize, String> {
+    let ref_count_val = sidecar
+        .get("profile")
+        .and_then(Value::as_object)
+        .and_then(|p| p.get("init_array_count"));
+    let ref_count = positive_size(ref_count_val, "reference init-array count")?;
+    if reference_init_len != ref_count || candidate_init_len < 8 {
+        return Err("init-array shape is not derivable".to_string());
+    }
+    Ok(ref_count)
+}
+
 #[no_mangle]
 pub extern "C" fn mocktail_rust_deriver_check_init_array(
     sidecar_ptr: *const c_char,
@@ -808,28 +853,20 @@ pub extern "C" fn mocktail_rust_deriver_check_init_array(
         copy_error(out_err, err_cap, "JSON input must contain one object");
         return -1;
     };
-    let ref_count_val = sidecar
-        .get("profile")
-        .and_then(Value::as_object)
-        .and_then(|p| p.get("init_array_count"));
-    let ref_count = match positive_size(ref_count_val, "reference init-array count") {
+    let ref_count = match check_init_array_data(&sidecar, reference_init_len, candidate_init_len) {
         Ok(c) => c,
         Err(e) => {
             copy_error(out_err, err_cap, &e);
             return -1;
         }
     };
-    if reference_init_len != ref_count || candidate_init_len < 8 {
-        copy_error(out_err, err_cap, "init-array shape is not derivable");
-        return -1;
-    }
     if !out_reference_count.is_null() {
         unsafe { *out_reference_count = ref_count };
     }
     0
 }
 
-fn resolve_constructors_and_seeds_inner(
+pub(crate) fn resolve_constructors_and_seeds_inner(
     sidecar: &Map<String, Value>,
     reference_init: &[u64],
     candidate_init: &[u64],
@@ -979,75 +1016,31 @@ pub extern "C" fn mocktail_rust_deriver_resolve_constructors_and_seeds(
     }
 }
 
-#[no_mangle]
-pub extern "C" fn mocktail_rust_deriver_build_documents(
-    sidecar_ptr: *const c_char,
-    sidecar_len: usize,
-    metadata_ptr: *const c_char,
-    metadata_len: usize,
-    inputs: *const MocktailRustDeriverBuildInputs,
-    on_profile_json: MocktailPayloadStoreStringCallback,
-    on_compatibility_json: MocktailPayloadStoreStringCallback,
-    ctx: *mut c_void,
-    out_err: *mut c_char,
-    err_cap: usize,
-) -> c_int {
-    if inputs.is_null() {
-        copy_error(out_err, err_cap, "null build inputs");
-        return -1;
-    }
-    let inp = unsafe { &*inputs };
-    let Some(sidecar) = parse_sidecar_object(sidecar_ptr, sidecar_len) else {
-        copy_error(out_err, err_cap, "JSON input must contain one object");
-        return -1;
-    };
-    let Some(metadata_raw) = slice_to_str(metadata_ptr, metadata_len) else {
-        copy_error(out_err, err_cap, "invalid candidate metadata UTF-8");
-        return -1;
-    };
-    let Some(metadata) = parse_json_object_str(metadata_raw, true) else {
-        copy_error(out_err, err_cap, "invalid candidate metadata JSON");
-        return -1;
-    };
-    let Some(reference_profile) = sidecar.get("profile").and_then(Value::as_object) else {
-        copy_error(
-            out_err,
-            err_cap,
-            "reference HostAbi sidecar shape is incomplete",
-        );
-        return -1;
-    };
-    let Some(seeds) = reference_profile.get("data_seeds").and_then(Value::as_object) else {
-        copy_error(
-            out_err,
-            err_cap,
-            "reference HostAbi sidecar shape is incomplete",
-        );
-        return -1;
-    };
-    let Some(bridge_entries) = reference_profile
+pub(crate) fn build_documents_data(
+    sidecar: &Map<String, Value>,
+    metadata_raw: &str,
+    inp: &MocktailRustDeriverBuildInputs,
+) -> Result<(String, String), String> {
+    let metadata = parse_json_object_str(metadata_raw, true)
+        .ok_or_else(|| "invalid candidate metadata JSON".to_string())?;
+    let reference_profile = sidecar
+        .get("profile")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "reference HostAbi sidecar shape is incomplete".to_string())?;
+    let seeds = reference_profile
+        .get("data_seeds")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "reference HostAbi sidecar shape is incomplete".to_string())?;
+    let bridge_entries = reference_profile
         .get("bridge_entries")
         .and_then(Value::as_array)
-    else {
-        copy_error(
-            out_err,
-            err_cap,
-            "reference HostAbi sidecar shape is incomplete",
-        );
-        return -1;
-    };
+        .ok_or_else(|| "reference HostAbi sidecar shape is incomplete".to_string())?;
 
-    let native_ranges = match adjust_ranges(
+    let native_ranges = adjust_ranges(
         reference_profile.get("native_mimalloc_constructor_run_ranges"),
         inp.reference_init_count,
         inp.candidate_init_count,
-    ) {
-        Ok(r) => r,
-        Err(e) => {
-            copy_error(out_err, err_cap, &e);
-            return -1;
-        }
-    };
+    )?;
     let valid_range = native_ranges
         .as_array()
         .filter(|arr| arr.len() == 1)
@@ -1058,32 +1051,11 @@ pub extern "C" fn mocktail_rust_deriver_build_documents(
                     == u64::try_from(inp.candidate_init_count).ok()
         });
     if !valid_range {
-        copy_error(
-            out_err,
-            err_cap,
-            "native constructor replay must cover all non-reserved entries",
-        );
-        return -1;
+        return Err("native constructor replay must cover all non-reserved entries".to_string());
     }
 
-    let singleton_bytes = match positive_size(seeds.get("jni_singleton_bytes"), "JNI singleton size")
-    {
-        Ok(s) => s,
-        Err(e) => {
-            copy_error(out_err, err_cap, &e);
-            return -1;
-        }
-    };
-    let arena_slots = match positive_size(
-        seeds.get("arena_table_slot_count"),
-        "arena table slot count",
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            copy_error(out_err, err_cap, &e);
-            return -1;
-        }
-    };
+    let singleton_bytes = positive_size(seeds.get("jni_singleton_bytes"), "JNI singleton size")?;
+    let arena_slots = positive_size(seeds.get("arena_table_slot_count"), "arena table slot count")?;
 
     let ref_build_id = slice_from_raw(inp.ref_build_id).unwrap_or("");
     let ref_sha256 = slice_from_raw(inp.ref_sha256).unwrap_or("");
@@ -1100,10 +1072,7 @@ pub extern "C" fn mocktail_rust_deriver_build_documents(
 
     let mut candidate_bridges = Vec::with_capacity(bridge_entries.len());
     for entry in bridge_entries {
-        let label = entry
-            .get("label")
-            .and_then(Value::as_str)
-            .unwrap_or("");
+        let label = entry.get("label").and_then(Value::as_str).unwrap_or("");
         let kind = entry.get("kind").and_then(Value::as_str).unwrap_or("");
         let rva = bridge_rva_for(label);
         candidate_bridges.push(json!({
@@ -1257,24 +1226,52 @@ pub extern "C" fn mocktail_rust_deriver_build_documents(
         "profiles": [Value::Object(compat_profile_map)],
     });
 
-    let Ok(mut derived_pretty) = serde_json::to_string_pretty(&derived) else {
-        copy_error(out_err, err_cap, "failed to serialize derived HostAbi profile");
-        return -1;
-    };
+    let mut derived_pretty = serde_json::to_string_pretty(&derived)
+        .map_err(|_| "failed to serialize derived HostAbi profile".to_string())?;
     derived_pretty.push('\n');
-    let Ok(mut compat_pretty) = serde_json::to_string_pretty(&compatibility) else {
-        copy_error(
-            out_err,
-            err_cap,
-            "failed to serialize derived compatibility manifest",
-        );
+    let mut compat_pretty = serde_json::to_string_pretty(&compatibility)
+        .map_err(|_| "failed to serialize derived compatibility manifest".to_string())?;
+    compat_pretty.push('\n');
+    Ok((derived_pretty, compat_pretty))
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_deriver_build_documents(
+    sidecar_ptr: *const c_char,
+    sidecar_len: usize,
+    metadata_ptr: *const c_char,
+    metadata_len: usize,
+    inputs: *const MocktailRustDeriverBuildInputs,
+    on_profile_json: MocktailPayloadStoreStringCallback,
+    on_compatibility_json: MocktailPayloadStoreStringCallback,
+    ctx: *mut c_void,
+    out_err: *mut c_char,
+    err_cap: usize,
+) -> c_int {
+    if inputs.is_null() {
+        copy_error(out_err, err_cap, "null build inputs");
+        return -1;
+    }
+    let inp = unsafe { &*inputs };
+    let Some(sidecar) = parse_sidecar_object(sidecar_ptr, sidecar_len) else {
+        copy_error(out_err, err_cap, "JSON input must contain one object");
         return -1;
     };
-    compat_pretty.push('\n');
-
-    emit_string(on_profile_json, ctx, &derived_pretty);
-    emit_string(on_compatibility_json, ctx, &compat_pretty);
-    0
+    let Some(metadata_raw) = slice_to_str(metadata_ptr, metadata_len) else {
+        copy_error(out_err, err_cap, "invalid candidate metadata UTF-8");
+        return -1;
+    };
+    match build_documents_data(&sidecar, metadata_raw, inp) {
+        Ok((derived_pretty, compat_pretty)) => {
+            emit_string(on_profile_json, ctx, &derived_pretty);
+            emit_string(on_compatibility_json, ctx, &compat_pretty);
+            0
+        }
+        Err(msg) => {
+            copy_error(out_err, err_cap, &msg);
+            -1
+        }
+    }
 }
 
 #[cfg(test)]
