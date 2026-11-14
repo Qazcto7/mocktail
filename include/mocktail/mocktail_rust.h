@@ -4338,6 +4338,91 @@ int32_t mocktail_rust_payload_store_status_json(
     MocktailRustPayloadStoreStrReceiver on_json,
     MocktailRustPayloadStoreStrReceiver on_error, void* ctx);
 
+// ============================================================================
+// 113. Readiness Canary Runner & Evidence Validator
+// ============================================================================
+
+typedef void (*MocktailRustCanaryStrReceiver)(void* ctx, const char* data,
+                                             size_t len);
+typedef void (*MocktailRustCanaryResultCallback)(
+    void* ctx, int32_t exit_code, bool teardown_crash, const char* log_path,
+    size_t log_path_len, const char* error, size_t error_len);
+
+typedef struct MocktailRustCanaryOptions {
+  const char* runtime_binary;
+  size_t runtime_binary_len;
+  const char* payload_directory;
+  size_t payload_directory_len;
+  const char* compatibility_manifest;
+  size_t compatibility_manifest_len;
+  const char* host_abi_profile;
+  size_t host_abi_profile_len;
+  const char* cache_root;
+  size_t cache_root_len;
+  const char* state_root;
+  size_t state_root_len;
+  int32_t graphics_backend;
+  int32_t timeout_seconds;
+} MocktailRustCanaryOptions;
+
+const char* mocktail_rust_canary_backend_name_cstr(int32_t backend);
+int32_t mocktail_rust_validate_readiness_log(
+    int32_t backend, const char* log_text, size_t log_len,
+    MocktailRustCanaryStrReceiver on_error, void* ctx);
+int32_t mocktail_rust_validate_teardown_crash_log(
+    int32_t backend, const char* log_text, size_t log_len,
+    MocktailRustCanaryStrReceiver on_error, void* ctx);
+void mocktail_rust_run_readiness_canary(
+    const MocktailRustCanaryOptions* options,
+    MocktailRustCanaryResultCallback on_result, void* ctx);
+
+// ============================================================================
+// 114. Payload Update Preflight & Background Updater
+// ============================================================================
+
+typedef void (*MocktailRustPreflightEnvValueCallback)(void* cb_ctx,
+                                                      const char* val,
+                                                      size_t val_len);
+typedef bool (*MocktailRustPreflightEnvLookupFn)(
+    const void* env_ctx, const char* name, size_t name_len,
+    MocktailRustPreflightEnvValueCallback on_value, void* cb_ctx);
+typedef void (*MocktailRustPreflightResultCallback)(
+    void* ctx, bool attempted, const char* error, size_t error_len,
+    const char* details, size_t details_len);
+
+typedef struct MocktailRustPreflightRuntimePaths {
+  const char* config_file;
+  size_t config_file_len;
+  const char* config_root;
+  size_t config_root_len;
+  const char* data_root;
+  size_t data_root_len;
+  const char* cache_root;
+  size_t cache_root_len;
+  const char* state_root;
+  size_t state_root_len;
+} MocktailRustPreflightRuntimePaths;
+
+typedef struct MocktailRustBackgroundPayloadUpdate
+    MocktailRustBackgroundPayloadUpdate;
+
+void mocktail_rust_run_payload_update_preflight(
+    const void* env_ctx, MocktailRustPreflightEnvLookupFn get_env,
+    const MocktailRustPreflightRuntimePaths* paths, const char* install_libdir,
+    size_t install_libdir_len, bool force_run_latest,
+    MocktailRustPreflightResultCallback on_result, void* ctx);
+MocktailRustBackgroundPayloadUpdate*
+mocktail_rust_background_payload_update_create(void);
+void mocktail_rust_background_payload_update_start(
+    MocktailRustBackgroundPayloadUpdate* handle, const void* env_ctx,
+    MocktailRustPreflightEnvLookupFn get_env,
+    const MocktailRustPreflightRuntimePaths* paths, const char* install_libdir,
+    size_t install_libdir_len, int64_t interval_ms);
+void mocktail_rust_background_payload_update_stop(
+    MocktailRustBackgroundPayloadUpdate* handle);
+void mocktail_rust_background_payload_update_destroy(
+    MocktailRustBackgroundPayloadUpdate* handle);
+
 #ifdef __cplusplus
 }
 #endif

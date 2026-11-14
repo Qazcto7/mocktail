@@ -2,10 +2,7 @@
 #define MOCKTAIL_RUNTIME_PAYLOAD_UPDATE_PREFLIGHT_H_
 
 #include <chrono>
-#include <condition_variable>
-#include <mutex>
 #include <string>
-#include <thread>
 
 #include "runtime/environment.h"
 #include "runtime/runtime_paths.h"
@@ -27,17 +24,17 @@ PayloadUpdatePreflightResult RunPayloadUpdatePreflight(
 
 class BackgroundPayloadUpdate final {
  public:
+  BackgroundPayloadUpdate() = default;
   ~BackgroundPayloadUpdate();
+  BackgroundPayloadUpdate(const BackgroundPayloadUpdate&) = delete;
+  BackgroundPayloadUpdate& operator=(const BackgroundPayloadUpdate&) = delete;
+
   void Start(const Environment& environment, const RuntimePaths& paths,
              std::chrono::milliseconds interval = std::chrono::minutes(30));
   void Stop();
 
  private:
-  std::mutex mutex_;
-  std::condition_variable wake_;
-  std::thread worker_;
-  bool stopped_ = false;
-  int child_ = -1;
+  void* handle_ = nullptr;
 };
 
 }  // namespace runtime

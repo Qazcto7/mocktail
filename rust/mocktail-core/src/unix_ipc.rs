@@ -1,14 +1,17 @@
 //! Shared POSIX Unix-domain IPC, process-spawning, descriptor, and
 //! atomic/locked filesystem helpers used across `discord_rpc`,
 //! `external_launch_broker`, `webview_helper_launcher`, `roblox_cookie_store`,
-//! `browser_tracker_service`, and `payload_store`.
+//! `browser_tracker_service`, `payload_store`, `readiness_canary`, and
+//! `payload_update_preflight`.
 
 use std::ffi::{CStr, CString, OsStr};
+use std::fs;
 use std::io;
 use std::mem::{self, MaybeUninit};
 use std::os::fd::RawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, Instant};
 
 extern "C" {
     static environ: *const *mut libc::c_char;
@@ -511,9 +514,9 @@ pub(crate) fn move_fd_above_stdio(fd: OwnedFd) -> Option<OwnedFd> {
     OwnedFd::from_raw(duped)
 }
 
-/// Checks that `path` is absolute, a non-symlink regular file (`lstat`), and executable (`X_OK`).
-pub(crate) fn validate_executable_absolute_regular_file(path: &Path) -> bool {
-    if path.as_os_str().is_empty() || !path.is_absolute() {
+/// Checks that `path` is a non-symlink regular file (`lstat`) and executable (`X_OK`).
+pub(crate) fn validate_executable_regular_file(path: &Path) -> bool {
+    if path.as_os_str().is_empty() {
         return false;
     }
     let Some(cpath) = path_to_cstr(path) else {
@@ -526,10 +529,250 @@ pub(crate) fn validate_executable_absolute_regular_file(path: &Path) -> bool {
         && unsafe { libc::access(cpath.as_ptr(), libc::X_OK) == 0 }
 }
 
-const HELPER_EXCLUDED_ENV_PREFIX: &[u8] = b"MOCKTAIL_CLIENT_SETTINGS_OVERRIDES_JSON=";
+/// Checks that `path` is absolute, a non-symlink regular file (`lstat`), and executable (`X_OK`).
+pub(crate) fn validate_executable_absolute_regular_file(path: &Path) -> bool {
+    path.is_absolute() && validate_executable_regular_file(path)
+}
 
-/// Filters `envp` (`NULL`-terminated C string pointers), omitting entries starting
-/// with `MOCKTAIL_CLIENT_SETTINGS_OVERRIDES_JSON=`. Pointers remain valid while the
+pub(crate) fn read_proc_self_exe() -> Option<PathBuf> {
+    fs::read_link("/proc/self/exe")
+        .ok()
+        .filter(|p| !p.as_os_str().is_empty())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TempDirError {
+    CreateParent,
+    CreateTemp,
+}
+
+pub(crate) fn create_unique_temp_dir(parent: &Path, prefix: &str) -> Result<PathBuf, TempDirError> {
+    if fs::create_dir_all(parent).is_err() {
+        return Err(TempDirError::CreateParent);
+    }
+    let pattern_path = parent.join(format!("{prefix}-XXXXXX"));
+    let Some(pattern) = path_to_cstr(&pattern_path) else {
+        return Err(TempDirError::CreateTemp);
+    };
+    let mut buf = pattern.into_bytes_with_nul();
+    let created = unsafe { libc::mkdtemp(buf.as_mut_ptr().cast::<libc::c_char>()) };
+    if created.is_null() {
+        return Err(TempDirError::CreateTemp);
+    }
+    let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    Ok(PathBuf::from(OsStr::from_bytes(&buf[..len])))
+}
+
+pub(crate) fn create_pipe_cloexec_above_stdio() -> Option<(OwnedFd, OwnedFd)> {
+    let mut fds = [-1 as RawFd; 2];
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return None;
+    }
+    let read_end = OwnedFd::from_raw(fds[0])?;
+    let write_end = OwnedFd::from_raw(fds[1])?;
+    let read_end = move_fd_above_stdio(read_end)?;
+    let write_end = move_fd_above_stdio(write_end)?;
+    Some((read_end, write_end))
+}
+
+pub(crate) fn create_seqpacket_pair_cloexec_above_stdio() -> Option<(OwnedFd, OwnedFd)> {
+    let mut fds = [-1 as RawFd; 2];
+    if unsafe {
+        libc::socketpair(
+            libc::AF_UNIX,
+            libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC,
+            0,
+            fds.as_mut_ptr(),
+        )
+    } != 0
+    {
+        return None;
+    }
+    let first = OwnedFd::from_raw(fds[0])?;
+    let second = OwnedFd::from_raw(fds[1])?;
+    let first = move_fd_above_stdio(first)?;
+    let second = move_fd_above_stdio(second)?;
+    Some((first, second))
+}
+
+pub(crate) struct SpawnFileActions {
+    inner: libc::posix_spawn_file_actions_t,
+}
+
+impl SpawnFileActions {
+    pub(crate) fn new() -> Result<Self, i32> {
+        let mut inner = MaybeUninit::<libc::posix_spawn_file_actions_t>::uninit();
+        let rc = unsafe { libc::posix_spawn_file_actions_init(inner.as_mut_ptr()) };
+        if rc != 0 {
+            return Err(rc);
+        }
+        Ok(Self {
+            inner: unsafe { inner.assume_init() },
+        })
+    }
+
+    pub(crate) fn add_dup2(&mut self, fd: RawFd, newfd: RawFd) -> Result<(), i32> {
+        let rc = unsafe { libc::posix_spawn_file_actions_adddup2(&mut self.inner, fd, newfd) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(rc)
+        }
+    }
+
+    pub(crate) fn add_close(&mut self, fd: RawFd) -> Result<(), i32> {
+        let rc = unsafe { libc::posix_spawn_file_actions_addclose(&mut self.inner, fd) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(rc)
+        }
+    }
+
+    pub(crate) fn as_ptr(&self) -> *const libc::posix_spawn_file_actions_t {
+        &self.inner
+    }
+}
+
+impl Drop for SpawnFileActions {
+    fn drop(&mut self) {
+        unsafe {
+            libc::posix_spawn_file_actions_destroy(&mut self.inner);
+        }
+    }
+}
+
+pub(crate) unsafe fn posix_spawn_raw(
+    path: &CStr,
+    actions: Option<&SpawnFileActions>,
+    argv: &[*mut libc::c_char],
+    envp: &[*mut libc::c_char],
+) -> Result<libc::pid_t, i32> {
+    let mut pid: libc::pid_t = -1;
+    let actions_ptr = actions.map_or(std::ptr::null(), SpawnFileActions::as_ptr);
+    let rc = libc::posix_spawn(
+        &mut pid,
+        path.as_ptr(),
+        actions_ptr,
+        std::ptr::null(),
+        argv.as_ptr().cast(),
+        envp.as_ptr().cast(),
+    );
+    if rc == 0 {
+        Ok(pid)
+    } else {
+        Err(rc)
+    }
+}
+
+pub(crate) fn waitpid_blocking(pid: libc::pid_t) -> Result<libc::c_int, i32> {
+    let mut status: libc::c_int = 0;
+    loop {
+        let rc = unsafe { libc::waitpid(pid, &mut status, 0) };
+        if rc < 0 {
+            let err = last_errno();
+            if err == libc::EINTR {
+                continue;
+            }
+            return Err(err);
+        }
+        return Ok(status);
+    }
+}
+
+pub(crate) fn terminate_and_reap(pid: libc::pid_t, grace: Duration) -> Option<libc::c_int> {
+    unsafe {
+        libc::kill(pid, libc::SIGTERM);
+    }
+    let deadline = Instant::now() + grace;
+    let mut status: libc::c_int = 0;
+    while Instant::now() < deadline {
+        let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        if waited == pid {
+            return Some(status);
+        }
+        if waited < 0 && last_errno() != libc::EINTR {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    if waited == pid {
+        return Some(status);
+    }
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+    }
+    waitpid_blocking(pid).ok()
+}
+
+pub(crate) fn is_env_entry(entry: &[u8], name: &[u8]) -> bool {
+    entry.len() > name.len() && entry[name.len()] == b'=' && &entry[..name.len()] == name
+}
+
+pub(crate) fn lookup_process_env_bytes(name: &[u8]) -> Option<Vec<u8>> {
+    if name.is_empty() || name.contains(&b'=') || name.contains(&0) {
+        return None;
+    }
+    unsafe {
+        let mut cur = environ;
+        if cur.is_null() {
+            return None;
+        }
+        while !(*cur).is_null() {
+            let bytes = CStr::from_ptr(*cur).to_bytes();
+            if is_env_entry(bytes, name) {
+                return Some(bytes[name.len() + 1..].to_vec());
+            }
+            cur = cur.add(1);
+        }
+    }
+    None
+}
+
+pub(crate) fn copy_filtered_process_env_entries(excluded_names: &[&[u8]]) -> Vec<CString> {
+    let mut out = Vec::new();
+    unsafe {
+        let mut cur = environ;
+        if cur.is_null() {
+            return out;
+        }
+        while !(*cur).is_null() {
+            let cstr = CStr::from_ptr(*cur);
+            let bytes = cstr.to_bytes();
+            if !excluded_names.iter().any(|name| is_env_entry(bytes, name)) {
+                out.push(cstr.to_owned());
+            }
+            cur = cur.add(1);
+        }
+    }
+    out
+}
+
+pub(crate) fn push_env_kv(entries: &mut Vec<CString>, name: &[u8], value: &[u8]) -> Result<(), ()> {
+    if name.contains(&0) || name.contains(&b'=') || value.contains(&0) {
+        return Err(());
+    }
+    let mut raw = Vec::with_capacity(name.len() + 1 + value.len() + 1);
+    raw.extend_from_slice(name);
+    raw.push(b'=');
+    raw.extend_from_slice(value);
+    CString::new(raw).map(|s| entries.push(s)).map_err(|_| ())
+}
+
+pub(crate) fn cstrings_as_mut_ptrs(entries: &[CString]) -> Vec<*mut libc::c_char> {
+    let mut ptrs = Vec::with_capacity(entries.len() + 1);
+    for entry in entries {
+        ptrs.push(entry.as_ptr().cast_mut());
+    }
+    ptrs.push(std::ptr::null_mut());
+    ptrs
+}
+
+const HELPER_EXCLUDED_ENV_NAME: &[u8] = b"MOCKTAIL_CLIENT_SETTINGS_OVERRIDES_JSON";
+
+/// Filters `envp` (`NULL`-terminated C string pointers), omitting entries matching
+/// `MOCKTAIL_CLIENT_SETTINGS_OVERRIDES_JSON=...`. Pointers remain valid while the
 /// parent environment is unmodified.
 pub(crate) unsafe fn filter_helper_env_ptrs(envp: *const *mut libc::c_char) -> Vec<*mut libc::c_char> {
     let mut out = Vec::new();
@@ -538,7 +781,7 @@ pub(crate) unsafe fn filter_helper_env_ptrs(envp: *const *mut libc::c_char) -> V
         while !(*cur).is_null() {
             let entry = *cur;
             let bytes = CStr::from_ptr(entry).to_bytes();
-            if !bytes.starts_with(HELPER_EXCLUDED_ENV_PREFIX) {
+            if !is_env_entry(bytes, HELPER_EXCLUDED_ENV_NAME) {
                 out.push(entry);
             }
             cur = cur.add(1);

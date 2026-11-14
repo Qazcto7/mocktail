@@ -25,6 +25,10 @@ pub mod micup_rpc;
 pub use micup_rpc::*;
 pub mod payload_store;
 pub use payload_store::*;
+pub mod payload_update_preflight;
+pub use payload_update_preflight::*;
+pub mod readiness_canary;
+pub use readiness_canary::*;
 pub mod roblox_cookie_store;
 pub use roblox_cookie_store::*;
 pub mod runtime_bridges;
@@ -8724,15 +8728,8 @@ pub unsafe extern "C" fn mocktail_rust_trim_to_utf8_boundary(
     if data.is_null() || len == 0 || max_bytes == 0 {
         return 0;
     }
-    if len <= max_bytes {
-        return len;
-    }
     let slice = std::slice::from_raw_parts(data, len);
-    let mut size = max_bytes;
-    while size > 0 && (slice[size] & 0xC0) == 0x80 {
-        size -= 1;
-    }
-    size
+    payload_update_preflight::trim_to_utf8_boundary_bytes(slice, max_bytes)
 }
 
 #[no_mangle]
@@ -8753,19 +8750,11 @@ pub unsafe extern "C" fn mocktail_rust_parse_updater_stderr_line(
         return 0;
     }
     let slice = std::slice::from_raw_parts(line as *const u8, len);
-    let prefix = b"[native-updater] ";
-    let warning_prefix = b"warning: ";
-
-    if slice.len() > prefix.len() && slice.starts_with(prefix) {
-        let detail = &slice[prefix.len()..];
-        if !detail.starts_with(warning_prefix) {
-            *out_is_failure = true;
-            let trim_len = mocktail_rust_trim_to_utf8_boundary(detail.as_ptr(), detail.len(), 400);
-            *out_len = trim_len;
-            if !out_buf.is_null() && cap >= trim_len {
-                std::ptr::copy_nonoverlapping(detail.as_ptr(), out_buf, trim_len);
-            }
-            return 0;
+    if let Some(detail) = payload_update_preflight::parse_updater_stderr_line_bytes(slice) {
+        *out_is_failure = true;
+        *out_len = detail.len();
+        if !out_buf.is_null() && cap >= detail.len() {
+            std::ptr::copy_nonoverlapping(detail.as_ptr(), out_buf, detail.len());
         }
     }
     0
@@ -8783,7 +8772,7 @@ pub unsafe extern "C" fn mocktail_rust_is_env_entry(
     }
     let entry_s = std::slice::from_raw_parts(entry as *const u8, entry_len);
     let name_s = std::slice::from_raw_parts(name as *const u8, name_len);
-    entry_s[name_len] == b'=' && &entry_s[..name_len] == name_s
+    unix_ipc::is_env_entry(entry_s, name_s)
 }
 
 #[no_mangle]
@@ -12401,108 +12390,10 @@ pub extern "C" fn mocktail_rust_is_overridden_environment_var(entry: *const c_ch
 // 94. Canary Readiness Backend & Audio Log Validator
 // ============================================================================
 
-#[no_mangle]
-pub extern "C" fn mocktail_rust_canary_backend_parse(
-    name: *const c_char,
-    out_backend: *mut i32,
-) -> i32 {
-    let s = if !name.is_null() {
-        unsafe { CStr::from_ptr(name) }.to_str().unwrap_or("")
-    } else {
-        ""
-    };
-    let val = match s {
-        "" | "vulkan" | "native-vulkan" | "direct-vulkan" => 0,
-        "gles" | "opengl" => 1,
-        "auto" | "system" => 2,
-        "angle-vulkan" => 3,
-        "angle-swiftshader" => 4,
-        _ => return -1,
-    };
-    if !out_backend.is_null() {
-        unsafe { *out_backend = val };
-    }
-    0
-}
-
-#[no_mangle]
-pub extern "C" fn mocktail_rust_canary_backend_name(
-    backend: i32,
-    out_buf: *mut c_char,
-    out_cap: usize,
-) -> i32 {
-    let name = match backend {
-        0 => "direct-vulkan",
-        1 => "opengl",
-        2 => "system",
-        3 => "angle-vulkan",
-        4 => "angle-swiftshader",
-        _ => "direct-vulkan",
-    };
-    copy_to_c_buffer(name, out_buf, out_cap);
-    0
-}
-
-#[no_mangle]
-pub extern "C" fn mocktail_rust_validate_canary_audio_log(
-    log_text: *const c_char,
-    log_len: usize,
-    require_clean_shutdown: i32,
-    err_buf: *mut c_char,
-    err_cap: usize,
-) -> i32 {
-    if log_text.is_null() || log_len == 0 {
-        return 0;
-    }
-    let slice = unsafe { std::slice::from_raw_parts(log_text as *const u8, log_len) };
-    let log = String::from_utf8_lossy(slice);
-
-    fn has_positive_number_after(text: &str, marker: &str) -> bool {
-        let mut pos = 0;
-        while let Some(found) = text[pos..].find(marker) {
-            let start = pos + found + marker.len();
-            let digits: String = text[start..].chars().take_while(|c| c.is_ascii_digit()).collect();
-            if let Ok(num) = digits.parse::<u64>() {
-                if num > 0 {
-                    return true;
-                }
-            }
-            pos = start;
-        }
-        false
-    }
-
-    let opensl = has_positive_number_after(&log, "[mocktail][audio] OpenSL playback activity: submitted_buffers=");
-    let fmod = has_positive_number_after(&log, "[mocktail][audio] fmod_java first_submission submitted_buffers=");
-
-    if log.contains("[mocktail][audio] fmod_java init_failed")
-        || log.contains("[mocktail][audio] fmod_java write_failed")
-        || log.contains("[mocktail][audio] fmod_java close_failed")
-    {
-        copy_error(err_buf, err_cap, "graphics canary observed an FMOD audio failure");
-        return -1;
-    }
-    if opensl
-        && (!has_positive_number_after(&log, "[mocktail][audio] OpenSL playback evidence: consumed_buffers=")
-            || (require_clean_shutdown != 0
-                && (!log.contains("[mocktail][audio] OpenSL player shutdown: submitted=")
-                    || !log.contains("clean=true"))))
-    {
-        copy_error(err_buf, err_cap, "graphics canary submitted OpenSL audio without clean consumption");
-        return -2;
-    }
-    if fmod
-        && (!has_positive_number_after(&log, "consumed_buffers=")
-            || (require_clean_shutdown != 0
-                && (!log.contains("[mocktail][audio] fmod_java shutdown submitted_buffers=")
-                    || !log.contains("pending_buffers=0"))))
-    {
-        copy_error(err_buf, err_cap, "graphics canary submitted FMOD audio without clean consumption");
-        return -3;
-    }
-
-    0
-}
+// Readiness canary FFI (`mocktail_rust_canary_backend_parse`,
+// `mocktail_rust_canary_backend_name`, `mocktail_rust_validate_canary_audio_log`,
+// `mocktail_rust_validate_readiness_log`, `mocktail_rust_validate_teardown_crash_log`,
+// and `mocktail_rust_run_readiness_canary`) lives in `crate::readiness_canary`.
 
 // ============================================================================
 // 95. Game Session State Machine & Transition Evaluator

@@ -162,6 +162,8 @@ add_custom_command(
     "${MOCKTAIL_RUST_CORE_DIR}/src/lib.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/micup_rpc.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/payload_store.rs"
+    "${MOCKTAIL_RUST_CORE_DIR}/src/payload_update_preflight.rs"
+    "${MOCKTAIL_RUST_CORE_DIR}/src/readiness_canary.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/roblox_cookie_store.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/runtime_bridges.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/runtime_policies.rs"
