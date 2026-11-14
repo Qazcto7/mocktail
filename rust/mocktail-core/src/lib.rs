@@ -21,6 +21,8 @@ pub mod input_router;
 pub use input_router::*;
 pub mod micup_rpc;
 pub use micup_rpc::*;
+pub mod roblox_cookie_store;
+pub use roblox_cookie_store::*;
 pub mod runtime_bridges;
 pub use runtime_bridges::*;
 pub mod runtime_policies;
@@ -32,6 +34,8 @@ pub use text_runtime::*;
 pub mod update_json;
 pub use update_json::*;
 pub(crate) mod unix_ipc;
+pub mod webview_helper_launcher;
+pub use webview_helper_launcher::*;
 pub mod window_gates;
 pub use window_gates::*;
 
@@ -1081,7 +1085,7 @@ pub extern "C" fn mocktail_rust_mutf8_to_utf8(
 // ============================================================================
 
 #[inline]
-fn is_valid_cookie_octet(b: u8) -> bool {
+pub(crate) fn is_valid_cookie_octet(b: u8) -> bool {
     b == 0x21 || (b >= 0x23 && b <= 0x2B) || (b >= 0x2D && b <= 0x3A)
         || (b >= 0x3C && b <= 0x5B) || (b >= 0x5D && b <= 0x7E)
 }
@@ -14653,7 +14657,7 @@ fn webview_is_safe_version_str(version: &str) -> bool {
             .all(|b| b.is_ascii_digit() || b == b'.' || b == b'-')
 }
 
-fn webview_is_roblox_host_str(host: &str) -> bool {
+pub(crate) fn webview_is_roblox_host_str(host: &str) -> bool {
     const ROOT: &str = "roblox.com";
     if host.len() < ROOT.len() {
         return false;

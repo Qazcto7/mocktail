@@ -4080,6 +4080,95 @@ int32_t mocktail_rust_external_launch_broker_socket_path(
     const MocktailRustExternalLaunchBroker* broker, char* out_buf,
     size_t out_cap);
 
+typedef void (*MocktailRustCookieStringCallback)(void* ctx, const char* data,
+                                                 size_t len);
+
+int32_t mocktail_rust_read_roblox_cookie_file(
+    const char* path_ptr, size_t path_len, int32_t required,
+    MocktailRustCookieStringCallback on_value,
+    MocktailRustCookieStringCallback on_error, void* ctx);
+int32_t mocktail_rust_remove_legacy_webview_cookies(const char* dir_ptr,
+                                                    size_t dir_len);
+int32_t mocktail_rust_cookie_helper_exchange(
+    uint8_t operation, const char* profile_ptr, size_t profile_len,
+    const char* cookie_ptr, size_t cookie_len, const char* install_libdir_ptr,
+    size_t install_libdir_len, MocktailRustCookieStringCallback on_response,
+    void* ctx);
+
+typedef struct MocktailRustWebViewProcess MocktailRustWebViewProcess;
+
+typedef void (*MocktailRustWebViewBytesCallback)(void* ctx, const char* data,
+                                                 size_t len);
+typedef void (*MocktailRustWebViewControlCallback)(void* ctx, uint8_t operation,
+                                                   const char* payload,
+                                                   size_t payload_len,
+                                                   int32_t visible);
+typedef void (*MocktailRustWebViewEventCallback)(void* ctx, uint8_t event_type,
+                                                 const char* payload,
+                                                 size_t payload_len);
+typedef void (*MocktailRustWebViewExitFn)(void* ctx);
+
+int32_t mocktail_rust_webview_validate_url(const char* url_ptr, size_t url_len,
+                                           char* out_err, size_t err_cap);
+int32_t mocktail_rust_webview_normalize_url(
+    const char* url_ptr, size_t url_len,
+    MocktailRustWebViewBytesCallback on_normalized, void* ctx, char* out_err,
+    size_t err_cap);
+int32_t mocktail_rust_webview_decode_request(
+    const char* req_ptr, size_t req_len,
+    MocktailRustWebViewBytesCallback on_url, void* ctx, char* out_err,
+    size_t err_cap);
+int32_t mocktail_rust_webview_decode_control_packet(
+    const char* packet_ptr, size_t packet_len,
+    MocktailRustWebViewControlCallback on_command, void* ctx, char* out_err,
+    size_t err_cap);
+int32_t mocktail_rust_webview_encode_event_packet(
+    uint8_t event_type, const char* payload_ptr, size_t payload_len,
+    MocktailRustWebViewBytesCallback on_packet, void* ctx);
+int32_t mocktail_rust_webview_decode_event_packet(
+    const char* packet_ptr, size_t packet_len,
+    MocktailRustWebViewEventCallback on_event, void* ctx, char* out_err,
+    size_t err_cap);
+int32_t mocktail_rust_webview_launch(
+    const char* helper_ptr, size_t helper_len, const char* url_ptr,
+    size_t url_len, void* observer_ctx, MocktailRustWebViewExitFn on_exit,
+    MocktailRustWebViewExitFn on_drop,
+    MocktailRustWebViewProcess** out_process, int32_t* out_pid, char* out_err,
+    size_t err_cap);
+void mocktail_rust_webview_process_release(
+    MocktailRustWebViewProcess* process);
+int32_t mocktail_rust_webview_process_running(
+    const MocktailRustWebViewProcess* process);
+int32_t mocktail_rust_webview_process_pid(
+    const MocktailRustWebViewProcess* process);
+int32_t mocktail_rust_webview_process_load_url(
+    const MocktailRustWebViewProcess* process, const char* url_ptr,
+    size_t url_len);
+int32_t mocktail_rust_webview_process_set_title(
+    const MocktailRustWebViewProcess* process, const char* title_ptr,
+    size_t title_len);
+int32_t mocktail_rust_webview_process_set_visible(
+    const MocktailRustWebViewProcess* process, int32_t visible);
+int32_t mocktail_rust_webview_process_evaluate_javascript(
+    const MocktailRustWebViewProcess* process, const char* script_ptr,
+    size_t script_len);
+int32_t mocktail_rust_webview_process_set_back_navigation_disabled(
+    const MocktailRustWebViewProcess* process, int32_t disabled);
+int32_t mocktail_rust_webview_process_set_show_domain_as_title(
+    const MocktailRustWebViewProcess* process, int32_t enabled);
+int32_t mocktail_rust_webview_process_set_roblox_cookie(
+    const MocktailRustWebViewProcess* process, const char* cookie_ptr,
+    size_t cookie_len);
+int32_t mocktail_rust_webview_process_clear_roblox_cookie(
+    const MocktailRustWebViewProcess* process);
+int32_t mocktail_rust_webview_process_wait_until_ready(
+    const MocktailRustWebViewProcess* process, int64_t timeout_ms);
+int32_t mocktail_rust_webview_process_drain_events(
+    const MocktailRustWebViewProcess* process,
+    MocktailRustWebViewEventCallback on_event, void* ctx);
+int32_t mocktail_rust_webview_process_request_close(
+    const MocktailRustWebViewProcess* process);
+
 #ifdef __cplusplus
 }
 #endif

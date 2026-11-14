@@ -160,12 +160,14 @@ add_custom_command(
     "${MOCKTAIL_RUST_CORE_DIR}/src/input_router.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/lib.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/micup_rpc.rs"
+    "${MOCKTAIL_RUST_CORE_DIR}/src/roblox_cookie_store.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/runtime_bridges.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/runtime_policies.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/storage_paths.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/text_runtime.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/unix_ipc.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/update_json.rs"
+    "${MOCKTAIL_RUST_CORE_DIR}/src/webview_helper_launcher.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/window_gates.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/Cargo.toml"
     "${CMAKE_CURRENT_SOURCE_DIR}/config/mocktail.example.yaml"
@@ -451,7 +453,7 @@ add_library(mocktail_webview_launcher STATIC
 )
 add_library(Mocktail::WebViewLauncher ALIAS mocktail_webview_launcher)
 target_include_directories(mocktail_webview_launcher PUBLIC include)
-target_link_libraries(mocktail_webview_launcher PUBLIC CURL::libcurl)
+target_link_libraries(mocktail_webview_launcher PUBLIC mocktail_core_rust)
 mocktail_apply_compile_options(mocktail_webview_launcher)
 
 add_library(mocktail_webview_helper_policy STATIC
