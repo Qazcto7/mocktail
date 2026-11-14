@@ -515,7 +515,8 @@ pub(crate) fn move_fd_above_stdio(fd: OwnedFd) -> Option<OwnedFd> {
 }
 
 /// Checks that `path` is a non-symlink regular file (`lstat`) and executable (`X_OK`).
-pub(crate) fn validate_executable_regular_file(path: &Path) -> bool {
+/// Checks that `path` is a non-symlink regular file (`lstat`).
+pub(crate) fn is_non_symlink_regular_file(path: &Path) -> bool {
     if path.as_os_str().is_empty() {
         return false;
     }
@@ -526,7 +527,16 @@ pub(crate) fn validate_executable_regular_file(path: &Path) -> bool {
         return false;
     };
     (st.st_mode & libc::S_IFMT) == libc::S_IFREG
-        && unsafe { libc::access(cpath.as_ptr(), libc::X_OK) == 0 }
+}
+
+pub(crate) fn validate_executable_regular_file(path: &Path) -> bool {
+    if !is_non_symlink_regular_file(path) {
+        return false;
+    }
+    let Some(cpath) = path_to_cstr(path) else {
+        return false;
+    };
+    unsafe { libc::access(cpath.as_ptr(), libc::X_OK) == 0 }
 }
 
 /// Checks that `path` is absolute, a non-symlink regular file (`lstat`), and executable (`X_OK`).
@@ -793,6 +803,127 @@ pub(crate) unsafe fn filter_helper_env_ptrs(envp: *const *mut libc::c_char) -> V
 
 pub(crate) unsafe fn build_filtered_helper_env_ptrs() -> Vec<*mut libc::c_char> {
     filter_helper_env_ptrs(environ)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadFileError {
+    NotFound,
+    OpenFailed(i32),
+    InvalidFile,
+    ReadFailed,
+}
+
+/// Opens and reads a regular file bounded by `max_bytes`.
+pub(crate) fn read_regular_file_limited(
+    path: &Path,
+    max_bytes: usize,
+    follow_symlinks: bool,
+    allow_empty: bool,
+) -> Result<Vec<u8>, ReadFileError> {
+    let Some(cpath) = path_to_cstr(path) else {
+        return Err(ReadFileError::OpenFailed(libc::EINVAL));
+    };
+    let mut flags = libc::O_RDONLY | libc::O_CLOEXEC;
+    if !follow_symlinks {
+        flags |= libc::O_NOFOLLOW;
+    }
+    let raw_fd = unsafe { libc::open(cpath.as_ptr(), flags) };
+    if raw_fd < 0 {
+        let err = last_errno();
+        return Err(if err == libc::ENOENT {
+            ReadFileError::NotFound
+        } else {
+            ReadFileError::OpenFailed(err)
+        });
+    }
+    let Some(fd) = OwnedFd::from_raw(raw_fd) else {
+        return Err(ReadFileError::OpenFailed(libc::EBADF));
+    };
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd.as_raw(), &mut st) } != 0
+        || (st.st_mode & libc::S_IFMT) != libc::S_IFREG
+        || st.st_size < 0
+        || (!allow_empty && st.st_size == 0)
+        || (st.st_size as u64) > (max_bytes as u64)
+    {
+        return Err(ReadFileError::InvalidFile);
+    }
+    read_all_fd(fd.as_raw(), st.st_size as usize).map_err(|_| ReadFileError::ReadFailed)
+}
+
+/// Acquires an exclusive blocking `flock` on a non-symlink `O_WRONLY | O_CREAT` lock file.
+pub(crate) fn flock_exclusive_file(path: &Path) -> Result<OwnedFd, i32> {
+    let cpath = path_to_cstr(path).ok_or(libc::EINVAL)?;
+    let raw_fd = unsafe {
+        libc::open(
+            cpath.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            0o600,
+        )
+    };
+    if raw_fd < 0 {
+        return Err(last_errno());
+    }
+    let fd = OwnedFd::from_raw(raw_fd).ok_or(libc::EBADF)?;
+    if !flock_fd(fd.as_raw(), libc::LOCK_EX) {
+        return Err(last_errno());
+    }
+    Ok(fd)
+}
+
+/// Writes `bytes` to a non-symlink regular file created/truncated with mode `0600` and `fsync`s it.
+pub(crate) fn write_private_trunc_file(path: &Path, bytes: &[u8]) -> bool {
+    let Some(cpath) = path_to_cstr(path) else {
+        return false;
+    };
+    let raw_fd = unsafe {
+        libc::open(
+            cpath.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            0o600,
+        )
+    };
+    let Some(fd) = OwnedFd::from_raw(raw_fd) else {
+        return false;
+    };
+    if !write_all_fd(fd.as_raw(), bytes) {
+        return false;
+    }
+    unsafe {
+        let _ = libc::fsync(fd.as_raw());
+    }
+    true
+}
+
+pub(crate) fn filter_env_slices(entries: &[&[u8]], excluded_names: &[&[u8]]) -> Vec<CString> {
+    let mut out = Vec::with_capacity(entries.len() + 12);
+    for &bytes in entries {
+        if bytes.contains(&0) {
+            continue;
+        }
+        if excluded_names
+            .iter()
+            .any(|&name| is_env_entry(bytes, name))
+        {
+            continue;
+        }
+        if let Ok(entry) = CString::new(bytes) {
+            out.push(entry);
+        }
+    }
+    out
+}
+
+pub(crate) fn strerror_string(err: i32) -> String {
+    let mut buf = [0i8; 256];
+    let rc = unsafe { libc::strerror_r(err, buf.as_mut_ptr(), buf.len()) };
+    if rc == 0 {
+        let s = unsafe { CStr::from_ptr(buf.as_ptr()) }.to_string_lossy();
+        if !s.is_empty() {
+            return s.into_owned();
+        }
+    }
+    format!("errno {err}")
 }
 
 #[cfg(test)]

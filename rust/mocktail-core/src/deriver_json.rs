@@ -5,6 +5,7 @@ use crate::{copy_error, copy_to_c_buffer};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::ffi::{c_char, c_int, c_void};
+use std::path::Path;
 
 pub type MocktailDeriverSpecCallback = Option<
     unsafe extern "C" fn(
@@ -374,6 +375,61 @@ fn extract_specs_inner(sidecar: &Map<String, Value>) -> Result<Vec<ParsedSpec>, 
     Ok(specs)
 }
 
+pub(crate) fn parse_sidecar_identity(
+    json_bytes: &[u8],
+    sidecar_path: &Path,
+) -> Result<(String, String), String> {
+    let sidecar_display = sidecar_path.display();
+    let Some(map) = parse_sidecar_object(json_bytes.as_ptr().cast::<c_char>(), json_bytes.len())
+    else {
+        return Err(format!("JSON input must contain one object: {sidecar_display}"));
+    };
+    if !json_int_eq_one(&map, "schema_version") {
+        return Err(format!(
+            "HostAbi sidecar has an unsupported schema: {sidecar_display}"
+        ));
+    }
+    let build_id = json_str_or_empty(&map, "elf_build_id").to_ascii_lowercase();
+    let payload_id = json_str_or_empty(&map, "payload_id");
+    let payload_path = json_str_or_empty(&map, "payload_path");
+    let suffix_matches = payload_id.len() > 41
+        && payload_id
+            .get(payload_id.len() - 40..)
+            .is_some_and(|tail| tail == build_id);
+    if build_id.len() != 40
+        || !suffix_matches
+        || payload_path != format!("payloads/{payload_id}")
+    {
+        return Err(format!(
+            "HostAbi sidecar identity is inconsistent: {sidecar_display}"
+        ));
+    }
+    Ok((build_id, payload_id.to_string()))
+}
+
+pub(crate) fn read_host_abi_sidecar_identity_file(
+    sidecar_path: &Path,
+) -> Result<(String, String), String> {
+    let raw = match crate::unix_ipc::read_regular_file_limited(
+        sidecar_path,
+        1024 * 1024,
+        false,
+        false,
+    ) {
+        Ok(bytes) => bytes,
+        Err(crate::unix_ipc::ReadFileError::NotFound | crate::unix_ipc::ReadFileError::OpenFailed(_)) => {
+            return Err(format!("cannot open JSON input: {}", sidecar_path.display()));
+        }
+        Err(crate::unix_ipc::ReadFileError::InvalidFile) => {
+            return Err("JSON input is not a bounded regular file".to_string());
+        }
+        Err(crate::unix_ipc::ReadFileError::ReadFailed) => {
+            return Err("cannot read JSON input".to_string());
+        }
+    };
+    parse_sidecar_identity(&raw, sidecar_path)
+}
+
 #[no_mangle]
 pub extern "C" fn mocktail_rust_deriver_read_sidecar_identity(
     json_ptr: *const c_char,
@@ -388,42 +444,20 @@ pub extern "C" fn mocktail_rust_deriver_read_sidecar_identity(
     err_cap: usize,
 ) -> c_int {
     let sidecar_path = slice_to_str(sidecar_path_ptr, sidecar_path_len).unwrap_or("");
-    let Some(map) = parse_sidecar_object(json_ptr, json_len) else {
-        copy_error(
-            out_err,
-            err_cap,
-            &format!("JSON input must contain one object: {sidecar_path}"),
-        );
-        return -1;
+    let json_bytes = if json_ptr.is_null() {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(json_ptr as *const u8, json_len) }
     };
-    if !json_int_eq_one(&map, "schema_version") {
-        copy_error(
-            out_err,
-            err_cap,
-            &format!("HostAbi sidecar has an unsupported schema: {sidecar_path}"),
-        );
-        return -1;
-    }
-    let build_id = json_str_or_empty(&map, "elf_build_id").to_ascii_lowercase();
-    let payload_id = json_str_or_empty(&map, "payload_id");
-    let payload_path = json_str_or_empty(&map, "payload_path");
-    let suffix_matches = payload_id.len() > 41
-        && payload_id
-            .get(payload_id.len() - 40..)
-            .is_some_and(|tail| tail == build_id);
-    if build_id.len() != 40
-        || !suffix_matches
-        || payload_path != format!("payloads/{payload_id}")
-    {
-        copy_error(
-            out_err,
-            err_cap,
-            &format!("HostAbi sidecar identity is inconsistent: {sidecar_path}"),
-        );
-        return -1;
-    }
+    let (build_id, payload_id) = match parse_sidecar_identity(json_bytes, Path::new(sidecar_path)) {
+        Ok(pair) => pair,
+        Err(err) => {
+            copy_error(out_err, err_cap, &err);
+            return -1;
+        }
+    };
     if copy_to_c_buffer(&build_id, out_build_id, build_id_cap) < 0
-        || copy_to_c_buffer(payload_id, out_payload_id, payload_id_cap) < 0
+        || copy_to_c_buffer(&payload_id, out_payload_id, payload_id_cap) < 0
     {
         copy_error(
             out_err,

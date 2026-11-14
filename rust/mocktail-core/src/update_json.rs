@@ -1003,7 +1003,7 @@ fn read_stored_version(val: Option<&Value>) -> Option<(String, u64, String)> {
 }
 
 impl MocktailRustUpdateState {
-    fn open(path: &Path) -> Self {
+    pub(crate) fn open(path: &Path) -> Self {
         let mut map = path
             .to_str()
             .and_then(read_update_state_json_string)
@@ -1030,7 +1030,7 @@ impl MocktailRustUpdateState {
         }
     }
 
-    fn save_phase(&mut self, phase: &str) {
+    pub(crate) fn save_phase(&mut self, phase: &str) {
         self.map
             .insert("phase".into(), Value::String(phase.to_string()));
         self.map
@@ -1042,6 +1042,126 @@ impl MocktailRustUpdateState {
         read_stored_version(self.map.get(key))
             .map(|(_, code, _)| code)
             .unwrap_or(0)
+    }
+
+    pub(crate) fn set_metadata_status(&mut self, status: &str) {
+        self.map
+            .insert("metadata_status".into(), Value::String(status.to_string()));
+    }
+
+    pub(crate) fn record_latest_check(
+        &mut self,
+        available: bool,
+        version_name: &str,
+        version_code: u64,
+    ) {
+        self.map
+            .insert("checked_at".into(), Value::from(now_unix_secs()));
+        if available {
+            self.map
+                .insert("metadata_status".into(), Value::String("available".into()));
+            if self.stored_version_code("latest_seen") <= version_code {
+                self.map.insert(
+                    "latest_seen".into(),
+                    serde_json::json!({
+                        "version_name": version_name,
+                        "version_code": version_code,
+                    }),
+                );
+            }
+        } else {
+            self.map
+                .insert("metadata_status".into(), Value::String("unavailable".into()));
+        }
+    }
+
+    pub(crate) fn get_latest_downloaded(&self) -> Option<(String, u64, String)> {
+        read_stored_version(self.map.get("latest_downloaded"))
+    }
+
+    pub(crate) fn record_latest_downloaded(
+        &mut self,
+        payload_id: &str,
+        version_name: &str,
+        version_code: u64,
+    ) {
+        if self.stored_version_code("latest_downloaded") <= version_code {
+            self.map.insert(
+                "latest_downloaded".into(),
+                serde_json::json!({
+                    "payload_id": payload_id,
+                    "version_name": version_name,
+                    "version_code": version_code,
+                }),
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn finish_and_save(
+        &mut self,
+        active_valid: bool,
+        active_payload_id: &str,
+        active_version_name: &str,
+        active_version_code: u64,
+        supported_version_code: u64,
+        succeeded: bool,
+        changed: bool,
+        message: &str,
+        error: &str,
+    ) -> bool {
+        if active_valid {
+            self.map.insert(
+                "active".into(),
+                serde_json::json!({
+                    "payload_id": active_payload_id,
+                    "version_name": active_version_name,
+                    "version_code": active_version_code,
+                }),
+            );
+        } else {
+            self.map.insert("active".into(), Value::Null);
+        }
+
+        let highest_seen = supported_version_code.max(self.stored_version_code("latest_seen"));
+        let stale = active_valid && active_version_code < highest_seen;
+
+        self.map
+            .insert("message".into(), Value::String(message.to_string()));
+        self.map
+            .insert("error".into(), Value::String(error.to_string()));
+        self.map.insert("stale".into(), Value::Bool(stale));
+
+        let cur_phase = self
+            .map
+            .get("phase")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let meta_status = self
+            .map
+            .get("metadata_status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let next_phase = if !succeeded {
+            "error".to_string()
+        } else if changed {
+            if stale { "blocked" } else { "current" }.to_string()
+        } else if cur_phase == "checking" {
+            if meta_status == "unavailable" {
+                "metadata-unavailable".to_string()
+            } else if stale {
+                "blocked".to_string()
+            } else {
+                "current".to_string()
+            }
+        } else {
+            cur_phase
+        };
+        self.save_phase(&next_phase);
+        stale
     }
 }
 
@@ -1087,11 +1207,7 @@ pub extern "C" fn mocktail_rust_update_state_set_metadata_status(
         return;
     }
     if let Some(status_str) = c_str_opt(status) {
-        unsafe {
-            (*state)
-                .map
-                .insert("metadata_status".into(), Value::String(status_str.to_string()));
-        }
+        unsafe { (*state).set_metadata_status(status_str) };
     }
 }
 
@@ -1106,28 +1222,8 @@ pub extern "C" fn mocktail_rust_update_state_record_latest_check(
     if state.is_null() {
         return;
     }
-    let st = unsafe { &mut *state };
-    st.map
-        .insert("checked_at".into(), Value::from(now_unix_secs()));
-    if available {
-        st.map
-            .insert("metadata_status".into(), Value::String("available".into()));
-        let ver_name = c_str_opt(version_name).unwrap_or("");
-        if st.stored_version_code("latest_seen") <= version_code {
-            st.map.insert(
-                "latest_seen".into(),
-                serde_json::json!({
-                    "version_name": ver_name,
-                    "version_code": version_code,
-                }),
-            );
-        }
-    } else {
-        st.map.insert(
-            "metadata_status".into(),
-            Value::String("unavailable".into()),
-        );
-    }
+    let ver_name = c_str_opt(version_name).unwrap_or("");
+    unsafe { (*state).record_latest_check(available, ver_name, version_code) };
 }
 
 /// Reads the highest recorded downloaded version into caller-provided buffers.
@@ -1143,10 +1239,7 @@ pub extern "C" fn mocktail_rust_update_state_get_latest_downloaded(
     if state.is_null() {
         return false;
     }
-    let st = unsafe { &*state };
-    let Some((ver_name, ver_code, payload_id)) =
-        read_stored_version(st.map.get("latest_downloaded"))
-    else {
+    let Some((ver_name, ver_code, payload_id)) = unsafe { &*state }.get_latest_downloaded() else {
         return false;
     };
     if copy_to_c_buffer(&ver_name, out_version_name, ver_cap) != 0 {
@@ -1175,19 +1268,9 @@ pub extern "C" fn mocktail_rust_update_state_record_latest_downloaded(
     if state.is_null() {
         return;
     }
-    let st = unsafe { &mut *state };
     let pid = c_str_opt(payload_id).unwrap_or("");
     let vname = c_str_opt(version_name).unwrap_or("");
-    if st.stored_version_code("latest_downloaded") <= version_code {
-        st.map.insert(
-            "latest_downloaded".into(),
-            serde_json::json!({
-                "payload_id": pid,
-                "version_name": vname,
-                "version_code": version_code,
-            }),
-        );
-    }
+    unsafe { (*state).record_latest_downloaded(pid, vname, version_code) };
 }
 
 /// Finalizes the update outcome, computes staleness, and persists the state file.
@@ -1208,65 +1291,26 @@ pub extern "C" fn mocktail_rust_update_state_finish_and_save(
     if state.is_null() {
         return;
     }
-    let st = unsafe { &mut *state };
-    if active_valid {
-        let pid = c_str_opt(active_payload_id).unwrap_or("");
-        let vname = c_str_opt(active_version_name).unwrap_or("");
-        st.map.insert(
-            "active".into(),
-            serde_json::json!({
-                "payload_id": pid,
-                "version_name": vname,
-                "version_code": active_version_code,
-            }),
-        );
-    } else {
-        st.map.insert("active".into(), Value::Null);
-    }
-
-    let highest_seen = supported_version_code.max(st.stored_version_code("latest_seen"));
-    let stale = active_valid && active_version_code < highest_seen;
+    let pid = c_str_opt(active_payload_id).unwrap_or("");
+    let vname = c_str_opt(active_version_name).unwrap_or("");
+    let msg_str = c_str_opt(message).unwrap_or("");
+    let err_str = c_str_opt(error).unwrap_or("");
+    let stale = unsafe {
+        (*state).finish_and_save(
+            active_valid,
+            pid,
+            vname,
+            active_version_code,
+            supported_version_code,
+            succeeded,
+            changed,
+            msg_str,
+            err_str,
+        )
+    };
     if !out_stale.is_null() {
         unsafe { *out_stale = stale };
     }
-
-    let msg_str = c_str_opt(message).unwrap_or("");
-    let err_str = c_str_opt(error).unwrap_or("");
-    st.map
-        .insert("message".into(), Value::String(msg_str.to_string()));
-    st.map
-        .insert("error".into(), Value::String(err_str.to_string()));
-    st.map.insert("stale".into(), Value::Bool(stale));
-
-    let cur_phase = st
-        .map
-        .get("phase")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let meta_status = st
-        .map
-        .get("metadata_status")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-
-    let next_phase = if !succeeded {
-        "error".to_string()
-    } else if changed {
-        if stale { "blocked" } else { "current" }.to_string()
-    } else if cur_phase == "checking" {
-        if meta_status == "unavailable" {
-            "metadata-unavailable".to_string()
-        } else if stale {
-            "blocked".to_string()
-        } else {
-            "current".to_string()
-        }
-    } else {
-        cur_phase
-    };
-    st.save_phase(&next_phase);
 }
 
 #[cfg(test)]

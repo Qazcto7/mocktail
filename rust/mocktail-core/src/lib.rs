@@ -39,6 +39,8 @@ pub mod storage_paths;
 pub use storage_paths::*;
 pub mod text_runtime;
 pub use text_runtime::*;
+pub mod update_coordinator;
+pub use update_coordinator::*;
 pub mod update_json;
 pub use update_json::*;
 pub(crate) mod unix_ipc;
@@ -75,6 +77,32 @@ pub extern "C" fn mocktail_rust_secure_zero(ptr: *mut u8, len: usize) {
     slice.zeroize();
 }
 
+pub(crate) fn sha256_bytes_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
+pub(crate) fn sha256_file_hex(path: &Path) -> Option<String> {
+    let file = File::open(path).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let mut reader = BufReader::with_capacity(64 * 1024, file);
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 16384];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(n) => hasher.update(&buffer[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return None,
+        }
+    }
+    Some(hex::encode(hasher.finalize()))
+}
+
 /// Computes the SHA-256 hash of a memory buffer.
 #[no_mangle]
 pub extern "C" fn mocktail_rust_sha256(
@@ -87,11 +115,7 @@ pub extern "C" fn mocktail_rust_sha256(
         return -1;
     }
     let input = unsafe { slice::from_raw_parts(data, len) };
-    let mut hasher = Sha256::new();
-    hasher.update(input);
-    let hash = hasher.finalize();
-    let hex_str = hex::encode(hash);
-
+    let hex_str = sha256_bytes_hex(input);
     let c_str = match CString::new(hex_str) {
         Ok(s) => s,
         Err(_) => return -1,
@@ -117,42 +141,14 @@ pub extern "C" fn mocktail_rust_sha256_file(
         return -1;
     }
     let c_path = unsafe { CStr::from_ptr(path) };
-    let path_str = match c_path.to_str() {
-        Ok(s) => s,
-        Err(_) => return -1,
-    };
-
-    let file = match File::open(path_str) {
-        Ok(f) => f,
-        Err(_) => return -1,
-    };
-
-    if let Ok(meta) = file.metadata() {
-        if !meta.is_file() {
-            return -1;
-        }
-    } else {
+    let Ok(path_str) = c_path.to_str() else {
         return -1;
-    }
-
-    let mut reader = BufReader::with_capacity(64 * 1024, file);
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 16384];
-
-    loop {
-        match reader.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(n) => hasher.update(&buffer[..n]),
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => return -1,
-        }
-    }
-
-    let hash = hasher.finalize();
-    let hex_str = hex::encode(hash);
-    let c_str = match CString::new(hex_str) {
-        Ok(s) => s,
-        Err(_) => return -1,
+    };
+    let Some(hex_str) = sha256_file_hex(Path::new(path_str)) else {
+        return -1;
+    };
+    let Ok(c_str) = CString::new(hex_str) else {
+        return -1;
     };
     let bytes = c_str.as_bytes_with_nul();
     if bytes.len() > out_cap {
@@ -1328,6 +1324,127 @@ pub extern "C" fn mocktail_rust_verify_elf_architecture(
     1
 }
 
+pub(crate) fn parse_elf_build_id_bytes(bytes: &[u8]) -> Option<String> {
+    let elf_len = bytes.len();
+    if elf_len < 64 || &bytes[0..4] != b"\x7fELF" || bytes[4] != 2 || bytes[5] != 1 {
+        return None;
+    }
+
+    let e_phoff = u64::from_le_bytes(bytes[32..40].try_into().ok()?) as usize;
+    let e_phentsize = u16::from_le_bytes(bytes[54..56].try_into().ok()?) as usize;
+    let e_phnum = u16::from_le_bytes(bytes[56..58].try_into().ok()?) as usize;
+
+    let e_shoff = u64::from_le_bytes(bytes[40..48].try_into().ok()?) as usize;
+    let e_shentsize = u16::from_le_bytes(bytes[58..60].try_into().ok()?) as usize;
+    let e_shnum = u16::from_le_bytes(bytes[60..62].try_into().ok()?) as usize;
+
+    let parse_notes = |note_data: &[u8]| -> Option<String> {
+        let mut offset = 0usize;
+        while offset + 12 <= note_data.len() {
+            let namesz = u32::from_le_bytes(note_data[offset..offset + 4].try_into().ok()?) as usize;
+            let descsz = u32::from_le_bytes(note_data[offset + 4..offset + 8].try_into().ok()?) as usize;
+            let n_type = u32::from_le_bytes(note_data[offset + 8..offset + 12].try_into().ok()?);
+            offset += 12;
+
+            let namesz_padded = namesz.checked_add(3)? & !3;
+            let descsz_padded = descsz.checked_add(3)? & !3;
+            let desc_end = offset.checked_add(namesz_padded)?.checked_add(descsz)?;
+            if desc_end > note_data.len() {
+                break;
+            }
+
+            let name = &note_data[offset..offset + namesz];
+            let desc = &note_data[offset + namesz_padded..offset + namesz_padded + descsz];
+            offset = offset.checked_add(namesz_padded)?.checked_add(descsz_padded)?;
+
+            if n_type == 3 && namesz >= 3 && name.starts_with(b"GNU") && descsz > 0 && descsz <= 64 {
+                return Some(hex::encode(desc));
+            }
+        }
+        None
+    };
+
+    if e_phentsize >= 56
+        && e_phnum > 0
+        && e_phnum
+            .checked_mul(e_phentsize)
+            .and_then(|sz| e_phoff.checked_add(sz))
+            .is_some_and(|end| end <= elf_len)
+    {
+        for i in 0..e_phnum {
+            let ph_offset = e_phoff + i * e_phentsize;
+            let p_type = u32::from_le_bytes(bytes[ph_offset..ph_offset + 4].try_into().ok()?);
+            if p_type == 4 {
+                let p_offset = u64::from_le_bytes(bytes[ph_offset + 8..ph_offset + 16].try_into().ok()?) as usize;
+                let p_filesz = u64::from_le_bytes(bytes[ph_offset + 32..ph_offset + 40].try_into().ok()?) as usize;
+                if p_offset.checked_add(p_filesz).is_some_and(|end| end <= elf_len) {
+                    if let Some(id) = parse_notes(&bytes[p_offset..p_offset + p_filesz]) {
+                        return Some(id);
+                    }
+                }
+            }
+        }
+    }
+
+    if e_shentsize >= 64
+        && e_shnum > 0
+        && e_shnum
+            .checked_mul(e_shentsize)
+            .and_then(|sz| e_shoff.checked_add(sz))
+            .is_some_and(|end| end <= elf_len)
+    {
+        for i in 0..e_shnum {
+            let sh_offset = e_shoff + i * e_shentsize;
+            let sh_type = u32::from_le_bytes(bytes[sh_offset + 4..sh_offset + 8].try_into().ok()?);
+            if sh_type == 7 {
+                let s_offset = u64::from_le_bytes(bytes[sh_offset + 24..sh_offset + 32].try_into().ok()?) as usize;
+                let s_size = u64::from_le_bytes(bytes[sh_offset + 32..sh_offset + 40].try_into().ok()?) as usize;
+                if s_offset.checked_add(s_size).is_some_and(|end| end <= elf_len) {
+                    if let Some(id) = parse_notes(&bytes[s_offset..s_offset + s_size]) {
+                        return Some(id);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+pub(crate) fn read_elf_build_id_file(path: &Path) -> Option<String> {
+    if path.as_os_str().is_empty() {
+        return None;
+    }
+    let cpath = crate::unix_ipc::path_to_cstr(path)?;
+    let raw_fd = unsafe { libc::open(cpath.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+    let fd = crate::unix_ipc::OwnedFd::from_raw(raw_fd)?;
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd.as_raw(), &mut st) } != 0 || st.st_size < 64 {
+        return None;
+    }
+    let map_len = usize::try_from(st.st_size).ok()?;
+    let mapped = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            map_len,
+            libc::PROT_READ,
+            libc::MAP_SHARED,
+            fd.as_raw(),
+            0,
+        )
+    };
+    drop(fd);
+    if mapped == libc::MAP_FAILED {
+        return None;
+    }
+    let slice = unsafe { slice::from_raw_parts(mapped.cast::<u8>(), map_len) };
+    let build_id = parse_elf_build_id_bytes(slice);
+    unsafe {
+        libc::munmap(mapped, map_len);
+    }
+    build_id
+}
+
 #[no_mangle]
 pub extern "C" fn mocktail_rust_parse_elf_build_id(
     elf_bytes: *const u8,
@@ -1342,88 +1459,17 @@ pub extern "C" fn mocktail_rust_parse_elf_build_id(
     if &bytes[0..4] != b"\x7fELF" || bytes[4] != 2 || bytes[5] != 1 {
         return -2;
     }
-
-    let e_phoff = u64::from_le_bytes(bytes[32..40].try_into().unwrap()) as usize;
-    let e_phentsize = u16::from_le_bytes(bytes[54..56].try_into().unwrap()) as usize;
-    let e_phnum = u16::from_le_bytes(bytes[56..58].try_into().unwrap()) as usize;
-
-    let e_shoff = u64::from_le_bytes(bytes[40..48].try_into().unwrap()) as usize;
-    let e_shentsize = u16::from_le_bytes(bytes[58..60].try_into().unwrap()) as usize;
-    let e_shnum = u16::from_le_bytes(bytes[60..62].try_into().unwrap()) as usize;
-
-    let parse_notes = |note_data: &[u8]| -> Option<String> {
-        let mut offset = 0;
-        while offset + 12 <= note_data.len() {
-            let namesz = u32::from_le_bytes(note_data[offset..offset + 4].try_into().unwrap()) as usize;
-            let descsz = u32::from_le_bytes(note_data[offset + 4..offset + 8].try_into().unwrap()) as usize;
-            let n_type = u32::from_le_bytes(note_data[offset + 8..offset + 12].try_into().unwrap());
-            offset += 12;
-
-            let namesz_padded = (namesz + 3) & !3;
-            let descsz_padded = (descsz + 3) & !3;
-
-            if offset + namesz_padded + descsz > note_data.len() {
-                break;
-            }
-
-            let name = &note_data[offset..offset + namesz];
-            let desc = &note_data[offset + namesz_padded..offset + namesz_padded + descsz];
-            offset += namesz_padded + descsz_padded;
-
-            if n_type == 3 && namesz >= 3 && name.starts_with(b"GNU") && descsz > 0 && descsz <= 64 {
-                return Some(hex::encode(desc));
-            }
-        }
-        None
+    let Some(id) = parse_elf_build_id_bytes(bytes) else {
+        return -4;
     };
-
-    if e_phentsize >= 56 && e_phnum > 0 && e_phoff + e_phnum * e_phentsize <= elf_len {
-        for i in 0..e_phnum {
-            let ph_offset = e_phoff + i * e_phentsize;
-            let p_type = u32::from_le_bytes(bytes[ph_offset..ph_offset + 4].try_into().unwrap());
-            if p_type == 4 { // PT_NOTE
-                let p_offset = u64::from_le_bytes(bytes[ph_offset + 8..ph_offset + 16].try_into().unwrap()) as usize;
-                let p_filesz = u64::from_le_bytes(bytes[ph_offset + 32..ph_offset + 40].try_into().unwrap()) as usize;
-                if p_offset + p_filesz <= elf_len {
-                    if let Some(id) = parse_notes(&bytes[p_offset..p_offset + p_filesz]) {
-                        if id.len() + 1 > out_cap {
-                            return -3;
-                        }
-                        unsafe {
-                            std::ptr::copy_nonoverlapping(id.as_ptr() as *const c_char, out_hex, id.len());
-                            *out_hex.add(id.len()) = 0;
-                        }
-                        return 0;
-                    }
-                }
-            }
-        }
+    if id.len() + 1 > out_cap {
+        return -3;
     }
-
-    if e_shentsize >= 64 && e_shnum > 0 && e_shoff + e_shnum * e_shentsize <= elf_len {
-        for i in 0..e_shnum {
-            let sh_offset = e_shoff + i * e_shentsize;
-            let sh_type = u32::from_le_bytes(bytes[sh_offset + 4..sh_offset + 8].try_into().unwrap());
-            if sh_type == 7 { // SHT_NOTE
-                let s_offset = u64::from_le_bytes(bytes[sh_offset + 24..sh_offset + 32].try_into().unwrap()) as usize;
-                let s_size = u64::from_le_bytes(bytes[sh_offset + 32..sh_offset + 40].try_into().unwrap()) as usize;
-                if s_offset + s_size <= elf_len {
-                    if let Some(id) = parse_notes(&bytes[s_offset..s_offset + s_size]) {
-                        if id.len() + 1 > out_cap {
-                            return -3;
-                        }
-                        unsafe {
-                            std::ptr::copy_nonoverlapping(id.as_ptr() as *const c_char, out_hex, id.len());
-                            *out_hex.add(id.len()) = 0;
-                        }
-                        return 0;
-                    }
-                }
-            }
-        }
+    unsafe {
+        std::ptr::copy_nonoverlapping(id.as_ptr() as *const c_char, out_hex, id.len());
+        *out_hex.add(id.len()) = 0;
     }
-
-    -4
+    0
 }
 
 // ============================================================================
@@ -1729,6 +1775,130 @@ pub struct MocktailRustPayloadProfile {
     pub elf_build_id: [c_char; 41],
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SupportedProfile {
+    pub version_name: String,
+    pub version_code: u64,
+    pub elf_build_id: String,
+}
+
+pub(crate) fn host_guest_abi() -> &'static str {
+    if cfg!(target_arch = "aarch64") {
+        "arm64-v8a"
+    } else {
+        "x86_64"
+    }
+}
+
+pub(crate) fn parse_compatibility_catalog_bytes(
+    slice: &[u8],
+    target_abi: &str,
+) -> Result<Vec<SupportedProfile>, (c_int, String)> {
+    let val: serde_json::Value = serde_json::from_slice(slice)
+        .map_err(|_| (-2, "compatibility manifest is not valid JSON".to_string()))?;
+    let obj = val
+        .as_object()
+        .ok_or_else(|| (-3, "compatibility manifest has an unsupported schema".to_string()))?;
+    if obj.get("schema_version").and_then(|v| v.as_i64()) != Some(1) {
+        return Err((-4, "compatibility manifest has an unsupported schema".to_string()));
+    }
+    let profiles_arr = obj
+        .get("profiles")
+        .and_then(|p| p.as_array())
+        .ok_or_else(|| (-5, "compatibility manifest has an unsupported schema".to_string()))?;
+
+    let mut parsed_list = Vec::new();
+    for p in profiles_arr {
+        let Some(p_obj) = p.as_object() else {
+            continue;
+        };
+        let Some(status) = p_obj.get("status") else {
+            continue;
+        };
+        let Some(status_str) = status.as_str() else {
+            return Err((-6, "compatibility profile has invalid policy field types".to_string()));
+        };
+        if status_str != "supported" {
+            continue;
+        }
+        let Some(allowed) = p_obj.get("default_allowed") else {
+            continue;
+        };
+        let Some(allowed_bool) = allowed.as_bool() else {
+            return Err((-6, "compatibility profile has invalid policy field types".to_string()));
+        };
+        if !allowed_bool {
+            continue;
+        }
+        let Some(patches) = p_obj.get("allow_legacy_binary_patches") else {
+            continue;
+        };
+        let Some(patches_bool) = patches.as_bool() else {
+            return Err((-6, "compatibility profile has invalid policy field types".to_string()));
+        };
+        if patches_bool {
+            continue;
+        }
+        let profile_abi = match p_obj.get("abi") {
+            Some(v) => v
+                .as_str()
+                .ok_or_else(|| (-7, "supported compatibility profile is incomplete".to_string()))?,
+            None => "x86_64",
+        };
+        if profile_abi != target_abi {
+            continue;
+        }
+        let version_name = p_obj
+            .get("version_name")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| (-8, "supported compatibility profile is incomplete".to_string()))?;
+        let version_code = p_obj
+            .get("version_code")
+            .and_then(|v| v.as_u64())
+            .filter(|&c| c > 0)
+            .ok_or_else(|| (-9, "supported compatibility profile is incomplete".to_string()))?;
+        let elf_build_id = p_obj
+            .get("elf_build_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+            .ok_or_else(|| (-10, "supported compatibility profile has invalid identity".to_string()))?;
+        parsed_list.push(SupportedProfile {
+            version_name: version_name.to_string(),
+            version_code,
+            elf_build_id: elf_build_id.to_ascii_lowercase(),
+        });
+    }
+    if parsed_list.is_empty() {
+        return Err((-11, "compatibility manifest has no default-supported payload".to_string()));
+    }
+    Ok(parsed_list)
+}
+
+pub(crate) fn load_compatibility_catalog_file(
+    path: &Path,
+    target_abi: &str,
+) -> Result<Vec<SupportedProfile>, String> {
+    let contents = match crate::unix_ipc::read_regular_file_limited(
+        path,
+        4 * 1024 * 1024,
+        false,
+        true,
+    ) {
+        Ok(bytes) => bytes,
+        Err(crate::unix_ipc::ReadFileError::NotFound | crate::unix_ipc::ReadFileError::OpenFailed(_)) => {
+            return Err(format!("compatibility manifest is unavailable: {}", path.display()));
+        }
+        Err(crate::unix_ipc::ReadFileError::InvalidFile) => {
+            return Err("compatibility manifest is not a bounded regular file".to_string());
+        }
+        Err(crate::unix_ipc::ReadFileError::ReadFailed) => {
+            return Err("cannot read compatibility manifest".to_string());
+        }
+    };
+    parse_compatibility_catalog_bytes(&contents, target_abi).map_err(|(_, msg)| msg)
+}
+
 #[no_mangle]
 pub extern "C" fn mocktail_rust_parse_compatibility_catalog(
     json_bytes: *const u8,
@@ -1749,139 +1919,44 @@ pub extern "C" fn mocktail_rust_parse_compatibility_catalog(
         return -1;
     }
     let slice = unsafe { slice::from_raw_parts(json_bytes, json_len) };
-    let val: serde_json::Value = match serde_json::from_slice(slice) {
-        Ok(v) => v,
-        Err(_) => {
-            set_error("compatibility manifest is not valid JSON");
-            return -2;
-        }
-    };
-    let obj = match val.as_object() {
-        Some(o) => o,
-        None => {
-            set_error("compatibility manifest has an unsupported schema");
-            return -3;
-        }
-    };
-    if obj.get("schema_version").and_then(|v| v.as_i64()) != Some(1) {
-        set_error("compatibility manifest has an unsupported schema");
-        return -4;
-    }
-    let profiles_arr = match obj.get("profiles").and_then(|p| p.as_array()) {
-        Some(a) => a,
-        None => {
-            set_error("compatibility manifest has an unsupported schema");
-            return -5;
-        }
-    };
     let target_abi = if guest_abi.is_null() {
         "x86_64"
     } else {
         unsafe { CStr::from_ptr(guest_abi).to_str().unwrap_or("x86_64") }
     };
+    let parsed = match parse_compatibility_catalog_bytes(slice, target_abi) {
+        Ok(list) => list,
+        Err((code, msg)) => {
+            set_error(&msg);
+            return code;
+        }
+    };
 
-    let mut parsed_list: Vec<MocktailRustPayloadProfile> = Vec::new();
-    for p in profiles_arr {
-        let p_obj = match p.as_object() {
-            Some(o) => o,
-            None => continue,
-        };
-        if let Some(status) = p_obj.get("status") {
-            if !status.is_string() {
-                set_error("compatibility profile has invalid policy field types");
-                return -6;
-            }
-            if status.as_str() != Some("supported") {
-                continue;
-            }
-        } else {
-            continue;
-        }
-        if let Some(allowed) = p_obj.get("default_allowed") {
-            if !allowed.is_boolean() {
-                set_error("compatibility profile has invalid policy field types");
-                return -6;
-            }
-            if allowed.as_bool() != Some(true) {
-                continue;
-            }
-        } else {
-            continue;
-        }
-        if let Some(patches) = p_obj.get("allow_legacy_binary_patches") {
-            if !patches.is_boolean() {
-                set_error("compatibility profile has invalid policy field types");
-                return -6;
-            }
-            if patches.as_bool() != Some(false) {
-                continue;
-            }
-        } else {
-            continue;
-        }
-        let profile_abi = match p_obj.get("abi") {
-            Some(v) => match v.as_str() {
-                Some(s) => s,
-                None => {
-                    set_error("supported compatibility profile is incomplete");
-                    return -7;
-                }
-            },
-            None => "x86_64",
-        };
-        if profile_abi != target_abi {
-            continue;
-        }
-        let version_name = match p_obj.get("version_name").and_then(|v| v.as_str()) {
-            Some(s) if !s.is_empty() => s,
-            _ => {
-                set_error("supported compatibility profile is incomplete");
-                return -8;
-            }
-        };
-        let version_code = match p_obj.get("version_code").and_then(|v| v.as_u64()) {
-            Some(c) if c > 0 => c,
-            _ => {
-                set_error("supported compatibility profile is incomplete");
-                return -9;
-            }
-        };
-        let elf_build_id = match p_obj.get("elf_build_id").and_then(|v| v.as_str()) {
-            Some(s) if s.len() == 40 && s.bytes().all(|b| (b >= b'0' && b <= b'9') || (b >= b'a' && b <= b'f') || (b >= b'A' && b <= b'F')) => s,
-            _ => {
-                set_error("supported compatibility profile has invalid identity");
-                return -10;
-            }
-        };
-
+    let count = std::cmp::min(parsed.len(), out_cap);
+    for (i, item) in parsed.iter().take(count).enumerate() {
         let mut prof = MocktailRustPayloadProfile {
             version_name: [0; 64],
-            version_code,
+            version_code: item.version_code,
             elf_build_id: [0; 41],
         };
-        let vn_bytes = version_name.as_bytes();
+        let vn_bytes = item.version_name.as_bytes();
         let vn_len = std::cmp::min(vn_bytes.len(), 63);
         unsafe {
-            std::ptr::copy_nonoverlapping(vn_bytes.as_ptr() as *const c_char, prof.version_name.as_mut_ptr(), vn_len);
-        }
-        let id_lower = elf_build_id.to_ascii_lowercase();
-        unsafe {
-            std::ptr::copy_nonoverlapping(id_lower.as_ptr() as *const c_char, prof.elf_build_id.as_mut_ptr(), 40);
-        }
-        parsed_list.push(prof);
-    }
-    if parsed_list.is_empty() {
-        set_error("compatibility manifest has no default-supported payload");
-        return -11;
-    }
-    let count = std::cmp::min(parsed_list.len(), out_cap);
-    if count > 0 {
-        unsafe {
-            std::ptr::copy_nonoverlapping(parsed_list.as_ptr(), out_profiles, count);
+            std::ptr::copy_nonoverlapping(
+                vn_bytes.as_ptr() as *const c_char,
+                prof.version_name.as_mut_ptr(),
+                vn_len,
+            );
+            std::ptr::copy_nonoverlapping(
+                item.elf_build_id.as_ptr() as *const c_char,
+                prof.elf_build_id.as_mut_ptr(),
+                40,
+            );
+            *out_profiles.add(i) = prof;
         }
     }
     unsafe {
-        *out_count = parsed_list.len();
+        *out_count = parsed.len();
     }
     0
 }
@@ -8617,6 +8692,19 @@ pub extern "C" fn mocktail_rust_update_is_retryable_curl_code(code: i32) -> bool
     matches!(code, 7 | 6 | 5 | 28 | 18 | 56 | 55 | 52 | 35)
 }
 
+pub(crate) fn evaluate_update_plan(
+    has_latest: bool,
+    latest_code: u64,
+    runnable: bool,
+    runnable_code: u64,
+    preferred_code: u64,
+) -> (bool, bool) {
+    let take_latest = has_latest && (!runnable || latest_code > runnable_code);
+    let need_preferred = !runnable || preferred_code > runnable_code;
+    let take_preferred = need_preferred && (!take_latest || latest_code != preferred_code);
+    (take_latest, take_preferred)
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn mocktail_rust_update_plan_evaluate(
     has_latest: bool,
@@ -8630,9 +8718,8 @@ pub unsafe extern "C" fn mocktail_rust_update_plan_evaluate(
     if out_take_latest.is_null() || out_take_preferred.is_null() {
         return -1;
     }
-    let take_latest = has_latest && (!runnable || latest_code > runnable_code);
-    let need_preferred = !runnable || preferred_code > runnable_code;
-    let take_preferred = need_preferred && (!take_latest || latest_code != preferred_code);
+    let (take_latest, take_preferred) =
+        evaluate_update_plan(has_latest, latest_code, runnable, runnable_code, preferred_code);
     *out_take_latest = take_latest;
     *out_take_preferred = take_preferred;
     0
@@ -12232,6 +12319,124 @@ pub extern "C" fn mocktail_rust_apk_provider_append_failure(
 // 92. Update Configuration YAML Parser
 // ============================================================================
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UpdateConfigData {
+    pub automatic: bool,
+    pub launch_after_update: bool,
+    pub source: String,
+    pub file_loaded: bool,
+    pub warnings: Vec<String>,
+}
+
+pub(crate) fn parse_update_config_yaml_str(s: &str) -> Result<(bool, bool, String), (i32, String)> {
+    let val: serde_yaml::Value = serde_yaml::from_str(s)
+        .map_err(|_| (-3, "cannot parse update configuration".to_string()))?;
+    let map = val
+        .as_mapping()
+        .ok_or_else(|| (-4, "configuration root must be a mapping".to_string()))?;
+
+    if let Some(ver) = map.get(&serde_yaml::Value::String("version".to_string())) {
+        let ver_str = match ver {
+            serde_yaml::Value::String(s) => s.as_str(),
+            serde_yaml::Value::Number(n) => {
+                if n.as_i64() == Some(1) { "1" } else { "invalid" }
+            }
+            _ => "invalid",
+        };
+        if ver_str != "1" {
+            return Err((-5, "only configuration version 1 is supported".to_string()));
+        }
+    }
+
+    let updates = map
+        .get(&serde_yaml::Value::String("updates".to_string()))
+        .and_then(|v| v.as_mapping())
+        .ok_or_else(|| (-6, "updates must be a mapping".to_string()))?;
+
+    let mut auto_val = true;
+    let mut launch_val = true;
+    let mut source_val = "auto".to_string();
+
+    for (k, v) in updates {
+        let key_str = k
+            .as_str()
+            .ok_or_else(|| (-7, "updates contains an empty or duplicate key".to_string()))?;
+        match key_str {
+            "automatic" => {
+                auto_val = v
+                    .as_bool()
+                    .ok_or_else(|| (-8, "updates.automatic must be true or false".to_string()))?;
+            }
+            "launch_after_update" => {
+                launch_val = v.as_bool().ok_or_else(|| {
+                    (-9, "updates.launch_after_update must be true or false".to_string())
+                })?;
+            }
+            "source" => match v.as_str() {
+                Some(src) if src == "auto" || src == "apk-pure" => {
+                    source_val = src.to_string();
+                }
+                _ => {
+                    return Err((
+                        -10,
+                        "updates.source must be auto or apk-pure in the native updater".to_string(),
+                    ));
+                }
+            },
+            "testing_latest_only" => {}
+            _ => {
+                return Err((-11, format!("unknown updates key: {key_str}")));
+            }
+        }
+    }
+
+    Ok((auto_val, launch_val, source_val))
+}
+
+pub(crate) fn load_update_config_file(path: &Path) -> Result<UpdateConfigData, String> {
+    let bytes = match crate::unix_ipc::read_regular_file_limited(
+        path,
+        1024 * 1024,
+        false,
+        true,
+    ) {
+        Ok(b) => b,
+        Err(crate::unix_ipc::ReadFileError::NotFound) => {
+            return Ok(UpdateConfigData {
+                automatic: true,
+                launch_after_update: false,
+                source: "apk-pure".to_string(),
+                file_loaded: false,
+                warnings: Vec::new(),
+            });
+        }
+        Err(crate::unix_ipc::ReadFileError::OpenFailed(_)) => {
+            return Err(format!("cannot open update configuration: {}", path.display()));
+        }
+        Err(crate::unix_ipc::ReadFileError::InvalidFile) => {
+            return Err("update configuration must be a regular file no larger than 1 MiB".to_string());
+        }
+        Err(crate::unix_ipc::ReadFileError::ReadFailed) => {
+            return Err(format!("cannot read update configuration: {}", path.display()));
+        }
+    };
+    let s = std::str::from_utf8(&bytes)
+        .map_err(|_| "cannot parse update configuration".to_string())?;
+    let (automatic, launch_after_update, source) =
+        parse_update_config_yaml_str(s).map_err(|(_, msg)| msg)?;
+    let mut warnings = Vec::new();
+    if s.contains("testing_latest_only") {
+        warnings.push("updates.testing_latest_only is no longer supported and is ignored".to_string());
+    }
+    Ok(UpdateConfigData {
+        automatic,
+        launch_after_update,
+        source,
+        file_loaded: true,
+        warnings,
+    })
+}
+
 #[no_mangle]
 pub extern "C" fn mocktail_rust_parse_update_config_yaml(
     yaml_str: *const c_char,
@@ -12255,96 +12460,13 @@ pub extern "C" fn mocktail_rust_parse_update_config_yaml(
             return -2;
         }
     };
-    let val: serde_yaml::Value = match serde_yaml::from_str(s) {
-        Ok(v) => v,
-        Err(_) => {
-            copy_error(err_buf, err_cap, "cannot parse update configuration");
-            return -3;
+    let (auto_val, launch_val, source_val) = match parse_update_config_yaml_str(s) {
+        Ok(parsed) => parsed,
+        Err((code, msg)) => {
+            copy_error(err_buf, err_cap, &msg);
+            return code;
         }
     };
-    let map = match val.as_mapping() {
-        Some(m) => m,
-        None => {
-            copy_error(err_buf, err_cap, "configuration root must be a mapping");
-            return -4;
-        }
-    };
-
-    if let Some(ver) = map.get(&serde_yaml::Value::String("version".to_string())) {
-        let ver_str = match ver {
-            serde_yaml::Value::String(s) => s.as_str(),
-            serde_yaml::Value::Number(n) => {
-                if n.as_i64() == Some(1) { "1" } else { "invalid" }
-            }
-            _ => "invalid",
-        };
-        if ver_str != "1" {
-            copy_error(err_buf, err_cap, "only configuration version 1 is supported");
-            return -5;
-        }
-    }
-
-    let updates = match map.get(&serde_yaml::Value::String("updates".to_string())).and_then(|v| v.as_mapping()) {
-        Some(u) => u,
-        None => {
-            copy_error(err_buf, err_cap, "updates must be a mapping");
-            return -6;
-        }
-    };
-
-    let mut auto_val = true;
-    let mut launch_val = true;
-    let mut source_val = "auto".to_string();
-
-    for (k, v) in updates {
-        let key_str = match k.as_str() {
-            Some(s) => s,
-            None => {
-                copy_error(err_buf, err_cap, "updates contains an empty or duplicate key");
-                return -7;
-            }
-        };
-        match key_str {
-            "automatic" => {
-                match v.as_bool() {
-                    Some(b) => auto_val = b,
-                    None => {
-                        copy_error(err_buf, err_cap, "updates.automatic must be true or false");
-                        return -8;
-                    }
-                }
-            }
-            "launch_after_update" => {
-                match v.as_bool() {
-                    Some(b) => launch_val = b,
-                    None => {
-                        copy_error(err_buf, err_cap, "updates.launch_after_update must be true or false");
-                        return -9;
-                    }
-                }
-            }
-            "source" => {
-                match v.as_str() {
-                    Some(s) if s == "auto" || s == "apk-pure" => {
-                        source_val = s.to_string();
-                    }
-                    _ => {
-                        copy_error(err_buf, err_cap, "updates.source must be auto or apk-pure in the native updater");
-                        return -10;
-                    }
-                }
-            }
-            "testing_latest_only" => {
-                // Deprecated, ignored
-            }
-            _ => {
-                let err_msg = format!("unknown updates key: {}", key_str);
-                copy_error(err_buf, err_cap, &err_msg);
-                return -11;
-            }
-        }
-    }
-
     if !out_auto.is_null() {
         unsafe { *out_auto = if auto_val { 1 } else { 0 } };
     }
@@ -12359,17 +12481,17 @@ pub extern "C" fn mocktail_rust_parse_update_config_yaml(
 // 93. Unsafe Latest Environment Filter & Builder
 // ============================================================================
 
-const OVERRIDDEN_ENV_VARS: &[&str] = &[
-    "ROBLOX_LIB_PATH",
-    "MOCKTAIL_ASSET_ROOT",
-    "MOCKTAIL_ASSET_PATH",
-    "MOCKTAIL_COMPATIBILITY_MANIFEST",
-    "MOCKTAIL_HOST_ABI_PROFILE_FILE",
-    "MOCKTAIL_HOST_ABI_CANARY",
-    "MOCKTAIL_ALLOW_CANDIDATE_HOST_ABI",
-    "MOCKTAIL_HOST_ABI_APPROVAL_RECEIPT",
-    "MOCKTAIL_SKIP_UPDATE_CHECK",
-    "MOCKTAIL_UNSAFE_LATEST",
+pub(crate) const OVERRIDDEN_ENV_VAR_BYTES: &[&[u8]] = &[
+    b"ROBLOX_LIB_PATH",
+    b"MOCKTAIL_ASSET_ROOT",
+    b"MOCKTAIL_ASSET_PATH",
+    b"MOCKTAIL_COMPATIBILITY_MANIFEST",
+    b"MOCKTAIL_HOST_ABI_PROFILE_FILE",
+    b"MOCKTAIL_HOST_ABI_CANARY",
+    b"MOCKTAIL_ALLOW_CANDIDATE_HOST_ABI",
+    b"MOCKTAIL_HOST_ABI_APPROVAL_RECEIPT",
+    b"MOCKTAIL_SKIP_UPDATE_CHECK",
+    b"MOCKTAIL_UNSAFE_LATEST",
 ];
 
 #[no_mangle]
@@ -12377,13 +12499,15 @@ pub extern "C" fn mocktail_rust_is_overridden_environment_var(entry: *const c_ch
     if entry.is_null() {
         return 0;
     }
-    let s = unsafe { CStr::from_ptr(entry) }.to_str().unwrap_or("");
-    for &var in OVERRIDDEN_ENV_VARS {
-        if s.starts_with(var) && s.as_bytes().get(var.len()) == Some(&b'=') {
-            return 1;
-        }
+    let bytes = unsafe { CStr::from_ptr(entry) }.to_bytes();
+    if OVERRIDDEN_ENV_VAR_BYTES
+        .iter()
+        .any(|&var| crate::unix_ipc::is_env_entry(bytes, var))
+    {
+        1
+    } else {
+        0
     }
-    0
 }
 
 // ============================================================================

@@ -134,6 +134,14 @@ pub(crate) struct CanaryRunOutput {
     pub error: String,
 }
 
+impl CanaryRunOutput {
+    pub(crate) fn is_ok(&self) -> bool {
+        self.error.is_empty()
+            && !self.log_path.is_empty()
+            && (self.exit_code == 0 || self.teardown_crash)
+    }
+}
+
 pub(crate) fn canary_backend_name_cstr(backend: i32) -> &'static CStr {
     match backend {
         K_CANARY_BACKEND_OPENGL_ES => c"opengl",

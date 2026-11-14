@@ -4423,6 +4423,185 @@ void mocktail_rust_background_payload_update_stop(
 void mocktail_rust_background_payload_update_destroy(
     MocktailRustBackgroundPayloadUpdate* handle);
 
+// 144. Update Coordinator & Unsafe Latest Runner
+typedef struct MocktailRustSupportedProfileView {
+  struct MocktailRustStrSlice version_name;
+  uint64_t version_code;
+  struct MocktailRustStrSlice elf_build_id;
+} MocktailRustSupportedProfileView;
+
+typedef struct MocktailRustCoordinatorStoreResultView {
+  bool valid;
+  struct MocktailRustStrSlice payload_id;
+  struct MocktailRustStrSlice payload_directory;
+  struct MocktailRustStrSlice host_abi_profile;
+  struct MocktailRustStrSlice compatibility_manifest;
+  struct MocktailRustStrSlice version_name;
+  uint64_t version_code;
+  struct MocktailRustStrSlice build_id;
+  struct MocktailRustStrSlice error;
+} MocktailRustCoordinatorStoreResultView;
+
+typedef struct MocktailRustUpdateCandidatePlanView {
+  struct MocktailRustStrSlice version_name;
+  uint64_t version_code;
+  bool has_exact_build_id;
+  struct MocktailRustStrSlice exact_build_id;
+  bool exact_supported;
+  bool reuse_installed;
+  struct MocktailRustStrSlice origin;
+} MocktailRustUpdateCandidatePlanView;
+
+typedef struct MocktailRustUnsafeLatestOptions {
+  struct MocktailRustStrSlice runtime_binary;
+  struct MocktailRustStrSlice payload_directory;
+  struct MocktailRustStrSlice compatibility_manifest;
+  struct MocktailRustStrSlice host_abi_profile;
+  const struct MocktailRustStrSlice* inherited_environment;
+  size_t inherited_environment_count;
+} MocktailRustUnsafeLatestOptions;
+
+typedef struct MocktailRustUpdatePathsView {
+  struct MocktailRustStrSlice config_file;
+  struct MocktailRustStrSlice data_root;
+  struct MocktailRustStrSlice cache_root;
+  struct MocktailRustStrSlice state_root;
+  struct MocktailRustStrSlice compatibility_manifest;
+  struct MocktailRustStrSlice signing_trust_manifest;
+  struct MocktailRustStrSlice download_sources_manifest;
+  struct MocktailRustStrSlice host_abi_reference_profile;
+  struct MocktailRustStrSlice runtime_binary;
+  struct MocktailRustStrSlice runtime_launcher;
+} MocktailRustUpdatePathsView;
+
+typedef struct MocktailRustUpdateRequestView {
+  bool startup_preflight;
+  bool check_latest;
+  bool run_canary;
+  bool download_only;
+  bool force_run_latest;
+  int32_t canary_graphics_backend;
+  int32_t progress_fd;
+} MocktailRustUpdateRequestView;
+
+typedef struct MocktailRustUpdateResultView {
+  bool changed;
+  bool stale;
+  struct MocktailRustStrSlice payload_id;
+  struct MocktailRustStrSlice message;
+  const struct MocktailRustStrSlice* warnings;
+  size_t warning_count;
+  struct MocktailRustStrSlice error;
+} MocktailRustUpdateResultView;
+
+typedef void (*MocktailCoordinatorProviderCheckLatestFn)(
+    void* ctx, void* receiver_ctx,
+    void (*on_result)(void* receiver_ctx,
+                      struct MocktailRustStrSlice version_name,
+                      uint64_t version_code,
+                      struct MocktailRustStrSlice error));
+
+typedef void (*MocktailCoordinatorDownloadAndPrepareFn)(
+    void* ctx, struct MocktailRustStrSlice version_name, uint64_t version_code,
+    bool has_exact_build_id, struct MocktailRustStrSlice exact_build_id,
+    struct MocktailRustStrSlice download_directory,
+    struct MocktailRustStrSlice prepare_prefix,
+    struct MocktailRustStrSlice signing_trust_manifest, int32_t progress_fd,
+    void* receiver_ctx,
+    void (*on_result)(void* receiver_ctx,
+                      struct MocktailRustStrSlice prepared_directory,
+                      struct MocktailRustStrSlice error));
+
+typedef void (*MocktailCoordinatorDeriveHostAbiFn)(
+    void* ctx, struct MocktailRustStrSlice reference_library,
+    struct MocktailRustStrSlice reference_profile,
+    const struct MocktailRustStrSlice* reference_manifests,
+    size_t reference_manifests_count,
+    struct MocktailRustStrSlice candidate_payload_directory,
+    struct MocktailRustStrSlice output_directory, void* receiver_ctx,
+    void (*on_result)(void* receiver_ctx, struct MocktailRustStrSlice profile,
+                      struct MocktailRustStrSlice compatibility_manifest,
+                      struct MocktailRustStrSlice error));
+
+typedef void (*MocktailCoordinatorStoreInspectFn)(
+    void* ctx, void* receiver_ctx,
+    void (*on_result)(
+        void* receiver_ctx,
+        const struct MocktailRustCoordinatorStoreResultView* result));
+
+typedef void (*MocktailCoordinatorStoreStageFn)(
+    void* ctx, struct MocktailRustStrSlice prepared_directory,
+    void* receiver_ctx,
+    void (*on_result)(
+        void* receiver_ctx,
+        const struct MocktailRustCoordinatorStoreResultView* result));
+
+typedef void (*MocktailCoordinatorStorePromoteFn)(
+    void* ctx, struct MocktailRustStrSlice payload_id, void* receiver_ctx,
+    void (*on_result)(
+        void* receiver_ctx,
+        const struct MocktailRustCoordinatorStoreResultView* result));
+
+typedef void (*MocktailCoordinatorStorePromoteProbationFn)(
+    void* ctx, struct MocktailRustStrSlice payload_id,
+    struct MocktailRustStrSlice candidate_profile,
+    struct MocktailRustStrSlice candidate_compatibility,
+    struct MocktailRustStrSlice canary_log_0,
+    struct MocktailRustStrSlice canary_log_1, void* receiver_ctx,
+    void (*on_result)(
+        void* receiver_ctx,
+        const struct MocktailRustCoordinatorStoreResultView* result));
+
+typedef void (*MocktailCoordinatorStoreCollectGarbageFn)(
+    void* ctx, const struct MocktailRustStrSlice* keep, size_t keep_count,
+    void* receiver_ctx,
+    void (*on_result)(void* receiver_ctx, size_t removed_count,
+                      uint64_t freed_bytes, struct MocktailRustStrSlice error));
+
+typedef struct MocktailRustUpdateCoordinatorOps {
+  void* ctx;
+  MocktailCoordinatorProviderCheckLatestFn provider_check_latest;
+  MocktailCoordinatorDownloadAndPrepareFn download_and_prepare;
+  MocktailCoordinatorDeriveHostAbiFn derive_host_abi_profile;
+  MocktailCoordinatorStoreInspectFn store_inspect_current;
+  MocktailCoordinatorStoreInspectFn store_verify_current;
+  MocktailCoordinatorStoreStageFn store_stage;
+  MocktailCoordinatorStorePromoteFn store_promote;
+  MocktailCoordinatorStorePromoteProbationFn store_promote_probation;
+  MocktailCoordinatorStoreCollectGarbageFn store_collect_garbage;
+} MocktailRustUpdateCoordinatorOps;
+
+bool mocktail_rust_resolve_reference_profile(
+    struct MocktailRustStrSlice location,
+    const MocktailRustSupportedProfileView* profiles, size_t profile_count,
+    void (*on_match)(void* ctx, size_t profile_index,
+                     struct MocktailRustStrSlice sidecar_path),
+    void* ctx);
+
+void mocktail_rust_plan_update_candidates(
+    const MocktailRustSupportedProfileView* profiles, size_t profile_count,
+    const MocktailRustSupportedProfileView* preferred, bool has_latest,
+    struct MocktailRustStrSlice latest_version_name, uint64_t latest_version_code,
+    const MocktailRustCoordinatorStoreResultView* current,
+    const MocktailRustCoordinatorStoreResultView* installed,
+    void (*on_plan)(void* ctx,
+                    const MocktailRustUpdateCandidatePlanView* plan),
+    void* ctx);
+
+int32_t mocktail_rust_run_unsafe_latest_candidate(
+    const MocktailRustUnsafeLatestOptions* options,
+    void (*on_result)(void* ctx, int32_t exit_code,
+                      struct MocktailRustStrSlice error),
+    void* ctx);
+
+void mocktail_rust_run_update(
+    const MocktailRustUpdatePathsView* paths,
+    const MocktailRustUpdateRequestView* request,
+    const MocktailRustUpdateCoordinatorOps* ops,
+    void (*on_result)(void* ctx,
+                      const MocktailRustUpdateResultView* result),
+    void* ctx);
+
 #ifdef __cplusplus
 }
 #endif

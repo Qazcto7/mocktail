@@ -1,21 +1,10 @@
 #include "update/update_coordinator.h"
-#include "mocktail/mocktail_rust.h"
 
-#include <fcntl.h>
-#include <sys/file.h>
 #include <sys/socket.h>
-#include <unistd.h>
 
-#include <algorithm>
-#include <array>
-#include <cerrno>
-#include <chrono>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <ctime>
+#include <cstddef>
+#include <cstdint>
 #include <filesystem>
-#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -23,628 +12,319 @@
 #include <utility>
 #include <vector>
 
-#include "compat/elf_build_id.h"
-#include "compat/guest_abi.h"
+#include "mocktail/mocktail_rust.h"
 #include "update/apk_bundle.h"
 #include "update/apk_provider.h"
 #include "update/apkpure_provider.h"
-#include "update/compatibility_catalog.h"
 #include "update/host_abi_deriver.h"
-#include "update/payload_integrity.h"
 #include "update/payload_store.h"
 #include "update/pinned_apk_provider.h"
-#include "update/readiness_canary.h"
-#include "update/unsafe_latest_runner.h"
-#include "update/update_config.h"
 
 namespace mocktail::update {
 namespace {
 
-class UpdateLock final {
- public:
-  UpdateLock(const std::filesystem::path& root, std::string* error) {
-    std::error_code filesystem_error;
-    std::filesystem::create_directories(root, filesystem_error);
-    if (filesystem_error) {
-      *error = "cannot create updater data root";
-      return;
-    }
-    descriptor_ = open((root / ".native-update.lock").c_str(),
-                       O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
-    if (descriptor_ < 0 || flock(descriptor_, LOCK_EX) != 0) {
-      if (descriptor_ >= 0) close(descriptor_);
-      descriptor_ = -1;
-      *error = "cannot lock native updater";
-    }
+MocktailRustStrSlice ToSlice(std::string_view value) {
+  return {value.data(), value.size()};
+}
+
+std::string_view ToStringView(MocktailRustStrSlice slice) {
+  if (slice.ptr == nullptr || slice.len == 0) {
+    return {};
   }
+  return {slice.ptr, slice.len};
+}
 
-  ~UpdateLock() {
-    if (descriptor_ >= 0) close(descriptor_);
+std::filesystem::path ToPath(MocktailRustStrSlice slice) {
+  const std::string_view sv = ToStringView(slice);
+  return std::filesystem::path(sv);
+}
+
+MocktailRustSupportedProfileView ToProfileView(
+    const SupportedPayloadProfile& profile) {
+  MocktailRustSupportedProfileView view{};
+  view.version_name = ToSlice(profile.version_name);
+  view.version_code = profile.version_code;
+  view.elf_build_id = ToSlice(profile.elf_build_id);
+  return view;
+}
+
+std::vector<MocktailRustSupportedProfileView> ToProfileViews(
+    const std::vector<SupportedPayloadProfile>& profiles) {
+  std::vector<MocktailRustSupportedProfileView> views;
+  views.reserve(profiles.size());
+  for (const SupportedPayloadProfile& profile : profiles) {
+    views.push_back(ToProfileView(profile));
   }
+  return views;
+}
 
-  explicit operator bool() const { return descriptor_ >= 0; }
+struct StoreResultStrings {
+  bool valid = false;
+  std::string payload_id;
+  std::string payload_directory;
+  std::string host_abi_profile;
+  std::string compatibility_manifest;
+  std::string version_name;
+  std::uint64_t version_code = 0;
+  std::string build_id;
+  std::string error;
 
- private:
-  int descriptor_ = -1;
+  explicit StoreResultStrings(const PayloadStoreResult& r)
+      : valid(static_cast<bool>(r)),
+        payload_id(r.payload_id),
+        payload_directory(r.payload_directory.string()),
+        host_abi_profile(r.host_abi_profile.string()),
+        compatibility_manifest(r.compatibility_manifest.string()),
+        version_name(r.version_name),
+        version_code(r.version_code),
+        build_id(r.build_id),
+        error(r.error) {}
+
+  MocktailRustCoordinatorStoreResultView view() const {
+    MocktailRustCoordinatorStoreResultView v{};
+    v.valid = valid;
+    v.payload_id = ToSlice(payload_id);
+    v.payload_directory = ToSlice(payload_directory);
+    v.host_abi_profile = ToSlice(host_abi_profile);
+    v.compatibility_manifest = ToSlice(compatibility_manifest);
+    v.version_name = ToSlice(version_name);
+    v.version_code = version_code;
+    v.build_id = ToSlice(build_id);
+    v.error = ToSlice(error);
+    return v;
+  }
 };
 
-void Progress(int descriptor, std::string_view message) {
+void EmitStoreResult(
+    const PayloadStoreResult& result, void* receiver_ctx,
+    void (*on_result)(void*, const MocktailRustCoordinatorStoreResultView*)) {
+  if (on_result == nullptr) return;
+  const StoreResultStrings backing(result);
+  const MocktailRustCoordinatorStoreResultView view = backing.view();
+  on_result(receiver_ctx, &view);
+}
+
+void ProgressPacket(int descriptor, std::string_view message) {
   if (descriptor < 0) return;
   const std::string packet = "P" + std::string(message);
   (void)send(descriptor, packet.data(), packet.size(), MSG_NOSIGNAL);
 }
 
-bool TraceFlagEnabled(const char* name) {
-  const char* value = std::getenv(name);
-  return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
-}
-
-bool UpdateTraceEnabled() {
-  static const bool enabled = TraceFlagEnabled("MOCKTAIL_UPDATE_TRACE") ||
-                              TraceFlagEnabled("MOCKTAIL_TRACE_ALL") ||
-                              TraceFlagEnabled("MOCKTAIL_FULL_TRACE");
-  return enabled;
-}
-
-// A first install downloads, verifies, canaries, and promotes several hundred
-// MiB. Without a per-stage breakdown there is no way to tell which stage owns
-// the wall-clock time, so the timer reports one line per stage on request.
-class StageTimer final {
- public:
-  explicit StageTimer(std::string name)
-      : name_(std::move(name)), start_(std::chrono::steady_clock::now()) {}
-
-  ~StageTimer() { Report(); }
-
-  StageTimer(const StageTimer&) = delete;
-  StageTimer& operator=(const StageTimer&) = delete;
-
-  void Report() {
-    if (name_.empty()) return;
-    if (UpdateTraceEnabled()) {
-      const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-          std::chrono::steady_clock::now() - start_);
-      std::fprintf(stderr, "  [update] %s %lld ms\n", name_.c_str(),
-                   static_cast<long long>(elapsed.count()));
-    }
-    name_.clear();
-  }
-
- private:
-  std::string name_;
-  std::chrono::steady_clock::time_point start_;
-};
-
-// The update lock is held, so no live run owns one of these.
-void RemoveStaleWorkspaces(const std::filesystem::path& parent) {
-  std::error_code filesystem_error;
-  std::vector<std::filesystem::path> stale;
-  std::filesystem::directory_iterator iterator(
-      parent, std::filesystem::directory_options::none, filesystem_error);
-  const std::filesystem::directory_iterator end;
-  while (!filesystem_error && iterator != end) {
-    if (iterator->path().filename().string().rfind(".update-", 0) == 0) {
-      stale.push_back(iterator->path());
-    }
-    iterator.increment(filesystem_error);
-  }
-  for (const std::filesystem::path& entry : stale) {
-    std::error_code ignored;
-    std::filesystem::remove_all(entry, ignored);
-  }
-}
-
-std::filesystem::path UniqueDirectory(const std::filesystem::path& parent,
-                                      std::string* error) {
-  std::error_code filesystem_error;
-  std::filesystem::create_directories(parent, filesystem_error);
-  if (filesystem_error) {
-    *error = "cannot create native updater cache";
-    return {};
-  }
-  std::string pattern = (parent / ".update-XXXXXX").string();
-  std::vector<char> mutable_pattern(pattern.begin(), pattern.end());
-  mutable_pattern.push_back('\0');
-  char* created = mkdtemp(mutable_pattern.data());
-  if (created == nullptr) {
-    *error = "cannot create native updater workspace";
-    return {};
-  }
-  return created;
-}
-
-struct UpdateStateGuard {
-  MocktailRustUpdateState* ptr = nullptr;
-  explicit UpdateStateGuard(const std::filesystem::path& path)
-      : ptr(mocktail_rust_update_state_new(path.c_str())) {}
-  ~UpdateStateGuard() { mocktail_rust_update_state_free(ptr); }
-  UpdateStateGuard(const UpdateStateGuard&) = delete;
-  UpdateStateGuard& operator=(const UpdateStateGuard&) = delete;
-};
-
-struct Candidate {
-  PayloadStoreResult staged;
-  ExpectedPayloadIdentity identity;
-  bool exact_supported = false;
-  std::filesystem::path profile;
-  std::filesystem::path compatibility;
-  std::string error;
-
-  explicit operator bool() const { return error.empty() && staged; }
-};
-
-Candidate FindStagedCandidate(const UpdatePaths& paths,
-                              const ExpectedPayloadIdentity& identity,
-                              bool exact_supported) {
-  Candidate result;
-  const std::filesystem::path payloads = paths.data_root / "payloads";
-  std::error_code filesystem_error;
-  std::filesystem::directory_iterator iterator(
-      payloads, std::filesystem::directory_options::none, filesystem_error);
-  const std::filesystem::directory_iterator end;
-  while (!filesystem_error && iterator != end) {
-    const auto status = iterator->symlink_status(filesystem_error);
-    if (filesystem_error) break;
-    if (std::filesystem::is_directory(status) &&
-        !std::filesystem::is_symlink(status)) {
-      const PayloadIntegrityResult payload =
-          InspectPreparedPayload(iterator->path());
-      if (payload && payload.payload_id == iterator->path().filename() &&
-          payload.metadata.version_name == identity.version_name &&
-          payload.metadata.version_code == identity.version_code &&
-          (!identity.exact_build_id.has_value() ||
-           payload.metadata.build_id == *identity.exact_build_id)) {
-        if (!result.staged.payload_id.empty()) {
-          // Provider download remains the unambiguous source of truth if the
-          // local store somehow contains two Build IDs for one version.
-          return {};
-        }
-        result.identity = identity;
-        result.exact_supported = exact_supported;
-        result.staged.payload_id = payload.payload_id;
-        result.staged.payload_directory = iterator->path();
-        result.staged.version_name = payload.metadata.version_name;
-        result.staged.version_code = payload.metadata.version_code;
-        result.staged.build_id = payload.metadata.build_id;
-      }
-    }
-    iterator.increment(filesystem_error);
-  }
-  if (filesystem_error) return {};
-  if (result.staged && !VerifyPreparedPayload(result.staged.payload_directory)) {
-    return {};
-  }
-  return result;
-}
-
-std::filesystem::path RejectionMarker(
-    const UpdatePaths& paths, const Candidate& candidate,
-    CanaryGraphicsBackend graphics_backend) {
-  if (!candidate.staged || paths.runtime_binary.empty()) return {};
-  const compat::BuildIdResult runtime =
-      compat::ReadElfBuildId(paths.runtime_binary.string());
-  if (!runtime) return {};
-  std::string fingerprint = HashRegularFile(paths.compatibility_manifest) +
-                            HashRegularFile(paths.data_root / "current.json");
-  std::error_code error;
-  std::vector<std::filesystem::path> references;
-  if (std::filesystem::is_directory(paths.host_abi_reference_profile, error)) {
-    std::filesystem::directory_iterator iterator(
-        paths.host_abi_reference_profile, error);
-    while (!error && iterator != std::filesystem::directory_iterator{}) {
-      if (iterator->path().extension() == ".json")
-        references.push_back(iterator->path());
-      iterator.increment(error);
-    }
-  } else {
-    references.push_back(paths.host_abi_reference_profile);
-  }
-  std::sort(references.begin(), references.end());
-  for (const auto& reference : references)
-    fingerprint += HashRegularFile(reference);
-  return paths.data_root / "rejections" /
-         (candidate.staged.payload_id + "-" + runtime.build_id + "-" +
-          HashText(fingerprint, 16) + "-" +
-          std::string(CanaryGraphicsBackendName(graphics_backend)) + ".txt");
-}
-
-void RecordRejection(const UpdatePaths& paths, const Candidate& candidate,
-                     CanaryGraphicsBackend graphics_backend,
-                     std::string_view reason) {
-  const std::filesystem::path marker =
-      RejectionMarker(paths, candidate, graphics_backend);
-  if (marker.empty()) return;
-  std::error_code filesystem_error;
-  std::filesystem::create_directories(marker.parent_path(), filesystem_error);
-  if (filesystem_error) return;
-  const int descriptor =
-      open(marker.c_str(),
-           O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
-  if (descriptor < 0) return;
-  std::string contents(reason.substr(0, 4096));
-  contents.push_back('\n');
-  std::size_t offset = 0;
-  while (offset < contents.size()) {
-    const ssize_t bytes =
-        write(descriptor, contents.data() + offset, contents.size() - offset);
-    if (bytes < 0 && errno == EINTR) continue;
-    if (bytes <= 0) break;
-    offset += static_cast<std::size_t>(bytes);
-  }
-  (void)fsync(descriptor);
-  close(descriptor);
-}
-
 ProviderChain BuildProviderChain(const UpdatePaths& paths) {
   ProviderChain chain;
-  if (!paths.download_sources_manifest.empty())
-    chain.Add(std::make_unique<PinnedApkProvider>(paths.download_sources_manifest));
+  if (!paths.download_sources_manifest.empty()) {
+    chain.Add(
+        std::make_unique<PinnedApkProvider>(paths.download_sources_manifest));
+  }
   chain.Add(std::make_unique<ApkPureProvider>());
   return chain;
 }
 
-Candidate DownloadCandidate(const ApkProvider* provider, PayloadStore* store,
-                            const ExpectedPayloadIdentity& identity,
-                            bool exact_supported, const UpdatePaths& paths,
-                            const std::filesystem::path& workspace,
-                            int progress_fd) {
-  Candidate result;
-  result.identity = identity;
-  result.exact_supported = exact_supported;
-  Progress(progress_fd, "Downloading Roblox...");
-  StageTimer download_timer("download-and-verify");
-  const std::filesystem::path download_directory =
-      paths.cache_root / "downloads/native-updater/archives" /
-      (std::string(compat::kGuestAbi) + "-" +
-       std::to_string(identity.version_code));
+struct CoordinatorContext {
+  const UpdatePaths& paths;
+  PayloadStore store;
+  ProviderChain default_providers;
+  const ApkProvider& provider;
+
+  CoordinatorContext(const UpdatePaths& update_paths,
+                     const ApkProvider* source)
+      : paths(update_paths),
+        store(update_paths.data_root, update_paths.compatibility_manifest,
+              update_paths.runtime_binary),
+        default_providers(BuildProviderChain(update_paths)),
+        provider(source != nullptr ? *source : default_providers) {}
+};
+
+void OpCheckLatest(void* ctx, void* receiver_ctx,
+                   void (*on_result)(void*, MocktailRustStrSlice, uint64_t,
+                                     MocktailRustStrSlice)) {
+  auto* context = static_cast<CoordinatorContext*>(ctx);
+  const ProviderVersion latest = context->provider.CheckLatest();
+  if (on_result != nullptr) {
+    on_result(receiver_ctx, ToSlice(latest.version_name), latest.version_code,
+              ToSlice(latest.error));
+  }
+}
+
+void OpDownloadAndPrepare(
+    void* ctx, MocktailRustStrSlice version_name, uint64_t version_code,
+    bool has_exact_build_id, MocktailRustStrSlice exact_build_id,
+    MocktailRustStrSlice download_directory,
+    MocktailRustStrSlice prepare_prefix,
+    MocktailRustStrSlice signing_trust_manifest, int32_t progress_fd,
+    void* receiver_ctx,
+    void (*on_result)(void*, MocktailRustStrSlice, MocktailRustStrSlice)) {
+  auto* context = static_cast<CoordinatorContext*>(ctx);
+  ExpectedPayloadIdentity identity;
+  identity.version_name = std::string(ToStringView(version_name));
+  identity.version_code = version_code;
+  if (has_exact_build_id) {
+    identity.exact_build_id = std::string(ToStringView(exact_build_id));
+  }
+
+  const std::filesystem::path download_dir = ToPath(download_directory);
+  const std::filesystem::path prep_prefix = ToPath(prepare_prefix);
+  const std::filesystem::path trust_manifest = ToPath(signing_trust_manifest);
+
   PreparedPayload prepared;
   std::size_t preparation = 0;
-  const ProviderDownloadResult downloaded = provider->DownloadVerified(
+  const ProviderDownloadResult downloaded = context->provider.DownloadVerified(
       ProviderVersion{identity.version_name, identity.version_code, {}},
-      download_directory, progress_fd,
+      download_dir, progress_fd,
       [&](const ProviderDownloadResult& archives) {
-        Progress(progress_fd, "Verifying Roblox...");
+        ProgressPacket(progress_fd, "Verifying Roblox...");
         prepared = PreparePayloadFromArchives(
-            archives.archives, identity, paths.signing_trust_manifest,
-            workspace / ("prepare-" + std::to_string(++preparation)),
+            archives.archives, identity, trust_manifest,
+            prep_prefix / ("prepare-" + std::to_string(++preparation)),
             archives.source + "-native");
         return prepared.error;
       });
+  if (on_result == nullptr) return;
   if (!downloaded) {
-    result.error = downloaded.error;
-    return result;
+    on_result(receiver_ctx, {}, ToSlice(downloaded.error));
+    return;
   }
-  download_timer.Report();
-  StageTimer stage_timer("stage");
-  result.staged = store->Stage(prepared.directory);
-  if (!result.staged) result.error = result.staged.error;
-  if (result.staged) {
-    std::error_code ignored;
-    std::filesystem::remove_all(download_directory, ignored);
-  }
-  return result;
+  const std::string dir_str = prepared.directory.string();
+  on_result(receiver_ctx, ToSlice(dir_str), {});
 }
 
-struct ReferenceProfile {
-  std::filesystem::path library;
-  std::filesystem::path profile;
-  std::vector<std::filesystem::path> compatibility_manifests;
-  std::string error;
+void OpDeriveHostAbi(
+    void* /*ctx*/, MocktailRustStrSlice reference_library,
+    MocktailRustStrSlice reference_profile,
+    const MocktailRustStrSlice* reference_manifests,
+    size_t reference_manifests_count,
+    MocktailRustStrSlice candidate_payload_directory,
+    MocktailRustStrSlice output_directory, void* receiver_ctx,
+    void (*on_result)(void*, MocktailRustStrSlice, MocktailRustStrSlice,
+                      MocktailRustStrSlice)) {
+  HostAbiDerivationOptions options;
+  options.reference_library = ToPath(reference_library);
+  options.reference_profile = ToPath(reference_profile);
+  if (reference_manifests != nullptr) {
+    options.reference_compatibility_manifests.reserve(
+        reference_manifests_count);
+    for (std::size_t i = 0; i < reference_manifests_count; ++i) {
+      options.reference_compatibility_manifests.push_back(
+          ToPath(reference_manifests[i]));
+    }
+  }
+  options.candidate_payload_directory = ToPath(candidate_payload_directory);
+  options.output_directory = ToPath(output_directory);
 
-  explicit operator bool() const {
-    return error.empty() && !library.empty() && !profile.empty();
+  const HostAbiDerivationResult derived = DeriveHostAbiProfile(options);
+  if (on_result == nullptr) return;
+  const std::string profile_str = derived.profile.string();
+  const std::string compat_str = derived.compatibility_manifest.string();
+  on_result(receiver_ctx, ToSlice(profile_str), ToSlice(compat_str),
+            ToSlice(derived.error));
+}
+
+void OpStoreInspectCurrent(
+    void* ctx, void* receiver_ctx,
+    void (*on_result)(void*, const MocktailRustCoordinatorStoreResultView*)) {
+  auto* context = static_cast<CoordinatorContext*>(ctx);
+  EmitStoreResult(context->store.InspectCurrent(), receiver_ctx, on_result);
+}
+
+void OpStoreVerifyCurrent(
+    void* ctx, void* receiver_ctx,
+    void (*on_result)(void*, const MocktailRustCoordinatorStoreResultView*)) {
+  auto* context = static_cast<CoordinatorContext*>(ctx);
+  EmitStoreResult(context->store.VerifyCurrent(), receiver_ctx, on_result);
+}
+
+void OpStoreStage(
+    void* ctx, MocktailRustStrSlice prepared_directory, void* receiver_ctx,
+    void (*on_result)(void*, const MocktailRustCoordinatorStoreResultView*)) {
+  auto* context = static_cast<CoordinatorContext*>(ctx);
+  EmitStoreResult(context->store.Stage(ToPath(prepared_directory)),
+                  receiver_ctx, on_result);
+}
+
+void OpStorePromote(
+    void* ctx, MocktailRustStrSlice payload_id, void* receiver_ctx,
+    void (*on_result)(void*, const MocktailRustCoordinatorStoreResultView*)) {
+  auto* context = static_cast<CoordinatorContext*>(ctx);
+  EmitStoreResult(context->store.Promote(ToStringView(payload_id)),
+                  receiver_ctx, on_result);
+}
+
+void OpStorePromoteProbation(
+    void* ctx, MocktailRustStrSlice payload_id,
+    MocktailRustStrSlice candidate_profile,
+    MocktailRustStrSlice candidate_compatibility,
+    MocktailRustStrSlice canary_log_0, MocktailRustStrSlice canary_log_1,
+    void* receiver_ctx,
+    void (*on_result)(void*, const MocktailRustCoordinatorStoreResultView*)) {
+  auto* context = static_cast<CoordinatorContext*>(ctx);
+  EmitStoreResult(
+      context->store.PromoteProbation(
+          ToStringView(payload_id), ToPath(candidate_profile),
+          ToPath(candidate_compatibility),
+          {ToPath(canary_log_0), ToPath(canary_log_1)}),
+      receiver_ctx, on_result);
+}
+
+void OpStoreCollectGarbage(
+    void* ctx, const MocktailRustStrSlice* keep, size_t keep_count,
+    void* receiver_ctx,
+    void (*on_result)(void*, size_t, uint64_t, MocktailRustStrSlice)) {
+  auto* context = static_cast<CoordinatorContext*>(ctx);
+  std::vector<std::string> keep_ids;
+  if (keep != nullptr) {
+    keep_ids.reserve(keep_count);
+    for (std::size_t i = 0; i < keep_count; ++i) {
+      keep_ids.emplace_back(ToStringView(keep[i]));
+    }
+  }
+  const PayloadGarbageResult collected =
+      context->store.CollectGarbage(keep_ids);
+  if (on_result != nullptr) {
+    on_result(receiver_ctx, collected.removed.size(),
+              static_cast<uint64_t>(collected.freed_bytes),
+              ToSlice(collected.error));
+  }
+}
+
+struct UpdatePathsStrings {
+  std::string config_file;
+  std::string data_root;
+  std::string cache_root;
+  std::string state_root;
+  std::string compatibility_manifest;
+  std::string signing_trust_manifest;
+  std::string download_sources_manifest;
+  std::string host_abi_reference_profile;
+  std::string runtime_binary;
+  std::string runtime_launcher;
+
+  explicit UpdatePathsStrings(const UpdatePaths& p)
+      : config_file(p.config_file.string()),
+        data_root(p.data_root.string()),
+        cache_root(p.cache_root.string()),
+        state_root(p.state_root.string()),
+        compatibility_manifest(p.compatibility_manifest.string()),
+        signing_trust_manifest(p.signing_trust_manifest.string()),
+        download_sources_manifest(p.download_sources_manifest.string()),
+        host_abi_reference_profile(p.host_abi_reference_profile.string()),
+        runtime_binary(p.runtime_binary.string()),
+        runtime_launcher(p.runtime_launcher.string()) {}
+
+  MocktailRustUpdatePathsView view() const {
+    MocktailRustUpdatePathsView v{};
+    v.config_file = ToSlice(config_file);
+    v.data_root = ToSlice(data_root);
+    v.cache_root = ToSlice(cache_root);
+    v.state_root = ToSlice(state_root);
+    v.compatibility_manifest = ToSlice(compatibility_manifest);
+    v.signing_trust_manifest = ToSlice(signing_trust_manifest);
+    v.download_sources_manifest = ToSlice(download_sources_manifest);
+    v.host_abi_reference_profile = ToSlice(host_abi_reference_profile);
+    v.runtime_binary = ToSlice(runtime_binary);
+    v.runtime_launcher = ToSlice(runtime_launcher);
+    return v;
   }
 };
-
-// `location` is one sidecar or a directory of them.
-std::map<std::string, std::filesystem::path> CollectReferenceSidecars(
-    const std::filesystem::path& location) {
-  std::map<std::string, std::filesystem::path> sidecars;
-  std::error_code filesystem_error;
-  std::vector<std::filesystem::path> files;
-  if (std::filesystem::is_directory(location, filesystem_error)) {
-    std::filesystem::directory_iterator iterator(
-        location, std::filesystem::directory_options::none, filesystem_error);
-    const std::filesystem::directory_iterator end;
-    while (!filesystem_error && iterator != end) {
-      if (iterator->path().extension() == ".json") {
-        files.push_back(iterator->path());
-      }
-      iterator.increment(filesystem_error);
-    }
-  } else if (std::filesystem::is_regular_file(location, filesystem_error)) {
-    files.push_back(location);
-  }
-  for (const std::filesystem::path& file : files) {
-    const HostAbiSidecarIdentity identity = ReadHostAbiSidecarIdentity(file);
-    if (identity) sidecars.emplace(identity.elf_build_id, file);
-  }
-  return sidecars;
-}
-
-// Library and sidecar are one unit: choosing the library by catalog order
-// let the two drift apart as soon as a newer profile was added, and the pair
-// then failed every derivation.
-ReferenceProfile ResolveReference(
-    const UpdatePaths& paths, const PayloadStoreResult& installed,
-    const std::vector<SupportedPayloadProfile>& profiles,
-    const ApkProvider* provider, PayloadStore* store,
-    const std::filesystem::path& workspace, int progress_fd) {
-  ReferenceProfile result;
-  // An approved probation payload carries the sidecar derived for its own
-  // bytes, and is the closest reference to whatever Roblox ships next.
-  if (installed && !installed.host_abi_profile.empty()) {
-    std::error_code filesystem_error;
-    const HostAbiSidecarIdentity identity =
-        ReadHostAbiSidecarIdentity(installed.host_abi_profile);
-    if (identity && identity.elf_build_id == installed.build_id &&
-        std::filesystem::is_regular_file(
-            installed.payload_directory / "libroblox.so", filesystem_error)) {
-      result.library = installed.payload_directory / "libroblox.so";
-      result.profile = installed.host_abi_profile;
-      if (!installed.compatibility_manifest.empty() &&
-          std::filesystem::is_regular_file(installed.compatibility_manifest,
-                                           filesystem_error)) {
-        result.compatibility_manifests.push_back(
-            installed.compatibility_manifest);
-      }
-      if (std::filesystem::is_regular_file(paths.compatibility_manifest,
-                                           filesystem_error) &&
-          (result.compatibility_manifests.empty() ||
-           result.compatibility_manifests.front() !=
-               paths.compatibility_manifest)) {
-        result.compatibility_manifests.push_back(paths.compatibility_manifest);
-      }
-      return result;
-    }
-  }
-  std::filesystem::path sidecar;
-  const std::optional<SupportedPayloadProfile> selected =
-      ResolveReferenceProfile(paths.host_abi_reference_profile, profiles,
-                              &sidecar);
-  if (!selected.has_value()) {
-    result.error =
-        "no HostAbi reference sidecar matches a supported Roblox profile";
-    return result;
-  }
-  const SupportedPayloadProfile& reference = *selected;
-  const std::string reference_id =
-      std::to_string(reference.version_code) + "-" + reference.elf_build_id;
-  const std::filesystem::path reference_directory =
-      paths.data_root / "payloads" / reference_id;
-  const PayloadIntegrityResult reference_payload =
-      InspectPreparedPayload(reference_directory);
-  if (reference_payload && reference_payload.payload_id == reference_id) {
-    result.library = reference_directory / "libroblox.so";
-    result.profile = sidecar;
-    result.compatibility_manifests.push_back(paths.compatibility_manifest);
-    return result;
-  }
-  Candidate downloaded =
-      DownloadCandidate(provider, store, ExactPayloadIdentity(reference), true,
-                        paths, workspace / "reference", progress_fd);
-  if (!downloaded) {
-    result.error = "cannot obtain HostAbi derivation reference " +
-                   reference.version_name + ": " + downloaded.error;
-    return result;
-  }
-  result.library = downloaded.staged.payload_directory / "libroblox.so";
-  result.profile = sidecar;
-  result.compatibility_manifests.push_back(paths.compatibility_manifest);
-  return result;
-}
-
-UpdateResult RunUnsafeLatest(
-    const UpdatePaths& paths, const UpdateRequest& request,
-    const std::vector<SupportedPayloadProfile>& profiles,
-    const PayloadStoreResult& installed, PayloadStore* store,
-    const ApkProvider& provider) {
-  UpdateResult result;
-  if (request.startup_preflight || !request.check_latest) {
-    result.error =
-        "unsafe latest launch requires an explicit latest-version check";
-    return result;
-  }
-
-  Progress(request.progress_fd, "Checking latest Roblox...");
-  const ProviderVersion latest = [&] {
-    StageTimer timer("check-latest");
-    return provider.CheckLatest();
-  }();
-  if (!latest) {
-    result.error = "cannot check latest Roblox for unsafe launch: " +
-                   latest.error;
-    return result;
-  }
-
-  std::string workspace_error;
-  const std::filesystem::path workspace = UniqueDirectory(
-      paths.cache_root / "downloads/native-updater", &workspace_error);
-  if (!workspace_error.empty()) {
-    result.error = workspace_error;
-    return result;
-  }
-  std::error_code filesystem_error;
-  const auto cleanup = [&]() {
-    std::filesystem::remove_all(workspace, filesystem_error);
-  };
-
-  ExpectedPayloadIdentity identity;
-  identity.version_name = latest.version_name;
-  identity.version_code = latest.version_code;
-  const std::optional<SupportedPayloadProfile> exact =
-      FindSupportedProfile(profiles, identity.version_name, identity.version_code);
-  if (exact.has_value()) identity.exact_build_id = exact->elf_build_id;
-  Candidate candidate = FindStagedCandidate(paths, identity, exact.has_value());
-  if (!candidate) {
-    candidate = DownloadCandidate(&provider, store, identity, exact.has_value(),
-                                  paths, workspace / "candidate",
-                                  request.progress_fd);
-  }
-  if (!candidate) {
-    result.error = "cannot prepare latest Roblox for unsafe launch: " +
-                   candidate.error;
-    cleanup();
-    return result;
-  }
-
-  if (!candidate.exact_supported) {
-    const ReferenceProfile reference = ResolveReference(
-        paths, installed, profiles, &provider, store, workspace,
-        request.progress_fd);
-    if (!reference) {
-      result.error = "cannot prepare latest Roblox for unsafe launch: " +
-                     reference.error;
-      cleanup();
-      return result;
-    }
-    HostAbiDerivationOptions derivation;
-    derivation.reference_library = reference.library;
-    derivation.reference_profile = reference.profile;
-    derivation.reference_compatibility_manifests =
-        reference.compatibility_manifests;
-    derivation.candidate_payload_directory = candidate.staged.payload_directory;
-    derivation.output_directory = workspace / "derived";
-    Progress(request.progress_fd, "Deriving latest Roblox compatibility...");
-    const HostAbiDerivationResult derived = [&] {
-      StageTimer timer("derive-host-abi");
-      return DeriveHostAbiProfile(derivation);
-    }();
-    if (!derived) {
-      result.error = "cannot derive latest Roblox HostAbi profile: " +
-                     derived.error;
-      cleanup();
-      return result;
-    }
-    candidate.profile = derived.profile;
-    candidate.compatibility = derived.compatibility_manifest;
-  }
-
-  // Staging preserves the immutable APK for inspection, but this path must
-  // never promote it or alter the normal current payload.
-  UnsafeLatestRunOptions launch;
-  launch.runtime_binary = paths.runtime_launcher.empty()
-                              ? paths.runtime_binary
-                              : paths.runtime_launcher;
-  launch.payload_directory = candidate.staged.payload_directory;
-  launch.compatibility_manifest = candidate.exact_supported
-                                      ? paths.compatibility_manifest
-                                      : candidate.compatibility;
-  launch.host_abi_profile = candidate.profile;
-  Progress(request.progress_fd, "Launching unapproved latest Roblox...");
-  const UnsafeLatestRunResult launched = RunUnsafeLatestCandidate(launch);
-  result.payload_id = candidate.staged.payload_id;
-  if (!launched) {
-    result.error = "unsafe latest Roblox " + candidate.staged.version_name +
-                   " did not complete: " + launched.error;
-    cleanup();
-    return result;
-  }
-  result.message = "unsafe latest Roblox " + candidate.staged.version_name +
-                   " exited successfully; active payload was not changed";
-  cleanup();
-  return result;
-}
-
-bool RunCandidateCanaries(const UpdatePaths& paths, const Candidate& candidate,
-                          bool run_canary,
-                          CanaryGraphicsBackend graphics_backend,
-                          int progress_fd,
-                          std::array<std::filesystem::path, 2>* logs,
-                          std::string* error) {
-  if (!run_canary) {
-    if (!candidate.exact_supported) {
-      *error = "latest candidate cannot be activated without Tier C probation";
-      return false;
-    }
-    return true;
-  }
-  const std::size_t runs = candidate.exact_supported ? 1 : 2;
-  for (std::size_t index = 0; index < runs; ++index) {
-    Progress(progress_fd, candidate.exact_supported
-                              ? "Testing Roblox..."
-                              : "Testing latest Roblox (" +
-                                    std::to_string(index + 1) + "/2)...");
-    CanaryOptions canary;
-    canary.runtime_binary = paths.runtime_launcher.empty()
-                                ? paths.runtime_binary
-                                : paths.runtime_launcher;
-    canary.payload_directory = candidate.staged.payload_directory;
-    canary.compatibility_manifest = candidate.exact_supported
-                                        ? paths.compatibility_manifest
-                                        : candidate.compatibility;
-    canary.host_abi_profile = candidate.profile;
-    canary.cache_root = paths.cache_root;
-    canary.state_root = paths.state_root;
-    canary.graphics_backend = graphics_backend;
-    const CanaryResult canary_result = [&] {
-      StageTimer timer("canary[" + std::to_string(index + 1) + "/" +
-                       std::to_string(runs) + "]");
-      return RunReadinessCanary(canary);
-    }();
-    if (!canary_result) {
-      *error = canary_result.error;
-      if (!canary_result.log_path.empty()) {
-        *error += "; log: " + canary_result.log_path.string();
-      }
-      return false;
-    }
-    (*logs)[index] = canary_result.log_path;
-  }
-  return true;
-}
-
-PayloadStoreResult PromoteCandidate(const UpdatePaths& paths,
-                                    const UpdateRequest& request,
-                                    const Candidate& candidate,
-                                    PayloadStore* store, std::string* error) {
-  std::array<std::filesystem::path, 2> logs;
-  if (!RunCandidateCanaries(paths, candidate, request.run_canary,
-                            request.canary_graphics_backend,
-                            request.progress_fd, &logs, error)) {
-    return {};
-  }
-  Progress(request.progress_fd, "Installing Roblox...");
-  StageTimer promote_timer("promote");
-  PayloadStoreResult promoted =
-      candidate.exact_supported
-          ? store->Promote(candidate.staged.payload_id)
-          : store->PromoteProbation(candidate.staged.payload_id,
-                                    candidate.profile, candidate.compatibility,
-                                    logs);
-  if (!promoted) *error = promoted.error;
-  return promoted;
-}
-
-std::string PlanDescription(const UpdateCandidatePlan& plan) {
-  return "Roblox " + plan.identity.version_name + " (" +
-         std::to_string(plan.identity.version_code) + ")";
-}
-
-// No manifest points at the derivation reference, so the collector below has
-// to be told about it or the next Tier C update downloads it again.
-std::vector<std::string> ReferencePayloadIds(
-    const UpdatePaths& paths,
-    const std::vector<SupportedPayloadProfile>& profiles) {
-  const std::optional<SupportedPayloadProfile> reference =
-      ResolveReferenceProfile(paths.host_abi_reference_profile, profiles,
-                              nullptr);
-  if (!reference.has_value()) return {};
-  return {std::to_string(reference->version_code) + "-" +
-          reference->elf_build_id};
-}
-
-// Called only once an install is known good; keeps the rollback target.
-std::string CollectSupersededPayloads(PayloadStore* store,
-                                      const std::vector<std::string>& keep) {
-  if (TraceFlagEnabled("MOCKTAIL_KEEP_OLD_PAYLOADS")) return {};
-  const PayloadGarbageResult collected = store->CollectGarbage(keep);
-  if (!collected || collected.removed.empty()) return {};
-  return "; freed " +
-         std::to_string(collected.freed_bytes / (1024ULL * 1024ULL)) +
-         " MiB from " + std::to_string(collected.removed.size()) +
-         " superseded payload" + (collected.removed.size() == 1 ? "" : "s");
-}
 
 }  // namespace
 
@@ -652,367 +332,121 @@ std::optional<SupportedPayloadProfile> ResolveReferenceProfile(
     const std::filesystem::path& location,
     const std::vector<SupportedPayloadProfile>& profiles,
     std::filesystem::path* sidecar) {
-  const std::map<std::string, std::filesystem::path> sidecars =
-      CollectReferenceSidecars(location);
-  // Newest one available: the shorter the distance to the candidate, the more
-  // signatures survive derivation.
-  std::optional<SupportedPayloadProfile> selected;
-  for (const SupportedPayloadProfile& profile : profiles) {
-    const auto found = sidecars.find(profile.elf_build_id);
-    if (found == sidecars.end()) continue;
-    if (!selected.has_value() ||
-        selected->version_code < profile.version_code) {
-      selected = profile;
-      if (sidecar != nullptr) *sidecar = found->second;
-    }
-  }
-  return selected;
+  const std::string loc_str = location.string();
+  const std::vector<MocktailRustSupportedProfileView> views =
+      ToProfileViews(profiles);
+  struct MatchState {
+    const std::vector<SupportedPayloadProfile>& profiles;
+    std::filesystem::path* sidecar;
+    std::optional<SupportedPayloadProfile> selected;
+  } state{profiles, sidecar, std::nullopt};
+
+  const bool found = mocktail_rust_resolve_reference_profile(
+      ToSlice(loc_str), views.empty() ? nullptr : views.data(), views.size(),
+      [](void* ctx, size_t profile_index, MocktailRustStrSlice sidecar_path) {
+        auto* s = static_cast<MatchState*>(ctx);
+        if (profile_index < s->profiles.size()) {
+          s->selected = s->profiles[profile_index];
+          if (s->sidecar != nullptr) {
+            *s->sidecar = ToPath(sidecar_path);
+          }
+        }
+      },
+      &state);
+  return found ? state.selected : std::nullopt;
 }
 
 std::vector<UpdateCandidatePlan> PlanUpdateCandidates(
     const std::vector<SupportedPayloadProfile>& profiles,
     const SupportedPayloadProfile& preferred, const ProviderVersion* latest,
     const PayloadStoreResult& current, const PayloadStoreResult& installed) {
+  const std::vector<MocktailRustSupportedProfileView> profile_views =
+      ToProfileViews(profiles);
+  const MocktailRustSupportedProfileView preferred_view =
+      ToProfileView(preferred);
+  const bool has_latest = latest != nullptr && static_cast<bool>(*latest);
+  const MocktailRustStrSlice latest_name =
+      has_latest ? ToSlice(latest->version_name) : MocktailRustStrSlice{};
+  const uint64_t latest_code = has_latest ? latest->version_code : 0;
+
+  const StoreResultStrings current_strings(current);
+  const StoreResultStrings installed_strings(installed);
+  const MocktailRustCoordinatorStoreResultView current_view =
+      current_strings.view();
+  const MocktailRustCoordinatorStoreResultView installed_view =
+      installed_strings.view();
+
   std::vector<UpdateCandidatePlan> plans;
-  const bool runnable = static_cast<bool>(current);
-  const std::uint64_t runnable_code = runnable ? current.version_code : 0;
-  const bool has_latest = latest != nullptr && *latest;
-  const std::uint64_t latest_code = has_latest ? latest->version_code : 0;
-
-  bool take_latest = false;
-  bool take_preferred = false;
-  mocktail_rust_update_plan_evaluate(has_latest, latest_code, runnable,
-                                     runnable_code, preferred.version_code,
-                                     &take_latest, &take_preferred);
-
-  if (take_latest) {
-    UpdateCandidatePlan plan;
-    plan.identity.version_name = latest->version_name;
-    plan.identity.version_code = latest->version_code;
-    const std::optional<SupportedPayloadProfile> exact = FindSupportedProfile(
-        profiles, latest->version_name, latest->version_code);
-    if (exact.has_value()) plan.identity.exact_build_id = exact->elf_build_id;
-    plan.exact_supported = exact.has_value();
-    plan.reuse_installed = installed &&
-                           installed.version_name == latest->version_name &&
-                           installed.version_code == latest->version_code &&
-                           !installed.host_abi_profile.empty() &&
-                           !installed.compatibility_manifest.empty();
-    plan.origin = "provider latest";
-    plans.push_back(std::move(plan));
-  }
-  // Without this step a rejected latest candidate leaves the user on whatever
-  // ancient payload they had, fixable only by deleting the store by hand.
-  if (take_preferred) {
-    UpdateCandidatePlan plan;
-    plan.identity = ExactPayloadIdentity(preferred);
-    plan.exact_supported = true;
-    plan.origin = "supported catalog";
-    plans.push_back(std::move(plan));
-  }
+  mocktail_rust_plan_update_candidates(
+      profile_views.empty() ? nullptr : profile_views.data(),
+      profile_views.size(), &preferred_view, has_latest, latest_name,
+      latest_code, &current_view, &installed_view,
+      [](void* ctx, const MocktailRustUpdateCandidatePlanView* plan) {
+        auto* out = static_cast<std::vector<UpdateCandidatePlan>*>(ctx);
+        UpdateCandidatePlan item;
+        item.identity.version_name =
+            std::string(ToStringView(plan->version_name));
+        item.identity.version_code = plan->version_code;
+        if (plan->has_exact_build_id) {
+          item.identity.exact_build_id =
+              std::string(ToStringView(plan->exact_build_id));
+        }
+        item.exact_supported = plan->exact_supported;
+        item.reuse_installed = plan->reuse_installed;
+        item.origin = std::string(ToStringView(plan->origin));
+        out->push_back(std::move(item));
+      },
+      &plans);
   return plans;
 }
 
 UpdateResult RunUpdate(const UpdatePaths& paths, const UpdateRequest& request,
                        const ApkProvider* source) {
+  CoordinatorContext context(paths, source);
+  const UpdatePathsStrings path_strings(paths);
+  const MocktailRustUpdatePathsView paths_view = path_strings.view();
+
+  MocktailRustUpdateRequestView request_view{};
+  request_view.startup_preflight = request.startup_preflight;
+  request_view.check_latest = request.check_latest;
+  request_view.run_canary = request.run_canary;
+  request_view.download_only = request.download_only;
+  request_view.force_run_latest = request.force_run_latest;
+  request_view.canary_graphics_backend =
+      static_cast<int32_t>(request.canary_graphics_backend);
+  request_view.progress_fd = request.progress_fd;
+
+  MocktailRustUpdateCoordinatorOps ops{};
+  ops.ctx = &context;
+  ops.provider_check_latest = OpCheckLatest;
+  ops.download_and_prepare = OpDownloadAndPrepare;
+  ops.derive_host_abi_profile = OpDeriveHostAbi;
+  ops.store_inspect_current = OpStoreInspectCurrent;
+  ops.store_verify_current = OpStoreVerifyCurrent;
+  ops.store_stage = OpStoreStage;
+  ops.store_promote = OpStorePromote;
+  ops.store_promote_probation = OpStorePromoteProbation;
+  ops.store_collect_garbage = OpStoreCollectGarbage;
+
   UpdateResult result;
-  StageTimer total_timer("total");
-  UpdateLock update_lock(paths.data_root, &result.error);
-  if (!update_lock) return result;
-
-  UpdateStateGuard state(paths.data_root / "update.json");
-  std::uint64_t supported_version_code = 0;
-  const auto save_phase = [&](std::string_view phase) {
-    const std::string phase_str(phase);
-    mocktail_rust_update_state_save_phase(state.ptr, phase_str.c_str());
-  };
-  const auto finish = [&]() {
-    PayloadStore store(paths.data_root, paths.compatibility_manifest,
-                       paths.runtime_binary);
-    const auto active = store.InspectCurrent();
-    bool stale = false;
-    mocktail_rust_update_state_finish_and_save(
-        state.ptr, static_cast<bool>(active), active.payload_id.c_str(),
-        active.version_name.c_str(), active.version_code,
-        supported_version_code, static_cast<bool>(result), result.changed,
-        result.message.c_str(), result.error.c_str(), &stale);
-    result.stale = stale;
-    return result;
-  };
-  save_phase("checking");
-  const UpdateConfigResult configured = LoadUpdateConfig(paths.config_file);
-  result.warnings = configured.warnings;
-  if (!configured) {
-    result.error = configured.error;
-    return finish();
-  }
-  if (configured.config.source != "apk-pure" &&
-      configured.config.source != "auto") {
-    result.error = "native updater supports only the direct APK providers";
-    return finish();
-  }
-  const CompatibilityCatalogResult catalog =
-      LoadCompatibilityCatalog(paths.compatibility_manifest);
-  if (!catalog) {
-    result.error = catalog.error;
-    return finish();
-  }
-  const auto preferred = PreferredSupportedProfile(catalog.profiles);
-  if (!preferred.has_value()) {
-    result.error = "no preferred supported Roblox profile is available";
-    return finish();
-  }
-  supported_version_code = preferred->version_code;
-
-  PayloadStore store(paths.data_root, paths.compatibility_manifest,
-                     paths.runtime_binary);
-  const PayloadStoreResult current =
-      request.download_only ? store.InspectCurrent() : store.VerifyCurrent();
-  PayloadStoreResult installed = current;
-  if (!current && !current.payload_id.empty() &&
-      !current.host_abi_profile.empty() &&
-      !current.compatibility_manifest.empty()) {
-    // Integrity was already checked. A receipt from an older runtime is still
-    // a valid derivation reference, but it must pass probation again before it
-    // can become runnable with this runtime.
-    installed.error.clear();
-  } else if (!current) {
-    installed = store.InspectCurrent();
-  }
-  const ProviderChain providers = BuildProviderChain(paths);
-  const ApkProvider& provider = source != nullptr ? *source : providers;
-  if (request.force_run_latest) {
-    UpdateResult unsafe =
-        RunUnsafeLatest(paths, request, catalog.profiles, installed, &store,
-                        provider);
-    unsafe.warnings = std::move(result.warnings);
-    result = std::move(unsafe);
-    return finish();
-  }
-  if (!configured.config.automatic &&
-      (request.startup_preflight || request.download_only)) {
-    save_phase("disabled");
-    if (current || request.download_only) {
-      result.payload_id = current.payload_id;
-      result.message = "automatic Roblox updates are disabled";
-      return finish();
-    }
-    result.error =
-        "no runnable payload is installed and automatic updates are disabled";
-    return finish();
-  }
-  std::optional<ProviderVersion> latest_version;
-  if (request.startup_preflight) {
-    mocktail_rust_update_state_set_metadata_status(state.ptr, "deferred");
-  }
-  if (request.check_latest && !request.startup_preflight) {
-    Progress(request.progress_fd, "Checking Roblox...");
-    const ProviderVersion latest = [&] {
-      StageTimer timer("check-latest");
-      return provider.CheckLatest();
-    }();
-    if (latest) {
-      latest_version = latest;
-    } else {
-      result.warnings.push_back("update metadata is temporarily unavailable: " +
-                                latest.error);
-    }
-    mocktail_rust_update_state_record_latest_check(
-        state.ptr, static_cast<bool>(latest), latest.version_name.c_str(),
-        latest.version_code);
-  }
-  ProviderVersion downloaded;
-  std::string downloaded_payload_id;
-  {
-    std::array<char, 256> ver_buf{};
-    std::array<char, 256> pid_buf{};
-    std::uint64_t dl_code = 0;
-    if (mocktail_rust_update_state_get_latest_downloaded(
-            state.ptr, ver_buf.data(), ver_buf.size(), &dl_code, pid_buf.data(),
-            pid_buf.size())) {
-      downloaded.version_name = ver_buf.data();
-      downloaded.version_code = dl_code;
-      downloaded_payload_id = pid_buf.data();
-    }
-  }
-  if (downloaded && (!latest_version ||
-                     downloaded.version_code > latest_version->version_code) &&
-      (!request.startup_preflight || current ||
-       FindSupportedProfile(catalog.profiles, downloaded.version_name,
-                             downloaded.version_code))) {
-    const ExpectedPayloadIdentity identity{
-        downloaded.version_name, downloaded.version_code, {}};
-    if (FindStagedCandidate(paths, identity, false))
-      latest_version = downloaded;
-  }
-  if (request.download_only && !latest_version) {
-    result.payload_id = current.payload_id;
-    result.message = "cannot discover a newer Roblox release";
-    return finish();
-  }
-  if (current && latest_version &&
-      current.version_code >= latest_version->version_code &&
-      current.version_code >= preferred->version_code) {
-    result.payload_id = current.payload_id;
-    result.message = "Roblox " + current.version_name + " is installed";
-    if (!request.download_only) {
-      auto keep = ReferencePayloadIds(paths, catalog.profiles);
-      if (downloaded && !downloaded_payload_id.empty()) {
-        keep.push_back(downloaded_payload_id);
-      }
-      result.message += CollectSupersededPayloads(&store, keep);
-    }
-    return finish();
-  }
-  const std::vector<UpdateCandidatePlan> plans = PlanUpdateCandidates(
-      catalog.profiles, *preferred,
-      latest_version.has_value() ? &*latest_version : nullptr, current,
-      installed);
-  if (plans.empty()) {
-    if (!current) {
-      result.error = "no Roblox payload is available to install";
-      return finish();
-    }
-    result.payload_id = current.payload_id;
-    result.message = "installed Roblox " + current.version_name + " (" +
-                     std::to_string(current.version_code) + ") remains installed";
-    return finish();
-  }
-
-  RemoveStaleWorkspaces(paths.cache_root / "downloads/native-updater");
-  const std::filesystem::path workspace = UniqueDirectory(
-      paths.cache_root / "downloads/native-updater", &result.error);
-  if (!result.error.empty()) return finish();
-  std::error_code filesystem_error;
-  const auto cleanup = [&]() {
-    std::filesystem::remove_all(workspace, filesystem_error);
-  };
-
-  std::string blocked;
-  std::size_t attempt = 0;
-  // Includes a rejected payload: it stays staged so the next launch
-  // recognises it instead of downloading it again.
-  std::vector<std::string> examined =
-      ReferencePayloadIds(paths, catalog.profiles);
-  for (const UpdateCandidatePlan& plan : plans) {
-    const std::string description = PlanDescription(plan);
-    ++attempt;
-    Candidate candidate;
-    if (plan.reuse_installed) {
-      candidate.staged = installed;
-      candidate.identity = plan.identity;
-      candidate.exact_supported = plan.exact_supported;
-      candidate.profile = installed.host_abi_profile;
-      candidate.compatibility = installed.compatibility_manifest;
-    } else {
-      candidate =
-          FindStagedCandidate(paths, plan.identity, plan.exact_supported);
-      if (!candidate) {
-        save_phase("downloading");
-        candidate = DownloadCandidate(
-            &provider, &store, plan.identity, plan.exact_supported, paths,
-            workspace / ("candidate-" + std::to_string(attempt)),
-            request.progress_fd);
-      }
-    }
-    if (!candidate) {
-      save_phase("blocked");
-      blocked = description + " could not be prepared: " + candidate.error;
-      continue;
-    }
-    examined.push_back(candidate.staged.payload_id);
-    mocktail_rust_update_state_record_latest_downloaded(
-        state.ptr, candidate.staged.payload_id.c_str(),
-        candidate.staged.version_name.c_str(), candidate.staged.version_code);
-    if (request.download_only) {
-      result.payload_id = current.payload_id;
-      result.message = "Roblox " + candidate.staged.version_name +
-                       " is downloaded for the next launch";
-      save_phase("ready");
-      cleanup();
-      return finish();
-    }
-    save_phase("verifying");
-    std::string candidate_error;
-    bool candidate_rejected = false;
-    if (!candidate.exact_supported && candidate.profile.empty()) {
-      const ReferenceProfile reference =
-          ResolveReference(paths, installed, catalog.profiles, &provider,
-                           &store, workspace, request.progress_fd);
-      if (!reference) {
-        candidate_error = reference.error;
-      } else {
-        HostAbiDerivationOptions derivation;
-        derivation.reference_library = reference.library;
-        derivation.reference_profile = reference.profile;
-        derivation.reference_compatibility_manifests =
-            reference.compatibility_manifests;
-        derivation.candidate_payload_directory =
-            candidate.staged.payload_directory;
-        derivation.output_directory =
-            workspace / ("derived-" + std::to_string(attempt));
-        Progress(request.progress_fd,
-                 "Checking latest Roblox compatibility...");
-        const HostAbiDerivationResult derived = [&] {
-          StageTimer timer("derive-host-abi");
-          return DeriveHostAbiProfile(derivation);
-        }();
-        if (!derived) {
-          candidate_error = derived.error;
-          candidate_rejected = true;
-        } else {
-          candidate.profile = derived.profile;
-          candidate.compatibility = derived.compatibility_manifest;
+  mocktail_rust_run_update(
+      &paths_view, &request_view, &ops,
+      [](void* ctx, const MocktailRustUpdateResultView* view) {
+        auto* out = static_cast<UpdateResult*>(ctx);
+        out->changed = view->changed;
+        out->stale = view->stale;
+        out->payload_id.assign(ToStringView(view->payload_id));
+        out->message.assign(ToStringView(view->message));
+        out->error.assign(ToStringView(view->error));
+        if (view->warnings != nullptr) {
+          out->warnings.reserve(view->warning_count);
+          for (std::size_t i = 0; i < view->warning_count; ++i) {
+            out->warnings.emplace_back(ToStringView(view->warnings[i]));
+          }
         }
-      }
-    }
-    PayloadStoreResult promoted;
-    if (candidate_error.empty()) {
-      promoted =
-          PromoteCandidate(paths, request, candidate, &store, &candidate_error);
-      candidate_rejected = !candidate_error.empty();
-    }
-    if (candidate_error.empty() && promoted) {
-      result.changed = !current || current.payload_id != promoted.payload_id;
-      result.payload_id = promoted.payload_id;
-      result.message =
-          candidate.exact_supported
-              ? "installed exact-supported Roblox " + promoted.version_name +
-                    " (" + std::to_string(promoted.version_code) + ")"
-              : "Roblox " + promoted.version_name + " (" +
-                    std::to_string(promoted.version_code) + ") passed two " +
-                    std::string(CanaryGraphicsBackendName(
-                        request.canary_graphics_backend)) +
-                    " graphics canaries and is current";
-      if (!blocked.empty()) result.message += "; " + blocked;
-      result.message += CollectSupersededPayloads(&store, examined);
-      cleanup();
-      return finish();
-    }
-    if (candidate_rejected) {
-      RecordRejection(paths, candidate, request.canary_graphics_backend,
-                      candidate_error);
-    }
-    blocked = description + " was rejected: " + candidate_error;
-  }
-
-  cleanup();
-  if (!current) {
-    result.error = "no Roblox payload could be installed; " + blocked;
-    return finish();
-  }
-  save_phase("blocked");
-  result.payload_id = current.payload_id;
-  result.stale = latest_version.has_value() &&
-                 current.version_code < latest_version->version_code;
-  result.message = "kept Roblox " + current.version_name + " (" +
-                   std::to_string(current.version_code) + "); " + blocked;
-  if (result.stale) {
-    result.message += "; Roblox " + latest_version->version_name +
-                      " is published, so this session can be rejected as "
-                      "outdated";
-  }
-  return finish();
+      },
+      &result);
+  return result;
 }
 
 }  // namespace mocktail::update

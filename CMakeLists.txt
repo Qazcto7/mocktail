@@ -170,6 +170,7 @@ add_custom_command(
     "${MOCKTAIL_RUST_CORE_DIR}/src/storage_paths.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/text_runtime.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/unix_ipc.rs"
+    "${MOCKTAIL_RUST_CORE_DIR}/src/update_coordinator.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/update_json.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/webview_helper_launcher.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/window_gates.rs"
