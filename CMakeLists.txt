@@ -155,6 +155,8 @@ add_custom_command(
   DEPENDS
     "${MOCKTAIL_RUST_CORE_DIR}/src/apk_signature_rs.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/deriver_json.rs"
+    "${MOCKTAIL_RUST_CORE_DIR}/src/discord_rpc.rs"
+    "${MOCKTAIL_RUST_CORE_DIR}/src/external_launch_broker.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/input_router.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/lib.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/micup_rpc.rs"
@@ -162,6 +164,7 @@ add_custom_command(
     "${MOCKTAIL_RUST_CORE_DIR}/src/runtime_policies.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/storage_paths.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/text_runtime.rs"
+    "${MOCKTAIL_RUST_CORE_DIR}/src/unix_ipc.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/update_json.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/src/window_gates.rs"
     "${MOCKTAIL_RUST_CORE_DIR}/Cargo.toml"

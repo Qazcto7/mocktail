@@ -49,6 +49,91 @@ fn has_control_byte(bytes: &[u8]) -> bool {
     bytes.iter().any(|&b| b < 0x20 || b == 0x7f)
 }
 
+pub(crate) fn validate_launch_object<'a>(
+    obj: &'a serde_json::Map<String, serde_json::Value>,
+) -> Result<([i64; 4], [(u32, &'a str); 12], usize, String), (c_int, String)> {
+    let place_id = read_optional_launch_int(obj, "placeId").map_err(|msg| (-3, msg))?;
+    let user_id = read_optional_launch_int(obj, "userId").map_err(|msg| (-3, msg))?;
+    let conversation_id =
+        read_optional_launch_int(obj, "conversationId").map_err(|msg| (-3, msg))?;
+    let referred_by_player_id =
+        read_optional_launch_int(obj, "referredByPlayerId").map_err(|msg| (-3, msg))?;
+
+    if place_id <= 0 {
+        return Err((
+            -4,
+            "experience launch requires a positive placeId".to_string(),
+        ));
+    }
+    if user_id < 0 || conversation_id < 0 || referred_by_player_id < 0 {
+        return Err((
+            -5,
+            "experience launch identifiers cannot be negative".to_string(),
+        ));
+    }
+
+    let mut extracted_strings: [(u32, &'a str); 12] = [(0, ""); 12];
+    let mut extracted_count = 0usize;
+    for (idx, field_name) in EXPERIENCE_LAUNCH_STRING_FIELDS.iter().enumerate() {
+        match obj.get(*field_name) {
+            None | Some(serde_json::Value::Null) => {}
+            Some(serde_json::Value::String(s)) => {
+                if s.len() > K_MAX_EXPERIENCE_LAUNCH_STRING_BYTES {
+                    return Err((
+                        -6,
+                        format!("experience launch field is too large: {}", field_name),
+                    ));
+                }
+                extracted_strings[extracted_count] = (idx as u32, s.as_str());
+                extracted_count += 1;
+            }
+            Some(_) => {
+                return Err((
+                    -6,
+                    format!("experience launch field is not a string: {}", field_name),
+                ));
+            }
+        }
+    }
+
+    let canonical = serde_json::to_string(obj).map_err(|_| {
+        (
+            -2,
+            "experience launch payload is not a JSON object".to_string(),
+        )
+    })?;
+    if canonical.len() > K_MAX_EXPERIENCE_LAUNCH_JSON_BYTES {
+        return Err((
+            -7,
+            "canonical experience launch JSON is too large".to_string(),
+        ));
+    }
+
+    Ok((
+        [place_id, user_id, conversation_id, referred_by_player_id],
+        extracted_strings,
+        extracted_count,
+        canonical,
+    ))
+}
+
+pub(crate) fn validate_and_canonicalize_launch_json(json: &str) -> Result<String, (c_int, String)> {
+    if json.is_empty() || json.len() > K_MAX_EXPERIENCE_LAUNCH_JSON_BYTES {
+        return Err((-1, "experience launch JSON size is invalid".to_string()));
+    }
+    let doc = match serde_json::from_str::<serde_json::Value>(json) {
+        Ok(serde_json::Value::Object(m)) => m,
+        _ => {
+            return Err((
+                -2,
+                "experience launch payload is not a JSON object".to_string(),
+            ))
+        }
+    };
+    let (_, _, _, canonical) = validate_launch_object(&doc)?;
+    Ok(canonical)
+}
+
 #[no_mangle]
 pub extern "C" fn mocktail_rust_parse_experience_launch_json_full(
     json_ptr: *const c_char,
@@ -83,85 +168,14 @@ pub extern "C" fn mocktail_rust_parse_experience_launch_json_full(
             return -2;
         }
     };
-    let obj = &doc;
-
-    let place_id = match read_optional_launch_int(obj, "placeId") {
-        Ok(v) => v,
-        Err(msg) => {
-            copy_error(err_buf, err_cap, &msg);
-            return -3;
-        }
-    };
-    let user_id = match read_optional_launch_int(obj, "userId") {
-        Ok(v) => v,
-        Err(msg) => {
-            copy_error(err_buf, err_cap, &msg);
-            return -3;
-        }
-    };
-    let conversation_id = match read_optional_launch_int(obj, "conversationId") {
-        Ok(v) => v,
-        Err(msg) => {
-            copy_error(err_buf, err_cap, &msg);
-            return -3;
-        }
-    };
-    let referred_by_player_id = match read_optional_launch_int(obj, "referredByPlayerId") {
-        Ok(v) => v,
-        Err(msg) => {
-            copy_error(err_buf, err_cap, &msg);
-            return -3;
-        }
-    };
-
-    if place_id <= 0 {
-        copy_error(err_buf, err_cap, "experience launch requires a positive placeId");
-        return -4;
-    }
-    if user_id < 0 || conversation_id < 0 || referred_by_player_id < 0 {
-        copy_error(err_buf, err_cap, "experience launch identifiers cannot be negative");
-        return -5;
-    }
-
-    let mut extracted_strings: [(u32, &str); 12] = [(0, ""); 12];
-    let mut extracted_count = 0usize;
-    for (idx, field_name) in EXPERIENCE_LAUNCH_STRING_FIELDS.iter().enumerate() {
-        match obj.get(*field_name) {
-            None | Some(serde_json::Value::Null) => {}
-            Some(serde_json::Value::String(s)) => {
-                if s.len() > K_MAX_EXPERIENCE_LAUNCH_STRING_BYTES {
-                    copy_error(
-                        err_buf,
-                        err_cap,
-                        &format!("experience launch field is too large: {}", field_name),
-                    );
-                    return -6;
-                }
-                extracted_strings[extracted_count] = (idx as u32, s.as_str());
-                extracted_count += 1;
+    let ([place_id, user_id, conversation_id, referred_by_player_id], extracted_strings, extracted_count, canonical) =
+        match validate_launch_object(&doc) {
+            Ok(v) => v,
+            Err((code, msg)) => {
+                copy_error(err_buf, err_cap, &msg);
+                return code;
             }
-            Some(_) => {
-                copy_error(
-                    err_buf,
-                    err_cap,
-                    &format!("experience launch field is not a string: {}", field_name),
-                );
-                return -6;
-            }
-        }
-    }
-
-    let canonical = match serde_json::to_string(obj) {
-        Ok(s) => s,
-        Err(_) => {
-            copy_error(err_buf, err_cap, "experience launch payload is not a JSON object");
-            return -2;
-        }
-    };
-    if canonical.len() > K_MAX_EXPERIENCE_LAUNCH_JSON_BYTES {
-        copy_error(err_buf, err_cap, "canonical experience launch JSON is too large");
-        return -7;
-    }
+        };
 
     unsafe {
         *out_data = MocktailRustExperienceLaunchData {

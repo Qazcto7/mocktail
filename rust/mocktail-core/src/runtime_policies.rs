@@ -1048,33 +1048,9 @@ pub extern "C" fn mocktail_rust_discord_parse_rpc_error(
     let Some(payload) = slice_to_str(payload_ptr, payload_len) else {
         return -1;
     };
-    let Some(obj) = parse_json_object_str(payload, false) else {
+    let Some((code, message)) = crate::discord_rpc::parse_rpc_error_fields(payload) else {
         return -1;
     };
-    if obj.get("evt").and_then(|v| v.as_str()) != Some("ERROR") {
-        return -1;
-    }
-    let mut code = 0i64;
-    let mut message = String::from("Discord rejected an RPC request");
-    if let Some(data) = obj.get("data").and_then(|v| v.as_object()) {
-        if let Some(parsed_code) = data.get("code").and_then(|v| v.as_i64()) {
-            code = parsed_code;
-        }
-        if let Some(raw_msg) = data.get("message").and_then(|v| v.as_str()) {
-            let truncated = truncate_utf8_str(raw_msg, 256);
-            message = truncated
-                .chars()
-                .map(|c| {
-                    let u = c as u32;
-                    if u < 0x20 || u == 0x7f {
-                        ' '
-                    } else {
-                        c
-                    }
-                })
-                .collect();
-        }
-    }
     if !out_code.is_null() {
         unsafe { *out_code = code };
     }
@@ -1093,11 +1069,7 @@ pub extern "C" fn mocktail_rust_discord_build_handshake(
         return -1;
     }
     let app_id = slice_to_lossy_cow(app_id_ptr, app_id_len);
-    let doc = json!({
-        "v": 1,
-        "client_id": app_id,
-    });
-    let Ok(compact) = serde_json::to_string(&doc) else {
+    let Some(compact) = crate::discord_rpc::build_handshake_json(&app_id) else {
         return -1;
     };
     emit_string(on_json, ctx, &compact);
@@ -1112,9 +1084,7 @@ pub extern "C" fn mocktail_rust_discord_is_ready_event(
     let Some(payload) = slice_to_str(payload_ptr, payload_len) else {
         return false;
     };
-    parse_json_object_str(payload, false)
-        .and_then(|obj| obj.get("evt").and_then(|v| v.as_str()).map(|s| s == "READY"))
-        .unwrap_or(false)
+    crate::discord_rpc::is_ready_event_json(payload)
 }
 
 #[no_mangle]
@@ -1125,59 +1095,27 @@ pub extern "C" fn mocktail_rust_discord_build_set_activity(
     on_json: MocktailPayloadStoreStringCallback,
     ctx: *mut c_void,
 ) -> i32 {
-    let activity_val = if activity.is_null() {
-        Value::Null
+    let built = if activity.is_null() {
+        None
     } else {
         let act = unsafe { &*activity };
-        let details = slice_to_lossy_cow(act.details, act.details_len);
-        let state = slice_to_lossy_cow(act.state, act.state_len);
-        let large_image = slice_to_lossy_cow(act.large_image, act.large_image_len);
-        let large_text = slice_to_lossy_cow(act.large_text, act.large_text_len);
-        let button_label = slice_to_lossy_cow(act.button_label, act.button_label_len);
-        let button_url = slice_to_lossy_cow(act.button_url, act.button_url_len);
-
-        let mut map = Map::new();
-        map.insert("type".to_owned(), Value::Number(0.into()));
-        map.insert("details".to_owned(), Value::String(details.into_owned()));
-        map.insert("instance".to_owned(), Value::Bool(true));
-        if !state.is_empty() {
-            map.insert("state".to_owned(), Value::String(state.into_owned()));
-        }
-        if act.has_start_timestamp {
-            map.insert(
-                "timestamps".to_owned(),
-                json!({ "start": act.start_timestamp }),
-            );
-        }
-        if !large_image.is_empty() {
-            let mut assets = Map::new();
-            assets.insert(
-                "large_image".to_owned(),
-                Value::String(large_image.into_owned()),
-            );
-            if !large_text.is_empty() {
-                assets.insert("large_text".to_owned(), Value::String(large_text.into_owned()));
-            }
-            map.insert("assets".to_owned(), Value::Object(assets));
-        }
-        if !button_label.is_empty() && !button_url.is_empty() {
-            map.insert(
-                "buttons".to_owned(),
-                json!([{ "label": button_label, "url": button_url }]),
-            );
-        }
-        Value::Object(map)
+        Some(crate::discord_rpc::BuiltActivity {
+            details: slice_to_lossy_cow(act.details, act.details_len).into_owned(),
+            state: slice_to_lossy_cow(act.state, act.state_len).into_owned(),
+            start_timestamp: if act.has_start_timestamp {
+                Some(act.start_timestamp)
+            } else {
+                None
+            },
+            large_image: slice_to_lossy_cow(act.large_image, act.large_image_len).into_owned(),
+            large_text: slice_to_lossy_cow(act.large_text, act.large_text_len).into_owned(),
+            button_label: slice_to_lossy_cow(act.button_label, act.button_label_len).into_owned(),
+            button_url: slice_to_lossy_cow(act.button_url, act.button_url_len).into_owned(),
+        })
     };
 
-    let request = json!({
-        "cmd": "SET_ACTIVITY",
-        "args": {
-            "pid": pid,
-            "activity": activity_val,
-        },
-        "nonce": nonce.to_string(),
-    });
-    let Ok(compact) = serde_json::to_string(&request) else {
+    let Some(compact) = crate::discord_rpc::build_set_activity_json(pid, built.as_ref(), nonce)
+    else {
         return -1;
     };
     emit_string(on_json, ctx, &compact);

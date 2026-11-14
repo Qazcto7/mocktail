@@ -1,326 +1,148 @@
 #include "runtime/discord_rpc.h"
-#include "mocktail/mocktail_rust.h"
 
-#include <poll.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <unistd.h>
-
-#include <algorithm>
 #include <array>
-#include <cerrno>
 #include <chrono>
-#include <condition_variable>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <deque>
-#include <limits>
+#include <cstddef>
+#include <cstdint>
 #include <mutex>
-#include <string_view>
-#include <unordered_set>
+#include <string>
 #include <utility>
-#include <vector>
 
-#include "runtime/owned_pthread.h"
+#include "mocktail/mocktail_rust.h"
 #include "runtime/roblox_place_metadata.h"
 
 namespace mocktail {
 namespace runtime {
 namespace {
 
-constexpr std::size_t kMaximumDiscordFrameBytes = 1024U * 1024U;
-constexpr std::size_t kDiscordWorkerStackBytes = 16U * 1024U * 1024U;
-constexpr std::chrono::milliseconds kReconnectDelay{5000};
-constexpr std::chrono::seconds kDiscordActivityRateWindow{20};
-constexpr std::size_t kDiscordActivityRateLimit = 5;
-constexpr char kJoinPage[] = "https://komaruworld.github.io/mocktail/join.html";
-
-enum class DiscordOpcode : uint32_t {
-  kHandshake = 0,
-  kFrame = 1,
-  kClose = 2,
-  kPing = 3,
-  kPong = 4,
-};
-
-struct DiscordFrame {
-  DiscordOpcode opcode = DiscordOpcode::kClose;
-  std::string payload;
-};
-
-std::string TruncateUtf8(std::string value, std::size_t maximum) {
-  const std::size_t boundary = mocktail_rust_discord_truncate_utf8(
-      value.data(), value.size(), maximum);
-  value.resize(boundary);
-  return value;
-}
-
-void AssignJsonString(void* ctx, const char* ptr, std::size_t len) {
-  static_cast<std::string*>(ctx)->assign(ptr, len);
-}
-
-std::string RenderPlaceTemplate(std::string text, std::string_view place_name) {
-  uint8_t buffer[128];
-  std::size_t out_len = 0;
-  if (mocktail_rust_discord_render_place_template(
-          text.data(), text.size(), place_name.data(), place_name.size(),
-          buffer, sizeof(buffer), &out_len) == 0) {
-    return std::string(reinterpret_cast<const char*>(buffer), out_len);
+int32_t PhaseToRust(RobloxExperiencePresencePhase phase) {
+  switch (phase) {
+    case RobloxExperiencePresencePhase::kBrowsing:
+      return 0;
+    case RobloxExperiencePresencePhase::kJoining:
+      return 1;
+    case RobloxExperiencePresencePhase::kPlaying:
+      return 2;
   }
-  return TruncateUtf8(std::move(text), 128);
+  return 0;
 }
 
-bool HasDiscordJoinTarget(const RobloxExperienceLaunchRequest& request) {
-  return mocktail_rust_discord_has_join_target(
-      request.place_id, request.game_instance_id.data(),
-      request.game_instance_id.size());
-}
-
-bool WriteAll(int descriptor, const void* bytes, std::size_t size) {
-  const auto* next = static_cast<const unsigned char*>(bytes);
-  while (size != 0) {
-    const ssize_t written =
-        send(descriptor, next, size, MSG_NOSIGNAL | MSG_DONTWAIT);
-    if (written > 0) {
-      next += written;
-      size -= static_cast<std::size_t>(written);
-      continue;
-    }
-    if (written < 0 && errno == EINTR) {
-      continue;
-    }
-    if (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-      pollfd event{descriptor, POLLOUT, 0};
-      if (poll(&event, 1, 1500) > 0 && (event.revents & POLLOUT) != 0) {
-        continue;
-      }
-    }
-    return false;
+RobloxExperiencePresencePhase PhaseFromRust(int32_t phase_code) {
+  switch (phase_code) {
+    case 1:
+      return RobloxExperiencePresencePhase::kJoining;
+    case 2:
+      return RobloxExperiencePresencePhase::kPlaying;
+    default:
+      return RobloxExperiencePresencePhase::kBrowsing;
   }
-  return true;
 }
 
-bool ReadAll(int descriptor, void* bytes, std::size_t size) {
-  auto* next = static_cast<unsigned char*>(bytes);
-  while (size != 0) {
-    pollfd event{descriptor, POLLIN, 0};
-    const int ready = poll(&event, 1, 3000);
-    if (ready <= 0) {
-      if (ready < 0 && errno == EINTR) {
-        continue;
-      }
-      return false;
-    }
-    const ssize_t received =
-        recv(descriptor, next, size, MSG_NOSIGNAL | MSG_DONTWAIT);
-    if (received > 0) {
-      next += received;
-      size -= static_cast<std::size_t>(received);
-      continue;
-    }
-    if (received < 0 &&
-        (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) {
-      continue;
-    }
-    return false;
-  }
-  return true;
+MocktailRustDiscordConfig ToRustConfig(const DiscordRpcConfig& config) {
+  MocktailRustDiscordConfig raw{};
+  raw.enabled = config.enabled ? 1 : 0;
+  raw.show_place_name = config.show_place_name ? 1 : 0;
+  raw.show_elapsed_time = config.show_elapsed_time ? 1 : 0;
+  raw.join_enabled = config.join_enabled ? 1 : 0;
+  raw.public_servers_only = config.public_servers_only ? 1 : 0;
+  raw.join_button_label_ptr = config.join_button_label.data();
+  raw.join_button_label_len = config.join_button_label.size();
+  raw.application_id_ptr = config.application_id.data();
+  raw.application_id_len = config.application_id.size();
+  raw.text_browsing_ptr = config.text.browsing.data();
+  raw.text_browsing_len = config.text.browsing.size();
+  raw.text_joining_ptr = config.text.joining.data();
+  raw.text_joining_len = config.text.joining.size();
+  raw.text_playing_ptr = config.text.playing.data();
+  raw.text_playing_len = config.text.playing.size();
+  raw.text_state_ptr = config.text.state.data();
+  raw.text_state_len = config.text.state.size();
+  raw.text_unknown_place_ptr = config.text.unknown_place.data();
+  raw.text_unknown_place_len = config.text.unknown_place.size();
+  return raw;
 }
 
-uint32_t DecodeLittleEndian(const unsigned char* source) {
-  return static_cast<uint32_t>(source[0]) |
-         (static_cast<uint32_t>(source[1]) << 8U) |
-         (static_cast<uint32_t>(source[2]) << 16U) |
-         (static_cast<uint32_t>(source[3]) << 24U);
+MocktailRustDiscordLaunchSlice ToSanitizedRustSlice(
+    const RobloxExperienceLaunchRequest* request) {
+  MocktailRustDiscordLaunchSlice slice{};
+  if (request == nullptr) {
+    return slice;
+  }
+  // Never pass access codes or canonical launch JSON to the Discord worker.
+  slice.place_id = request->place_id;
+  slice.game_instance_id_ptr = request->game_instance_id.data();
+  slice.game_instance_id_len = request->game_instance_id.size();
+  slice.has_private_access = !request->reserved_server_access_code.empty() ||
+                             !request->access_code.empty() ||
+                             !request->link_code.empty();
+  return slice;
 }
 
-bool WriteFrame(int descriptor, DiscordOpcode opcode,
-                std::string_view payload) {
-  if (payload.size() > kMaximumDiscordFrameBytes ||
-      payload.size() > std::numeric_limits<uint32_t>::max()) {
-    return false;
-  }
-  std::string null_payload(payload);
-  const std::size_t required_capacity = 8U + payload.size() + 1U;
-  std::vector<uint8_t> frame_buffer(required_capacity);
-  std::size_t written_len = 0;
-  const int status = mocktail_rust_build_discord_frame(
-      static_cast<uint32_t>(opcode),
-      null_payload.c_str(),
-      frame_buffer.data(),
-      frame_buffer.size(),
-      &written_len);
-  if (status != 0 || written_len == 0) {
-    return false;
-  }
-  return WriteAll(descriptor, frame_buffer.data(), written_len);
-}
-
-bool ReadFrame(int descriptor, DiscordFrame* frame) {
-  std::array<unsigned char, 8> header{};
-  if (frame == nullptr || !ReadAll(descriptor, header.data(), header.size())) {
-    return false;
-  }
-  const uint32_t length = DecodeLittleEndian(header.data() + 4);
-  if (length > kMaximumDiscordFrameBytes) {
-    return false;
-  }
-  frame->opcode = static_cast<DiscordOpcode>(DecodeLittleEndian(header.data()));
-  frame->payload.resize(length);
-  return length == 0 ||
-         ReadAll(descriptor, frame->payload.data(), frame->payload.size());
-}
-
-void LogDiscordRpcError(const DiscordFrame& frame) {
-  if (frame.opcode != DiscordOpcode::kFrame) {
+void AssignBuiltActivity(void* ctx, const char* details_ptr, size_t details_len,
+                         const char* state_ptr, size_t state_len,
+                         bool has_start_timestamp, int64_t start_timestamp,
+                         const char* large_image_ptr, size_t large_image_len,
+                         const char* large_text_ptr, size_t large_text_len,
+                         const char* button_label_ptr, size_t button_label_len,
+                         const char* button_url_ptr, size_t button_url_len) {
+  auto* activity = static_cast<DiscordRpcActivity*>(ctx);
+  if (activity == nullptr) {
     return;
   }
-  int64_t code = 0;
-  std::array<char, 257> message_buf{};
-  if (mocktail_rust_discord_parse_rpc_error(
-          frame.payload.data(), frame.payload.size(), &code,
-          message_buf.data(), message_buf.size()) != 0) {
+  if (details_ptr != nullptr && details_len > 0) {
+    activity->details.assign(details_ptr, details_len);
+  }
+  if (state_ptr != nullptr && state_len > 0) {
+    activity->state.assign(state_ptr, state_len);
+  }
+  if (has_start_timestamp) {
+    activity->start_timestamp = start_timestamp;
+  }
+  if (large_image_ptr != nullptr && large_image_len > 0) {
+    activity->large_image.assign(large_image_ptr, large_image_len);
+  }
+  if (large_text_ptr != nullptr && large_text_len > 0) {
+    activity->large_text.assign(large_text_ptr, large_text_len);
+  }
+  if (button_label_ptr != nullptr && button_label_len > 0) {
+    activity->button_label.assign(button_label_ptr, button_label_len);
+  }
+  if (button_url_ptr != nullptr && button_url_len > 0) {
+    activity->button_url.assign(button_url_ptr, button_url_len);
+  }
+}
+
+void InspectMetadataBridge(void* /*ctx*/, int32_t phase_code, int64_t place_id,
+                           MocktailDiscordMetadataInspectResultFn on_result,
+                           void* rust_out) {
+  if (on_result == nullptr) {
     return;
   }
-  std::fprintf(stderr, "  [discord-rpc] request rejected code=%lld: %s\n",
-               static_cast<long long>(code), message_buf.data());
+  const PlaceMetadataLookupResult metadata =
+      SharedRobloxPlaceMetadataCache().Inspect(PhaseFromRust(phase_code),
+                                               place_id, /*need_icon=*/true);
+  on_result(rust_out, metadata.name.data(), metadata.name.size(),
+            metadata.icon_url.data(), metadata.icon_url.size(),
+            metadata.should_fetch_after_publish, metadata.waiting_for_name);
 }
 
-std::vector<std::string> DiscordSocketDirectories() {
-  std::vector<std::string> directories;
-  const auto append = [&directories](const char* path) {
-    if (path != nullptr && path[0] != '\0') {
-      directories.emplace_back(path);
-    }
-  };
-  const char* runtime = std::getenv("XDG_RUNTIME_DIR");
-  append(runtime);
-  if (runtime != nullptr && runtime[0] != '\0') {
-    directories.emplace_back(std::string(runtime) +
-                             "/app/com.discordapp.Discord");
-    directories.emplace_back(std::string(runtime) +
-                             "/.flatpak/com.discordapp.Discord/xdg-run");
-    directories.emplace_back(std::string(runtime) +
-                             "/app/dev.vencord.Vesktop");
-    directories.emplace_back(std::string(runtime) +
-                             "/.flatpak/dev.vencord.Vesktop/xdg-run");
-    directories.emplace_back(std::string(runtime) +
-                             "/app/com.discordapp.DiscordCanary");
-    directories.emplace_back(std::string(runtime) +
-                             "/app/com.discordapp.DiscordPTB");
-    directories.emplace_back(std::string(runtime) + "/snap.discord");
+bool RefreshMetadataBridge(void* /*ctx*/, int64_t place_id,
+                           int64_t* out_retry_delay_secs) {
+  std::chrono::seconds retry_delay{0};
+  const bool changed = SharedRobloxPlaceMetadataCache().Refresh(
+      place_id, /*fetch_icon=*/true, &retry_delay);
+  if (out_retry_delay_secs != nullptr) {
+    *out_retry_delay_secs = retry_delay.count();
   }
-  append(std::getenv("TMPDIR"));
-  directories.emplace_back("/tmp");
-  directories.emplace_back("/run/user/" + std::to_string(getuid()));
-  std::unordered_set<std::string> unique;
-  std::vector<std::string> result;
-  for (std::string& directory : directories) {
-    if (unique.insert(directory).second) {
-      result.push_back(std::move(directory));
-    }
-  }
-  return result;
-}
-
-int ConnectDiscord() {
-  for (const std::string& directory : DiscordSocketDirectories()) {
-    for (int index = 0; index < 10; ++index) {
-      const std::string path =
-          directory + "/discord-ipc-" + std::to_string(index);
-      sockaddr_un address{};
-      address.sun_family = AF_UNIX;
-      if (path.size() >= sizeof(address.sun_path)) {
-        continue;
-      }
-      std::memcpy(address.sun_path, path.c_str(), path.size() + 1);
-      const int descriptor = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-      if (descriptor < 0) {
-        continue;
-      }
-      timeval timeout{2, 0};
-      (void)setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout,
-                       sizeof(timeout));
-      (void)setsockopt(descriptor, SOL_SOCKET, SO_SNDTIMEO, &timeout,
-                       sizeof(timeout));
-      if (connect(descriptor, reinterpret_cast<const sockaddr*>(&address),
-                  sizeof(address)) == 0) {
-        return descriptor;
-      }
-      (void)close(descriptor);
-    }
-  }
-  return -1;
-}
-
-bool HandshakeDiscord(int descriptor, std::string_view application_id) {
-  std::string handshake_json;
-  if (mocktail_rust_discord_build_handshake(application_id.data(),
-                                            application_id.size(),
-                                            AssignJsonString, &handshake_json) !=
-          0 ||
-      !WriteFrame(descriptor, DiscordOpcode::kHandshake, handshake_json)) {
-    return false;
-  }
-  for (int attempt = 0; attempt < 3; ++attempt) {
-    DiscordFrame frame;
-    if (!ReadFrame(descriptor, &frame)) {
-      return false;
-    }
-    if (frame.opcode == DiscordOpcode::kPing) {
-      if (!WriteFrame(descriptor, DiscordOpcode::kPong, frame.payload)) {
-        return false;
-      }
-      continue;
-    }
-    if (frame.opcode != DiscordOpcode::kFrame) {
-      return false;
-    }
-    return mocktail_rust_discord_is_ready_event(frame.payload.data(),
-                                                frame.payload.size());
-  }
-  return false;
-}
-
-bool SetDiscordActivity(int descriptor, const DiscordRpcActivity* activity,
-                        uint64_t nonce) {
-  MocktailRustDiscordActivity raw{};
-  if (activity != nullptr) {
-    raw.details = activity->details.data();
-    raw.details_len = activity->details.size();
-    raw.state = activity->state.data();
-    raw.state_len = activity->state.size();
-    raw.has_start_timestamp = activity->start_timestamp.has_value();
-    raw.start_timestamp = activity->start_timestamp.value_or(0);
-    raw.large_image = activity->large_image.data();
-    raw.large_image_len = activity->large_image.size();
-    raw.large_text = activity->large_text.data();
-    raw.large_text_len = activity->large_text.size();
-    raw.button_label = activity->button_label.data();
-    raw.button_label_len = activity->button_label.size();
-    raw.button_url = activity->button_url.data();
-    raw.button_url_len = activity->button_url.size();
-  }
-  std::string request_json;
-  if (mocktail_rust_discord_build_set_activity(
-          getpid(), activity != nullptr ? &raw : nullptr, nonce,
-          AssignJsonString, &request_json) != 0) {
-    return false;
-  }
-  return WriteFrame(descriptor, DiscordOpcode::kFrame, request_json);
-}
-
-bool IsSafeExternalImageUrl(std::string_view url) {
-  if (url.empty() || url.size() > 512) return false;
-  std::string null_url(url);
-  return mocktail_rust_is_safe_url(null_url.c_str()) == 1;
+  return changed;
 }
 
 }  // namespace
 
 bool IsPublicDiscordJoin(const RobloxExperienceLaunchRequest& request) {
-  return HasDiscordJoinTarget(request) &&
+  return mocktail_rust_discord_has_join_target(
+             request.place_id, request.game_instance_id.data(),
+             request.game_instance_id.size()) &&
          request.reserved_server_access_code.empty() &&
          request.access_code.empty() && request.link_code.empty();
 }
@@ -343,45 +165,13 @@ DiscordRpcActivity BuildDiscordRpcActivity(
     const RobloxExperienceLaunchRequest* request, std::string place_name,
     int64_t session_started_at, std::string place_icon_url) {
   DiscordRpcActivity activity;
-  activity.state = TruncateUtf8(config.text.state, 128);
-  switch (phase) {
-    case RobloxExperiencePresencePhase::kBrowsing:
-      activity.details = TruncateUtf8(config.text.browsing, 128);
-      break;
-    case RobloxExperiencePresencePhase::kJoining:
-    case RobloxExperiencePresencePhase::kPlaying: {
-      if (place_name.empty()) {
-        if (phase == RobloxExperiencePresencePhase::kJoining) {
-          activity.details = TruncateUtf8(config.text.joining, 128);
-          break;
-        }
-        place_name = config.text.unknown_place;
-      }
-      if (config.show_place_name) {
-        activity.details = RenderPlaceTemplate(config.text.playing, place_name);
-      } else {
-        activity.details = activity.state;
-        activity.state.clear();
-      }
-      if (phase == RobloxExperiencePresencePhase::kPlaying &&
-          config.show_elapsed_time && session_started_at > 0) {
-        activity.start_timestamp = session_started_at;
-      }
-      if (IsSafeExternalImageUrl(place_icon_url)) {
-        activity.large_image = std::move(place_icon_url);
-        activity.large_text = TruncateUtf8(place_name, 128);
-      }
-      if (phase == RobloxExperiencePresencePhase::kPlaying &&
-          config.join_enabled && request != nullptr &&
-          (!config.public_servers_only || IsPublicDiscordJoin(*request))) {
-        activity.button_url = BuildDiscordJoinUrl(*request);
-        if (!activity.button_url.empty()) {
-          activity.button_label = config.join_button_label;
-        }
-      }
-      break;
-    }
-  }
+  const MocktailRustDiscordConfig rust_cfg = ToRustConfig(config);
+  const MocktailRustDiscordLaunchSlice slice = ToSanitizedRustSlice(request);
+  (void)mocktail_rust_discord_build_activity(
+      &rust_cfg, PhaseToRust(phase), request != nullptr,
+      request != nullptr ? &slice : nullptr, place_name.data(),
+      place_name.size(), session_started_at, place_icon_url.data(),
+      place_icon_url.size(), &AssignBuiltActivity, &activity);
   return activity;
 }
 
@@ -404,251 +194,67 @@ class DiscordRpcSession::Impl final {
       }
       return false;
     }
+
     InitializeRobloxHttpClient();
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      if (started_) {
-        return true;
-      }
-      phase_ = RobloxExperiencePresencePhase::kBrowsing;
-      request_ = {};
-      revision_ = 1;
-      stopping_ = false;
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (started_) {
+      return true;
     }
-    const int error =
-        worker_.Start(&Impl::RunWorker, this, kDiscordWorkerStackBytes);
-    if (error != 0) {
+
+    const MocktailRustDiscordConfig rust_cfg = ToRustConfig(config_);
+    const MocktailRustDiscordMetadataCallbacks metadata_callbacks{
+        nullptr, &InspectMetadataBridge, &RefreshMetadataBridge};
+    std::array<char, 256> err_buf{};
+    MocktailRustDiscordSession* rust_session = nullptr;
+    const int32_t rc = mocktail_rust_discord_session_start(
+        &rust_cfg, &metadata_callbacks, &rust_session, err_buf.data(),
+        err_buf.size());
+    if (rc != 0 || rust_session == nullptr) {
       if (detail != nullptr) {
-        *detail =
-            "could not start Discord RPC worker: " + std::to_string(error);
+        *detail = err_buf[0] != '\0' ? err_buf.data()
+                                     : "could not start Discord RPC session";
       }
       return false;
     }
-    std::lock_guard<std::mutex> lock(mutex_);
+
+    rust_session_ = rust_session;
+    stopping_ = false;
     started_ = true;
     return true;
   }
 
   void Stop() {
+    MocktailRustDiscordSession* session_to_stop = nullptr;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (!started_ && !worker_.joinable()) {
+      if (!started_ || rust_session_ == nullptr) {
         return;
       }
       stopping_ = true;
-      condition_.notify_all();
+      started_ = false;
+      session_to_stop = rust_session_;
+      rust_session_ = nullptr;
     }
-    if (worker_.joinable()) {
-      (void)worker_.WaitFor(-1, 1);
-    }
-    std::lock_guard<std::mutex> lock(mutex_);
-    started_ = false;
+    mocktail_rust_discord_session_stop(session_to_stop);
   }
 
   void Update(RobloxExperiencePresencePhase phase,
               const RobloxExperienceLaunchRequest* request) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!started_ || stopping_) {
+    if (!started_ || stopping_ || rust_session_ == nullptr) {
       return;
     }
-    phase_ = phase;
-    request_ = {};
-    if (request != nullptr) {
-      // Never pass access codes or canonical launch JSON to the Discord worker.
-      request_.place_id = request->place_id;
-      request_.game_instance_id = request->game_instance_id;
-      if (!request->reserved_server_access_code.empty()) {
-        request_.reserved_server_access_code = "present";
-      }
-      if (!request->access_code.empty()) {
-        request_.access_code = "present";
-      }
-      if (!request->link_code.empty()) {
-        request_.link_code = "present";
-      }
-    }
-    if (phase == RobloxExperiencePresencePhase::kPlaying) {
-      session_started_at_ =
-          std::chrono::duration_cast<std::chrono::seconds>(
-              std::chrono::system_clock::now().time_since_epoch())
-              .count();
-    } else {
-      session_started_at_ = 0;
-    }
-    ++revision_;
-    std::fprintf(stderr,
-                 "  [discord-rpc] queued phase=%s revision=%llu "
-                 "place_id=%lld\n",
-                 RobloxExperiencePresencePhaseName(phase_),
-                 static_cast<unsigned long long>(revision_),
-                 static_cast<long long>(request_.place_id));
-    condition_.notify_all();
+    const MocktailRustDiscordLaunchSlice slice = ToSanitizedRustSlice(request);
+    (void)mocktail_rust_discord_session_update(
+        rust_session_, PhaseToRust(phase), request != nullptr,
+        request != nullptr ? &slice : nullptr);
   }
 
  private:
-  struct Desired {
-    RobloxExperiencePresencePhase phase =
-        RobloxExperiencePresencePhase::kBrowsing;
-    RobloxExperienceLaunchRequest request;
-    int64_t started_at = 0;
-    uint64_t revision = 0;
-  };
-
-  static void* RunWorker(void* context) {
-    static_cast<Impl*>(context)->Run();
-    return nullptr;
-  }
-
-  bool IsStopping() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return stopping_;
-  }
-
-  Desired Snapshot() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return {phase_, request_, session_started_at_, revision_};
-  }
-
-  bool WaitForChange(uint64_t revision, std::chrono::milliseconds duration) {
-    std::unique_lock<std::mutex> lock(mutex_);
-    condition_.wait_for(lock, duration, [this, revision]() {
-      return stopping_ || revision_ != revision;
-    });
-    return !stopping_;
-  }
-
-  void Run() {
-    int descriptor = -1;
-    uint64_t published_revision = 0;
-    uint64_t nonce = 1;
-    std::deque<std::chrono::steady_clock::time_point> activity_updates;
-    while (!IsStopping()) {
-      Desired desired = Snapshot();
-      const PlaceMetadataLookupResult metadata =
-          SharedRobloxPlaceMetadataCache().Inspect(
-              desired.phase, desired.request.place_id, /*need_icon=*/true);
-      std::string place_name = metadata.name;
-      std::string place_icon_url = metadata.icon_url;
-      const bool resolve_metadata_after_publish =
-          metadata.should_fetch_after_publish;
-      if (descriptor < 0) {
-        descriptor = ConnectDiscord();
-        if (descriptor < 0 ||
-            !HandshakeDiscord(descriptor, config_.application_id)) {
-          if (descriptor >= 0) {
-            (void)close(descriptor);
-            descriptor = -1;
-          }
-          if (!WaitForChange(desired.revision, kReconnectDelay)) {
-            break;
-          }
-          continue;
-        }
-        std::fprintf(stderr, "  [discord-rpc] connected to Discord Desktop\n");
-        published_revision = 0;
-      }
-      const bool wait_for_place_metadata = metadata.waiting_for_name;
-      if (published_revision != desired.revision &&
-          !wait_for_place_metadata) {
-        const auto now = std::chrono::steady_clock::now();
-        while (!activity_updates.empty() &&
-               now - activity_updates.front() >= kDiscordActivityRateWindow) {
-          activity_updates.pop_front();
-        }
-        if (activity_updates.size() >= kDiscordActivityRateLimit) {
-          const auto delay =
-              std::chrono::duration_cast<std::chrono::milliseconds>(
-                  activity_updates.front() + kDiscordActivityRateWindow - now);
-          (void)WaitForChange(desired.revision, delay);
-          continue;
-        }
-        const DiscordRpcActivity activity = BuildDiscordRpcActivity(
-            config_, desired.phase,
-            desired.phase == RobloxExperiencePresencePhase::kBrowsing
-                ? nullptr
-                : &desired.request,
-            std::move(place_name), desired.started_at,
-            std::move(place_icon_url));
-        if (!SetDiscordActivity(descriptor, &activity, nonce++)) {
-          (void)close(descriptor);
-          descriptor = -1;
-          continue;
-        }
-        std::fprintf(stderr,
-                     "  [discord-rpc] sent phase=%s revision=%llu\n",
-                     RobloxExperiencePresencePhaseName(desired.phase),
-                     static_cast<unsigned long long>(desired.revision));
-        activity_updates.push_back(std::chrono::steady_clock::now());
-        published_revision = desired.revision;
-      }
-
-      if (resolve_metadata_after_publish) {
-        std::chrono::seconds retry_delay{0};
-        const bool changed = SharedRobloxPlaceMetadataCache().Refresh(
-            desired.request.place_id, /*fetch_icon=*/true, &retry_delay);
-        if (retry_delay.count() > 0) {
-          std::fprintf(stderr,
-                       "  [discord-rpc] place metadata incomplete; retry in "
-                       "%llds place_id=%lld\n",
-                       static_cast<long long>(retry_delay.count()),
-                       static_cast<long long>(desired.request.place_id));
-        }
-        if (Snapshot().revision != desired.revision) {
-          continue;
-        }
-        if (changed &&
-            (desired.phase == RobloxExperiencePresencePhase::kJoining ||
-             desired.phase == RobloxExperiencePresencePhase::kPlaying)) {
-          // Publish cached metadata through the normal rate limiter.
-          published_revision = 0;
-          continue;
-        }
-      }
-
-      pollfd event{descriptor, POLLIN, 0};
-      const int ready = poll(&event, 1, 500);
-      if (ready < 0 && errno == EINTR) {
-        continue;
-      }
-      if (ready < 0 || (ready > 0 && (event.revents &
-                                      (POLLERR | POLLHUP | POLLNVAL)) != 0)) {
-        (void)close(descriptor);
-        descriptor = -1;
-        continue;
-      }
-      if (ready > 0 && (event.revents & POLLIN) != 0) {
-        DiscordFrame frame;
-        if (!ReadFrame(descriptor, &frame)) {
-          (void)close(descriptor);
-          descriptor = -1;
-        } else if (frame.opcode == DiscordOpcode::kPing) {
-          if (!WriteFrame(descriptor, DiscordOpcode::kPong, frame.payload)) {
-            (void)close(descriptor);
-            descriptor = -1;
-          }
-        } else if (frame.opcode == DiscordOpcode::kClose) {
-          (void)close(descriptor);
-          descriptor = -1;
-        } else {
-          LogDiscordRpcError(frame);
-        }
-      }
-    }
-    if (descriptor >= 0) {
-      (void)SetDiscordActivity(descriptor, nullptr, nonce);
-      (void)close(descriptor);
-    }
-  }
-
   const DiscordRpcConfig config_;
   std::mutex mutex_;
-  std::condition_variable condition_;
-  OwnedPthread worker_;
-  RobloxExperiencePresencePhase phase_ =
-      RobloxExperiencePresencePhase::kBrowsing;
-  RobloxExperienceLaunchRequest request_;
-  int64_t session_started_at_ = 0;
-  uint64_t revision_ = 0;
+  MocktailRustDiscordSession* rust_session_ = nullptr;
   bool started_ = false;
   bool stopping_ = false;
 };

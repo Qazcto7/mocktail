@@ -13,6 +13,10 @@ pub mod apk_signature_rs;
 pub use apk_signature_rs::*;
 pub mod deriver_json;
 pub use deriver_json::*;
+pub mod discord_rpc;
+pub use discord_rpc::*;
+pub mod external_launch_broker;
+pub use external_launch_broker::*;
 pub mod input_router;
 pub use input_router::*;
 pub mod micup_rpc;
@@ -27,6 +31,7 @@ pub mod text_runtime;
 pub use text_runtime::*;
 pub mod update_json;
 pub use update_json::*;
+pub(crate) mod unix_ipc;
 pub mod window_gates;
 pub use window_gates::*;
 
@@ -7964,124 +7969,8 @@ pub extern "C" fn mocktail_rust_text_next_grapheme(
 }
 
 // ============================================================================
-// 46. External Launch Broker & Wire Protocol (Group C)
+// 46. External Launch Broker & Wire Protocol (moved to external_launch_broker.rs)
 // ============================================================================
-
-const EXTERNAL_LAUNCH_WIRE_PREFIX: &[u8] = b"MOCKTAIL-EXTERNAL-LAUNCH/1\n";
-const EXTERNAL_LAUNCH_REPLY_PREFIX: &[u8] = b"MTL1";
-
-#[no_mangle]
-pub extern "C" fn mocktail_rust_external_launch_build_packet(
-    json_ptr: *const c_char,
-    json_len: usize,
-    out_buf: *mut c_char,
-    out_cap: usize,
-) -> c_int {
-    if json_ptr.is_null() || out_buf.is_null() {
-        return -1;
-    }
-    let total_len = EXTERNAL_LAUNCH_WIRE_PREFIX.len() + json_len;
-    if total_len + 1 > out_cap {
-        return -1;
-    }
-    unsafe {
-        let dst = slice::from_raw_parts_mut(out_buf as *mut u8, out_cap);
-        dst[..EXTERNAL_LAUNCH_WIRE_PREFIX.len()].copy_from_slice(EXTERNAL_LAUNCH_WIRE_PREFIX);
-        let json_slice = slice::from_raw_parts(json_ptr as *const u8, json_len);
-        dst[EXTERNAL_LAUNCH_WIRE_PREFIX.len()..total_len].copy_from_slice(json_slice);
-        dst[total_len] = 0;
-    }
-    total_len as c_int
-}
-
-#[no_mangle]
-pub extern "C" fn mocktail_rust_external_launch_verify_and_strip_prefix(
-    packet_ptr: *const c_char,
-    packet_len: usize,
-    out_json_offset: *mut usize,
-    out_json_len: *mut usize,
-) -> c_int {
-    if packet_ptr.is_null() || out_json_offset.is_null() || out_json_len.is_null() {
-        return -1;
-    }
-    if packet_len <= EXTERNAL_LAUNCH_WIRE_PREFIX.len() {
-        return -1;
-    }
-    let slice = unsafe { slice::from_raw_parts(packet_ptr as *const u8, packet_len) };
-    if !slice.starts_with(EXTERNAL_LAUNCH_WIRE_PREFIX) {
-        return -1;
-    }
-    unsafe {
-        *out_json_offset = EXTERNAL_LAUNCH_WIRE_PREFIX.len();
-        *out_json_len = packet_len - EXTERNAL_LAUNCH_WIRE_PREFIX.len();
-    }
-    0
-}
-
-#[no_mangle]
-pub extern "C" fn mocktail_rust_external_launch_build_reply(
-    reply_code: u8,
-    out_bytes: *mut u8,
-    out_cap: usize,
-) -> c_int {
-    if out_bytes.is_null() || out_cap < 5 {
-        return -1;
-    }
-    unsafe {
-        let dst = slice::from_raw_parts_mut(out_bytes, out_cap);
-        dst[..4].copy_from_slice(EXTERNAL_LAUNCH_REPLY_PREFIX);
-        dst[4] = reply_code;
-    }
-    5
-}
-
-#[no_mangle]
-pub extern "C" fn mocktail_rust_external_launch_parse_reply(
-    in_bytes: *const u8,
-    in_len: usize,
-    out_reply_code: *mut u8,
-) -> c_int {
-    if in_bytes.is_null() || out_reply_code.is_null() || in_len != 5 {
-        return -1;
-    }
-    let slice = unsafe { slice::from_raw_parts(in_bytes, in_len) };
-    if &slice[..4] != EXTERNAL_LAUNCH_REPLY_PREFIX {
-        return -1;
-    }
-    unsafe { *out_reply_code = slice[4] };
-    0
-}
-
-#[no_mangle]
-pub extern "C" fn mocktail_rust_external_launch_reply_status_code(reply_code: u8) -> c_int {
-    match reply_code {
-        0 => 0, /* kOk */
-        1 => 1, /* kInvalidArgument */
-        2 => 3, /* kUnavailable */
-        3 => 2, /* kFailedPrecondition */
-        4 => 3, /* kUnavailable */
-        _ => 5, /* kPlatformError */
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn mocktail_rust_external_launch_format_socket_name(
-    instance_key_ptr: *const c_char,
-    is_run_user: c_int,
-    out_buf: *mut c_char,
-    out_cap: usize,
-) -> c_int {
-    if instance_key_ptr.is_null() || out_buf.is_null() {
-        return -1;
-    }
-    let key = unsafe { CStr::from_ptr(instance_key_ptr).to_str().unwrap_or("") };
-    let name = if is_run_user != 0 {
-        format!("mocktail.{}.external-launch-v1.sock", key)
-    } else {
-        format!("{}.external-launch-v1.sock", key)
-    };
-    copy_to_c_buffer(&name, out_buf, out_cap)
-}
 
 // ============================================================================
 // 47. Split APK & Bundle Layout Resolver (Group D)
@@ -8285,22 +8174,12 @@ pub unsafe extern "C" fn mocktail_rust_discord_has_join_target(
     instance_id: *const c_char,
     instance_id_len: usize,
 ) -> bool {
-    if place_id <= 0 {
-        return false;
-    }
-    if instance_id.is_null() || instance_id_len == 0 {
-        return true;
-    }
-    if instance_id_len > 128 {
-        return false;
-    }
-    let slice = std::slice::from_raw_parts(instance_id as *const u8, instance_id_len);
-    for &b in slice {
-        if b < 0x20 || b == 0x7f {
-            return false;
-        }
-    }
-    true
+    let slice = if instance_id.is_null() || instance_id_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(instance_id as *const u8, instance_id_len)
+    };
+    crate::discord_rpc::has_join_target_bytes(place_id, slice)
 }
 
 pub(crate) fn truncate_utf8_bytes(slice: &[u8], maximum: usize) -> usize {
@@ -8347,33 +8226,18 @@ pub unsafe extern "C" fn mocktail_rust_discord_percent_encode(
         *out_len = 0;
         return 0;
     }
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let slice = std::slice::from_raw_parts(src as *const u8, src_len);
-    let mut written = 0;
-    for &b in slice {
-        let is_unreserved = (b >= b'a' && b <= b'z')
-            || (b >= b'A' && b <= b'Z')
-            || (b >= b'0' && b <= b'9')
-            || b == b'-'
-            || b == b'_'
-            || b == b'.'
-            || b == b'~';
-        if is_unreserved {
-            if !out_buf.is_null() && written < out_cap {
-                *out_buf.add(written) = b;
-            }
-            written += 1;
-        } else {
-            if !out_buf.is_null() && written + 2 < out_cap {
-                *out_buf.add(written) = b'%';
-                *out_buf.add(written + 1) = HEX[(b >> 4) as usize];
-                *out_buf.add(written + 2) = HEX[(b & 0x0f) as usize];
-            }
-            written += 3;
-        }
+    let encoded = crate::discord_rpc::percent_encode_bytes(slice);
+    let bytes = encoded.as_bytes();
+    *out_len = bytes.len();
+    if out_buf.is_null() {
+        return 0;
     }
-    *out_len = written;
-    if !out_buf.is_null() && written > out_cap {
+    let copy_len = bytes.len().min(out_cap);
+    if copy_len > 0 {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, copy_len);
+    }
+    if bytes.len() > out_cap {
         return -2;
     }
     0
@@ -8441,42 +8305,21 @@ pub unsafe extern "C" fn mocktail_rust_discord_build_join_url(
     if out_len.is_null() {
         return -1;
     }
-    if !mocktail_rust_discord_has_join_target(place_id, instance_id, instance_id_len) {
-        *out_len = 0;
+    let slice = if instance_id.is_null() || instance_id_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(instance_id as *const u8, instance_id_len)
+    };
+    let url = crate::discord_rpc::build_join_url_bytes(place_id, slice);
+    let bytes = url.as_bytes();
+    *out_len = bytes.len();
+    if bytes.is_empty() {
         return 0;
     }
-    let base = "https://komaruworld.github.io/mocktail/join.html#placeId=";
-    let place_str = place_id.to_string();
-    let mut url = Vec::with_capacity(256);
-    url.extend_from_slice(base.as_bytes());
-    url.extend_from_slice(place_str.as_bytes());
-
-    if !instance_id.is_null() && instance_id_len > 0 {
-        url.extend_from_slice(b"&gameInstanceId=");
-        let mut enc_len = 0usize;
-        mocktail_rust_discord_percent_encode(instance_id, instance_id_len, std::ptr::null_mut(), 0, &mut enc_len);
-        let cur_len = url.len();
-        url.resize(cur_len + enc_len, 0);
-        let mut actual_enc = 0usize;
-        mocktail_rust_discord_percent_encode(
-            instance_id,
-            instance_id_len,
-            url[cur_len..].as_mut_ptr(),
-            enc_len,
-            &mut actual_enc,
-        );
-    }
-
-    if url.len() > 512 {
-        *out_len = 0;
-        return 0;
-    }
-
-    *out_len = url.len();
-    if out_buf.is_null() || out_cap < url.len() {
+    if out_buf.is_null() || out_cap < bytes.len() {
         return if out_buf.is_null() { 0 } else { -2 };
     }
-    std::ptr::copy_nonoverlapping(url.as_ptr(), out_buf, url.len());
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());
     0
 }
 

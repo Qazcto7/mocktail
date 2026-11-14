@@ -3965,6 +3965,121 @@ int32_t mocktail_rust_micup_session_update(
     uint64_t revision);
 void mocktail_rust_micup_session_stop(MocktailRustMicupSession* session);
 
+typedef struct MocktailRustDiscordConfig {
+  int32_t enabled;
+  int32_t show_place_name;
+  int32_t show_elapsed_time;
+  int32_t join_enabled;
+  int32_t public_servers_only;
+  const char* join_button_label_ptr;
+  size_t join_button_label_len;
+  const char* application_id_ptr;
+  size_t application_id_len;
+  const char* text_browsing_ptr;
+  size_t text_browsing_len;
+  const char* text_joining_ptr;
+  size_t text_joining_len;
+  const char* text_playing_ptr;
+  size_t text_playing_len;
+  const char* text_state_ptr;
+  size_t text_state_len;
+  const char* text_unknown_place_ptr;
+  size_t text_unknown_place_len;
+} MocktailRustDiscordConfig;
+
+typedef struct MocktailRustDiscordLaunchSlice {
+  int64_t place_id;
+  const char* game_instance_id_ptr;
+  size_t game_instance_id_len;
+  bool has_private_access;
+} MocktailRustDiscordLaunchSlice;
+
+typedef void (*MocktailDiscordMetadataInspectResultFn)(
+    void* rust_out, const char* name_ptr, size_t name_len,
+    const char* icon_url_ptr, size_t icon_url_len,
+    bool should_fetch_after_publish, bool waiting_for_name);
+
+typedef void (*MocktailDiscordMetadataInspectFn)(
+    void* ctx, int32_t phase, int64_t place_id,
+    MocktailDiscordMetadataInspectResultFn on_result, void* rust_out);
+
+typedef bool (*MocktailDiscordMetadataRefreshFn)(
+    void* ctx, int64_t place_id, int64_t* out_retry_delay_secs);
+
+typedef struct MocktailRustDiscordMetadataCallbacks {
+  void* ctx;
+  MocktailDiscordMetadataInspectFn inspect;
+  MocktailDiscordMetadataRefreshFn refresh;
+} MocktailRustDiscordMetadataCallbacks;
+
+typedef void (*MocktailDiscordActivityFieldsCallback)(
+    void* ctx, const char* details_ptr, size_t details_len,
+    const char* state_ptr, size_t state_len, bool has_start_timestamp,
+    int64_t start_timestamp, const char* large_image_ptr,
+    size_t large_image_len, const char* large_text_ptr, size_t large_text_len,
+    const char* button_label_ptr, size_t button_label_len,
+    const char* button_url_ptr, size_t button_url_len);
+
+typedef struct MocktailRustDiscordSession MocktailRustDiscordSession;
+
+int32_t mocktail_rust_discord_build_activity(
+    const MocktailRustDiscordConfig* config, int32_t phase, bool has_request,
+    const MocktailRustDiscordLaunchSlice* launch_slice,
+    const char* place_name_ptr, size_t place_name_len,
+    int64_t session_started_at, const char* place_icon_url_ptr,
+    size_t place_icon_url_len, MocktailDiscordActivityFieldsCallback on_built,
+    void* ctx);
+int32_t mocktail_rust_discord_session_start(
+    const MocktailRustDiscordConfig* config,
+    const MocktailRustDiscordMetadataCallbacks* metadata_callbacks,
+    MocktailRustDiscordSession** out_session, char* out_detail,
+    size_t detail_cap);
+int32_t mocktail_rust_discord_session_update(
+    MocktailRustDiscordSession* session, int32_t phase, bool has_request,
+    const MocktailRustDiscordLaunchSlice* launch_slice);
+void mocktail_rust_discord_session_stop(MocktailRustDiscordSession* session);
+
+typedef int32_t (*MocktailExternalLaunchDispatchFn)(
+    void* ctx, const char* canonical_json_ptr, size_t canonical_json_len,
+    int32_t* out_status_code, char* out_err, size_t err_cap);
+
+typedef struct MocktailRustExternalLaunchBroker
+    MocktailRustExternalLaunchBroker;
+
+int32_t mocktail_rust_external_launch_resolve_socket_path(
+    bool owner, const char* instance_key_ptr, size_t instance_key_len,
+    char* out_path, size_t path_cap, int32_t* out_status, char* out_err,
+    size_t err_cap);
+int32_t mocktail_rust_external_launch_broker_start(
+    const char* socket_path_ptr, size_t socket_path_len,
+    const char* instance_key_ptr, size_t instance_key_len,
+    size_t maximum_pending_launches, int32_t forwarding_timeout_ms,
+    bool has_initial, const char* initial_json_ptr, size_t initial_json_len,
+    MocktailRustExternalLaunchBroker** out_broker, int32_t* out_status,
+    char* out_err, size_t err_cap);
+int32_t mocktail_rust_external_launch_forward_to_owner(
+    const char* socket_path_ptr, size_t socket_path_len,
+    const char* instance_key_ptr, size_t instance_key_len,
+    int32_t forwarding_timeout_ms, const char* json_ptr, size_t json_len,
+    int32_t* out_status, char* out_err, size_t err_cap);
+int32_t mocktail_rust_external_launch_broker_queue_initial(
+    MocktailRustExternalLaunchBroker* broker, const char* json_ptr,
+    size_t json_len, int32_t* out_status, char* out_err, size_t err_cap);
+int32_t mocktail_rust_external_launch_broker_drain(
+    MocktailRustExternalLaunchBroker* broker, size_t maximum_requests,
+    MocktailExternalLaunchDispatchFn on_dispatch, void* dispatch_ctx,
+    int32_t* out_status, char* out_err, size_t err_cap);
+int32_t mocktail_rust_external_launch_broker_shutdown(
+    MocktailRustExternalLaunchBroker* broker, int32_t* out_status,
+    char* out_err, size_t err_cap);
+void mocktail_rust_external_launch_broker_destroy(
+    MocktailRustExternalLaunchBroker* broker);
+size_t mocktail_rust_external_launch_broker_pending_count(
+    const MocktailRustExternalLaunchBroker* broker);
+int32_t mocktail_rust_external_launch_broker_socket_path(
+    const MocktailRustExternalLaunchBroker* broker, char* out_buf,
+    size_t out_cap);
+
 #ifdef __cplusplus
 }
 #endif

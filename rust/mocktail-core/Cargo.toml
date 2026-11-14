@@ -20,6 +20,7 @@ url = "2.5"
 serde_yaml = "0.9"
 unicode-segmentation = "1.13"
 base64 = "0.23"
+libc = "0.2"
 tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = "1"
