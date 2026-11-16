@@ -156,6 +156,7 @@ set(MOCKTAIL_RUST_UPDATER_BIN "${CMAKE_BINARY_DIR}/cargo-target/release/mocktail
 set(MOCKTAIL_UPDATER_BIN "${CMAKE_BINARY_DIR}/mocktail_updater")
 set(MOCKTAIL_RUST_SOURCES
   "${MOCKTAIL_RUST_CORE_DIR}/build.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/src/android_looper.rs"
   "${MOCKTAIL_RUST_CORE_DIR}/src/apk_bundle.rs"
   "${MOCKTAIL_RUST_CORE_DIR}/src/apk_signature_rs.rs"
   "${MOCKTAIL_RUST_CORE_DIR}/src/bin/mocktail_updater.rs"
@@ -172,6 +173,7 @@ set(MOCKTAIL_RUST_SOURCES
   "${MOCKTAIL_RUST_CORE_DIR}/src/http_transport.rs"
   "${MOCKTAIL_RUST_CORE_DIR}/src/input_router.rs"
   "${MOCKTAIL_RUST_CORE_DIR}/src/lib.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/src/memory_pressure.rs"
   "${MOCKTAIL_RUST_CORE_DIR}/src/micup_rpc.rs"
   "${MOCKTAIL_RUST_CORE_DIR}/src/payload_store.rs"
   "${MOCKTAIL_RUST_CORE_DIR}/src/payload_update_preflight.rs"

@@ -237,6 +237,16 @@ TEST(RobloxDesktopAppPolicyTest, RejectsMalformedOrSymlinkedStorage) {
   EXPECT_EQ(ReadJson(outside)["Preserve"], true);
 
   EXPECT_FALSE(ApplyDesktopAppPolicy(outside, default_path, 42, "invalid"));
+
+  // Empty/truncated appStorage.json recovers gracefully like a missing file.
+  const std::filesystem::path truncated = temporary.path() / "truncated.json";
+  {
+    std::ofstream output(truncated);
+  }
+  const DesktopAppPolicyResult recovered =
+      ApplyDesktopAppPolicy(truncated, default_path, 42, "dark");
+  ASSERT_TRUE(recovered) << recovered.error;
+  EXPECT_TRUE(recovered.app_storage_created);
 }
 
 }  // namespace

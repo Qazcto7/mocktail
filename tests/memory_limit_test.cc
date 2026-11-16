@@ -118,6 +118,16 @@ TEST(MemoryLimitTest, TerminatesOnlyGuardedProcessWithExit137) {
   EXPECT_EQ(WEXITSTATUS(child_status), 137);
 }
 
+TEST(MemoryLimitTest, StartsAndStopsAdaptivePressureMonitorWithoutHardCap) {
+  MemoryLimitWatchdog watchdog;
+  std::string error;
+
+  ASSERT_TRUE(watchdog.StartAdaptiveMonitor(&error)) << error;
+  EXPECT_TRUE(watchdog.running());
+  watchdog.Stop();
+  EXPECT_FALSE(watchdog.running());
+}
+
 }  // namespace
 }  // namespace runtime
 }  // namespace mocktail

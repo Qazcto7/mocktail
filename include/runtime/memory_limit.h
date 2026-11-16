@@ -57,11 +57,16 @@ class MemoryLimitWatchdog final {
   MemoryLimitWatchdog& operator=(const MemoryLimitWatchdog&) = delete;
 
   bool Start(std::uint64_t limit_bytes, std::string* error);
+  // Starts proactive Rust memory pressure trimming without imposing a fatal
+  // process-kill cap (for runs where memory_limit_mb is disabled).
+  bool StartAdaptiveMonitor(std::string* error);
   void Stop();
 
   bool running() const { return running_; }
 
  private:
+  bool StartInternal(std::uint64_t limit_bytes, bool allow_zero_limit,
+                     std::string* error);
   static void* ThreadEntry(void* context);
   void Run();
 

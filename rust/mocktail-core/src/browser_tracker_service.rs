@@ -120,6 +120,9 @@ fn read_storage(path: &Path) -> Result<String, &'static str> {
     let Ok(raw) = std::fs::read_to_string(path) else {
         return Err("appStorage is not a valid JSON object");
     };
+    if raw.trim().is_empty() {
+        return Ok("{}".to_owned());
+    }
     if parse_json_object_str(&raw, false).is_none() {
         return Err("appStorage is not a valid JSON object");
     }

@@ -16,6 +16,7 @@ extern std::unordered_set<jstring> g_known_strings;
 
 struct PseudoArray {
   ~PseudoArray();
+  uint32_t ref_count = 1;
   std::vector<jbyte> bytes;
   std::vector<jfloat> floats;
   std::vector<jobject> objects;

@@ -4841,6 +4841,40 @@ void mocktail_rust_cpu_apply_process_tuning(void);
 
 void mocktail_cpu_dump_stats(void);
 
+typedef void (*MocktailRustMemoryTrimFn)(int32_t android_trim_level);
+
+int32_t mocktail_rust_memory_register_trim_callback(
+    MocktailRustMemoryTrimFn cb);
+
+int32_t mocktail_rust_memory_poll_and_trim(uint64_t limit_bytes);
+
+int32_t mocktail_rust_memory_consume_engine_low_memory(void);
+
+void mocktail_rust_memory_note_engine_low_memory_invoked(void);
+
+void mocktail_rust_memory_disable_engine_low_memory(void);
+
+void mocktail_rust_memory_dump_stats(void);
+
+struct MocktailRustALooper;
+typedef int (*MocktailRustALooperCallbackFn)(int fd, int events, void* data);
+
+struct MocktailRustALooper* mocktail_rust_alooper_for_thread(void);
+struct MocktailRustALooper* mocktail_rust_alooper_prepare(int opts);
+void mocktail_rust_alooper_acquire(struct MocktailRustALooper* looper);
+void mocktail_rust_alooper_release(struct MocktailRustALooper* looper);
+int mocktail_rust_alooper_add_fd(struct MocktailRustALooper* looper, int fd,
+                                 int ident, int events,
+                                 MocktailRustALooperCallbackFn callback,
+                                 void* data);
+int mocktail_rust_alooper_remove_fd(struct MocktailRustALooper* looper, int fd);
+void mocktail_rust_alooper_wake(struct MocktailRustALooper* looper);
+bool mocktail_rust_alooper_is_polling(struct MocktailRustALooper* looper);
+int mocktail_rust_alooper_poll_once(int timeout_ms, int* out_fd,
+                                    int* out_events, void** out_data);
+int mocktail_rust_alooper_poll_all(int timeout_ms, int* out_fd,
+                                   int* out_events, void** out_data);
+
 #ifdef __cplusplus
 }
 #endif

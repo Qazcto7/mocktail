@@ -248,6 +248,7 @@ struct NativeActivityLifecycleCallbacks {
 };
 
 NativeNoArgFn g_native_call_messages_from_main_thread = nullptr;
+std::atomic<NativeNoArgFn> g_native_on_low_memory{nullptr};
 NativeNoArgFn g_pending_main_thread_start_lua_app_dm = nullptr;
 jclass g_native_gl_class_for_main_thread = nullptr;
 jnivm::VM* g_vm_for_main_thread_pump = nullptr;
@@ -1010,6 +1011,27 @@ void PumpRobloxMainThreadMessagesOnce() {
 void PumpStartupOwnerThread(void* /*context*/) {
   RunPendingMainThreadTaskSchedulerForeground();
   PumpRobloxMainThreadMessagesOnce();
+}
+
+void PumpPendingLowMemoryTrimOnce(uint64_t main_loop_ticks) {
+  if (main_loop_ticks < 90 || g_main_thread_message_pump_ready.load() == 0) {
+    return;
+  }
+  NativeNoArgFn on_low_memory =
+      g_native_on_low_memory.load(std::memory_order_acquire);
+  if (on_low_memory == nullptr || g_vm_for_main_thread_pump == nullptr ||
+      g_native_gl_class_for_main_thread == nullptr) {
+    return;
+  }
+  if (mocktail_rust_memory_consume_engine_low_memory() == 0) {
+    return;
+  }
+  JNIEnv* env = AttachMainThreadJniEnv();
+  if (env == nullptr) {
+    return;
+  }
+  on_low_memory(env, g_native_gl_class_for_main_thread);
+  mocktail_rust_memory_note_engine_low_memory_invoked();
 }
 
 std::string GetEnvString(const char* name, const char* default_value) {
@@ -6181,6 +6203,12 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
             "JNIAppLifecycleNativeAdapter_setActive"));
     g_native_call_messages_from_main_thread =
         native_call_messages_from_main_thread;
+    g_native_on_low_memory.store(
+        reinterpret_cast<NativeNoArgFn>(linker::ResolveSymbol(
+            roblox_handle,
+            "Java_com_roblox_engine_jni_NativeGLInterface_"
+            "nativeAppBridgeV2OnLowMemory")),
+        std::memory_order_release);
     std::cout << "  [engine] Stage6 symbol resolve done" << std::endl;
     std::cout << "    native_init_with_params="
               << reinterpret_cast<const void*>(native_init_with_params) << '\n'
@@ -6994,6 +7022,7 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
       const uint64_t fps_after_platform_ns =
           fps_trace ? MonotonicNanos() : 0;
       PumpRobloxMainThreadMessagesOnce();
+      PumpPendingLowMemoryTrimOnce(main_loop_ticks);
       const uint64_t fps_after_engine_ns = fps_trace ? MonotonicNanos() : 0;
       if (experience_composition != nullptr &&
           experience_composition->subscribed()) {
@@ -7095,6 +7124,7 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
                 << std::flush;
       game_present_observer.Reset();
     } else if (!experience_destroyed_app) {
+      g_native_on_low_memory.store(nullptr, std::memory_order_release);
       const mocktail::runtime::RobloxSymbolLookup lifecycle_lookup(
           &ResolveRobloxCapabilitySymbol, &roblox_handle);
       const mocktail::runtime::RobloxAppLifecycleResolution

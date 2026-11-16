@@ -75,7 +75,8 @@ bool WriteAll(int descriptor, std::string_view bytes) {
 }
 
 JsonReadResult ReadJsonObject(const std::filesystem::path& path,
-                              std::string_view label) {
+                              std::string_view label,
+                              bool treat_empty_as_missing = false) {
   const int descriptor = open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
   if (descriptor < 0) {
     if (errno == ENOENT) {
@@ -111,6 +112,10 @@ JsonReadResult ReadJsonObject(const std::filesystem::path& path,
               std::string(label) + " changed while being read"};
     }
     offset += static_cast<std::size_t>(count);
+  }
+  if (treat_empty_as_missing &&
+      bytes.find_first_not_of(" \t\r\n") == std::string::npos) {
+    return {};
   }
   std::string normalized;
   const int32_t ok = mocktail_rust_json_normalize_object(
@@ -198,7 +203,7 @@ DesktopAppPolicyResult ApplyDesktopAppPolicy(
     return result;
   }
   JsonReadResult storage =
-      ReadJsonObject(app_storage_file, "Roblox appStorage");
+      ReadJsonObject(app_storage_file, "Roblox appStorage", true);
   if (storage.status == ReadStatus::kInvalid) {
     result.error = storage.error;
     return result;

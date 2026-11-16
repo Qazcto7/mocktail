@@ -679,6 +679,12 @@ int main(int argc, char* argv[]) {
     std::cout << "  [memory] RSS+swap watchdog active at "
               << runtime_config.config.performance().memory_limit_mb
               << " MiB\n";
+  } else if (command_line.options.mode == mocktail::runtime::CommandMode::kRun) {
+    std::string adaptive_error;
+    if (!memory_limit_watchdog.StartAdaptiveMonitor(&adaptive_error)) {
+      std::cerr << "  [memory] adaptive pressure monitor unavailable: "
+                << adaptive_error << '\n';
+    }
   }
   SecureEraseArguments(&cgroup_reexec_arguments);
   const bool uses_managed_payload =
@@ -1258,6 +1264,7 @@ int main(int argc, char* argv[]) {
     failure_dialog.MarkSuccessful();
     support_bundle_guard.Disarm();
     libc_shim::DumpPathStats();
+    mocktail_rust_memory_dump_stats();
     // Guest atexit handlers target workers that cannot be joined. Host
     // shutdown is already complete here, so do not re-enter guest teardown.
     std::cout.flush();

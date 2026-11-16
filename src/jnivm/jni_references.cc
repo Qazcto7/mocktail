@@ -30,10 +30,10 @@ struct LocalJniFramesOwner {
 
 thread_local LocalJniFramesOwner g_local_frames;
 std::recursive_mutex g_jni_state_mutex;
-std::unordered_map<jobject, std::unique_ptr<Object>> g_object_storage;
-std::unordered_map<jobject, uint32_t> g_jni_ref_counts;
 constexpr uint32_t kJniSegmentCapacity = 100000;
 constexpr uint32_t kJniHandleShift = 16;
+std::unique_ptr<Object> g_segment_objects[kJniSegmentCapacity];
+uint32_t g_segment_ref_counts[kJniSegmentCapacity] = {};
 std::shared_ptr<void> g_segment_owners[kJniSegmentCapacity];
 std::unordered_set<jclass> g_known_classes;
 std::unordered_map<std::string, jclass> g_class_handle_cache;
@@ -109,11 +109,18 @@ void RetainJniReference(jobject obj) {
     return;
   }
   std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
-  auto it = g_jni_ref_counts.find(obj);
-  if (it != g_jni_ref_counts.end()) {
-    ++it->second;
-  } else {
-    g_jni_ref_counts[obj] = 1;
+  if (IsSegmentHandle(obj)) {
+    const uint32_t index = JniIndexFromHandle(obj);
+    if (index > 0 && index < kJniSegmentCapacity &&
+        g_segment_types[index].load(std::memory_order_acquire) !=
+            static_cast<uint8_t>(SegmentType::kEmpty)) {
+      ++g_segment_ref_counts[index];
+      return;
+    }
+  }
+  auto arr_it = g_array_storage.find(reinterpret_cast<jarray>(obj));
+  if (arr_it != g_array_storage.end() && arr_it->second != nullptr) {
+    ++arr_it->second->ref_count;
   }
 }
 
@@ -199,8 +206,8 @@ jobject StoreObject(std::unique_ptr<Object> object) {
     return nullptr;
   }
   jobject handle = JniHandleFromIndex(static_cast<uint32_t>(index));
-  g_object_storage[handle] = std::move(object);
-  g_jni_ref_counts[handle] = 1;
+  g_segment_objects[index] = std::move(object);
+  g_segment_ref_counts[index] = 1;
   RegisterLocalRef(handle);
   return handle;
 }
@@ -252,21 +259,28 @@ void ReleaseJniReference(jobject obj) {
   if (g_shutting_down_jnivm.load(std::memory_order_acquire)) {
     return;
   }
-  auto ref_it = g_jni_ref_counts.find(obj);
-  if (ref_it != g_jni_ref_counts.end()) {
-    if (ref_it->second > 1) {
-      --ref_it->second;
+
+  const bool is_segment = IsSegmentHandle(obj);
+  const uint32_t seg_index = is_segment ? JniIndexFromHandle(obj) : 0;
+  if (is_segment && seg_index > 0 && seg_index < kJniSegmentCapacity) {
+    if (g_segment_ref_counts[seg_index] > 1) {
+      --g_segment_ref_counts[seg_index];
       return;
     }
-    g_jni_ref_counts.erase(ref_it);
+    g_segment_ref_counts[seg_index] = 0;
+  } else {
+    auto arr_it = g_array_storage.find(reinterpret_cast<jarray>(obj));
+    if (arr_it != g_array_storage.end()) {
+      if (arr_it->second != nullptr && arr_it->second->ref_count > 1) {
+        --arr_it->second->ref_count;
+        return;
+      }
+      std::unique_ptr<PseudoArray> dying_array = std::move(arr_it->second);
+      g_array_storage.erase(arr_it);
+      return;
+    }
   }
 
-  auto arr_it = g_array_storage.find(reinterpret_cast<jarray>(obj));
-  if (arr_it != g_array_storage.end()) {
-    std::unique_ptr<PseudoArray> dying_array = std::move(arr_it->second);
-    g_array_storage.erase(arr_it);
-    return;
-  }
   if (g_known_classes.find(reinterpret_cast<jclass>(obj)) !=
       g_known_classes.end()) {
     return;
@@ -277,21 +291,16 @@ void ReleaseJniReference(jobject obj) {
   g_direct_buffer_capacities.erase(obj);
   g_known_strings.erase(reinterpret_cast<jstring>(obj));
   std::unique_ptr<Object> dying_object;
-  auto obj_it = g_object_storage.find(obj);
-  if (obj_it != g_object_storage.end()) {
-    dying_object = std::move(obj_it->second);
-    g_object_storage.erase(obj_it);
-    if (IsSegmentHandle(obj)) {
-      const uint32_t index = JniIndexFromHandle(obj);
-      if (index > 0 && index < kJniSegmentCapacity &&
-          g_segment_types[index].load(std::memory_order_acquire) !=
-              static_cast<uint8_t>(SegmentType::kEmpty)) {
-        g_segment_types[index].store(static_cast<uint8_t>(SegmentType::kEmpty),
-                                     std::memory_order_release);
-        my_segment[index] = nullptr;
-        g_segment_owners[index].reset();
-        g_free_slots.push_back(static_cast<int>(index));
-      }
+  if (is_segment && seg_index > 0 && seg_index < kJniSegmentCapacity &&
+      g_segment_objects[seg_index] != nullptr) {
+    dying_object = std::move(g_segment_objects[seg_index]);
+    if (g_segment_types[seg_index].load(std::memory_order_acquire) !=
+        static_cast<uint8_t>(SegmentType::kEmpty)) {
+      g_segment_types[seg_index].store(static_cast<uint8_t>(SegmentType::kEmpty),
+                                       std::memory_order_release);
+      my_segment[seg_index] = nullptr;
+      g_segment_owners[seg_index].reset();
+      g_free_slots.push_back(static_cast<int>(seg_index));
     }
   }
 }
@@ -368,7 +377,6 @@ jbyteArray MakeByteArray(jsize len) {
   }
   jbyteArray ref = reinterpret_cast<jbyteArray>(array.get());
   g_array_storage[ref] = std::move(array);
-  g_jni_ref_counts[reinterpret_cast<jobject>(ref)] = 1;
   RegisterLocalRef(reinterpret_cast<jobject>(ref));
   return ref;
 }
@@ -381,7 +389,6 @@ jfloatArray MakeFloatArray(jsize len) {
   }
   jfloatArray ref = reinterpret_cast<jfloatArray>(array.get());
   g_array_storage[ref] = std::move(array);
-  g_jni_ref_counts[reinterpret_cast<jobject>(ref)] = 1;
   RegisterLocalRef(reinterpret_cast<jobject>(ref));
   return ref;
 }
@@ -395,7 +402,6 @@ jobjectArray MakeObjectArray(jsize len, jobject init) {
   }
   jobjectArray ref = reinterpret_cast<jobjectArray>(array.get());
   g_array_storage[ref] = std::move(array);
-  g_jni_ref_counts[reinterpret_cast<jobject>(ref)] = 1;
   RegisterLocalRef(reinterpret_cast<jobject>(ref));
   return ref;
 }

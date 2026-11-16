@@ -29,6 +29,7 @@ int AAsset_openFileDescriptor(AAsset* asset, off_t* outStart,
                               off_t* outLength);
 int AAsset_openFileDescriptor64(AAsset* asset, off_t* outStart,
                                 off_t* outLength);
+void mocktail_android_trim_asset_cache(int32_t android_trim_level);
 }
 
 namespace {
@@ -296,6 +297,42 @@ TEST_F(AssetManagerTest, CacheSeparatesRuntimeAssetRootChanges) {
                         static_cast<std::size_t>(AAsset_getLength(second))),
             "second-root");
   AAsset_close(second);
+}
+
+TEST_F(AssetManagerTest, MapsLargeAndEmptyAssetsAndTrimsLookupCacheSafely) {
+  WriteAsset("empty.bin", "");
+  std::vector<unsigned char> large_blob(64 * 1024, 0xAB);
+  large_blob[0] = 0x11;
+  large_blob[4096] = 0x22;
+  large_blob.back() = 0x99;
+  WriteBinaryAsset("large.bin", large_blob);
+
+  AAssetManager* manager = AAssetManager_fromJava(nullptr, nullptr);
+  AAsset* empty = AAssetManager_open(manager, "empty.bin", 0);
+  ASSERT_NE(empty, nullptr);
+  EXPECT_EQ(AAsset_getLength(empty), 0);
+  EXPECT_NE(AAsset_getBuffer(empty), nullptr);
+  AAsset_close(empty);
+
+  AAsset* large = AAssetManager_open(manager, "large.bin", 0);
+  ASSERT_NE(large, nullptr);
+  EXPECT_EQ(AAsset_getLength(large), static_cast<off_t>(large_blob.size()));
+  const auto* ptr = static_cast<const unsigned char*>(AAsset_getBuffer(large));
+  ASSERT_NE(ptr, nullptr);
+  EXPECT_EQ(ptr[0], 0x11);
+  EXPECT_EQ(ptr[4096], 0x22);
+  EXPECT_EQ(ptr[large_blob.size() - 1], 0x99);
+  EXPECT_EQ(AAsset_seek(large, 4096, SEEK_SET), 4096);
+  unsigned char byte = 0;
+  EXPECT_EQ(AAsset_read(large, &byte, 1), 1);
+  EXPECT_EQ(byte, 0x22);
+  AAsset_close(large);
+
+  mocktail_android_trim_asset_cache(15);
+  AAsset* reopened = AAssetManager_open(manager, "large.bin", 0);
+  ASSERT_NE(reopened, nullptr);
+  EXPECT_EQ(AAsset_getLength(reopened), static_cast<off_t>(large_blob.size()));
+  AAsset_close(reopened);
 }
 
 }  // namespace

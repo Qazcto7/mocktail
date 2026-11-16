@@ -87,9 +87,15 @@ FleasionPreparation PrepareFleasion(const RuntimeConfig& config,
   Bio ca_input(BIO_new_mem_buf(ca_pem.data(), static_cast<int>(ca_pem.size())), BIO_free);
   Certificate ca(ca_input ? PEM_read_bio_X509(ca_input.get(), nullptr, nullptr, nullptr)
                          : nullptr, X509_free);
-  if (!ca || X509_check_ca(ca.get()) <= 0 ||
-      X509_cmp_current_time(X509_get0_notBefore(ca.get())) >= 0 ||
-      X509_cmp_current_time(X509_get0_notAfter(ca.get())) <= 0) {
+#if defined(OPENSSL_VERSION_MAJOR) && OPENSSL_VERSION_MAJOR >= 4
+  const bool valid_times =
+      ca && X509_check_certificate_times(nullptr, ca.get(), nullptr) == 1;
+#else
+  const bool valid_times =
+      ca && X509_cmp_current_time(X509_get0_notBefore(ca.get())) < 0 &&
+      X509_cmp_current_time(X509_get0_notAfter(ca.get())) > 0;
+#endif
+  if (!ca || X509_check_ca(ca.get()) <= 0 || !valid_times) {
     ERR_clear_error();
     result.error = "Fleasion CA must be a currently valid PEM CA certificate";
     return result;
