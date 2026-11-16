@@ -41,7 +41,6 @@ std::unordered_map<std::string, jobject> g_singleton_objects;
 std::unordered_set<jobject> g_singleton_object_handles;
 std::unordered_map<jobject, jlong> g_direct_buffer_capacities;
 std::unordered_map<std::string, std::shared_ptr<Class>> g_fallback_classes;
-std::unordered_set<jstring> g_known_strings;
 std::unordered_map<jarray, std::unique_ptr<PseudoArray>> g_array_storage;
 static std::atomic<uint8_t> g_segment_types[kJniSegmentCapacity] = {};
 std::vector<int> g_free_slots;
@@ -289,7 +288,6 @@ void ReleaseJniReference(jobject obj) {
     return;
   }
   g_direct_buffer_capacities.erase(obj);
-  g_known_strings.erase(reinterpret_cast<jstring>(obj));
   std::unique_ptr<Object> dying_object;
   if (is_segment && seg_index > 0 && seg_index < kJniSegmentCapacity &&
       g_segment_objects[seg_index] != nullptr) {
@@ -407,7 +405,14 @@ jobjectArray MakeObjectArray(jsize len, jobject init) {
 }
 
 PseudoJavaObject::~PseudoJavaObject() {
-  for (const auto& field : object_fields) ReleaseJniReference(field.second);
+  if (fields_ != nullptr) {
+    for (const auto& entry : fields_->entries) {
+      if (entry.kind == PseudoFieldEntry::Kind::kObject &&
+          entry.value.object_val != nullptr) {
+        ReleaseJniReference(entry.value.object_val);
+      }
+    }
+  }
 }
 
 PseudoArray::~PseudoArray() {

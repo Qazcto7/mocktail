@@ -43,7 +43,15 @@ void Class::RegisterMethod(const std::string& method_name,
 
 const MethodCallback* Class::FindMethod(const std::string& method_name,
                                         const std::string& signature) const {
-  const std::string key = method_name + ":" + signature;
+  if (methods_.empty()) {
+    return nullptr;
+  }
+  thread_local std::string key;
+  key.clear();
+  key.reserve(method_name.size() + 1 + signature.size());
+  key.append(method_name);
+  key.push_back(':');
+  key.append(signature);
   auto it = methods_.find(key);
   if (it == methods_.end()) {
     return nullptr;
@@ -101,9 +109,25 @@ bool IsThreadLocalEnvValid() {
          g_thread_local_env->functions != nullptr;
 }
 
+struct MethodKey {
+  std::string_view name;
+  std::string_view signature;
+  bool operator==(const MethodKey& other) const {
+    return name == other.name && signature == other.signature;
+  }
+};
+
+struct MethodKeyHash {
+  std::size_t operator()(const MethodKey& key) const {
+    const std::size_t h1 = std::hash<std::string_view>{}(key.name);
+    const std::size_t h2 = std::hash<std::string_view>{}(key.signature);
+    return h1 ^ (h2 + 0x9e3779b9U + (h1 << 6) + (h1 >> 2));
+  }
+};
+
 std::list<std::string> g_method_name_storage;
 std::list<std::string> g_method_signature_storage;
-std::unordered_map<std::string, jmethodID> g_method_ids;
+std::unordered_map<MethodKey, jmethodID, MethodKeyHash> g_method_ids;
 bool g_android_graph_ready = false;
 bool g_fmod_initialized = true;
 constexpr jlong kLocalStorageUninitializedUser = -2;
@@ -223,22 +247,25 @@ jmethodID StoreMethodId(const char* name, const char* sig) {
     std::cerr << "[JNI] Warning: Invalid method signature rejected by Rust core: " << sig << '\n';
     return nullptr;
   }
-  std::string key = name;
-  key += ':';
-  key += sig ? sig : "";
-  auto it = g_method_ids.find(key);
+  const std::string_view name_sv(name);
+  const std::string_view sig_sv(sig != nullptr ? sig : "");
+  auto it = g_method_ids.find(MethodKey{name_sv, sig_sv});
   if (it != g_method_ids.end()) {
     return it->second;
   }
-  g_method_name_storage.emplace_back(name);
-  g_method_signature_storage.emplace_back(sig ? sig : "");
-  const char* stored_name = g_method_name_storage.back().c_str();
-  const char* stored_signature = g_method_signature_storage.back().c_str();
+  g_method_name_storage.emplace_back(name_sv);
+  g_method_signature_storage.emplace_back(sig_sv);
+  const std::string& stored_name_str = g_method_name_storage.back();
+  const std::string& stored_sig_str = g_method_signature_storage.back();
+  const char* stored_name = stored_name_str.c_str();
+  const char* stored_signature = stored_sig_str.c_str();
   g_method_descriptors.push_back(
       {stored_name, stored_signature, ResolveMethodTag(stored_name, stored_signature)});
   jmethodID method_id =
       reinterpret_cast<jmethodID>(&g_method_descriptors.back());
-  g_method_ids[key] = method_id;
+  g_method_ids.emplace(
+      MethodKey{std::string_view(stored_name_str), std::string_view(stored_sig_str)},
+      method_id);
   return method_id;
 }
 
@@ -534,15 +561,13 @@ void RecordNativeHelperCallback(jobject obj, const char* name) {
 
 bool IsJavaStringGetBytesMethod(jobject obj, jmethodID method_id) {
   if (obj == nullptr || method_id == nullptr ||
-      ObjectClassName(obj) != "java/lang/String" ||
       std::strcmp(MethodName(method_id), "getBytes") != 0 ||
       std::strcmp(MethodSignature(method_id),
                   "(Ljava/lang/String;)[B") != 0) {
     return false;
   }
-  std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
-  return g_known_strings.find(reinterpret_cast<jstring>(obj)) !=
-         g_known_strings.end();
+  PseudoJavaObject* pseudo = PseudoObjectFromRef(obj);
+  return pseudo != nullptr && pseudo->IsString();
 }
 
 std::string TrimString(const std::string& value) {

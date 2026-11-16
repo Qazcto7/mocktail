@@ -25,6 +25,7 @@
 #include <iostream>
 #include <list>
 #include <mutex>
+#include <shared_mutex>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
@@ -52,7 +53,7 @@ SymbolMap g_legacy_bionic_symbols;
 
 // Keep string memory alive for Bionic linker sonames to avoid dangling pointers.
 std::list<std::string> g_persistent_names;
-std::mutex g_registry_mutex;
+std::shared_mutex g_registry_mutex;
 AndroidLibraryLoadObserver g_library_load_observer = nullptr;
 void* g_library_load_observer_context = nullptr;
 
@@ -183,7 +184,7 @@ void RemoveHandleFromRegistry(LibraryHandle handle) {
 }  // namespace
 
 void RegisterSymbol(const std::string& name, void* addr) {
-  std::lock_guard<std::mutex> lock(g_registry_mutex);
+  std::unique_lock<std::shared_mutex> lock(g_registry_mutex);
   g_legacy_bionic_symbols[name] = addr;
 }
 
@@ -246,7 +247,7 @@ ProgramHeaderValidation ValidateBionicProgramHeaders(LibraryHandle handle) {
 
 std::uintptr_t FindLoadedAndroidLibraryBase(
     const std::string& logical_name) {
-  std::lock_guard<std::mutex> lock(g_registry_mutex);
+  std::shared_lock<std::shared_mutex> lock(g_registry_mutex);
   const auto loaded = g_symbol_table.find(logical_name);
   if (loaded == g_symbol_table.end() || loaded->second == nullptr) {
     return 0;
@@ -263,7 +264,7 @@ void RegisterSyntheticSymbol(const std::string& soname,
                              const std::string& name, void* address) {
   LibraryHandle loaded_handle = nullptr;
   {
-    std::lock_guard<std::mutex> lock(g_registry_mutex);
+    std::unique_lock<std::shared_mutex> lock(g_registry_mutex);
     g_synthetic_symbols[soname][name] = address;
     auto loaded = g_synthetic_libraries.find(soname);
     if (loaded != g_synthetic_libraries.end()) {
@@ -516,7 +517,7 @@ void RegisterBionicDynamicLoaderForLibdl() {
 }
 
 SymbolMap GetSyntheticLibrarySymbols(const std::string& soname) {
-  std::lock_guard<std::mutex> lock(g_registry_mutex);
+  std::shared_lock<std::shared_mutex> lock(g_registry_mutex);
   auto found = g_synthetic_symbols.find(soname);
   return found == g_synthetic_symbols.end() ? SymbolMap{} : found->second;
 }
@@ -526,7 +527,7 @@ LibraryHandle AddSyntheticLibrary(const std::string& soname,
   LibraryHandle existing_handle = nullptr;
   SymbolMap owned_exports;
   {
-    std::lock_guard<std::mutex> lock(g_registry_mutex);
+    std::unique_lock<std::shared_mutex> lock(g_registry_mutex);
     auto& registered_exports = g_synthetic_symbols[soname];
     for (const auto& [name, address] : exports) {
       registered_exports[name] = address;
@@ -550,7 +551,7 @@ LibraryHandle AddSyntheticLibrary(const std::string& soname,
 #ifdef MOCKTAIL_USE_BIONIC_LINKER
   const char* persistent_soname = nullptr;
   {
-    std::lock_guard<std::mutex> lock(g_registry_mutex);
+    std::unique_lock<std::shared_mutex> lock(g_registry_mutex);
     g_persistent_names.push_back(soname);
     persistent_soname = g_persistent_names.back().c_str();
   }
@@ -571,7 +572,7 @@ LibraryHandle AddSyntheticLibrary(const std::string& soname,
   }
 
   {
-    std::lock_guard<std::mutex> lock(g_registry_mutex);
+    std::unique_lock<std::shared_mutex> lock(g_registry_mutex);
     g_synthetic_libraries[soname] = handle;
     g_synthetic_handles.insert(handle);
     g_symbol_table[soname] = handle;
@@ -596,7 +597,7 @@ bool SetAndroidLibraryLoadObserver(AndroidLibraryLoadObserver observer,
   if (observer == nullptr || context == nullptr) {
     return false;
   }
-  std::lock_guard<std::mutex> lock(g_registry_mutex);
+  std::unique_lock<std::shared_mutex> lock(g_registry_mutex);
   if (g_library_load_observer != nullptr) {
     return false;
   }
@@ -606,7 +607,7 @@ bool SetAndroidLibraryLoadObserver(AndroidLibraryLoadObserver observer,
 }
 
 void ClearAndroidLibraryLoadObserver(void* context) {
-  std::lock_guard<std::mutex> lock(g_registry_mutex);
+  std::unique_lock<std::shared_mutex> lock(g_registry_mutex);
   if (context == nullptr || context != g_library_load_observer_context) {
     return;
   }
@@ -643,7 +644,7 @@ LibraryHandle OpenAndroidLibrary(const std::string& real_path,
   AndroidLibraryLoadObserver observer = nullptr;
   void* observer_context = nullptr;
   {
-    std::lock_guard<std::mutex> lock(g_registry_mutex);
+    std::unique_lock<std::shared_mutex> lock(g_registry_mutex);
     g_symbol_table[registry_name] = handle;
     observer = g_library_load_observer;
     observer_context = g_library_load_observer_context;
@@ -656,7 +657,7 @@ LibraryHandle OpenAndroidLibrary(const std::string& real_path,
   if (observer != nullptr &&
       !observer(observer_context, registry_name, image_base)) {
     {
-      std::lock_guard<std::mutex> lock(g_registry_mutex);
+      std::unique_lock<std::shared_mutex> lock(g_registry_mutex);
       RemoveHandleFromRegistry(handle);
     }
 #ifdef MOCKTAIL_USE_BIONIC_LINKER
@@ -688,7 +689,7 @@ LibraryHandle LoadLibrary(const std::string& real_path,
 
   SymbolMap legacy_exports;
   {
-    std::lock_guard<std::mutex> lock(g_registry_mutex);
+    std::unique_lock<std::shared_mutex> lock(g_registry_mutex);
     legacy_exports =
         LegacyExportsForSyntheticLibrary(real_path, g_legacy_bionic_symbols);
     auto specific = g_synthetic_symbols.find(real_path);
@@ -700,7 +701,7 @@ LibraryHandle LoadLibrary(const std::string& real_path,
   }
   LibraryHandle handle = AddSyntheticLibrary(real_path, legacy_exports);
   if (handle != nullptr && host_alias != real_path) {
-    std::lock_guard<std::mutex> lock(g_registry_mutex);
+    std::unique_lock<std::shared_mutex> lock(g_registry_mutex);
     g_symbol_table[host_alias] = handle;
   }
   return handle;
@@ -730,20 +731,21 @@ bool IsBlockedRobloxCrashReportNativeSymbol(
   return false;
 }
 
-void* ResolveSymbol(LibraryHandle handle, const std::string& symbol_name) {
-  if (!handle || IsBlockedRobloxCrashReportNativeSymbol(symbol_name)) {
+void* ResolveSymbol(LibraryHandle handle, const char* symbol_name) {
+  if (!handle || symbol_name == nullptr ||
+      IsBlockedRobloxCrashReportNativeSymbol(symbol_name)) {
     return nullptr;
   }
 
 #ifdef MOCKTAIL_USE_BIONIC_LINKER
-  void* sym = ::linker::dlsym(handle, symbol_name.c_str());
+  void* sym = ::linker::dlsym(handle, symbol_name);
   if (!sym) {
     char* err = ::linker::dlerror();
     std::cerr << "  [linker] symbol '" << symbol_name << "' not found. dlerror: "
               << (err ? err : "unknown error") << '\n';
   }
 #else
-  void* sym = ::dlsym(handle, symbol_name.c_str());
+  void* sym = ::dlsym(handle, symbol_name);
   if (!sym) {
     char* err = ::dlerror();
     std::cerr << "  [linker] symbol '" << symbol_name << "' not found. dlerror: "
@@ -754,6 +756,10 @@ void* ResolveSymbol(LibraryHandle handle, const std::string& symbol_name) {
   return sym;
 }
 
+void* ResolveSymbol(LibraryHandle handle, const std::string& symbol_name) {
+  return ResolveSymbol(handle, symbol_name.c_str());
+}
+
 void UnloadLibrary(LibraryHandle handle) {
   if (!handle) {
     return;
@@ -761,7 +767,7 @@ void UnloadLibrary(LibraryHandle handle) {
 
   bool synthetic = false;
   {
-    std::lock_guard<std::mutex> lock(g_registry_mutex);
+    std::unique_lock<std::shared_mutex> lock(g_registry_mutex);
     synthetic = g_synthetic_handles.erase(handle) != 0;
     RemoveHandleFromRegistry(handle);
   }

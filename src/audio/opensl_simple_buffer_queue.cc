@@ -60,11 +60,99 @@ struct OpenSlSimpleBufferQueueAdapter::State
         max_buffers(options.max_buffers),
         event_callback(options.event_callback),
         event_context(options.event_context),
-        ticket_pool(options.max_buffers) {
-    free_tickets.reserve(options.max_buffers);
-    for (std::size_t i = options.max_buffers; i > 0; --i) {
+        ticket_pool(options.max_buffers),
+        ticket_pool_alloc(
+            mocktail_rust_audio_slot_pool_create(options.max_buffers)),
+        callback_ring(mocktail_rust_audio_ring_create(
+            std::max<std::size_t>(options.max_buffers * 16U, 512U))) {
+    if (ticket_pool_alloc == nullptr) {
+      free_tickets.reserve(options.max_buffers);
+      for (std::size_t i = options.max_buffers; i > 0; --i) {
+        free_tickets.push_back(i - 1);
+      }
+    }
+  }
+
+  ~State() {
+    if (ticket_pool_alloc != nullptr) {
+      mocktail_rust_audio_slot_pool_destroy(ticket_pool_alloc);
+      ticket_pool_alloc = nullptr;
+    }
+    if (callback_ring != nullptr) {
+      mocktail_rust_audio_ring_destroy(callback_ring);
+      callback_ring = nullptr;
+    }
+  }
+
+  std::ptrdiff_t AcquireTicketSlotLocked() {
+    if (ticket_pool_alloc != nullptr) {
+      return mocktail_rust_audio_slot_pool_acquire(ticket_pool_alloc);
+    }
+    if (free_tickets.empty()) {
+      return -1;
+    }
+    const std::size_t slot = free_tickets.back();
+    free_tickets.pop_back();
+    return static_cast<std::ptrdiff_t>(slot);
+  }
+
+  void ReleaseTicketSlotLocked(std::size_t slot_index) {
+    if (ticket_pool_alloc != nullptr) {
+      mocktail_rust_audio_slot_pool_release(ticket_pool_alloc, slot_index);
+      return;
+    }
+    free_tickets.push_back(slot_index);
+  }
+
+  void ResetTicketPoolLocked() {
+    if (ticket_pool_alloc != nullptr) {
+      mocktail_rust_audio_slot_pool_reset(ticket_pool_alloc);
+      return;
+    }
+    free_tickets.clear();
+    for (std::size_t i = max_buffers; i > 0; --i) {
       free_tickets.push_back(i - 1);
     }
+  }
+
+  void PushCallbackJobLocked(AndroidSimpleBufferQueueCallback cb, void* ctx) {
+    if (callback_ring != nullptr && callback_jobs.empty() &&
+        mocktail_rust_audio_ring_push(
+            callback_ring, reinterpret_cast<uintptr_t>(cb),
+            reinterpret_cast<uintptr_t>(ctx))) {
+      return;
+    }
+    callback_jobs.push_back(CallbackJob{cb, ctx});
+  }
+
+  bool PopCallbackJobLocked(CallbackJob* out) {
+    if (callback_ring != nullptr) {
+      uintptr_t cb_raw = 0;
+      uintptr_t ctx_raw = 0;
+      if (mocktail_rust_audio_ring_pop(callback_ring, &cb_raw, &ctx_raw)) {
+        out->callback =
+            reinterpret_cast<AndroidSimpleBufferQueueCallback>(cb_raw);
+        out->context = reinterpret_cast<void*>(ctx_raw);
+        return true;
+      }
+    }
+    if (!callback_jobs.empty()) {
+      *out = callback_jobs.front();
+      callback_jobs.pop_front();
+      return true;
+    }
+    return false;
+  }
+
+  bool HasPendingCallbacksLocked() const {
+    return !callback_jobs.empty();
+  }
+
+  void ClearCallbacksLocked() {
+    if (callback_ring != nullptr) {
+      mocktail_rust_audio_ring_clear(callback_ring);
+    }
+    callback_jobs.clear();
   }
 
   static const AndroidSimpleBufferQueueTable kQueueTable;
@@ -99,13 +187,14 @@ struct OpenSlSimpleBufferQueueAdapter::State
         return opensl_abi::kResultPreconditionsViolated;
       }
       if (state->pending_count.load(std::memory_order_relaxed) >=
-              state->max_buffers ||
-          state->free_tickets.empty()) {
+          state->max_buffers) {
         return opensl_abi::kResultBufferInsufficient;
       }
-      const std::size_t slot_index = state->free_tickets.back();
-      state->free_tickets.pop_back();
-      ticket = &state->ticket_pool[slot_index];
+      const std::ptrdiff_t slot_index = state->AcquireTicketSlotLocked();
+      if (slot_index < 0) {
+        return opensl_abi::kResultBufferInsufficient;
+      }
+      ticket = &state->ticket_pool[static_cast<std::size_t>(slot_index)];
       id = state->next_id++;
       ticket->state = state;
       ticket->id = id;
@@ -132,7 +221,7 @@ struct OpenSlSimpleBufferQueueAdapter::State
         ticket->state.reset();
         const std::size_t slot_index =
             static_cast<std::size_t>(ticket - state->ticket_pool.data());
-        state->free_tickets.push_back(slot_index);
+        state->ReleaseTicketSlotLocked(slot_index);
         if (state->pending_count.load(std::memory_order_relaxed) > 0) {
           state->pending_count.fetch_sub(1, std::memory_order_relaxed);
         }
@@ -159,7 +248,6 @@ struct OpenSlSimpleBufferQueueAdapter::State
         return opensl_abi::kResultPreconditionsViolated;
       }
       ++state->generation;
-      state->free_tickets.clear();
       for (auto& ticket : state->ticket_pool) {
         if (ticket.in_use) {
           ticket.in_use = false;
@@ -167,9 +255,8 @@ struct OpenSlSimpleBufferQueueAdapter::State
           ++discarded_count;
         }
       }
-      for (std::size_t i = state->max_buffers; i > 0; --i) {
-        state->free_tickets.push_back(i - 1);
-      }
+      state->ResetTicketPoolLocked();
+      state->ClearCallbacksLocked();
       state->discarded_buffers += discarded_count;
       state->pending_count.store(0, std::memory_order_relaxed);
     }
@@ -232,7 +319,7 @@ struct OpenSlSimpleBufferQueueAdapter::State
         ticket->state.reset();
         const std::size_t slot_index =
             static_cast<std::size_t>(ticket - state->ticket_pool.data());
-        state->free_tickets.push_back(slot_index);
+        state->ReleaseTicketSlotLocked(slot_index);
         if (state->pending_count.load(std::memory_order_relaxed) > 0) {
           state->pending_count.fetch_sub(1, std::memory_order_relaxed);
         }
@@ -242,8 +329,8 @@ struct OpenSlSimpleBufferQueueAdapter::State
           state->consumed_bytes += size_bytes;
           consumed = true;
           if (state->callback != nullptr) {
-            state->callback_jobs.push_back(
-                CallbackJob{state->callback, state->callback_context});
+            state->PushCallbackJobLocked(state->callback,
+                                         state->callback_context);
             notify_worker = true;
           }
         } else {
@@ -273,14 +360,13 @@ struct OpenSlSimpleBufferQueueAdapter::State
       CallbackJob job;
       {
         std::unique_lock<std::mutex> lock(mutex);
-        callback_cv.wait(lock,
-                         [this] { return stopping || !callback_jobs.empty(); });
+        callback_cv.wait(lock, [this, &job] {
+          return stopping || PopCallbackJobLocked(&job);
+        });
         if (stopping) {
-          callback_jobs.clear();
+          ClearCallbacksLocked();
           return;
         }
-        job = callback_jobs.front();
-        callback_jobs.pop_front();
       }
       if (job.callback != nullptr) {
         job.callback(Interface(), job.context);
@@ -363,6 +449,8 @@ struct OpenSlSimpleBufferQueueAdapter::State
   Handle handle;
   pthread_t callback_thread{};
   std::vector<ReleaseTicket> ticket_pool;
+  MocktailRustAudioSlotPool* ticket_pool_alloc = nullptr;
+  MocktailRustAudioCallbackRing* callback_ring = nullptr;
   std::vector<std::size_t> free_tickets;
   std::atomic<std::size_t> pending_count{0};
   std::deque<CallbackJob> callback_jobs;
@@ -538,7 +626,7 @@ void OpenSlSimpleBufferQueueAdapter::Shutdown() {
     ++state->generation;
     state->callback = nullptr;
     state->callback_context = nullptr;
-    state->callback_jobs.clear();
+    state->ClearCallbacksLocked();
   }
   state->callback_cv.notify_all();
 

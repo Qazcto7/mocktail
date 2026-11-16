@@ -63,10 +63,18 @@ struct DeviceState {
                     std::uint8_t[buffer_size_bytes * buffer_count]),
         counters(std::move(runtime_counters)) {}
 
+  ~DeviceState() {
+    if (slot_pool != nullptr) {
+      mocktail_rust_audio_slot_pool_destroy(slot_pool);
+      slot_pool = nullptr;
+    }
+  }
+
   bool InitializeSlots() {
     if (slots == nullptr || storage == nullptr) {
       return false;
     }
+    slot_pool = mocktail_rust_audio_slot_pool_create(slot_count);
     for (std::size_t index = 0; index < slot_count; ++index) {
       slots[index].device = this;
       slots[index].bytes = storage.get() + index * block_bytes;
@@ -75,12 +83,28 @@ struct DeviceState {
   }
 
   BufferSlot* FindFreeSlot() {
+    if (slot_pool != nullptr) {
+      const ptrdiff_t idx = mocktail_rust_audio_slot_pool_acquire(slot_pool);
+      if (idx >= 0 && static_cast<std::size_t>(idx) < slot_count) {
+        return &slots[static_cast<std::size_t>(idx)];
+      }
+      return nullptr;
+    }
     for (std::size_t index = 0; index < slot_count; ++index) {
       if (slots[index].state == BufferSlotState::kFree) {
         return &slots[index];
       }
     }
     return nullptr;
+  }
+
+  void ReleaseSlot(BufferSlot* slot) {
+    if (slot_pool != nullptr && slot != nullptr) {
+      const auto index = static_cast<std::size_t>(slot - slots.get());
+      if (index < slot_count) {
+        mocktail_rust_audio_slot_pool_release(slot_pool, index);
+      }
+    }
   }
 
   std::mutex operation_mutex;
@@ -92,6 +116,7 @@ struct DeviceState {
   const std::size_t slot_count;
   const std::unique_ptr<BufferSlot[]> slots;
   const std::unique_ptr<std::uint8_t[]> storage;
+  MocktailRustAudioSlotPool* slot_pool = nullptr;
   const std::shared_ptr<RuntimeCounters> counters;
   std::size_t pending_buffers = 0;
   std::size_t pending_bytes = 0;
@@ -161,6 +186,7 @@ void ReleaseOwnedBuffer(void* context, const void* /*data*/,
     released_bytes = slot->size_bytes;
     slot->size_bytes = 0;
     slot->state = BufferSlotState::kFree;
+    device->ReleaseSlot(slot);
     if (device->pending_buffers > 0) {
       --device->pending_buffers;
     }
@@ -534,6 +560,7 @@ Status FmodJavaAudioRuntime::Write(
     if (device->closing || device->sink == nullptr) {
       slot->size_bytes = 0;
       slot->state = BufferSlotState::kFree;
+      device->ReleaseSlot(slot);
       device->capacity_cv.notify_all();
       return reject(Status::Error(
           StatusCode::kFailedPrecondition,
@@ -556,6 +583,7 @@ Status FmodJavaAudioRuntime::Write(
       if (slot->state == BufferSlotState::kPending) {
         slot->size_bytes = 0;
         slot->state = BufferSlotState::kFree;
+        device->ReleaseSlot(slot);
         --device->pending_buffers;
         device->pending_bytes -= size_bytes;
         rolled_back = true;

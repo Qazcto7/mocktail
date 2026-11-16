@@ -2,6 +2,7 @@
 //! and test stub runtime backing `libGLESv2.so`.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::{c_char, c_void, CStr};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::OnceLock;
@@ -95,6 +96,49 @@ const MAX_TEX_UNITS: usize = 32;
 const MAX_CACHED_UBO_SLOTS: usize = 16;
 const MAX_CACHED_SSBO_SLOTS: usize = 4;
 const MAX_CACHED_VERTEX_ATTRIBS: usize = 16;
+const MAX_CACHED_UNIFORM1I_SLOTS: usize = 64;
+const MAX_CACHED_TEX_PARAM_SLOTS: usize = 64;
+const MAX_CACHED_UNIFORM_LOC_ENTRIES: usize = 512;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VertexAttribPointerState {
+    pub buffer: GLuint,
+    pub size: GLint,
+    pub typ: GLenum,
+    pub normalized: bool,
+    pub stride: GLsizei,
+    pub pointer: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CachedUniform1i {
+    program: GLuint,
+    location: GLint,
+    value: GLint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CachedTexParam {
+    target: GLenum,
+    texture: GLuint,
+    pname: GLenum,
+    value: GLint,
+}
+
+fn is_cacheable_tex_param_i(pname: GLenum) -> bool {
+    matches!(
+        pname,
+        0x2800 // GL_TEXTURE_MAG_FILTER
+        | 0x2801 // GL_TEXTURE_MIN_FILTER
+        | 0x2802 // GL_TEXTURE_WRAP_S
+        | 0x2803 // GL_TEXTURE_WRAP_T
+        | 0x8072 // GL_TEXTURE_WRAP_R
+        | 0x813C // GL_TEXTURE_BASE_LEVEL
+        | 0x813D // GL_TEXTURE_MAX_LEVEL
+        | 0x884C // GL_TEXTURE_COMPARE_MODE
+        | 0x884D // GL_TEXTURE_COMPARE_FUNC
+    )
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexedBufferBinding {
@@ -173,8 +217,16 @@ pub struct GlStateCache {
     pub pack_alignment: Option<GLint>,
     pub attrib_known: u16,
     pub attrib_enabled: u16,
+    pub attrib_ptrs: [Option<VertexAttribPointerState>; MAX_CACHED_VERTEX_ATTRIBS],
+    pub attrib_divisors: [Option<GLuint>; MAX_CACHED_VERTEX_ATTRIBS],
     pub cap_known: u32,
     pub cap_enabled: u32,
+    uniform1i_slots: [Option<CachedUniform1i>; MAX_CACHED_UNIFORM1I_SLOTS],
+    uniform1i_cursor: usize,
+    tex_param_slots: [Option<CachedTexParam>; MAX_CACHED_TEX_PARAM_SLOTS],
+    tex_param_cursor: usize,
+    uniform_locs: HashMap<GLuint, HashMap<String, GLint>>,
+    uniform_loc_entries: usize,
 }
 
 impl Default for GlStateCache {
@@ -219,8 +271,16 @@ impl Default for GlStateCache {
             pack_alignment: None,
             attrib_known: 0,
             attrib_enabled: 0,
+            attrib_ptrs: [None; MAX_CACHED_VERTEX_ATTRIBS],
+            attrib_divisors: [None; MAX_CACHED_VERTEX_ATTRIBS],
             cap_known: 0,
             cap_enabled: 0,
+            uniform1i_slots: [None; MAX_CACHED_UNIFORM1I_SLOTS],
+            uniform1i_cursor: 0,
+            tex_param_slots: [None; MAX_CACHED_TEX_PARAM_SLOTS],
+            tex_param_cursor: 0,
+            uniform_locs: HashMap::new(),
+            uniform_loc_entries: 0,
         }
     }
 }
@@ -243,10 +303,12 @@ impl GlStateCache {
             return false;
         }
         self.vao = Some(vao);
-        // GL_ELEMENT_ARRAY_BUFFER binding and vertex attrib enable flags are container-local per VAO.
+        // GL_ELEMENT_ARRAY_BUFFER binding and vertex attrib layout are container-local per VAO.
         self.element_array_buffer = None;
         self.attrib_known = 0;
         self.attrib_enabled = 0;
+        self.attrib_ptrs = [None; MAX_CACHED_VERTEX_ATTRIBS];
+        self.attrib_divisors = [None; MAX_CACHED_VERTEX_ATTRIBS];
         true
     }
 
@@ -620,6 +682,13 @@ impl GlStateCache {
                     }
                 }
             }
+            for slot in self.tex_param_slots.iter_mut() {
+                if let Some(entry) = *slot {
+                    if entry.texture == id {
+                        *slot = None;
+                    }
+                }
+            }
         }
     }
 
@@ -640,6 +709,13 @@ impl GlStateCache {
             ] {
                 if *slot == Some(id) {
                     *slot = None;
+                }
+            }
+            for slot in self.attrib_ptrs.iter_mut() {
+                if let Some(ptr_state) = *slot {
+                    if ptr_state.buffer == id {
+                        *slot = None;
+                    }
                 }
             }
             self.invalidate_indexed_buffer(id);
@@ -681,13 +757,197 @@ impl GlStateCache {
                 self.element_array_buffer = None;
                 self.attrib_known = 0;
                 self.attrib_enabled = 0;
+                self.attrib_ptrs = [None; MAX_CACHED_VERTEX_ATTRIBS];
+                self.attrib_divisors = [None; MAX_CACHED_VERTEX_ATTRIBS];
             }
         }
     }
 
+    pub fn on_program_relinked(&mut self, id: GLuint) {
+        if id == 0 {
+            return;
+        }
+        for slot in self.uniform1i_slots.iter_mut() {
+            if let Some(entry) = *slot {
+                if entry.program == id {
+                    *slot = None;
+                }
+            }
+        }
+        if let Some(removed) = self.uniform_locs.remove(&id) {
+            self.uniform_loc_entries = self.uniform_loc_entries.saturating_sub(removed.len());
+        }
+    }
+
     pub fn on_delete_program(&mut self, id: GLuint) {
-        if id != 0 && self.program == Some(id) {
-            self.program = None;
+        if id != 0 {
+            if self.program == Some(id) {
+                self.program = None;
+            }
+            self.on_program_relinked(id);
+        }
+    }
+
+    pub fn should_set_vertex_attrib_pointer(
+        &mut self,
+        index: GLuint,
+        size: GLint,
+        typ: GLenum,
+        normalized: GLboolean,
+        stride: GLsizei,
+        pointer: usize,
+    ) -> bool {
+        let idx = index as usize;
+        let Some(buffer) = self.array_buffer else {
+            return true;
+        };
+        if self.vao.is_none() || idx >= MAX_CACHED_VERTEX_ATTRIBS {
+            return true;
+        }
+        let next = VertexAttribPointerState {
+            buffer,
+            size,
+            typ,
+            normalized: normalized != 0,
+            stride,
+            pointer,
+        };
+        if self.attrib_ptrs[idx] == Some(next) {
+            return false;
+        }
+        self.attrib_ptrs[idx] = Some(next);
+        true
+    }
+
+    pub fn should_set_vertex_attrib_divisor(&mut self, index: GLuint, divisor: GLuint) -> bool {
+        let idx = index as usize;
+        if self.vao.is_none() || idx >= MAX_CACHED_VERTEX_ATTRIBS {
+            return true;
+        }
+        if self.attrib_divisors[idx] == Some(divisor) {
+            return false;
+        }
+        self.attrib_divisors[idx] = Some(divisor);
+        true
+    }
+
+    pub fn should_set_uniform1i(&mut self, location: GLint, v0: GLint) -> bool {
+        let Some(program) = self.program else {
+            return true;
+        };
+        if program == 0 || location < 0 {
+            return true;
+        }
+        for slot in self.uniform1i_slots.iter_mut() {
+            if let Some(entry) = slot {
+                if entry.program == program && entry.location == location {
+                    if entry.value == v0 {
+                        return false;
+                    }
+                    entry.value = v0;
+                    return true;
+                }
+            }
+        }
+        self.uniform1i_slots[self.uniform1i_cursor] = Some(CachedUniform1i {
+            program,
+            location,
+            value: v0,
+        });
+        self.uniform1i_cursor = (self.uniform1i_cursor + 1) % MAX_CACHED_UNIFORM1I_SLOTS;
+        true
+    }
+
+    fn current_bound_texture(&self, target: GLenum) -> Option<GLuint> {
+        let unit = self.active_texture?;
+        if unit >= MAX_TEX_UNITS {
+            return None;
+        }
+        match target {
+            GL_TEXTURE_2D => self.tex_2d[unit],
+            GL_TEXTURE_CUBE_MAP => self.tex_cube[unit],
+            GL_TEXTURE_3D => self.tex_3d[unit],
+            GL_TEXTURE_2D_ARRAY => self.tex_array[unit],
+            _ => None,
+        }
+    }
+
+    pub fn should_set_tex_parameteri(
+        &mut self,
+        target: GLenum,
+        pname: GLenum,
+        param: GLint,
+    ) -> bool {
+        if !is_cacheable_tex_param_i(pname) {
+            return true;
+        }
+        let Some(texture) = self.current_bound_texture(target) else {
+            return true;
+        };
+        if texture == 0 {
+            return true;
+        }
+        for slot in self.tex_param_slots.iter_mut() {
+            if let Some(entry) = slot {
+                if entry.target == target && entry.texture == texture && entry.pname == pname {
+                    if entry.value == param {
+                        return false;
+                    }
+                    entry.value = param;
+                    return true;
+                }
+            }
+        }
+        self.tex_param_slots[self.tex_param_cursor] = Some(CachedTexParam {
+            target,
+            texture,
+            pname,
+            value: param,
+        });
+        self.tex_param_cursor = (self.tex_param_cursor + 1) % MAX_CACHED_TEX_PARAM_SLOTS;
+        true
+    }
+
+    pub fn invalidate_tex_param(&mut self, target: GLenum, pname: GLenum) {
+        let Some(texture) = self.current_bound_texture(target) else {
+            return;
+        };
+        if texture == 0 {
+            return;
+        }
+        for slot in self.tex_param_slots.iter_mut() {
+            if let Some(entry) = *slot {
+                if entry.target == target && entry.texture == texture && entry.pname == pname {
+                    *slot = None;
+                }
+            }
+        }
+    }
+
+    pub fn lookup_uniform_location(&self, program: GLuint, name: &str) -> Option<GLint> {
+        self.uniform_locs.get(&program)?.get(name).copied()
+    }
+
+    pub fn store_uniform_location(&mut self, program: GLuint, name: &str, loc: GLint) {
+        if program == 0 || name.len() > 256 {
+            return;
+        }
+        if self.uniform_loc_entries >= MAX_CACHED_UNIFORM_LOC_ENTRIES {
+            self.uniform_locs.clear();
+            self.uniform_loc_entries = 0;
+        }
+        let table = self.uniform_locs.entry(program).or_default();
+        if !table.contains_key(name) {
+            self.uniform_loc_entries += 1;
+        }
+        table.insert(name.to_owned(), loc);
+    }
+
+    pub fn trim_ephemeral_caches(&mut self) {
+        if !self.uniform_locs.is_empty() {
+            self.uniform_locs.clear();
+            self.uniform_locs.shrink_to_fit();
+            self.uniform_loc_entries = 0;
         }
     }
 }
@@ -715,6 +975,8 @@ impl Default for GlThreadState {
 static GLOBAL_INVALIDATE_EPOCH: AtomicU64 = AtomicU64::new(1);
 static STUB_NEXT_OBJECT: AtomicUsize = AtomicUsize::new(1);
 static DUMP_REGISTERED: AtomicBool = AtomicBool::new(false);
+static PENDING_MEMORY_TRIM: AtomicBool = AtomicBool::new(false);
+static TRIM_CALLBACK_REGISTERED: AtomicBool = AtomicBool::new(false);
 
 pub struct GlStats {
     pub state_calls: AtomicU64,
@@ -728,6 +990,7 @@ pub struct GlStats {
     pub program_live: AtomicUsize,
     pub sync_live: AtomicUsize,
     pub oom_errors: AtomicU64,
+    pub shader_trims: AtomicU64,
 }
 
 impl GlStats {
@@ -744,6 +1007,7 @@ impl GlStats {
             program_live: AtomicUsize::new(0),
             sync_live: AtomicUsize::new(0),
             oom_errors: AtomicU64::new(0),
+            shader_trims: AtomicU64::new(0),
         }
     }
 }
@@ -954,7 +1218,36 @@ fn live_sub_one(counter: &AtomicUsize, id: GLuint) {
 // ============================================================================
 
 #[no_mangle]
+pub extern "C" fn mocktail_gles_request_trim(_android_trim_level: i32) {
+    PENDING_MEMORY_TRIM.store(true, Ordering::Release);
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_gles_on_frame_present() {
+    if !PENDING_MEMORY_TRIM.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    sync_tls_cache(|c| c.trim_ephemeral_caches());
+    if host_active() {
+        if let Some(f) = host_gl!(FN, "glReleaseShaderCompiler", unsafe extern "C" fn()) {
+            unsafe { f() };
+        }
+    }
+    if stats_enabled() {
+        STATS.shader_trims.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn mocktail_gles_on_make_current(ctx: usize) {
+    if ctx != 0 && !TRIM_CALLBACK_REGISTERED.swap(true, Ordering::AcqRel) {
+        let reg = unsafe { dlsym_default(b"mocktail_rust_memory_register_trim_callback\0") };
+        if !reg.is_null() {
+            let register_fn: unsafe extern "C" fn(extern "C" fn(i32)) =
+                unsafe { std::mem::transmute(reg) };
+            unsafe { register_fn(mocktail_gles_request_trim) };
+        }
+    }
     TLS_GL.with(|cell| {
         let mut st = cell.borrow_mut();
         st.ctx_id = ctx;
@@ -992,7 +1285,7 @@ pub extern "C" fn mocktail_gles_dump_stats() {
         0.0
     };
     eprintln!(
-        "  [gles] state_calls={} elided={} ({:.1}%) live(tex={} buf={} fbo={} rbo={} vao={} prog={} shader={} sync={}) oom={}",
+        "  [gles] state_calls={} elided={} ({:.1}%) live(tex={} buf={} fbo={} rbo={} vao={} prog={} shader={} sync={}) oom={} shader_trims={}",
         calls,
         elided,
         pct,
@@ -1005,6 +1298,7 @@ pub extern "C" fn mocktail_gles_dump_stats() {
         STATS.shader_live.load(Ordering::Relaxed),
         STATS.sync_live.load(Ordering::Relaxed),
         STATS.oom_errors.load(Ordering::Relaxed),
+        STATS.shader_trims.load(Ordering::Relaxed),
     );
 }
 
@@ -1636,12 +1930,33 @@ pub extern "C" fn mocktail_rust_gl_get_uniform_location(
     name: *const GLchar,
 ) -> GLint {
     if host_active() {
+        let name_str = if !name.is_null() && program != 0 && state_cache_enabled() {
+            unsafe { CStr::from_ptr(name) }.to_str().ok()
+        } else {
+            None
+        };
+        if let Some(key) = name_str {
+            let track = stats_enabled();
+            if track {
+                STATS.state_calls.fetch_add(1, Ordering::Relaxed);
+            }
+            if let Some(cached) = sync_tls_cache(|c| c.lookup_uniform_location(program, key)) {
+                if track {
+                    STATS.state_elided.fetch_add(1, Ordering::Relaxed);
+                }
+                return cached;
+            }
+        }
         if let Some(f) = host_gl!(
             FN,
             "glGetUniformLocation",
             unsafe extern "C" fn(GLuint, *const GLchar) -> GLint
         ) {
-            return unsafe { f(program, name) };
+            let loc = unsafe { f(program, name) };
+            if let Some(key) = name_str {
+                sync_tls_cache(|c| c.store_uniform_location(program, key, loc));
+            }
+            return loc;
         }
     }
     if !stub_require() {
@@ -2349,6 +2664,9 @@ pub extern "C" fn mocktail_rust_gl_object_label(
     label: *const GLchar,
 ) {
     if host_active() {
+        if !env_flag_enabled("MOCKTAIL_GLES_OBJECT_LABELS") {
+            return;
+        }
         if let Some(f) = host_gl!(
             FN,
             "glObjectLabel",
@@ -2518,16 +2836,158 @@ gl_passthrough!(mocktail_rust_gl_framebuffer_renderbuffer, "glFramebufferRenderb
 gl_passthrough!(mocktail_rust_gl_framebuffer_texture_2d, "glFramebufferTexture2D", (target: GLenum, attachment: GLenum, textarget: GLenum, texture: GLuint, level: GLint));
 gl_passthrough!(mocktail_rust_gl_generate_mipmap, "glGenerateMipmap", (target: GLenum));
 gl_passthrough!(mocktail_rust_gl_get_program_binary, "glGetProgramBinary", (program: GLuint, buf_size: GLsizei, length: *mut GLsizei, binary_format: *mut GLenum, binary: *mut c_void));
-gl_passthrough!(mocktail_rust_gl_link_program, "glLinkProgram", (program: GLuint));
-gl_passthrough!(mocktail_rust_gl_program_binary, "glProgramBinary", (program: GLuint, binary_format: GLenum, binary: *const c_void, length: GLsizei));
+#[no_mangle]
+pub extern "C" fn mocktail_rust_gl_link_program(program: GLuint) {
+    sync_tls_cache(|c| c.on_program_relinked(program));
+    if host_active() {
+        if let Some(f) = host_gl!(FN, "glLinkProgram", unsafe extern "C" fn(GLuint)) {
+            unsafe { f(program) };
+            return;
+        }
+    }
+    let _ = stub_require();
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_gl_program_binary(
+    program: GLuint,
+    binary_format: GLenum,
+    binary: *const c_void,
+    length: GLsizei,
+) {
+    sync_tls_cache(|c| c.on_program_relinked(program));
+    if host_active() {
+        if let Some(f) = host_gl!(
+            FN,
+            "glProgramBinary",
+            unsafe extern "C" fn(GLuint, GLenum, *const c_void, GLsizei)
+        ) {
+            unsafe { f(program, binary_format, binary, length) };
+            return;
+        }
+    }
+    let _ = stub_require();
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_gl_tex_parameterf(
+    target: GLenum,
+    pname: GLenum,
+    param: GLfloat,
+) {
+    sync_tls_cache(|c| c.invalidate_tex_param(target, pname));
+    if host_active() {
+        if let Some(f) = host_gl!(
+            FN,
+            "glTexParameterf",
+            unsafe extern "C" fn(GLenum, GLenum, GLfloat)
+        ) {
+            unsafe { f(target, pname, param) };
+            return;
+        }
+    }
+    let _ = stub_require();
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_gl_tex_parameterfv(
+    target: GLenum,
+    pname: GLenum,
+    params: *const GLfloat,
+) {
+    sync_tls_cache(|c| c.invalidate_tex_param(target, pname));
+    if host_active() {
+        if let Some(f) = host_gl!(
+            FN,
+            "glTexParameterfv",
+            unsafe extern "C" fn(GLenum, GLenum, *const GLfloat)
+        ) {
+            unsafe { f(target, pname, params) };
+            return;
+        }
+    }
+    let _ = stub_require();
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_gl_tex_parameteri(
+    target: GLenum,
+    pname: GLenum,
+    param: GLint,
+) {
+    if host_active() {
+        if with_cache_check(|c| c.should_set_tex_parameteri(target, pname, param)) {
+            if let Some(f) = host_gl!(
+                FN,
+                "glTexParameteri",
+                unsafe extern "C" fn(GLenum, GLenum, GLint)
+            ) {
+                unsafe { f(target, pname, param) };
+            }
+        }
+        return;
+    }
+    let _ = stub_require();
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_gl_uniform1i(location: GLint, v0: GLint) {
+    if host_active() {
+        if with_cache_check(|c| c.should_set_uniform1i(location, v0)) {
+            if let Some(f) = host_gl!(FN, "glUniform1i", unsafe extern "C" fn(GLint, GLint)) {
+                unsafe { f(location, v0) };
+            }
+        }
+        return;
+    }
+    let _ = stub_require();
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_gl_vertex_attrib_divisor(index: GLuint, divisor: GLuint) {
+    if host_active() {
+        if with_cache_check(|c| c.should_set_vertex_attrib_divisor(index, divisor)) {
+            if let Some(f) = host_gl!(
+                FN,
+                "glVertexAttribDivisor",
+                unsafe extern "C" fn(GLuint, GLuint)
+            ) {
+                unsafe { f(index, divisor) };
+            }
+        }
+        return;
+    }
+    let _ = stub_require();
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_gl_vertex_attrib_pointer(
+    index: GLuint,
+    size: GLint,
+    typ: GLenum,
+    normalized: GLboolean,
+    stride: GLsizei,
+    pointer: *const c_void,
+) {
+    if host_active() {
+        if with_cache_check(|c| {
+            c.should_set_vertex_attrib_pointer(index, size, typ, normalized, stride, pointer as usize)
+        }) {
+            if let Some(f) = host_gl!(
+                FN,
+                "glVertexAttribPointer",
+                unsafe extern "C" fn(GLuint, GLint, GLenum, GLboolean, GLsizei, *const c_void)
+            ) {
+                unsafe { f(index, size, typ, normalized, stride, pointer) };
+            }
+        }
+        return;
+    }
+    let _ = stub_require();
+}
+
 gl_passthrough!(mocktail_rust_gl_release_shader_compiler, "glReleaseShaderCompiler", ());
 gl_passthrough!(mocktail_rust_gl_renderbuffer_storage, "glRenderbufferStorage", (target: GLenum, internalformat: GLenum, width: GLsizei, height: GLsizei));
 gl_passthrough!(mocktail_rust_gl_shader_source, "glShaderSource", (shader: GLuint, count: GLsizei, string: *const *const GLchar, length: *const GLint));
 gl_passthrough!(mocktail_rust_gl_tex_image_2d, "glTexImage2D", (target: GLenum, level: GLint, internalformat: GLint, width: GLsizei, height: GLsizei, border: GLint, format: GLenum, typ: GLenum, pixels: *const c_void));
-gl_passthrough!(mocktail_rust_gl_tex_parameterf, "glTexParameterf", (target: GLenum, pname: GLenum, param: GLfloat));
-gl_passthrough!(mocktail_rust_gl_tex_parameterfv, "glTexParameterfv", (target: GLenum, pname: GLenum, params: *const GLfloat));
-gl_passthrough!(mocktail_rust_gl_tex_parameteri, "glTexParameteri", (target: GLenum, pname: GLenum, param: GLint));
 gl_passthrough!(mocktail_rust_gl_tex_sub_image_2d, "glTexSubImage2D", (target: GLenum, level: GLint, xoffset: GLint, yoffset: GLint, width: GLsizei, height: GLsizei, format: GLenum, typ: GLenum, pixels: *const c_void));
-gl_passthrough!(mocktail_rust_gl_uniform1i, "glUniform1i", (location: GLint, v0: GLint));
-gl_passthrough!(mocktail_rust_gl_vertex_attrib_divisor, "glVertexAttribDivisor", (index: GLuint, divisor: GLuint));
-gl_passthrough!(mocktail_rust_gl_vertex_attrib_pointer, "glVertexAttribPointer", (index: GLuint, size: GLint, typ: GLenum, normalized: GLboolean, stride: GLsizei, pointer: *const c_void));

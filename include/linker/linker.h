@@ -58,6 +58,7 @@ LibraryHandle OpenAndroidLibrary(const std::string& real_path,
 LibraryHandle LoadLibrary(const std::string& real_path,
                           const std::string& host_alias);
 
+void* ResolveSymbol(LibraryHandle handle, const char* symbol_name);
 void* ResolveSymbol(LibraryHandle handle, const std::string& symbol_name);
 
 // Crashpad execution is intentionally outside Mocktail's supported JNI

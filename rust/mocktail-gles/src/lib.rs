@@ -267,4 +267,56 @@ mod tests {
         assert!(!cache.should_set_polygon_offset(1.0, 2.0));
         assert!(cache.should_set_polygon_offset(-1.0, 2.0));
     }
+
+    #[test]
+    fn state_cache_phase3_tracks_uniforms_vertex_attrib_layouts_tex_params_and_trim() {
+        let mut cache = GlStateCache::default();
+
+        // Program-scoped uniform1i deduplication and relink/delete invalidation.
+        assert!(cache.should_set_uniform1i(0, 2)); // No active program yet -> bypass
+        assert!(cache.should_use_program(17));
+        assert!(cache.should_set_uniform1i(0, 2));
+        assert!(!cache.should_set_uniform1i(0, 2));
+        assert!(cache.should_set_uniform1i(0, 3));
+        assert!(cache.should_set_uniform1i(-1, 0)); // Invalid location -> bypass
+        cache.on_program_relinked(17);
+        assert!(cache.should_set_uniform1i(0, 3));
+
+        // Uniform location cache lifecycle & trim cleanup.
+        assert_eq!(cache.lookup_uniform_location(17, "u_tex"), None);
+        cache.store_uniform_location(17, "u_tex", 4);
+        assert_eq!(cache.lookup_uniform_location(17, "u_tex"), Some(4));
+        cache.on_program_relinked(17);
+        assert_eq!(cache.lookup_uniform_location(17, "u_tex"), None);
+        cache.store_uniform_location(17, "u_tex", 4);
+        cache.trim_ephemeral_caches();
+        assert_eq!(cache.lookup_uniform_location(17, "u_tex"), None);
+
+        // VertexAttribPointer depends on bound VAO + ARRAY_BUFFER, and Divisor depends on VAO.
+        assert!(cache.should_bind_vao(1));
+        assert!(cache.should_bind_buffer(GL_ARRAY_BUFFER, 20));
+        assert!(cache.should_set_vertex_attrib_pointer(0, 3, 0x1406, 0, 12, 0));
+        assert!(!cache.should_set_vertex_attrib_pointer(0, 3, 0x1406, 0, 12, 0));
+        assert!(cache.should_bind_buffer(GL_ARRAY_BUFFER, 21));
+        assert!(cache.should_set_vertex_attrib_pointer(0, 3, 0x1406, 0, 12, 0));
+        assert!(cache.should_set_vertex_attrib_divisor(0, 1));
+        assert!(!cache.should_set_vertex_attrib_divisor(0, 1));
+        cache.on_delete_buffers(&[21]);
+        assert!(cache.should_bind_buffer(GL_ARRAY_BUFFER, 21));
+        assert!(cache.should_set_vertex_attrib_pointer(0, 3, 0x1406, 0, 12, 0));
+        assert!(cache.should_bind_vao(2));
+        assert!(cache.should_set_vertex_attrib_pointer(0, 3, 0x1406, 0, 12, 0));
+        assert!(cache.should_set_vertex_attrib_divisor(0, 1));
+
+        // Per-texture TexParameteri deduplication and invalidation.
+        assert!(cache.should_set_active_texture(GL_TEXTURE0));
+        assert!(cache.should_bind_texture(GL_TEXTURE_2D, 30));
+        assert!(cache.should_set_tex_parameteri(GL_TEXTURE_2D, 0x2801, 0x2601));
+        assert!(!cache.should_set_tex_parameteri(GL_TEXTURE_2D, 0x2801, 0x2601));
+        cache.invalidate_tex_param(GL_TEXTURE_2D, 0x2801);
+        assert!(cache.should_set_tex_parameteri(GL_TEXTURE_2D, 0x2801, 0x2601));
+        cache.on_delete_textures(&[30]);
+        assert!(cache.should_bind_texture(GL_TEXTURE_2D, 30));
+        assert!(cache.should_set_tex_parameteri(GL_TEXTURE_2D, 0x2801, 0x2601));
+    }
 }

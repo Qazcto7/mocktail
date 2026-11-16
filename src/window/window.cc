@@ -195,6 +195,7 @@ struct WindowState {
 
 static WindowState g_state;
 static std::atomic<int> g_real_swap_count{0};
+static std::atomic<bool> g_window_minimized{false};
 static std::atomic<uint64_t> g_first_present_ticks_ns{0};
 static InputPumpPacer g_input_pump_pacer;
 static PresentLifecycleGate g_present_lifecycle;
@@ -2422,6 +2423,11 @@ bool PumpEvents() {
             g_text_input_owner != nullptr && g_text_input_owner->active())) {
       fprintf(stderr, "  [input] failed to restore pointer after focus gain\n");
     }
+    if (event.type == SDL_EVENT_WINDOW_MINIMIZED) {
+      g_window_minimized.store(true, std::memory_order_release);
+    } else if (event.type == SDL_EVENT_WINDOW_RESTORED) {
+      g_window_minimized.store(false, std::memory_order_release);
+    }
 
     const bool geometry_changed = event.type == SDL_EVENT_WINDOW_MOVED ||
                                   event.type == SDL_EVENT_WINDOW_RESIZED ||
@@ -2585,12 +2591,29 @@ bool UnthrottledPresentationRequested() {
          policy == graphics::PresentModePolicy::kImmediate;
 }
 
+bool IsWindowMinimized() {
+  return g_window_minimized.load(std::memory_order_acquire);
+}
+
 uint64_t PaceInputPump() {
   if (!g_state.initialised) {
     return 0;
   }
   if (__builtin_expect(SDL_HasEvents(SDL_EVENT_FIRST, SDL_EVENT_LAST), 0)) {
     return 0;
+  }
+  if (__builtin_expect(g_window_minimized.load(std::memory_order_acquire), 0)) {
+    static const bool bg_saver_enabled = [] {
+      const char* value = std::getenv("MOCKTAIL_MINIMIZED_BACKGROUND_SAVER");
+      return value == nullptr ||
+             (value[0] != '\0' && std::strcmp(value, "0") != 0 &&
+              std::strcmp(value, "false") != 0);
+    }();
+    if (bg_saver_enabled) {
+      constexpr uint64_t kMinimizedPumpDelayNs = 16000000ULL;
+      SDL_DelayPrecise(kMinimizedPumpDelayNs);
+      return kMinimizedPumpDelayNs;
+    }
   }
   const uint64_t delay_ns =
       g_input_pump_pacer.DelayBeforeNextPump(SDL_GetTicksNS());
@@ -2601,6 +2624,7 @@ uint64_t PaceInputPump() {
 }
 
 void Shutdown() {
+  g_window_minimized.store(false, std::memory_order_release);
   g_input_pump_pacer.Reset();
   g_pre_text_input_pump_gate.Deactivate();
   g_platform_event_observer.Deactivate();

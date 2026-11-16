@@ -344,6 +344,7 @@ struct MemoryStats {
     pressure_critical: AtomicU64,
     malloc_trims: AtomicU64,
     cache_trims: AtomicU64,
+    bg_trims: AtomicU64,
     engine_low_mem_queued: AtomicU64,
     engine_low_mem_invoked: AtomicU64,
     reclaimed_bytes: AtomicU64,
@@ -361,6 +362,7 @@ impl MemoryStats {
             pressure_critical: AtomicU64::new(0),
             malloc_trims: AtomicU64::new(0),
             cache_trims: AtomicU64::new(0),
+            bg_trims: AtomicU64::new(0),
             engine_low_mem_queued: AtomicU64::new(0),
             engine_low_mem_invoked: AtomicU64::new(0),
             reclaimed_bytes: AtomicU64::new(0),
@@ -377,6 +379,7 @@ static TRIM_CALLBACKS: OnceLock<Mutex<[Option<MocktailRustMemoryTrimFn>; MAX_TRI
     OnceLock::new();
 static PENDING_ENGINE_LOW_MEMORY: AtomicBool = AtomicBool::new(false);
 static ENGINE_LOW_MEMORY_DISABLED: AtomicBool = AtomicBool::new(false);
+static WINDOW_IN_BACKGROUND: AtomicBool = AtomicBool::new(false);
 
 fn evaluator() -> &'static Mutex<PressureEvaluator> {
     EVALUATOR.get_or_init(|| Mutex::new(PressureEvaluator::default()))
@@ -561,6 +564,33 @@ pub extern "C" fn mocktail_rust_memory_disable_engine_low_memory() {
 }
 
 #[no_mangle]
+pub extern "C" fn mocktail_rust_memory_notify_background(is_background: bool) {
+    let was_bg = WINDOW_IN_BACKGROUND.swap(is_background, Ordering::AcqRel);
+    if !is_background || was_bg || !trim_enabled() {
+        return;
+    }
+    let mut rss = 0u64;
+    let mut swap = 0u64;
+    let have_rss = crate::mocktail_rust_read_self_memory(&mut rss, &mut swap) == 1;
+    invoke_registered_cache_trims(PressureLevel::Low);
+    let _ = perform_host_malloc_trim();
+    STATS.malloc_trims.fetch_add(1, Ordering::Relaxed);
+    STATS.bg_trims.fetch_add(1, Ordering::Relaxed);
+    if have_rss && stats_enabled() {
+        let mut after_rss = 0u64;
+        let mut after_swap = 0u64;
+        if crate::mocktail_rust_read_self_memory(&mut after_rss, &mut after_swap) == 1 {
+            STATS.last_rss_bytes.store(after_rss, Ordering::Relaxed);
+            if after_rss < rss {
+                STATS
+                    .reclaimed_bytes
+                    .fetch_add(rss - after_rss, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn mocktail_rust_memory_dump_stats() {
     if !stats_enabled() {
         return;
@@ -574,7 +604,7 @@ pub extern "C" fn mocktail_rust_memory_dump_stats() {
         .unwrap_or_else(|| STATS.last_avail_bytes.load(Ordering::Relaxed));
 
     eprintln!(
-        "  [memory] trim={} low_mem_cb={} peak_rss={}MiB last_rss={}MiB host_avail={}MiB polls={} pressure(mod={} low={} crit={}) malloc_trims={} cache_trims={} engine_low_mem(queued={} invoked={}) reclaimed={}KiB",
+        "  [memory] trim={} low_mem_cb={} peak_rss={}MiB last_rss={}MiB host_avail={}MiB polls={} pressure(mod={} low={} crit={}) malloc_trims={} cache_trims={} bg_trims={} engine_low_mem(queued={} invoked={}) reclaimed={}KiB",
         if trim_enabled() { "on" } else { "off" },
         if low_mem_callback_enabled() && !ENGINE_LOW_MEMORY_DISABLED.load(Ordering::Relaxed) {
             "on"
@@ -590,6 +620,7 @@ pub extern "C" fn mocktail_rust_memory_dump_stats() {
         STATS.pressure_critical.load(Ordering::Relaxed),
         STATS.malloc_trims.load(Ordering::Relaxed),
         STATS.cache_trims.load(Ordering::Relaxed),
+        STATS.bg_trims.load(Ordering::Relaxed),
         STATS.engine_low_mem_queued.load(Ordering::Relaxed),
         STATS.engine_low_mem_invoked.load(Ordering::Relaxed),
         STATS.reclaimed_bytes.load(Ordering::Relaxed) / KIB,
@@ -683,5 +714,32 @@ Cached:           500000 kB
         let d = eval.evaluate(2_000, 800 * MIB, Some(roomy_host), limit, false);
         assert_eq!(d.level, PressureLevel::Low);
         assert_ne!(d.actions & ACTION_ENGINE_LOW_MEMORY, 0);
+    }
+
+    static TEST_TRIM_CALLS: AtomicU64 = AtomicU64::new(0);
+
+    extern "C" fn test_trim_hook(level: c_int) {
+        if level >= 5 {
+            TEST_TRIM_CALLS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn background_transition_triggers_registered_cache_trim_once_per_entry() {
+        assert_eq!(mocktail_rust_memory_register_trim_callback(Some(test_trim_hook)), 0);
+        let before = TEST_TRIM_CALLS.load(Ordering::Relaxed);
+        mocktail_rust_memory_notify_background(false);
+        assert_eq!(TEST_TRIM_CALLS.load(Ordering::Relaxed), before);
+
+        mocktail_rust_memory_notify_background(true);
+        assert_eq!(TEST_TRIM_CALLS.load(Ordering::Relaxed), before + 1);
+        // Repeated background notification without leaving background does not re-trim.
+        mocktail_rust_memory_notify_background(true);
+        assert_eq!(TEST_TRIM_CALLS.load(Ordering::Relaxed), before + 1);
+
+        mocktail_rust_memory_notify_background(false);
+        mocktail_rust_memory_notify_background(true);
+        assert_eq!(TEST_TRIM_CALLS.load(Ordering::Relaxed), before + 2);
+        mocktail_rust_memory_notify_background(false);
     }
 }

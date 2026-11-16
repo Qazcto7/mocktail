@@ -1,10 +1,12 @@
 #include "mocktail/audio/sdl_audio_sink.h"
 
 #include "mocktail/audio/sdl_audio_capture.h"
+#include "mocktail/mocktail_rust.h"
 
 #include <SDL3/SDL.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <condition_variable>
 #include <limits>
@@ -118,6 +120,13 @@ struct SdlReleaseContext {
   void* callback_context = nullptr;
 };
 
+struct SdlPooledReleaseSlot {
+  AudioBufferReleaseCallback callback = nullptr;
+  void* callback_context = nullptr;
+  MocktailRustAudioSlotPool* pool = nullptr;
+  std::size_t index = 0;
+};
+
 void SDLCALL OnSdlBufferReleased(void* userdata, const void* data, int size) {
   auto* release = static_cast<SdlReleaseContext*>(userdata);
   if (release == nullptr) {
@@ -130,8 +139,31 @@ void SDLCALL OnSdlBufferReleased(void* userdata, const void* data, int size) {
   delete release;
 }
 
+void SDLCALL OnSdlPooledBufferReleased(void* userdata, const void* data,
+                                       int size) {
+  auto* slot = static_cast<SdlPooledReleaseSlot*>(userdata);
+  if (slot == nullptr) {
+    return;
+  }
+  const AudioBufferReleaseCallback callback = slot->callback;
+  void* const callback_context = slot->callback_context;
+  MocktailRustAudioSlotPool* const pool = slot->pool;
+  const std::size_t slot_index = slot->index;
+  slot->callback = nullptr;
+  slot->callback_context = nullptr;
+  if (pool != nullptr) {
+    mocktail_rust_audio_slot_pool_release(pool, slot_index);
+  }
+  if (callback != nullptr) {
+    callback(callback_context, data,
+             size > 0 ? static_cast<std::size_t>(size) : 0);
+  }
+}
+
 class SdlAudioSink final : public AudioSink {
  public:
+  static constexpr std::size_t kReleasePoolCapacity = 64;
+
   SdlAudioSink(PcmSpec spec, SDL_AudioStream* stream,
                SDL_AudioDeviceID logical_device_id,
                std::uint32_t physical_device_id,
@@ -143,9 +175,22 @@ class SdlAudioSink final : public AudioSink {
         logical_device_id_(logical_device_id),
         physical_device_id_(physical_device_id),
         data_needed_callback_(data_needed_callback),
-        data_needed_context_(data_needed_context) {}
+        data_needed_context_(data_needed_context),
+        release_pool_(
+            mocktail_rust_audio_slot_pool_create(kReleasePoolCapacity)) {
+    for (std::size_t i = 0; i < kReleasePoolCapacity; ++i) {
+      release_slots_[i].pool = release_pool_;
+      release_slots_[i].index = i;
+    }
+  }
 
-  ~SdlAudioSink() override { Shutdown(); }
+  ~SdlAudioSink() override {
+    Shutdown();
+    if (release_pool_ != nullptr) {
+      mocktail_rust_audio_slot_pool_destroy(release_pool_);
+      release_pool_ = nullptr;
+    }
+  }
 
   const PcmSpec& source_spec() const override { return source_spec_; }
 
@@ -176,18 +221,38 @@ class SdlAudioSink final : public AudioSink {
       queued = SDL_PutAudioStreamData(stream, buffer.data,
                                       static_cast<int>(buffer.size_bytes));
     } else {
-      auto* release = new (std::nothrow)
-          SdlReleaseContext{buffer.release_callback, buffer.release_context};
-      if (release == nullptr) {
-        EndCall();
-        return Status::Error(StatusCode::kUnavailable,
-                             "unable to allocate SDL buffer release context");
-      }
-      queued = SDL_PutAudioStreamDataNoCopy(stream, buffer.data,
-                                            static_cast<int>(buffer.size_bytes),
-                                            OnSdlBufferReleased, release);
-      if (!queued) {
-        delete release;
+      const ptrdiff_t pooled_index =
+          release_pool_ != nullptr
+              ? mocktail_rust_audio_slot_pool_acquire(release_pool_)
+              : -1;
+      if (pooled_index >= 0 &&
+          static_cast<std::size_t>(pooled_index) < kReleasePoolCapacity) {
+        auto& slot = release_slots_[static_cast<std::size_t>(pooled_index)];
+        slot.callback = buffer.release_callback;
+        slot.callback_context = buffer.release_context;
+        queued = SDL_PutAudioStreamDataNoCopy(
+            stream, buffer.data, static_cast<int>(buffer.size_bytes),
+            OnSdlPooledBufferReleased, &slot);
+        if (!queued) {
+          slot.callback = nullptr;
+          slot.callback_context = nullptr;
+          mocktail_rust_audio_slot_pool_release(
+              release_pool_, static_cast<std::size_t>(pooled_index));
+        }
+      } else {
+        auto* release = new (std::nothrow)
+            SdlReleaseContext{buffer.release_callback, buffer.release_context};
+        if (release == nullptr) {
+          EndCall();
+          return Status::Error(StatusCode::kUnavailable,
+                               "unable to allocate SDL buffer release context");
+        }
+        queued = SDL_PutAudioStreamDataNoCopy(
+            stream, buffer.data, static_cast<int>(buffer.size_bytes),
+            OnSdlBufferReleased, release);
+        if (!queued) {
+          delete release;
+        }
       }
     }
     const Status status = queued
@@ -436,6 +501,8 @@ class SdlAudioSink final : public AudioSink {
   std::uint32_t physical_device_id_ = 0;
   bool (*data_needed_callback_)(void*, const void**, std::size_t*) = nullptr;
   void* data_needed_context_ = nullptr;
+  MocktailRustAudioSlotPool* release_pool_ = nullptr;
+  std::array<SdlPooledReleaseSlot, kReleasePoolCapacity> release_slots_{};
   mutable bool switching_device_ = false;
   bool shutting_down_ = false;
   bool shutdown_complete_ = false;

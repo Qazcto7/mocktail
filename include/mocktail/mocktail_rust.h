@@ -4854,6 +4854,8 @@ void mocktail_rust_memory_note_engine_low_memory_invoked(void);
 
 void mocktail_rust_memory_disable_engine_low_memory(void);
 
+void mocktail_rust_memory_notify_background(bool is_background);
+
 void mocktail_rust_memory_dump_stats(void);
 
 struct MocktailRustALooper;
@@ -4874,6 +4876,33 @@ int mocktail_rust_alooper_poll_once(int timeout_ms, int* out_fd,
                                     int* out_events, void** out_data);
 int mocktail_rust_alooper_poll_all(int timeout_ms, int* out_fd,
                                    int* out_events, void** out_data);
+
+struct MocktailRustAudioSlotPool;
+struct MocktailRustAudioCallbackRing;
+
+struct MocktailRustAudioSlotPool* mocktail_rust_audio_slot_pool_create(
+    size_t capacity);
+void mocktail_rust_audio_slot_pool_destroy(
+    struct MocktailRustAudioSlotPool* pool);
+ptrdiff_t mocktail_rust_audio_slot_pool_acquire(
+    const struct MocktailRustAudioSlotPool* pool);
+bool mocktail_rust_audio_slot_pool_release(
+    const struct MocktailRustAudioSlotPool* pool, size_t index);
+void mocktail_rust_audio_slot_pool_reset(
+    const struct MocktailRustAudioSlotPool* pool);
+
+struct MocktailRustAudioCallbackRing* mocktail_rust_audio_ring_create(
+    size_t min_capacity);
+void mocktail_rust_audio_ring_destroy(
+    struct MocktailRustAudioCallbackRing* ring);
+bool mocktail_rust_audio_ring_push(
+    const struct MocktailRustAudioCallbackRing* ring, uintptr_t callback,
+    uintptr_t context);
+bool mocktail_rust_audio_ring_pop(
+    const struct MocktailRustAudioCallbackRing* ring, uintptr_t* callback_out,
+    uintptr_t* context_out);
+void mocktail_rust_audio_ring_clear(
+    const struct MocktailRustAudioCallbackRing* ring);
 
 #ifdef __cplusplus
 }

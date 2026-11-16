@@ -249,6 +249,8 @@ struct NativeActivityLifecycleCallbacks {
 
 NativeNoArgFn g_native_call_messages_from_main_thread = nullptr;
 std::atomic<NativeNoArgFn> g_native_on_low_memory{nullptr};
+std::atomic<NativeSetTaskSchedulerBackgroundModeFn>
+    g_native_set_task_scheduler_background_mode{nullptr};
 NativeNoArgFn g_pending_main_thread_start_lua_app_dm = nullptr;
 jclass g_native_gl_class_for_main_thread = nullptr;
 jnivm::VM* g_vm_for_main_thread_pump = nullptr;
@@ -816,10 +818,10 @@ JNIEnv* AttachMainThreadJniEnv() {
   return env;
 }
 
-bool InvokeTaskSchedulerForeground(
+bool InvokeTaskSchedulerBackgroundMode(
     JNIEnv* env, jclass native_gl_class,
     NativeSetTaskSchedulerBackgroundModeFn native_set_task_scheduler_background_mode,
-    const char* log_scope) {
+    bool background, const char* reason_text, const char* log_scope) {
   if (env == nullptr || native_gl_class == nullptr ||
       native_set_task_scheduler_background_mode == nullptr) {
     std::cerr << "  [" << log_scope
@@ -829,15 +831,16 @@ bool InvokeTaskSchedulerForeground(
     return false;
   }
 
-  jstring reason = env->NewStringUTF("ASMA.start");
+  jstring reason = env->NewStringUTF(reason_text ? reason_text : "");
   std::cout << "  [" << log_scope
-            << "] NativeGLInterface.setTaskSchedulerBackgroundMode(false, "
-            << "ASMA.start)\n"
+            << "] NativeGLInterface.setTaskSchedulerBackgroundMode("
+            << (background ? "true" : "false") << ", "
+            << (reason_text ? reason_text : "") << ")\n"
             << std::flush;
   if (sigsetjmp(g_update_surface_app_jmp_buf, 0) == 0) {
     g_update_surface_app_recovery_in_progress = kStage6RecoveryInline;
-    native_set_task_scheduler_background_mode(env, native_gl_class, JNI_FALSE,
-                                              reason);
+    native_set_task_scheduler_background_mode(
+        env, native_gl_class, background ? JNI_TRUE : JNI_FALSE, reason);
     env->DeleteLocalRef(reason);
     g_update_surface_app_recovery_in_progress = kStage6RecoveryInactive;
     std::cout << "  [" << log_scope
@@ -852,6 +855,15 @@ bool InvokeTaskSchedulerForeground(
             << "] setTaskSchedulerBackgroundMode recovered from crash\n"
             << std::flush;
   return false;
+}
+
+bool InvokeTaskSchedulerForeground(
+    JNIEnv* env, jclass native_gl_class,
+    NativeSetTaskSchedulerBackgroundModeFn native_set_task_scheduler_background_mode,
+    const char* log_scope) {
+  return InvokeTaskSchedulerBackgroundMode(
+      env, native_gl_class, native_set_task_scheduler_background_mode, false,
+      "ASMA.start", log_scope);
 }
 
 void RunPendingMainThreadTaskSchedulerForeground() {
@@ -1032,6 +1044,40 @@ void PumpPendingLowMemoryTrimOnce(uint64_t main_loop_ticks) {
   }
   on_low_memory(env, g_native_gl_class_for_main_thread);
   mocktail_rust_memory_note_engine_low_memory_invoked();
+}
+
+void UpdateMinimizedBackgroundStateOnce(uint64_t main_loop_ticks) {
+  static bool s_in_minimized_bg = false;
+  if (main_loop_ticks < 90 || g_main_thread_message_pump_ready.load() == 0) {
+    return;
+  }
+  if (IsDisabled("MOCKTAIL_MINIMIZED_BACKGROUND_SAVER")) {
+    return;
+  }
+  const bool minimized = mocktail::window::IsWindowMinimized();
+  if (minimized == s_in_minimized_bg) {
+    return;
+  }
+  s_in_minimized_bg = minimized;
+  mocktail_rust_memory_notify_background(minimized);
+
+  if (IsDisabled("MOCKTAIL_MINIMIZED_TASK_SCHEDULER_BG")) {
+    return;
+  }
+  NativeSetTaskSchedulerBackgroundModeFn set_bg =
+      g_native_set_task_scheduler_background_mode.load(
+          std::memory_order_acquire);
+  if (set_bg == nullptr || g_vm_for_main_thread_pump == nullptr ||
+      g_native_gl_class_for_main_thread == nullptr) {
+    return;
+  }
+  JNIEnv* env = AttachMainThreadJniEnv();
+  if (env == nullptr) {
+    return;
+  }
+  InvokeTaskSchedulerBackgroundMode(
+      env, g_native_gl_class_for_main_thread, set_bg, minimized,
+      minimized ? "mocktail.minimized" : "mocktail.restored", "main");
 }
 
 std::string GetEnvString(const char* name, const char* default_value) {
@@ -6209,6 +6255,8 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
             "Java_com_roblox_engine_jni_NativeGLInterface_"
             "nativeAppBridgeV2OnLowMemory")),
         std::memory_order_release);
+    g_native_set_task_scheduler_background_mode.store(
+        native_set_task_scheduler_background_mode, std::memory_order_release);
     std::cout << "  [engine] Stage6 symbol resolve done" << std::endl;
     std::cout << "    native_init_with_params="
               << reinterpret_cast<const void*>(native_init_with_params) << '\n'
@@ -7023,6 +7071,7 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
           fps_trace ? MonotonicNanos() : 0;
       PumpRobloxMainThreadMessagesOnce();
       PumpPendingLowMemoryTrimOnce(main_loop_ticks);
+      UpdateMinimizedBackgroundStateOnce(main_loop_ticks);
       const uint64_t fps_after_engine_ns = fps_trace ? MonotonicNanos() : 0;
       if (experience_composition != nullptr &&
           experience_composition->subscribed()) {

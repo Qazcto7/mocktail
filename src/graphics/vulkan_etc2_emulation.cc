@@ -3,6 +3,8 @@
 #include "mocktail/graphics/texture_override.h"
 #include "mocktail/mocktail_rust.h"
 
+#include <dlfcn.h>
+
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
@@ -171,6 +173,8 @@ struct Staging {
   VkBuffer buffer = VK_NULL_HANDLE;
   VkDeviceMemory memory = VK_NULL_HANDLE;
   bool host_cached = false;
+  VkDeviceSize size = 0;
+  std::uint8_t* mapped = nullptr;
 };
 
 struct PendingUpload {
@@ -209,6 +213,24 @@ struct CommandRecord {
 std::atomic<unsigned> g_image_logs{0};
 std::atomic<unsigned> g_decode_logs{0};
 std::atomic<unsigned> g_failure_logs{0};
+std::atomic<bool> g_staging_trim_requested{false};
+std::atomic<bool> g_staging_trim_registered{false};
+
+void OnVulkanStagingTrimRequested(int32_t /*android_trim_level*/) {
+  g_staging_trim_requested.store(true, std::memory_order_release);
+}
+
+void EnsureVulkanStagingTrimCallbackRegistered() {
+  if (g_staging_trim_registered.exchange(true, std::memory_order_acq_rel)) {
+    return;
+  }
+  using RegisterTrimFn = int32_t (*)(MocktailRustMemoryTrimFn);
+  auto* reg = reinterpret_cast<RegisterTrimFn>(
+      ::dlsym(RTLD_DEFAULT, "mocktail_rust_memory_register_trim_callback"));
+  if (reg != nullptr) {
+    (void)reg(OnVulkanStagingTrimRequested);
+  }
+}
 
 void LogFailure(const char* message) {
   if (ShouldLog(&g_failure_logs, 8)) {
@@ -273,10 +295,14 @@ bool CreateStaging(const HostDevice& dev, VkDeviceSize size, Staging* staging,
     dev.free_memory(dev.device, memory, nullptr);
     return false;
   }
-  *staging = {dev.device, buffer, memory,
+  *staging = {dev.device,
+              buffer,
+              memory,
               (dev.memory.memoryTypes[type].propertyFlags &
-               VK_MEMORY_PROPERTY_HOST_CACHED_BIT) != 0};
-  *mapped = static_cast<std::uint8_t*>(data);
+               VK_MEMORY_PROPERTY_HOST_CACHED_BIT) != 0,
+              size,
+              static_cast<std::uint8_t*>(data)};
+  *mapped = staging->mapped;
   return true;
 }
 
@@ -498,6 +524,112 @@ struct VulkanEtc2Emulation::State {
   TextureOverrides overrides = TextureOverrides::FromEnvironment();
   const std::uint32_t upscale =
       SmallTextureUpscale(std::getenv("MOCKTAIL_SMALL_TEXTURE_UPSCALE"));
+
+  std::mutex staging_pool_mutex;
+  std::vector<Staging> staging_pool;
+  VkDeviceSize staging_pool_bytes = 0;
+  static constexpr std::size_t kMaxPooledStagingEntries = 32;
+  static constexpr VkDeviceSize kMaxPooledStagingBytes =
+      16ULL * 1024ULL * 1024ULL;
+
+  bool AcquireStaging(const HostDevice& dev, VkDeviceSize size,
+                      Staging* staging, std::uint8_t** mapped) {
+    EnsureVulkanStagingTrimCallbackRegistered();
+    std::vector<Staging> trim_doomed;
+    bool hit = false;
+    {
+      std::lock_guard<std::mutex> lock(staging_pool_mutex);
+      if (g_staging_trim_requested.exchange(false, std::memory_order_acq_rel)) {
+        trim_doomed.swap(staging_pool);
+        staging_pool_bytes = 0;
+      } else if (!staging_pool.empty() && size > 0) {
+        const VkDeviceSize max_acceptable =
+            std::max<VkDeviceSize>(size * 2U, 256U * 1024U);
+        std::size_t best_index = staging_pool.size();
+        for (std::size_t i = 0; i < staging_pool.size(); ++i) {
+          const Staging& cand = staging_pool[i];
+          if (cand.device != dev.device || cand.mapped == nullptr ||
+              cand.size < size || cand.size > max_acceptable) {
+            continue;
+          }
+          if (best_index == staging_pool.size() ||
+              (cand.host_cached && !staging_pool[best_index].host_cached) ||
+              cand.size < staging_pool[best_index].size) {
+            best_index = i;
+          }
+        }
+        if (best_index < staging_pool.size()) {
+          *staging = staging_pool[best_index];
+          *mapped = staging->mapped;
+          staging_pool_bytes -= staging->size;
+          staging_pool[best_index] = staging_pool.back();
+          staging_pool.pop_back();
+          hit = true;
+        }
+      }
+    }
+    for (const Staging& doomed : trim_doomed) {
+      if (const auto doomed_dev = Find(doomed.device); doomed_dev != nullptr) {
+        DestroyStaging(*doomed_dev, doomed);
+      }
+    }
+    if (hit) {
+      return true;
+    }
+    return CreateStaging(dev, size, staging, mapped);
+  }
+
+  void RecycleOrDestroyStagingList(const std::vector<Staging>& items) {
+    std::vector<Staging> to_destroy;
+    const bool trim =
+        g_staging_trim_requested.exchange(false, std::memory_order_acq_rel);
+    {
+      std::lock_guard<std::mutex> lock(staging_pool_mutex);
+      if (trim) {
+        to_destroy.insert(to_destroy.end(), staging_pool.begin(),
+                          staging_pool.end());
+        staging_pool.clear();
+        staging_pool_bytes = 0;
+        to_destroy.insert(to_destroy.end(), items.begin(), items.end());
+      } else {
+        for (const Staging& staging : items) {
+          if (staging.mapped != nullptr && staging.size > 0 &&
+              staging.size <= kMaxPooledStagingBytes / 2U &&
+              staging_pool.size() < kMaxPooledStagingEntries &&
+              staging_pool_bytes + staging.size <= kMaxPooledStagingBytes) {
+            staging_pool_bytes += staging.size;
+            staging_pool.push_back(staging);
+          } else {
+            to_destroy.push_back(staging);
+          }
+        }
+      }
+    }
+    for (const Staging& staging : to_destroy) {
+      if (const auto dev = Find(staging.device); dev != nullptr) {
+        DestroyStaging(*dev, staging);
+      }
+    }
+  }
+
+  void DrainStagingPoolForDevice(const HostDevice& dev) {
+    std::vector<Staging> doomed;
+    {
+      std::lock_guard<std::mutex> lock(staging_pool_mutex);
+      for (auto it = staging_pool.begin(); it != staging_pool.end();) {
+        if (it->device == dev.device) {
+          staging_pool_bytes -= it->size;
+          doomed.push_back(*it);
+          it = staging_pool.erase(it);
+        } else {
+          ++it;
+        }
+      }
+    }
+    for (const Staging& staging : doomed) {
+      DestroyStaging(dev, staging);
+    }
+  }
 
   std::shared_ptr<const RgbaImage> FindOverride(const PendingUpload& upload,
                                                 const std::uint8_t* compressed,
@@ -753,6 +885,7 @@ void VulkanEtc2Emulation::DestroyDevice(VkDevice device) {
     for (const Staging& staging : doomed) {
       DestroyStaging(*dev, staging);
     }
+    state_->DrainStagingPoolForDevice(*dev);
   }
   std::lock_guard<std::shared_mutex> lock(state_->devices_mutex);
   state_->devices.erase(
@@ -997,7 +1130,7 @@ void VulkanEtc2Emulation::CmdCopyBufferToImage(
     LogFailure("skipped an upload with an unsupported region");
     return;
   }
-  if (!CreateStaging(*dev, total, &staging, &mapped)) {
+  if (!state_->AcquireStaging(*dev, total, &staging, &mapped)) {
     LogFailure("could not allocate a host-visible staging buffer");
     return;
   }
@@ -1037,7 +1170,7 @@ void VulkanEtc2Emulation::CmdCopyBufferToImage2(
     LogFailure("skipped an upload with an unsupported region");
     return;
   }
-  if (!CreateStaging(*dev, total, &staging, &mapped)) {
+  if (!state_->AcquireStaging(*dev, total, &staging, &mapped)) {
     LogFailure("could not allocate a host-visible staging buffer");
     return;
   }
@@ -1412,11 +1545,7 @@ void VulkanEtc2Emulation::ReleaseCommandBuffer(VkCommandBuffer command_buffer) {
     state_->has_commands.store(!state_->commands.empty(),
                                std::memory_order_release);
   }
-  for (const Staging& staging : doomed) {
-    if (const auto dev = state_->Find(staging.device); dev != nullptr) {
-      DestroyStaging(*dev, staging);
-    }
-  }
+  state_->RecycleOrDestroyStagingList(doomed);
 }
 
 }  // namespace mocktail::graphics

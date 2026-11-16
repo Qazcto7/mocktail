@@ -12,7 +12,6 @@ namespace jnivm::internal {
 // Shared by reference ownership and object/field access. Callers retaining a
 // raw PseudoJavaObject pointer must keep its JNI reference alive.
 extern std::recursive_mutex g_jni_state_mutex;
-extern std::unordered_set<jstring> g_known_strings;
 
 struct PseudoArray {
   ~PseudoArray();
@@ -22,17 +21,47 @@ struct PseudoArray {
   std::vector<jobject> objects;
 };
 
+struct PseudoFieldEntry {
+  enum class Kind : uint8_t {
+    kObject,
+    kInt,
+    kLong,
+    kFloat,
+    kBoolean,
+  };
+  const char* name = nullptr;
+  Kind kind = Kind::kObject;
+  union {
+    jobject object_val;
+    jint int_val;
+    jlong long_val;
+    jfloat float_val;
+    jboolean boolean_val;
+  } value{};
+};
+
+struct PseudoObjectFields {
+  std::vector<PseudoFieldEntry> entries;
+};
+
 struct PseudoJavaObject : Object {
-  explicit PseudoJavaObject(std::shared_ptr<Class> cls)
-      : Object(std::move(cls)) {}
+  explicit PseudoJavaObject(std::shared_ptr<Class> cls, bool is_string = false)
+      : Object(std::move(cls)), is_string_(is_string) {}
 
   ~PseudoJavaObject() override;
 
-  std::unordered_map<std::string, jobject> object_fields;
-  std::unordered_map<std::string, jint> int_fields;
-  std::unordered_map<std::string, jlong> long_fields;
-  std::unordered_map<std::string, jfloat> float_fields;
-  std::unordered_map<std::string, jboolean> boolean_fields;
+  bool IsString() const { return is_string_; }
+  const PseudoObjectFields* Fields() const { return fields_.get(); }
+  PseudoObjectFields* MutableFields() {
+    if (!fields_) {
+      fields_ = std::make_unique<PseudoObjectFields>();
+    }
+    return fields_.get();
+  }
+
+ private:
+  std::unique_ptr<PseudoObjectFields> fields_;
+  bool is_string_ = false;
 };
 
 bool TraceEnabled();

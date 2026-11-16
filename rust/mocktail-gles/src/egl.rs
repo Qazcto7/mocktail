@@ -3,6 +3,7 @@
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::ffi::{c_char, c_void, CStr, CString};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use crate::dl::{
@@ -230,6 +231,26 @@ fn notify_gles_context_destroy(ctx: EGLContext) {
     if !sym.is_null() {
         let cb: FnGlesNotifyContextDestroy = unsafe { std::mem::transmute(sym) };
         unsafe { cb(ctx as usize) };
+    }
+}
+
+fn notify_gles_frame_present() {
+    static FRAME_PRESENT_FN: AtomicUsize = AtomicUsize::new(0);
+    let mut ptr = FRAME_PRESENT_FN.load(Ordering::Relaxed);
+    if ptr == 0 {
+        let gles = adapter_gles_handle();
+        if !gles.is_null() {
+            let sym =
+                unsafe { dlsym_cstr(gles, b"mocktail_gles_on_frame_present\0".as_ptr().cast()) };
+            if !sym.is_null() {
+                ptr = sym as usize;
+                FRAME_PRESENT_FN.store(ptr, Ordering::Relaxed);
+            }
+        }
+    }
+    if ptr != 0 {
+        let cb: unsafe extern "C" fn() = unsafe { std::mem::transmute(ptr) };
+        unsafe { cb() };
     }
 }
 
@@ -1125,6 +1146,9 @@ pub extern "C" fn mocktail_rust_egl_swap_buffers(
         }
         let swap: FnWindowSwap = unsafe { std::mem::transmute(sym) };
         let ok = unsafe { swap() };
+        if ok {
+            notify_gles_frame_present();
+        }
         set_error(if ok { EGL_SUCCESS } else { EGL_BAD_ACCESS });
         return if ok { EGL_TRUE } else { EGL_FALSE };
     }

@@ -120,7 +120,7 @@ bool IsNonZeroAscii(const char* input, std::size_t* length) {
 
 struct PseudoStringObject : PseudoJavaObject {
   PseudoStringObject(std::shared_ptr<Class> cls, const char* utf)
-      : PseudoJavaObject(std::move(cls)) {
+      : PseudoJavaObject(std::move(cls), /*is_string=*/true) {
     std::size_t ascii_len = 0;
     if (IsNonZeroAscii(utf, &ascii_len)) {
       if (utf != nullptr && ascii_len != 0) {
@@ -136,7 +136,7 @@ struct PseudoStringObject : PseudoJavaObject {
 
   PseudoStringObject(std::shared_ptr<Class> cls, const jchar* utf16,
                      jsize length)
-      : PseudoJavaObject(std::move(cls)),
+      : PseudoJavaObject(std::move(cls), /*is_string=*/true),
         chars_(MakeUtf16Vector(utf16, length)),
         has_utf16_(true) {}
 
@@ -203,25 +203,35 @@ static inline bool IsRawStringPointer(jstring str) {
   return true;
 }
 
+std::shared_ptr<Class> CachedStringClassLocked() {
+  static auto* cached =
+      new std::shared_ptr<Class>(FallbackClassForName("java/lang/String"));
+  return *cached;
+}
+
+PseudoStringObject* PseudoStringFromRef(jstring str) {
+  PseudoJavaObject* obj = PseudoObjectFromRef(reinterpret_cast<jobject>(str));
+  if (__builtin_expect(obj != nullptr && obj->IsString(), 1)) {
+    return static_cast<PseudoStringObject*>(obj);
+  }
+  return nullptr;
+}
+
 jstring MakeString(const char* utf) {
   std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
-  auto cls = FallbackClassForName("java/lang/String");
+  auto cls = CachedStringClassLocked();
   auto object = std::make_unique<PseudoStringObject>(std::move(cls), utf);
   jobject handle = StoreObject(std::move(object));
-  jstring str = reinterpret_cast<jstring>(handle);
-  g_known_strings.insert(str);
-  return str;
+  return reinterpret_cast<jstring>(handle);
 }
 
 jstring MakeUtf16String(const jchar* utf16, jsize length) {
   std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
-  auto cls = FallbackClassForName("java/lang/String");
+  auto cls = CachedStringClassLocked();
   auto object =
       std::make_unique<PseudoStringObject>(std::move(cls), utf16, length);
   jobject handle = StoreObject(std::move(object));
-  jstring str = reinterpret_cast<jstring>(handle);
-  g_known_strings.insert(str);
-  return str;
+  return reinterpret_cast<jstring>(handle);
 }
 
 std::string StringFromJString(jstring str) {
@@ -229,12 +239,9 @@ std::string StringFromJString(jstring str) {
     return {};
   }
   std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
-  if (g_known_strings.find(str) != g_known_strings.end()) {
-    auto* string_object = dynamic_cast<PseudoStringObject*>(
-        PseudoObjectFromRef(reinterpret_cast<jobject>(str)));
-    if (string_object != nullptr) {
-      return string_object->Utf8String();
-    }
+  if (PseudoStringObject* string_object = PseudoStringFromRef(str);
+      string_object != nullptr) {
+    return string_object->Utf8String();
   }
   if (!IsRawStringPointer(str)) {
     return {};
@@ -285,8 +292,7 @@ jbyteArray JavaStringGetUtf8Bytes(jobject obj, jstring charset_name) {
   std::string bytes;
   {
     std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
-    auto* string_object =
-        dynamic_cast<PseudoStringObject*>(PseudoObjectFromRef(obj));
+    auto* string_object = PseudoStringFromRef(reinterpret_cast<jstring>(obj));
     if (string_object == nullptr) {
       return nullptr;
     }
@@ -313,12 +319,11 @@ const char* StringChars(jstring str) {
   if (!str) {
     return nullptr;
   }
-  if (g_known_strings.find(str) != g_known_strings.end()) {
-    auto* string_object = dynamic_cast<PseudoStringObject*>(
-        PseudoObjectFromRef(reinterpret_cast<jobject>(str)));
-    return string_object != nullptr
-               ? string_object->ModifiedUtf8String().c_str()
-               : "";
+  if (auto* string_object = PseudoStringFromRef(str); string_object != nullptr) {
+    return string_object->ModifiedUtf8String().c_str();
+  }
+  if (IsSegmentHandle(reinterpret_cast<jobject>(str))) {
+    return "";
   }
   if (!IsRawStringPointer(str)) {
     return "";
@@ -331,16 +336,12 @@ const jchar* StringUtf16Chars(jstring str) {
   if (!str) {
     return nullptr;
   }
-  if (g_known_strings.find(str) != g_known_strings.end()) {
-    auto* string_object = dynamic_cast<PseudoStringObject*>(
-        PseudoObjectFromRef(reinterpret_cast<jobject>(str)));
-    if (string_object == nullptr) {
-      return kEmptyUtf16;
-    }
+  if (auto* string_object = PseudoStringFromRef(str); string_object != nullptr) {
     const auto& utf16 = string_object->Utf16Chars();
     return !utf16.empty() ? utf16.data() : kEmptyUtf16;
   }
-  if (!IsRawStringPointer(str)) {
+  if (IsSegmentHandle(reinterpret_cast<jobject>(str)) ||
+      !IsRawStringPointer(str)) {
     return kEmptyUtf16;
   }
   return reinterpret_cast<const jchar*>(str);
@@ -348,12 +349,11 @@ const jchar* StringUtf16Chars(jstring str) {
 
 jsize StringUtf16Length(jstring str) {
   std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
-  if (g_known_strings.find(str) != g_known_strings.end()) {
-    auto* string_object = dynamic_cast<PseudoStringObject*>(
-        PseudoObjectFromRef(reinterpret_cast<jobject>(str)));
-    return string_object != nullptr ? string_object->Utf16Length() : 0;
+  if (auto* string_object = PseudoStringFromRef(str); string_object != nullptr) {
+    return string_object->Utf16Length();
   }
-  if (!IsRawStringPointer(str)) {
+  if (IsSegmentHandle(reinterpret_cast<jobject>(str)) ||
+      !IsRawStringPointer(str)) {
     return 0;
   }
   const char* bytes = reinterpret_cast<const char*>(str);
@@ -362,14 +362,11 @@ jsize StringUtf16Length(jstring str) {
 
 jsize StringModifiedUtf8Length(jstring str) {
   std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
-  if (g_known_strings.find(str) != g_known_strings.end()) {
-    auto* string_object = dynamic_cast<PseudoStringObject*>(
-        PseudoObjectFromRef(reinterpret_cast<jobject>(str)));
-    return string_object != nullptr
-               ? static_cast<jsize>(string_object->ModifiedUtf8String().size())
-               : 0;
+  if (auto* string_object = PseudoStringFromRef(str); string_object != nullptr) {
+    return static_cast<jsize>(string_object->ModifiedUtf8String().size());
   }
-  if (!IsRawStringPointer(str)) {
+  if (IsSegmentHandle(reinterpret_cast<jobject>(str)) ||
+      !IsRawStringPointer(str)) {
     return 0;
   }
   const char* bytes = reinterpret_cast<const char*>(str);
@@ -381,8 +378,7 @@ void CopyStringRegion(jstring str, jsize start, jsize length, jchar* output) {
     return;
   }
   std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
-  auto* string_object = dynamic_cast<PseudoStringObject*>(
-      PseudoObjectFromRef(reinterpret_cast<jobject>(str)));
+  auto* string_object = PseudoStringFromRef(str);
   if (string_object == nullptr) {
     return;
   }
@@ -402,8 +398,7 @@ void CopyStringModifiedUtf8Region(jstring str, jsize start, jsize length,
     return;
   }
   std::lock_guard<std::recursive_mutex> lock(g_jni_state_mutex);
-  auto* string_object = dynamic_cast<PseudoStringObject*>(
-      PseudoObjectFromRef(reinterpret_cast<jobject>(str)));
+  auto* string_object = PseudoStringFromRef(str);
   if (string_object == nullptr) {
     return;
   }

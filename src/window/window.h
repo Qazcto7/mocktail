@@ -168,6 +168,8 @@ void Shutdown();
 
 bool IsInitialised();
 
+bool IsWindowMinimized();
+
 int GetWidth();
 int GetHeight();
 
