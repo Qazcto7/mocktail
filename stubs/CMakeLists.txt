@@ -94,15 +94,55 @@ configure_stub(stub_mediandk "libmediandk.so")
 add_library(stub_openmax SHARED libopensl_stub.cc)
 configure_stub(stub_openmax "libOpenMAXAL.so")
 
+find_package(Threads REQUIRED)
+find_program(MOCKTAIL_GLES_CARGO cargo REQUIRED)
+set(MOCKTAIL_RUST_GLES_DIR "${CMAKE_SOURCE_DIR}/rust/mocktail-gles")
+set(MOCKTAIL_RUST_GLES_STATIC
+  "${CMAKE_BINARY_DIR}/cargo-gles-target/release/libmocktail_gles.a")
+set(MOCKTAIL_RUST_GLES_SOURCES
+  "${MOCKTAIL_RUST_GLES_DIR}/Cargo.toml"
+  "${MOCKTAIL_RUST_GLES_DIR}/src/dl.rs"
+  "${MOCKTAIL_RUST_GLES_DIR}/src/egl.rs"
+  "${MOCKTAIL_RUST_GLES_DIR}/src/gles.rs"
+  "${MOCKTAIL_RUST_GLES_DIR}/src/lib.rs"
+)
+add_custom_command(
+  OUTPUT "${MOCKTAIL_RUST_GLES_STATIC}"
+  COMMAND "${MOCKTAIL_GLES_CARGO}" build --release --offline --lib
+    --manifest-path "${MOCKTAIL_RUST_GLES_DIR}/Cargo.toml"
+    --target-dir "${CMAKE_BINARY_DIR}/cargo-gles-target"
+  DEPENDS ${MOCKTAIL_RUST_GLES_SOURCES}
+  WORKING_DIRECTORY "${MOCKTAIL_RUST_GLES_DIR}"
+  COMMENT "Building Rust GLES/EGL adapter library"
+  VERBATIM
+)
+add_custom_target(mocktail_gles_rust_build ALL
+  DEPENDS "${MOCKTAIL_RUST_GLES_STATIC}"
+)
+
 # Fake EGL handles require MOCKTAIL_ENABLE_TEST_GRAPHICS_STUBS=1.
 add_library(stub_egl SHARED libegl_stub.cc)
 configure_stub(stub_egl "libEGL.so")
-target_link_libraries(stub_egl PRIVATE dl)
+add_dependencies(stub_egl mocktail_gles_rust_build)
+target_link_libraries(stub_egl PRIVATE
+  "${MOCKTAIL_RUST_GLES_STATIC}" dl Threads::Threads m
+)
+target_link_options(stub_egl PRIVATE
+  -Wl,--gc-sections
+  "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/egl.ver"
+)
 
-# Production uses ANGLE or the system GLES library.
+# Production delegates to system GLES via the Rust interceptor layer.
 add_library(stub_glesv2 SHARED libgles_stub.cc)
 configure_stub(stub_glesv2 "libGLESv2.so")
-target_link_libraries(stub_glesv2 PRIVATE dl)
+add_dependencies(stub_glesv2 mocktail_gles_rust_build)
+target_link_libraries(stub_glesv2 PRIVATE
+  "${MOCKTAIL_RUST_GLES_STATIC}" dl Threads::Threads m
+)
+target_link_options(stub_glesv2 PRIVATE
+  -Wl,--gc-sections
+  "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/glesv2.ver"
+)
 
 # The host Vulkan loader owns device commands; this target adapts Android WSI.
 add_library(stub_vulkan SHARED

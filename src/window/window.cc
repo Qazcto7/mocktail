@@ -216,6 +216,17 @@ static std::mutex g_gles_text_overlay_mutex;
 static bool g_auto_angle_retry_attempted = false;
 static std::filesystem::path g_window_state_path;
 
+template <typename Fn>
+Fn LookupGlesBridgeSymbol(const char* symbol) {
+  if (void* sym = dlsym(RTLD_DEFAULT, symbol)) {
+    return reinterpret_cast<Fn>(sym);
+  }
+  if (void* gles = dlopen("libGLESv2.so", RTLD_LAZY | RTLD_NOLOAD)) {
+    return reinterpret_cast<Fn>(dlsym(gles, symbol));
+  }
+  return nullptr;
+}
+
 WindowStartupPresentationPlan RestoredWindowPresentationPlan() {
   if (!g_state.state_persistence_active) {
     return {};
@@ -1547,7 +1558,9 @@ bool MakeCurrentOnThread() {
             SDL_GetError());
     return false;
   }
-  fprintf(stderr, "  [window] EGL context now current on engine thread\n");
+  if (WindowTraceEnabled()) {
+    fprintf(stderr, "  [window] EGL context now current on engine thread\n");
+  }
   return true;
 }
 
@@ -1831,8 +1844,14 @@ bool SwapBuffers() {
     }
     text_overlay = g_gles_text_overlay.get();
   }
-  if (text_overlay != nullptr) {
-    (void)text_overlay->Draw(g_state.sdl_window);
+  if (text_overlay != nullptr && text_overlay->Draw(g_state.sdl_window)) {
+    using InvalidateCacheFn = void (*)();
+    static InvalidateCacheFn g_invalidate_cache =
+        LookupGlesBridgeSymbol<InvalidateCacheFn>(
+            "mocktail_gles_invalidate_state_cache");
+    if (g_invalidate_cache != nullptr) {
+      g_invalidate_cache();
+    }
   }
 
   if (!SDL_GL_SwapWindow(g_state.sdl_window)) {
@@ -2622,6 +2641,11 @@ void Shutdown() {
     g_gles_text_overlay.reset();
   }
   if (!g_state.direct_vulkan && g_state.egl_context != nullptr) {
+    using DumpStatsFn = void (*)();
+    if (auto dump_stats =
+            LookupGlesBridgeSymbol<DumpStatsFn>("mocktail_gles_dump_stats")) {
+      dump_stats();
+    }
     SDL_GL_MakeCurrent(g_state.sdl_window, nullptr);
   }
   if (!g_state.direct_vulkan && g_state.egl_context) {

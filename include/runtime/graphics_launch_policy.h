@@ -51,6 +51,13 @@ std::string SelectVulkanIcdManifest(
     const std::vector<std::filesystem::path>& directories,
     std::string_view vendor);
 
+// Select an EGL GLVND vendor manifest (e.g. "mesa" or "nvidia") from the
+// candidate directories so dual-GPU hosts do not accidentally initialize
+// discrete/unused EGL ICDs before Mesa.
+std::string SelectEglVendorManifest(
+    const std::vector<std::filesystem::path>& directories,
+    std::string_view vendor);
+
 // Publishes the resolved graphics backend before the managed payload updater
 // starts. OpenGL is a strict system EGL/GLES path; it never silently retries
 // through ANGLE/Vulkan or accepts a window without a real graphics context.

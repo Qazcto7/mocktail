@@ -1,0 +1,6 @@
+{
+  global:
+    egl*;
+  local:
+    *;
+};

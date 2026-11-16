@@ -73,8 +73,21 @@ int main(int argc, char** argv) {
   std::cout << "canary adapter loaded\n";
 }
 EOF
+RUST_GLES_LIB=""
+if [[ -f "${ROOT}/build/cargo-gles-target/release/libmocktail_gles.a" ]]; then
+  RUST_GLES_LIB="${ROOT}/build/cargo-gles-target/release/libmocktail_gles.a"
+elif [[ -f "${ROOT}/rust/mocktail-gles/target/release/libmocktail_gles.a" ]]; then
+  RUST_GLES_LIB="${ROOT}/rust/mocktail-gles/target/release/libmocktail_gles.a"
+elif command -v cargo >/dev/null 2>&1; then
+  cargo build --release --offline --lib \
+    --manifest-path "${ROOT}/rust/mocktail-gles/Cargo.toml" \
+    --target-dir "${TEMP_DIR}/cargo-gles"
+  RUST_GLES_LIB="${TEMP_DIR}/cargo-gles/release/libmocktail_gles.a"
+fi
 "${CXX}" -std=c++17 -shared -fPIC "${ROOT}/stubs/libegl_stub.cc" \
-  -ldl -o "${TEMP_DIR}/fixtures/libEGL.so"
+  ${RUST_GLES_LIB:+-x none "${RUST_GLES_LIB}"} \
+  -Wl,--version-script="${ROOT}/stubs/egl.ver" \
+  -ldl -pthread -lm -o "${TEMP_DIR}/fixtures/libEGL.so"
 
 # The packaging contract uses a recording quick-sharun, without changing
 # the host /usr or downloading toolchain dependencies during a unit test.

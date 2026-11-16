@@ -26,6 +26,12 @@ constexpr const char* kIcdDirectories[] = {
     "/usr/local/share/vulkan/icd.d",
 };
 
+constexpr const char* kEglVendorDirectories[] = {
+    "/etc/glvnd/egl_vendor.d",
+    "/usr/share/glvnd/egl_vendor.d",
+    "/usr/local/share/glvnd/egl_vendor.d",
+};
+
 #if defined(__aarch64__)
 constexpr int32_t kTargetIsAarch64 = 1;
 #else
@@ -65,6 +71,12 @@ bool SetDefault(const char* name, const std::string& value,
 
 bool IsStrictOpenGlName(const std::string& name) {
   return name == "opengl" || name == "gles";
+}
+
+bool EnvIsOn(const char* name) {
+  const char* value = std::getenv(name);
+  return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0 &&
+         std::strcmp(value, "off") != 0 && std::strcmp(value, "igpu") != 0;
 }
 
 bool EnvIsOff(const char* name) {
@@ -229,6 +241,44 @@ bool RadvIcdSelected() {
   return mocktail_rust_graphics_is_radv_icd_list(manifests) != 0;
 }
 
+std::string FindEglVendorFile(const char* vendor_needle) {
+  if (vendor_needle == nullptr || vendor_needle[0] == '\0') {
+    return {};
+  }
+  std::vector<std::filesystem::path> directories;
+  for (const char* directory : kEglVendorDirectories) {
+    directories.emplace_back(directory);
+  }
+  return SelectEglVendorManifest(directories, vendor_needle);
+}
+
+bool ApplyEglVendorPolicy(const HostGpuCapabilities& gpus, std::string* error) {
+  const char* existing = std::getenv("__EGL_VENDOR_LIBRARY_FILENAMES");
+  const char* explicit_egl = std::getenv("MOCKTAIL_EGL_LIBRARY");
+  if ((existing != nullptr && existing[0] != '\0') ||
+      (explicit_egl != nullptr && explicit_egl[0] != '\0')) {
+    return true;
+  }
+  const bool explicit_nv_offload =
+      EnvIsOn("__NV_PRIME_RENDER_OFFLOAD") ||
+      (EnvIsOn("DRI_PRIME") && gpus.has_any_nvidia() && !gpus.has_amd);
+  if (explicit_nv_offload && gpus.has_any_nvidia()) {
+    const std::string nvidia = FindEglVendorFile("nvidia");
+    if (!nvidia.empty()) {
+      std::fprintf(stderr, "  [runtime] egl vendor=%s\n", nvidia.c_str());
+      return SetDefault("__EGL_VENDOR_LIBRARY_FILENAMES", nvidia, error);
+    }
+  }
+  if (gpus.has_any_intel() || gpus.has_amd) {
+    const std::string mesa = FindEglVendorFile("mesa");
+    if (!mesa.empty()) {
+      std::fprintf(stderr, "  [runtime] egl vendor=%s\n", mesa.c_str());
+      return SetDefault("__EGL_VENDOR_LIBRARY_FILENAMES", mesa, error);
+    }
+  }
+  return true;
+}
+
 bool UsesCpuTextureOptions() {
   for (const char* name : {"MOCKTAIL_TEXTURE_OVERRIDE_DIR",
                             "MOCKTAIL_TEXTURE_DUMP_DIR",
@@ -242,6 +292,18 @@ bool UsesCpuTextureOptions() {
   return advertise != nullptr && std::strcmp(advertise, "0") == 0;
 }
 
+std::string JoinDirectoryLines(
+    const std::vector<std::filesystem::path>& directories) {
+  std::string dirs_nl;
+  for (const std::filesystem::path& directory : directories) {
+    if (!dirs_nl.empty()) {
+      dirs_nl.push_back('\n');
+    }
+    dirs_nl.append(directory.string());
+  }
+  return dirs_nl;
+}
+
 }  // namespace
 
 std::string SelectVulkanIcdManifest(
@@ -250,18 +312,29 @@ std::string SelectVulkanIcdManifest(
   if (vendor.empty()) {
     return {};
   }
-  std::string dirs_nl;
-  for (const std::filesystem::path& directory : directories) {
-    if (!dirs_nl.empty()) {
-      dirs_nl.push_back('\n');
-    }
-    dirs_nl.append(directory.string());
-  }
+  const std::string dirs_nl = JoinDirectoryLines(directories);
   const std::string needle(vendor);
   std::array<char, 4096> selected{};
   if (mocktail_rust_graphics_select_icd_manifest(
           dirs_nl.c_str(), needle.c_str(), kTargetIsAarch64,
           selected.data(), selected.size()) == 0) {
+    return selected.data();
+  }
+  return {};
+}
+
+std::string SelectEglVendorManifest(
+    const std::vector<std::filesystem::path>& directories,
+    std::string_view vendor) {
+  if (vendor.empty()) {
+    return {};
+  }
+  const std::string dirs_nl = JoinDirectoryLines(directories);
+  const std::string needle(vendor);
+  std::array<char, 4096> selected{};
+  if (mocktail_rust_graphics_select_egl_vendor_manifest(
+          dirs_nl.c_str(), needle.c_str(), selected.data(),
+          selected.size()) == 0) {
     return selected.data();
   }
   return {};
@@ -377,7 +450,10 @@ bool ApplyGraphicsLaunchPolicy(const RuntimeConfig& config,
 
   if (strict_opengl &&
       (!SetValue("MOCKTAIL_DISABLE_AUTO_ANGLE_FALLBACK", "1", error) ||
-       !SetValue("MOCKTAIL_SOFTWARE_WINDOW_FALLBACK", "0", error))) {
+       !SetValue("MOCKTAIL_SOFTWARE_WINDOW_FALLBACK", "0", error) ||
+       !SetDefault("MESA_SHADER_CACHE_MAX_SIZE", "2G", error) ||
+       !SetDefault("MESA_GLSL_CACHE_MAX_SIZE", "2G", error) ||
+       !ApplyEglVendorPolicy(gpus, error))) {
     return false;
   }
 

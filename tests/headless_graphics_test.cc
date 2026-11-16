@@ -2,6 +2,8 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
+#include <dlfcn.h>
 
 using EGLBoolean = uint32_t;
 using EGLint = int32_t;
@@ -26,6 +28,10 @@ EGLSurface eglCreatePbufferSurface(EGLDisplay display, EGLConfig config,
                                    const EGLint* attrib_list);
 EGLBoolean eglMakeCurrent(EGLDisplay display, EGLSurface draw, EGLSurface read,
                           EGLContext context);
+EGLSurface eglGetCurrentSurface(EGLint readdraw);
+EGLBoolean eglGetConfigAttrib(EGLDisplay display, EGLConfig config,
+                              EGLint attribute, EGLint* value);
+void* eglGetProcAddress(const char* procname);
 EGLContext eglGetCurrentContext();
 EGLint eglGetError();
 const uint8_t* glGetString(GLenum name);
@@ -34,6 +40,9 @@ GLuint glCreateShader(GLenum type);
 void glGetShaderiv(GLuint shader, GLenum pname, GLint* params);
 GLenum glCheckFramebufferStatus(GLenum target);
 GLenum glGetError();
+void* glFenceSync(GLenum condition, uint32_t flags);
+GLenum glClientWaitSync(void* sync, uint32_t flags, uint64_t timeout);
+void glDeleteSync(void* sync);
 }
 
 namespace {
@@ -73,6 +82,22 @@ TEST(HeadlessGraphicsTest, EglCreatesCurrentMockContext) {
   ASSERT_NE(surface, nullptr);
   EXPECT_EQ(eglMakeCurrent(display, surface, surface, context), 1u);
   EXPECT_EQ(eglGetCurrentContext(), context);
+  EXPECT_EQ(eglGetCurrentSurface(0x3059), surface);
+  EXPECT_EQ(eglGetCurrentSurface(0x305a), surface);
+
+  EGLint min_swap = -1;
+  EXPECT_EQ(eglGetConfigAttrib(display, config, 0x303b, &min_swap), 1u);
+  EXPECT_EQ(min_swap, 0);
+  EGLint renderable = 0;
+  EXPECT_EQ(eglGetConfigAttrib(display, config, 0x3040, &renderable), 1u);
+  EXPECT_NE(renderable & 0x0040, 0);
+  void* vao_proc = eglGetProcAddress("glBindVertexArray");
+  ASSERT_NE(vao_proc, nullptr);
+  Dl_info info{};
+  ASSERT_NE(dladdr(vao_proc, &info), 0);
+  ASSERT_NE(info.dli_fname, nullptr);
+  EXPECT_NE(std::strstr(info.dli_fname, "libGLESv2.so"), nullptr);
+  EXPECT_EQ(std::strstr(info.dli_fname, "libGLESv2.so.2"), nullptr);
   EXPECT_EQ(eglGetError(), 0x3000);
 }
 
@@ -90,6 +115,11 @@ TEST(HeadlessGraphicsTest, GlesReportsNoErrorAndSuccessfulObjects) {
   GLint status = 0;
   glGetShaderiv(shader, 0x8b81, &status);
   EXPECT_EQ(status, 1);
+
+  void* sync = glFenceSync(0x9117, 0);
+  ASSERT_NE(sync, nullptr);
+  EXPECT_EQ(glClientWaitSync(sync, 0, 0), 0x911au);
+  glDeleteSync(sync);
 
   EXPECT_EQ(glCheckFramebufferStatus(0x8d40), 0x8cd5u);
   EXPECT_EQ(glGetError(), 0u);

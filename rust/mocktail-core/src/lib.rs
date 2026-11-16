@@ -13684,6 +13684,57 @@ pub extern "C" fn mocktail_rust_vulkan_etc2_copy_from_mapped(
 // ============================================================================
 
 #[no_mangle]
+pub extern "C" fn mocktail_rust_graphics_select_egl_vendor_manifest(
+    dirs_nl: *const c_char,
+    needle: *const c_char,
+    out_buf: *mut c_char,
+    out_cap: usize,
+) -> i32 {
+    if dirs_nl.is_null() || needle.is_null() || out_buf.is_null() || out_cap == 0 {
+        return -1;
+    }
+    let dirs_str = unsafe { CStr::from_ptr(dirs_nl) }.to_string_lossy();
+    let needle_str = unsafe { CStr::from_ptr(needle) }.to_string_lossy();
+    if needle_str.is_empty() {
+        return -1;
+    }
+    for dir in dirs_str.lines() {
+        let dir_trimmed = dir.trim();
+        if dir_trimmed.is_empty() {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(dir_trimmed) else {
+            continue;
+        };
+        let mut names: Vec<(String, std::path::PathBuf)> = Vec::new();
+        for entry in entries.flatten() {
+            let file_name = entry.file_name().to_string_lossy().into_owned();
+            if !file_name.ends_with(".json") || !file_name.contains(needle_str.as_ref()) {
+                continue;
+            }
+            let path = entry.path();
+            if std::fs::File::open(&path).is_ok() {
+                names.push((file_name, path));
+            }
+        }
+        names.sort_by(|a, b| a.0.cmp(&b.0));
+        if let Some((_, best)) = names.first() {
+            let best_str = best.to_string_lossy();
+            let bytes = best_str.as_bytes();
+            if bytes.len() < out_cap {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf as *mut u8, bytes.len());
+                    *out_buf.add(bytes.len()) = 0;
+                }
+                return 0;
+            }
+            return -1;
+        }
+    }
+    -1
+}
+
+#[no_mangle]
 pub extern "C" fn mocktail_rust_graphics_is_haswell_intel(device_id: u32) -> i32 {
     let matched = (0x0150..=0x016a).contains(&device_id)
         || (0x0400..=0x042f).contains(&device_id)
@@ -19607,6 +19658,28 @@ integrations:
         let before = ktx.clone();
         assert_eq!(mocktail_rust_etc1_transcode_ktx1_for_vulkan(ktx.as_mut_ptr(), ktx.len()), 0);
         assert_eq!(ktx, before);
+
+        // 5. EGL vendor manifest selector prefers sorted matching GLVND JSON
+        let egl_dir = std::env::temp_dir().join(format!("mocktail_egl_vendor_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&egl_dir);
+        std::fs::create_dir_all(&egl_dir).unwrap();
+        std::fs::write(egl_dir.join("10_nvidia.json"), "{}").unwrap();
+        std::fs::write(egl_dir.join("50_mesa.json"), "{}").unwrap();
+        let dirs_c = CString::new(egl_dir.to_string_lossy().as_ref()).unwrap();
+        let mesa_c = CString::new("mesa").unwrap();
+        let mut egl_out = [0 as c_char; 512];
+        assert_eq!(
+            mocktail_rust_graphics_select_egl_vendor_manifest(
+                dirs_c.as_ptr(),
+                mesa_c.as_ptr(),
+                egl_out.as_mut_ptr(),
+                egl_out.len(),
+            ),
+            0
+        );
+        let picked = unsafe { CStr::from_ptr(egl_out.as_ptr()) }.to_string_lossy().into_owned();
+        assert!(picked.ends_with("50_mesa.json"));
+        let _ = std::fs::remove_dir_all(&egl_dir);
     }
 
 }

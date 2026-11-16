@@ -108,6 +108,17 @@ TEST(VulkanIcdSelectionTest, IgnoresAMissingDirectory) {
   EXPECT_TRUE(SelectVulkanIcdManifest({temporary.root()}, "").empty());
 }
 
+TEST(EglVendorSelectionTest, PrefersSortedMesaOverNvidiaVendorJson) {
+  TemporaryDirectory temporary;
+  WriteManifest(temporary.root() / "10_nvidia.json");
+  WriteManifest(temporary.root() / "50_mesa.json");
+  EXPECT_EQ(SelectEglVendorManifest({temporary.root()}, "mesa"),
+            (temporary.root() / "50_mesa.json").string());
+  EXPECT_EQ(SelectEglVendorManifest({temporary.root()}, "nvidia"),
+            (temporary.root() / "10_nvidia.json").string());
+  EXPECT_TRUE(SelectEglVendorManifest({temporary.root()}, "absent").empty());
+}
+
 }  // namespace
 }  // namespace runtime
 }  // namespace mocktail

@@ -2349,6 +2349,12 @@ int32_t mocktail_rust_graphics_select_icd_manifest(
     char* out_buf,
     size_t out_cap);
 
+int32_t mocktail_rust_graphics_select_egl_vendor_manifest(
+    const char* dirs_nl,
+    const char* needle,
+    char* out_buf,
+    size_t out_cap);
+
 int32_t mocktail_rust_graphics_is_radv_icd_list(const char* manifests);
 
 // ============================================================================

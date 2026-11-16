@@ -477,7 +477,7 @@ bool StartsWith(const char* value, const char* prefix) {
 }
 
 bool IsGlSymbol(const char* name) {
-  return StartsWith(name, "gl");
+  return StartsWith(name, "gl") && name[2] >= 'A' && name[2] <= 'Z';
 }
 
 enum class SymbolResolveSource {
@@ -523,29 +523,53 @@ SymbolResolveResult ResolveSymbolForBionic(const char* name, bool has_window,
   const bool prefer_real_gles =
       has_window && !IsEnabled("MOCKTAIL_GLES_FORCE_STUB") &&
       !IsEnabled("MOCKTAIL_GLES_NOOP_DRAW_CALLS");
+  const bool raw_gles_passthrough =
+      prefer_real_gles && IsEnabled("MOCKTAIL_GLES_RAW_PASSTHROUGH");
   SymbolResolveResult result;
 
+  if (is_gl_symbol && raw_gles_passthrough) {
+    result.address = mocktail::window::GetGLProcAddress(name);
+    if (result.address != nullptr) {
+      result.source = SymbolResolveSource::kWindow;
+      return result;
+    }
+    if (real_gles_handle != nullptr) {
+      result.address = ::dlsym(real_gles_handle, name);
+      if (result.address != nullptr) {
+        result.source = SymbolResolveSource::kRealGles;
+        return result;
+      }
+    }
+  }
+
+  for (void* h : stub_handles) {
+    if (void* candidate = ::dlsym(h, name);
+        candidate != nullptr && StubOwnsSymbolAddress(h, candidate)) {
+      result.address = candidate;
+      if (is_gl_symbol && prefer_real_gles && real_gles_handle != nullptr &&
+          ::dlsym(real_gles_handle, "glGetError") != nullptr &&
+          ::dlsym(h, "mocktail_gles_lookup_proc") != nullptr) {
+        result.source = SymbolResolveSource::kRealGles;
+      } else {
+        result.source = SymbolResolveSource::kStub;
+      }
+      return result;
+    }
+  }
+
+  // Fallback for direct GLES3/extension imports not explicitly wrapped by stub_glesv2.
   if (is_gl_symbol && prefer_real_gles) {
     result.address = mocktail::window::GetGLProcAddress(name);
     if (result.address != nullptr) {
       result.source = SymbolResolveSource::kWindow;
       return result;
     }
-  }
-
-  if (is_gl_symbol && prefer_real_gles && real_gles_handle != nullptr) {
-    result.address = ::dlsym(real_gles_handle, name);
-    if (result.address != nullptr) {
-      result.source = SymbolResolveSource::kRealGles;
-      return result;
-    }
-  }
-
-  for (void* h : stub_handles) {
-    if (void *candidate = ::dlsym(h, name); candidate != nullptr && StubOwnsSymbolAddress(h, candidate)) {
-      result.address = candidate;
-      result.source = SymbolResolveSource::kStub;
-      return result;
+    if (real_gles_handle != nullptr) {
+      result.address = ::dlsym(real_gles_handle, name);
+      if (result.address != nullptr) {
+        result.source = SymbolResolveSource::kRealGles;
+        return result;
+      }
     }
   }
 
