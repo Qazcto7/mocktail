@@ -6,6 +6,7 @@
 #include "compat/bionic_dns_runtime.h"
 #include "compat/bionic_host_libc_runtime.h"
 #include "compat/bionic_large_file_runtime.h"
+#include "compat/bionic_pthread_create_runtime.h"
 #include "compat/bionic_pthread_key_runtime.h"
 #include "compat/bionic_abi_exports.h"
 #include "compat/bionic_rwlock_runtime.h"
@@ -339,6 +340,15 @@ void RegisterBionicPthreadKeyRuntimeForLibc() {
   RegisterSyntheticSymbol(
       "libc.so", "pthread_barrier_wait",
       reinterpret_cast<void*>(mocktail_pthread_barrier_wait));
+  RegisterSyntheticSymbol(
+      "libc.so", "pthread_setname_np",
+      reinterpret_cast<void*>(mocktail_bionic_pthread_setname_np));
+  RegisterSyntheticSymbol(
+      "libc.so", "sched_yield",
+      reinterpret_cast<void*>(mocktail_bionic_sched_yield));
+  RegisterSyntheticSymbol(
+      "libc.so", "nanosleep",
+      reinterpret_cast<void*>(mocktail_bionic_nanosleep));
 }
 
 void RegisterBionicAtForkRuntimeForLibc() {

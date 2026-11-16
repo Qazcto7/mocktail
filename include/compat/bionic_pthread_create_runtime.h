@@ -4,6 +4,7 @@
 #include <pthread.h>
 #include <sched.h>
 #include <sys/types.h>
+#include <time.h>
 
 #include <cstddef>
 
@@ -37,5 +38,10 @@ extern "C" int mocktail_bionic_pthread_setschedparam(
     pthread_t thread, int policy, const struct sched_param* parameters);
 extern "C" int mocktail_bionic_sched_setscheduler(
     pid_t tid, int policy, const struct sched_param* parameters);
+extern "C" int mocktail_bionic_pthread_setname_np(pthread_t thread,
+                                                  const char* name);
+extern "C" int mocktail_bionic_sched_yield();
+extern "C" int mocktail_bionic_nanosleep(const struct timespec* request,
+                                         struct timespec* remaining);
 
 #endif  // MOCKTAIL_COMPAT_BIONIC_PTHREAD_CREATE_RUNTIME_H_

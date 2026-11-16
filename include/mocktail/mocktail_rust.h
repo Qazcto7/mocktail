@@ -4835,6 +4835,12 @@ void mocktail_rust_client_settings_resolve(
     MocktailRustInjectedHttpGetFn http_get, void* http_ctx,
     MocktailRustClientSettingsCallback on_result, void* result_ctx);
 
+int32_t mocktail_rust_cpu_available_physical_cores(void);
+
+void mocktail_rust_cpu_apply_process_tuning(void);
+
+void mocktail_cpu_dump_stats(void);
+
 #ifdef __cplusplus
 }
 #endif

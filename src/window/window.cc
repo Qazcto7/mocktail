@@ -25,6 +25,7 @@
 #include "mocktail/graphics/angle_probe.h"
 #include "mocktail/graphics/gles_text_overlay_compositor.h"
 #include "mocktail/graphics/present_mode_policy.h"
+#include "mocktail/mocktail_rust.h"
 #include "mocktail/platform/display_refresh_capabilities.h"
 #include "mocktail/platform/sdl_application_metadata.h"
 #include "mocktail/platform/sdl_event_converter.h"
@@ -2621,6 +2622,7 @@ void Shutdown() {
             static_cast<void*>(g_state.sdl_window), g_state.egl_context,
             g_state.egl_surface);
   }
+  mocktail_cpu_dump_stats();
   (void)PersistWindowState();
   if (g_text_input_owner != nullptr) {
     g_text_input_owner->Shutdown();

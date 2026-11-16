@@ -60,6 +60,7 @@
 #include "libc_shim/libc_shim.h"
 #include "linker/linker.h"
 #include "mocktail/graphics/bionic_egl_bridge.h"
+#include "mocktail/mocktail_rust.h"
 #include "runtime/device_memory_profile.h"
 #include "runtime/display_size.h"
 #include "runtime/environment.h"
@@ -5453,8 +5454,18 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
   }
   RegisterBionicDnsWrappers();
   RegisterBionicPathWrappers();
+  if (has_window) {
+    mocktail_rust_cpu_apply_process_tuning();
+  }
   linker::RegisterSymbol("prctl",
                          reinterpret_cast<void*>(mocktail_bionic_prctl));
+  linker::RegisterSymbol(
+      "pthread_setname_np",
+      reinterpret_cast<void*>(mocktail_bionic_pthread_setname_np));
+  linker::RegisterSymbol(
+      "sched_yield", reinterpret_cast<void*>(mocktail_bionic_sched_yield));
+  linker::RegisterSymbol(
+      "nanosleep", reinterpret_cast<void*>(mocktail_bionic_nanosleep));
   linker::RegisterSymbol(
       "setsockopt", reinterpret_cast<void*>(mocktail_bionic_setsockopt));
   linker::RegisterSymbol("sendmsg",

@@ -4,6 +4,7 @@
 #include "compat/bionic_dns_runtime.h"
 #include "compat/bionic_host_libc_runtime.h"
 #include "compat/bionic_large_file_runtime.h"
+#include "compat/bionic_pthread_create_runtime.h"
 #include "compat/bionic_pthread_key_runtime.h"
 #include "compat/bionic_abi_exports.h"
 #include "compat/bionic_rwlock_runtime.h"
@@ -100,6 +101,12 @@ TEST(LinkerRegistryTest, KeepsBionicPthreadKeyAbiOwnedByLibc) {
             reinterpret_cast<void *>(mocktail_pthread_barrier_destroy));
   EXPECT_EQ(symbols.at("pthread_barrier_wait"),
             reinterpret_cast<void *>(mocktail_pthread_barrier_wait));
+  EXPECT_EQ(symbols.at("pthread_setname_np"),
+            reinterpret_cast<void *>(mocktail_bionic_pthread_setname_np));
+  EXPECT_EQ(symbols.at("sched_yield"),
+            reinterpret_cast<void *>(mocktail_bionic_sched_yield));
+  EXPECT_EQ(symbols.at("nanosleep"),
+            reinterpret_cast<void *>(mocktail_bionic_nanosleep));
 }
 
 TEST(LinkerRegistryTest, KeepsBionicAtForkAbiOwnedByLibc) {

@@ -17,6 +17,8 @@ pub mod browser_tracker_service;
 pub use browser_tracker_service::*;
 pub mod candidate_approval;
 pub use candidate_approval::*;
+pub mod cpu_runtime;
+pub use cpu_runtime::*;
 #[cfg(any(test, feature = "updater"))]
 pub(crate) mod capstone_ffi;
 pub mod deriver_json;
@@ -15706,10 +15708,19 @@ struct HostAllocHeader {
     usable_size: usize,
 }
 
-fn host_allocations_map() -> &'static std::sync::Mutex<std::collections::HashMap<usize, usize>> {
-    static MAP: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<usize, usize>>> =
-        std::sync::OnceLock::new();
-    MAP.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+const HOST_ALLOC_SHARDS: usize = 64;
+
+fn host_allocations_shard(
+    pointer_addr: usize,
+) -> &'static std::sync::Mutex<std::collections::HashMap<usize, usize>> {
+    static SHARDS: std::sync::OnceLock<
+        [std::sync::Mutex<std::collections::HashMap<usize, usize>>; HOST_ALLOC_SHARDS],
+    > = std::sync::OnceLock::new();
+    let shards = SHARDS.get_or_init(|| {
+        std::array::from_fn(|_| std::sync::Mutex::new(std::collections::HashMap::new()))
+    });
+    let idx = ((pointer_addr >> 6) ^ (pointer_addr >> 13)) & (HOST_ALLOC_SHARDS - 1);
+    &shards[idx]
 }
 
 #[no_mangle]
@@ -15751,7 +15762,9 @@ pub extern "C" fn mocktail_rust_host_aligned_allocate(
             },
         );
     }
-    let mut guard = host_allocations_map().lock().unwrap_or_else(|e| e.into_inner());
+    let mut guard = host_allocations_shard(aligned)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     guard.insert(aligned, header_addr);
     aligned as *mut std::ffi::c_void
 }
@@ -15774,7 +15787,9 @@ pub extern "C" fn mocktail_rust_host_reallocate(
         return std::ptr::null_mut();
     }
     let copy_size = {
-        let guard = host_allocations_map().lock().unwrap_or_else(|e| e.into_inner());
+        let guard = host_allocations_shard(pointer as usize)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(&header_addr) = guard.get(&(pointer as usize)) {
             let header = unsafe { &*(header_addr as *const HostAllocHeader) };
             if header.magic == HOST_ALLOC_MAGIC {
@@ -15805,7 +15820,9 @@ pub extern "C" fn mocktail_rust_host_free(pointer: *mut std::ffi::c_void) {
         return;
     }
     let raw = {
-        let mut guard = host_allocations_map().lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = host_allocations_shard(pointer as usize)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let header_addr = match guard.remove(&(pointer as usize)) {
             Some(addr) => addr,
             None => return,
@@ -15828,7 +15845,9 @@ pub extern "C" fn mocktail_rust_host_usable_size(pointer: *mut std::ffi::c_void)
     if pointer.is_null() {
         return 0;
     }
-    let guard = host_allocations_map().lock().unwrap_or_else(|e| e.into_inner());
+    let guard = host_allocations_shard(pointer as usize)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     match guard.get(&(pointer as usize)) {
         Some(&header_addr) => {
             let header = unsafe { &*(header_addr as *const HostAllocHeader) };

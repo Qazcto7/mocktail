@@ -162,6 +162,7 @@ set(MOCKTAIL_RUST_SOURCES
   "${MOCKTAIL_RUST_CORE_DIR}/src/browser_tracker_service.rs"
   "${MOCKTAIL_RUST_CORE_DIR}/src/candidate_approval.rs"
   "${MOCKTAIL_RUST_CORE_DIR}/src/capstone_ffi.rs"
+  "${MOCKTAIL_RUST_CORE_DIR}/src/cpu_runtime.rs"
   "${MOCKTAIL_RUST_CORE_DIR}/src/deriver_json.rs"
   "${MOCKTAIL_RUST_CORE_DIR}/src/discord_rpc.rs"
   "${MOCKTAIL_RUST_CORE_DIR}/src/elf_reader.rs"

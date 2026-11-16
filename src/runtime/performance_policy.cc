@@ -1,19 +1,12 @@
 #include "runtime/performance_policy.h"
 #include "mocktail/mocktail_rust.h"
 
-#include <sched.h>
-
-#include <algorithm>
 #include <array>
 #include <charconv>
 #include <cstdlib>
 #include <cstring>
-#include <fstream>
 #include <limits>
-#include <set>
 #include <string>
-#include <thread>
-#include <utility>
 
 #include "runtime/crash_report_policy.h"
 #include "runtime/http_client_policy.h"
@@ -21,32 +14,6 @@
 
 namespace mocktail {
 namespace runtime {
-namespace {
-
-bool ReadTopologyValue(int logical_cpu, std::string_view name, int* value) {
-  const std::string path = "/sys/devices/system/cpu/cpu" +
-                           std::to_string(logical_cpu) + "/topology/" +
-                           std::string(name);
-  std::ifstream input(path);
-  return static_cast<bool>(input >> *value);
-}
-
-int LogicalCpuFallback(const cpu_set_t* allowed) {
-  int count = 0;
-  if (allowed != nullptr) {
-    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
-      if (CPU_ISSET(cpu, allowed)) {
-        ++count;
-      }
-    }
-  }
-  if (count > 0) {
-    return count;
-  }
-  return static_cast<int>(std::max(1U, std::thread::hardware_concurrency()));
-}
-
-}  // namespace
 
 bool ParsePhysicsWorkerMode(std::string_view value, PhysicsWorkerMode* mode) {
   if (mode == nullptr) {
@@ -97,27 +64,7 @@ PerformancePolicy ParsePerformancePolicy(
 }
 
 int DetectAvailablePhysicalCoreCount() {
-  cpu_set_t allowed;
-  CPU_ZERO(&allowed);
-  if (sched_getaffinity(0, sizeof(allowed), &allowed) != 0) {
-    return LogicalCpuFallback(nullptr);
-  }
-
-  std::set<std::pair<int, int>> physical_cores;
-  for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
-    if (!CPU_ISSET(cpu, &allowed)) {
-      continue;
-    }
-    int package_id = 0;
-    int core_id = 0;
-    if (!ReadTopologyValue(cpu, "physical_package_id", &package_id) ||
-        !ReadTopologyValue(cpu, "core_id", &core_id)) {
-      return LogicalCpuFallback(&allowed);
-    }
-    physical_cores.emplace(package_id, core_id);
-  }
-  return physical_cores.empty() ? LogicalCpuFallback(&allowed)
-                                : static_cast<int>(physical_cores.size());
+  return mocktail_rust_cpu_available_physical_cores();
 }
 
 bool MergePerformanceClientSettingsOverrides(const PerformancePolicy& policy,
