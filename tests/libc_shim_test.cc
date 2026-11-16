@@ -316,5 +316,46 @@ TEST_F(LibcShimTest, TranslatePathHandlesBoundariesAndConcurrentReads) {
   }
 }
 
+TEST_F(LibcShimTest, HandlesShortPrefixesAndConcurrentSnapshotUpdates) {
+  RegisterPathMapping("a", "/tmp/short_a");
+  RegisterPathMapping("ab", "/tmp/short_ab");
+  EXPECT_EQ(TranslatePath("a/file"), "/tmp/short_a/file");
+  EXPECT_EQ(TranslatePath("ab/file"), "/tmp/short_ab/file");
+  EXPECT_EQ(TranslatePath("ac/file"), "ac/file");
+
+  std::atomic<bool> stop{false};
+  std::thread writer([&stop]() {
+    for (int i = 0; i < 100 && !stop.load(std::memory_order_relaxed); ++i) {
+      RegisterPathMapping("/data/user/0/com.roblox.client", "/host/mocktail");
+      RegisterPathMapping("/data/user/0/com.roblox.client/cache",
+                          "/host/mocktail-cache");
+    }
+    stop.store(true, std::memory_order_relaxed);
+  });
+
+  std::vector<std::thread> readers;
+  readers.reserve(4);
+  for (int t = 0; t < 4; ++t) {
+    readers.emplace_back([&stop]() {
+      while (!stop.load(std::memory_order_relaxed)) {
+        const std::string p = TranslatePath("/data/user/0/com.roblox.client/a");
+        EXPECT_TRUE(p == "/data/user/0/com.roblox.client/a" ||
+                    p == "/host/mocktail/a");
+        EXPECT_EQ(TranslatePath("/proc/self/stat"), "/proc/self/stat");
+      }
+    });
+  }
+  writer.join();
+  for (auto& reader : readers) {
+    reader.join();
+  }
+
+  // Exercise stack-overflow heap fallback (> PATH_MAX) through mocktail_access.
+  const std::string huge_suffix(5000, 'x');
+  const std::string huge_android =
+      "/data/user/0/com.roblox.client/" + huge_suffix;
+  EXPECT_EQ(mocktail_access(huge_android.c_str(), F_OK), -1);
+}
+
 }  // namespace
 }  // namespace libc_shim

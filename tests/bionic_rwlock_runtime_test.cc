@@ -42,10 +42,13 @@ TEST(BionicRwlockRuntimeTest, UnlockWakesRawGuestFutexWait) {
   std::atomic<int> wait_result{EINVAL};
   std::thread waiter([&] {
     const int old_state = __atomic_load_n(state, __ATOMIC_RELAXED);
+    // Mark pending-writers bit just as Bionic futex waiters do before sleeping.
+    const int pending = old_state | 2;
+    __atomic_store_n(state, pending, __ATOMIC_RELAXED);
     waiting.store(true, std::memory_order_release);
     wait_result.store(
         static_cast<int>(::syscall(SYS_futex, state, FUTEX_WAIT_PRIVATE,
-                                   old_state, nullptr, nullptr, 0)),
+                                   pending, nullptr, nullptr, 0)),
         std::memory_order_release);
   });
   while (!waiting.load(std::memory_order_acquire)) {

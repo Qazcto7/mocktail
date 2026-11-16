@@ -14,28 +14,36 @@ namespace {
 
 struct ThreadSpinState {
   HttpClientSpinRateLimiter limiter;
-  uint8_t checked_state = 0;  // 0 = unchecked, 1 = not_http, 2 = is_http
   uint8_t retries_remaining = 8;
 };
 
 thread_local ThreadSpinState g_thread_spin_state;
 
 bool IsHttpClientThread(ThreadSpinState* state) {
-  if (__builtin_expect(state->checked_state == 1, 1)) {
+  const std::uint8_t cached = t_http_client_spin_checked_state;
+  if (__builtin_expect(
+          cached ==
+              static_cast<std::uint8_t>(HttpClientThreadState::kNotHttpClient),
+          1)) {
     return false;
   }
-  if (__builtin_expect(state->checked_state == 2, 0)) {
+  if (__builtin_expect(
+          cached ==
+              static_cast<std::uint8_t>(HttpClientThreadState::kIsHttpClient),
+          0)) {
     return true;
   }
 
   char thread_name[16]{};
   if (pthread_getname_np(pthread_self(), thread_name, sizeof(thread_name)) == 0) {
     if (std::strcmp(thread_name, "HttpClient") == 0) {
-      state->checked_state = 2;
+      t_http_client_spin_checked_state =
+          static_cast<std::uint8_t>(HttpClientThreadState::kIsHttpClient);
       return true;
     }
     if (thread_name[0] != '\0') {
-      state->checked_state = 1;
+      t_http_client_spin_checked_state =
+          static_cast<std::uint8_t>(HttpClientThreadState::kNotHttpClient);
       return false;
     }
   }
@@ -43,7 +51,8 @@ bool IsHttpClientThread(ThreadSpinState* state) {
   if (state->retries_remaining > 0) {
     --state->retries_remaining;
   } else {
-    state->checked_state = 1;
+    t_http_client_spin_checked_state =
+        static_cast<std::uint8_t>(HttpClientThreadState::kNotHttpClient);
   }
   return false;
 }

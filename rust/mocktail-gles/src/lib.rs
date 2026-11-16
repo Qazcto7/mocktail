@@ -20,9 +20,9 @@ mod tests {
     };
     use super::gles::{
         mocktail_gles_lookup_proc, mocktail_rust_gl_get_error, mocktail_rust_gl_get_string,
-        GlStateCache, GL_ARRAY_BUFFER, GL_DRAW_FRAMEBUFFER, GL_ELEMENT_ARRAY_BUFFER,
-        GL_FRAMEBUFFER, GL_READ_FRAMEBUFFER, GL_TEXTURE0, GL_TEXTURE_2D, GL_UNIFORM_BUFFER,
-        GL_VERSION,
+        GlStateCache, IndexedBufferBinding, GL_ARRAY_BUFFER, GL_DRAW_FRAMEBUFFER,
+        GL_ELEMENT_ARRAY_BUFFER, GL_FRAMEBUFFER, GL_READ_FRAMEBUFFER, GL_SHADER_STORAGE_BUFFER,
+        GL_TEXTURE0, GL_TEXTURE_2D, GL_UNIFORM_BUFFER, GL_VERSION,
     };
     use std::ffi::CString;
     use std::sync::Mutex;
@@ -170,5 +170,101 @@ mod tests {
         assert!(cache.should_set_color_mask(1, 1, 1, 1));
         assert!(!cache.should_set_color_mask(2, 1, 1, 1));
         assert!(cache.should_set_color_mask(1, 0, 1, 1));
+    }
+
+    #[test]
+    fn state_cache_phase2_tracks_attribs_indexed_buffers_and_polygon_offset() {
+        let mut cache = GlStateCache::default();
+
+        // Vertex attrib enable flags follow the currently bound VAO.
+        assert!(cache.should_bind_vao(10));
+        assert!(cache.should_set_vertex_attrib_enabled(0, true));
+        assert!(!cache.should_set_vertex_attrib_enabled(0, true));
+        assert!(cache.should_set_vertex_attrib_enabled(0, false));
+        assert!(!cache.should_set_vertex_attrib_enabled(0, false));
+        assert!(cache.should_set_vertex_attrib_enabled(16, true));
+        assert!(cache.should_set_vertex_attrib_enabled(16, true));
+
+        // Switching or deleting VAO invalidates per-VAO attrib bits.
+        assert!(cache.should_bind_vao(11));
+        assert!(cache.should_set_vertex_attrib_enabled(0, false));
+        cache.on_delete_vaos(&[11]);
+        assert!(cache.should_set_vertex_attrib_enabled(0, false));
+
+        // Indexed buffer slots respect generic binding and Base vs Range variants.
+        assert!(cache.should_bind_buffer_indexed(
+            GL_UNIFORM_BUFFER,
+            0,
+            IndexedBufferBinding::Base(5)
+        ));
+        assert!(!cache.should_bind_buffer_indexed(
+            GL_UNIFORM_BUFFER,
+            0,
+            IndexedBufferBinding::Base(5)
+        ));
+        assert!(!cache.should_bind_buffer(GL_UNIFORM_BUFFER, 5));
+        // Intervening generic bind forces rebind because glBindBufferBase also sets generic binding.
+        assert!(cache.should_bind_buffer(GL_UNIFORM_BUFFER, 9));
+        assert!(cache.should_bind_buffer_indexed(
+            GL_UNIFORM_BUFFER,
+            0,
+            IndexedBufferBinding::Base(5)
+        ));
+        // Range with different offset/size or vs Base never collides.
+        assert!(cache.should_bind_buffer_indexed(
+            GL_UNIFORM_BUFFER,
+            0,
+            IndexedBufferBinding::Range {
+                buffer: 5,
+                offset: 0,
+                size: 128,
+            }
+        ));
+        assert!(!cache.should_bind_buffer_indexed(
+            GL_UNIFORM_BUFFER,
+            0,
+            IndexedBufferBinding::Range {
+                buffer: 5,
+                offset: 0,
+                size: 128,
+            }
+        ));
+        // glBufferData / glDeleteBuffers invalidate cached indexed slots for that buffer.
+        cache.on_buffer_data(GL_UNIFORM_BUFFER);
+        assert!(cache.should_bind_buffer_indexed(
+            GL_UNIFORM_BUFFER,
+            0,
+            IndexedBufferBinding::Range {
+                buffer: 5,
+                offset: 0,
+                size: 128,
+            }
+        ));
+        cache.on_delete_buffers(&[5]);
+        assert!(cache.should_bind_buffer_indexed(
+            GL_UNIFORM_BUFFER,
+            0,
+            IndexedBufferBinding::Range {
+                buffer: 5,
+                offset: 0,
+                size: 128,
+            }
+        ));
+        // SSBO out-of-min-spec index passes through safely without polluting slot 0.
+        assert!(cache.should_bind_buffer_indexed(
+            GL_SHADER_STORAGE_BUFFER,
+            4,
+            IndexedBufferBinding::Base(7)
+        ));
+        assert!(cache.should_bind_buffer_indexed(
+            GL_SHADER_STORAGE_BUFFER,
+            4,
+            IndexedBufferBinding::Base(7)
+        ));
+
+        // Polygon offset deduplication.
+        assert!(cache.should_set_polygon_offset(1.0, 2.0));
+        assert!(!cache.should_set_polygon_offset(1.0, 2.0));
+        assert!(cache.should_set_polygon_offset(-1.0, 2.0));
     }
 }

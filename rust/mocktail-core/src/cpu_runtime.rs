@@ -24,6 +24,8 @@ pub struct CpuRuntimeStats {
     pub nanosleeps: AtomicU64,
     pub futex_waits: AtomicU64,
     pub rwlock_ops: AtomicU64,
+    pub rwlock_wakes: AtomicU64,
+    pub rwlock_wakes_skipped: AtomicU64,
     pub sem_ops: AtomicU64,
 }
 
@@ -43,6 +45,8 @@ impl CpuRuntimeStats {
             nanosleeps: AtomicU64::new(0),
             futex_waits: AtomicU64::new(0),
             rwlock_ops: AtomicU64::new(0),
+            rwlock_wakes: AtomicU64::new(0),
+            rwlock_wakes_skipped: AtomicU64::new(0),
             sem_ops: AtomicU64::new(0),
         }
     }
@@ -653,7 +657,7 @@ pub extern "C" fn mocktail_cpu_dump_stats() {
     }
     let topo = host_topology();
     eprintln!(
-        "  [cpu] policy={} topology={} allowed={} physical={} p_cores={} e_cores={} llc_clusters={} named={} roles(crit={} worker={} io={} audio={}) affinity_applied={} nice_applied={} sched_yields={} nanosleeps={} futex_waits={} rwlock_ops={} sem_ops={}",
+        "  [cpu] policy={} topology={} allowed={} physical={} p_cores={} e_cores={} llc_clusters={} named={} roles(crit={} worker={} io={} audio={}) affinity_applied={} nice_applied={} sched_yields={} nanosleeps={} futex_waits={} rwlock_ops={} rwlock_wakes={} rwlock_wakes_skipped={} sem_ops={}",
         if cpu_policy_enabled() { "on" } else { "off" },
         topo.kind.as_str(),
         topo.allowed_logical.len(),
@@ -672,6 +676,8 @@ pub extern "C" fn mocktail_cpu_dump_stats() {
         STATS.nanosleeps.load(Ordering::Relaxed),
         STATS.futex_waits.load(Ordering::Relaxed),
         STATS.rwlock_ops.load(Ordering::Relaxed),
+        STATS.rwlock_wakes.load(Ordering::Relaxed),
+        STATS.rwlock_wakes_skipped.load(Ordering::Relaxed),
         STATS.sem_ops.load(Ordering::Relaxed),
     );
 }
@@ -939,22 +945,57 @@ pub extern "C" fn mocktail_bionic_pthread_rwlock_unlock(
     let state = unsafe { rwlock_state(rwlock) };
     let writer_tid = unsafe { rwlock_writer_tid(rwlock) };
     let old_state = state.load(Ordering::Relaxed);
-    if rwlock_owned_by_writer(old_state) {
+    let had_pending = if rwlock_owned_by_writer(old_state) {
         if writer_tid.load(Ordering::Relaxed) != current_tid() {
             return libc::EPERM;
         }
         writer_tid.store(0, Ordering::Relaxed);
-        state.fetch_and(!(RWLOCK_WRITER_FLAG | RWLOCK_PENDING_MASK), Ordering::Release);
+        let prev = state.fetch_and(
+            !(RWLOCK_WRITER_FLAG | RWLOCK_PENDING_MASK),
+            Ordering::Release,
+        );
+        (prev & RWLOCK_PENDING_MASK) != 0
     } else if rwlock_owned_by_readers(old_state) {
-        let prev = state.fetch_sub(RWLOCK_READER_STEP, Ordering::Release);
-        if (prev >> 2) != 1 {
-            return 0;
+        let mut cur = old_state;
+        loop {
+            if !rwlock_owned_by_readers(cur) {
+                return libc::EPERM;
+            }
+            if (cur >> 2) > 1 {
+                let next = cur - RWLOCK_READER_STEP;
+                match state.compare_exchange_weak(
+                    cur,
+                    next,
+                    Ordering::Release,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => return 0,
+                    Err(actual) => cur = actual,
+                }
+            } else {
+                match state.compare_exchange_weak(
+                    cur,
+                    0,
+                    Ordering::Release,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => break (cur & RWLOCK_PENDING_MASK) != 0,
+                    Err(actual) => cur = actual,
+                }
+            }
         }
-        state.fetch_and(!RWLOCK_PENDING_MASK, Ordering::Relaxed);
     } else {
         return libc::EPERM;
+    };
+
+    if had_pending {
+        if stats_enabled() {
+            STATS.rwlock_wakes.fetch_add(1, Ordering::Relaxed);
+        }
+        futex_wake_private(state as *const AtomicI32 as *const c_void, i32::MAX);
+    } else if stats_enabled() {
+        STATS.rwlock_wakes_skipped.fetch_add(1, Ordering::Relaxed);
     }
-    futex_wake_private(state as *const AtomicI32 as *const c_void, i32::MAX);
     0
 }
 

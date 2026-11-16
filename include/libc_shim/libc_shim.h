@@ -58,6 +58,9 @@ void RegisterPathMapping(const std::string& android_prefix,
 
 void ClearPathMappings();
 
+// Prints path-translation cache telemetry when MOCKTAIL_PATH_STATS=1.
+void DumpPathStats();
+
 }  // namespace libc_shim
 
 extern "C" {

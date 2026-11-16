@@ -92,6 +92,28 @@ const CAP_SAMPLE_ALPHA_TO_COVERAGE: u32 = 1 << 7;
 const CAP_SAMPLE_COVERAGE: u32 = 1 << 8;
 
 const MAX_TEX_UNITS: usize = 32;
+const MAX_CACHED_UBO_SLOTS: usize = 16;
+const MAX_CACHED_SSBO_SLOTS: usize = 4;
+const MAX_CACHED_VERTEX_ATTRIBS: usize = 16;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexedBufferBinding {
+    Base(GLuint),
+    Range {
+        buffer: GLuint,
+        offset: GLintptr,
+        size: GLsizeiptr,
+    },
+}
+
+impl IndexedBufferBinding {
+    fn buffer_id(self) -> GLuint {
+        match self {
+            IndexedBufferBinding::Base(buffer) => buffer,
+            IndexedBufferBinding::Range { buffer, .. } => buffer,
+        }
+    }
+}
 
 fn cap_bit(cap: GLenum) -> Option<u32> {
     match cap {
@@ -127,6 +149,8 @@ pub struct GlStateCache {
     pub copy_read_buffer: Option<GLuint>,
     pub copy_write_buffer: Option<GLuint>,
     pub ssbo: Option<GLuint>,
+    pub ubo_indexed: [Option<IndexedBufferBinding>; MAX_CACHED_UBO_SLOTS],
+    pub ssbo_indexed: [Option<IndexedBufferBinding>; MAX_CACHED_SSBO_SLOTS],
     pub draw_fbo: Option<GLuint>,
     pub read_fbo: Option<GLuint>,
     pub renderbuffer: Option<GLuint>,
@@ -135,6 +159,7 @@ pub struct GlStateCache {
     pub clear_color_bits: Option<[u32; 4]>,
     pub clear_depth_bits: Option<u32>,
     pub clear_stencil: Option<GLint>,
+    pub polygon_offset_bits: Option<(u32, u32)>,
     pub depth_mask: Option<bool>,
     pub depth_func: Option<GLenum>,
     pub color_mask: Option<[bool; 4]>,
@@ -146,6 +171,8 @@ pub struct GlStateCache {
     pub stencil_op: Option<(GLenum, GLenum, GLenum)>,
     pub unpack_alignment: Option<GLint>,
     pub pack_alignment: Option<GLint>,
+    pub attrib_known: u16,
+    pub attrib_enabled: u16,
     pub cap_known: u32,
     pub cap_enabled: u32,
 }
@@ -168,6 +195,8 @@ impl Default for GlStateCache {
             copy_read_buffer: None,
             copy_write_buffer: None,
             ssbo: None,
+            ubo_indexed: [None; MAX_CACHED_UBO_SLOTS],
+            ssbo_indexed: [None; MAX_CACHED_SSBO_SLOTS],
             draw_fbo: None,
             read_fbo: None,
             renderbuffer: None,
@@ -176,6 +205,7 @@ impl Default for GlStateCache {
             clear_color_bits: None,
             clear_depth_bits: None,
             clear_stencil: None,
+            polygon_offset_bits: None,
             depth_mask: None,
             depth_func: None,
             color_mask: None,
@@ -187,6 +217,8 @@ impl Default for GlStateCache {
             stencil_op: None,
             unpack_alignment: None,
             pack_alignment: None,
+            attrib_known: 0,
+            attrib_enabled: 0,
             cap_known: 0,
             cap_enabled: 0,
         }
@@ -211,8 +243,28 @@ impl GlStateCache {
             return false;
         }
         self.vao = Some(vao);
-        // GL_ELEMENT_ARRAY_BUFFER binding is container-local per VAO.
+        // GL_ELEMENT_ARRAY_BUFFER binding and vertex attrib enable flags are container-local per VAO.
         self.element_array_buffer = None;
+        self.attrib_known = 0;
+        self.attrib_enabled = 0;
+        true
+    }
+
+    pub fn should_set_vertex_attrib_enabled(&mut self, index: GLuint, enable: bool) -> bool {
+        let idx = index as usize;
+        if idx >= MAX_CACHED_VERTEX_ATTRIBS {
+            return true;
+        }
+        let bit = 1u16 << idx;
+        if (self.attrib_known & bit) != 0 && ((self.attrib_enabled & bit) != 0) == enable {
+            return false;
+        }
+        self.attrib_known |= bit;
+        if enable {
+            self.attrib_enabled |= bit;
+        } else {
+            self.attrib_enabled &= !bit;
+        }
         true
     }
 
@@ -276,6 +328,68 @@ impl GlStateCache {
             GL_UNIFORM_BUFFER => self.uniform_buffer = None,
             GL_SHADER_STORAGE_BUFFER => self.ssbo = None,
             _ => {}
+        }
+    }
+
+    pub fn should_bind_buffer_indexed(
+        &mut self,
+        target: GLenum,
+        index: GLuint,
+        binding: IndexedBufferBinding,
+    ) -> bool {
+        let idx = index as usize;
+        let buffer = binding.buffer_id();
+        let (generic_slot, slot_ref): (&mut Option<GLuint>, Option<&mut Option<IndexedBufferBinding>>) =
+            match target {
+                GL_UNIFORM_BUFFER => (&mut self.uniform_buffer, self.ubo_indexed.get_mut(idx)),
+                GL_SHADER_STORAGE_BUFFER => (&mut self.ssbo, self.ssbo_indexed.get_mut(idx)),
+                _ => {
+                    self.on_bind_buffer_indexed(target);
+                    return true;
+                }
+            };
+        let Some(indexed_slot) = slot_ref else {
+            *generic_slot = None;
+            return true;
+        };
+        if *indexed_slot == Some(binding) && *generic_slot == Some(buffer) {
+            return false;
+        }
+        *indexed_slot = Some(binding);
+        *generic_slot = Some(buffer);
+        true
+    }
+
+    pub fn on_buffer_data(&mut self, target: GLenum) {
+        let generic = match target {
+            GL_ARRAY_BUFFER => self.array_buffer,
+            GL_ELEMENT_ARRAY_BUFFER => self.element_array_buffer,
+            GL_UNIFORM_BUFFER => self.uniform_buffer,
+            GL_PIXEL_PACK_BUFFER => self.pixel_pack_buffer,
+            GL_PIXEL_UNPACK_BUFFER => self.pixel_unpack_buffer,
+            GL_COPY_READ_BUFFER => self.copy_read_buffer,
+            GL_COPY_WRITE_BUFFER => self.copy_write_buffer,
+            GL_SHADER_STORAGE_BUFFER => self.ssbo,
+            _ => None,
+        };
+        if let Some(buf_id) = generic {
+            self.invalidate_indexed_buffer(buf_id);
+        }
+    }
+
+    fn invalidate_indexed_buffer(&mut self, id: GLuint) {
+        if id == 0 {
+            return;
+        }
+        for slot in self.ubo_indexed.iter_mut() {
+            if slot.map(IndexedBufferBinding::buffer_id) == Some(id) {
+                *slot = None;
+            }
+        }
+        for slot in self.ssbo_indexed.iter_mut() {
+            if slot.map(IndexedBufferBinding::buffer_id) == Some(id) {
+                *slot = None;
+            }
         }
     }
 
@@ -425,6 +539,15 @@ impl GlStateCache {
         true
     }
 
+    pub fn should_set_polygon_offset(&mut self, factor: GLfloat, units: GLfloat) -> bool {
+        let next = (factor.to_bits(), units.to_bits());
+        if self.polygon_offset_bits == Some(next) {
+            return false;
+        }
+        self.polygon_offset_bits = Some(next);
+        true
+    }
+
     pub fn should_set_cull_face(&mut self, mode: GLenum) -> bool {
         if self.cull_face == Some(mode) {
             return false;
@@ -519,6 +642,7 @@ impl GlStateCache {
                     *slot = None;
                 }
             }
+            self.invalidate_indexed_buffer(id);
         }
     }
 
@@ -555,6 +679,8 @@ impl GlStateCache {
             if self.vao == Some(id) {
                 self.vao = None;
                 self.element_array_buffer = None;
+                self.attrib_known = 0;
+                self.attrib_enabled = 0;
             }
         }
     }
@@ -1629,13 +1755,16 @@ pub extern "C" fn mocktail_rust_gl_bind_buffer_base(
     buffer: GLuint,
 ) {
     if host_active() {
-        sync_tls_cache(|c| c.on_bind_buffer_indexed(target));
-        if let Some(f) = host_gl!(
-            FN,
-            "glBindBufferBase",
-            unsafe extern "C" fn(GLenum, GLuint, GLuint)
-        ) {
-            unsafe { f(target, index, buffer) };
+        if with_cache_check(|c| {
+            c.should_bind_buffer_indexed(target, index, IndexedBufferBinding::Base(buffer))
+        }) {
+            if let Some(f) = host_gl!(
+                FN,
+                "glBindBufferBase",
+                unsafe extern "C" fn(GLenum, GLuint, GLuint)
+            ) {
+                unsafe { f(target, index, buffer) };
+            }
         }
         return;
     }
@@ -1651,13 +1780,90 @@ pub extern "C" fn mocktail_rust_gl_bind_buffer_range(
     size: GLsizeiptr,
 ) {
     if host_active() {
-        sync_tls_cache(|c| c.on_bind_buffer_indexed(target));
+        if with_cache_check(|c| {
+            c.should_bind_buffer_indexed(
+                target,
+                index,
+                IndexedBufferBinding::Range {
+                    buffer,
+                    offset,
+                    size,
+                },
+            )
+        }) {
+            if let Some(f) = host_gl!(
+                FN,
+                "glBindBufferRange",
+                unsafe extern "C" fn(GLenum, GLuint, GLuint, GLintptr, GLsizeiptr)
+            ) {
+                unsafe { f(target, index, buffer, offset, size) };
+            }
+        }
+        return;
+    }
+    let _ = stub_require();
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_gl_buffer_data(
+    target: GLenum,
+    size: GLsizeiptr,
+    data: *const c_void,
+    usage: GLenum,
+) {
+    if host_active() {
+        sync_tls_cache(|c| c.on_buffer_data(target));
         if let Some(f) = host_gl!(
             FN,
-            "glBindBufferRange",
-            unsafe extern "C" fn(GLenum, GLuint, GLuint, GLintptr, GLsizeiptr)
+            "glBufferData",
+            unsafe extern "C" fn(GLenum, GLsizeiptr, *const c_void, GLenum)
         ) {
-            unsafe { f(target, index, buffer, offset, size) };
+            unsafe { f(target, size, data, usage) };
+        }
+        return;
+    }
+    let _ = stub_require();
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_gl_enable_vertex_attrib_array(index: GLuint) {
+    if host_active() {
+        if with_cache_check(|c| c.should_set_vertex_attrib_enabled(index, true)) {
+            if let Some(f) =
+                host_gl!(FN, "glEnableVertexAttribArray", unsafe extern "C" fn(GLuint))
+            {
+                unsafe { f(index) };
+            }
+        }
+        return;
+    }
+    let _ = stub_require();
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_gl_disable_vertex_attrib_array(index: GLuint) {
+    if host_active() {
+        if with_cache_check(|c| c.should_set_vertex_attrib_enabled(index, false)) {
+            if let Some(f) =
+                host_gl!(FN, "glDisableVertexAttribArray", unsafe extern "C" fn(GLuint))
+            {
+                unsafe { f(index) };
+            }
+        }
+        return;
+    }
+    let _ = stub_require();
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_gl_polygon_offset(factor: GLfloat, units: GLfloat) {
+    if host_active() {
+        if with_cache_check(|c| c.should_set_polygon_offset(factor, units)) {
+            if let Some(f) =
+                host_gl!(FN, "glPolygonOffset", unsafe extern "C" fn(GLfloat, GLfloat))
+            {
+                unsafe { f(factor, units) };
+            }
         }
         return;
     }
@@ -2300,15 +2506,12 @@ macro_rules! gl_passthrough {
 gl_passthrough!(mocktail_rust_gl_attach_shader, "glAttachShader", (program: GLuint, shader: GLuint));
 gl_passthrough!(mocktail_rust_gl_bind_attrib_location, "glBindAttribLocation", (program: GLuint, index: GLuint, name: *const GLchar));
 gl_passthrough!(mocktail_rust_gl_blit_framebuffer, "glBlitFramebuffer", (sx0: GLint, sy0: GLint, sx1: GLint, sy1: GLint, dx0: GLint, dy0: GLint, dx1: GLint, dy1: GLint, mask: GLbitfield, filter: GLenum));
-gl_passthrough!(mocktail_rust_gl_buffer_data, "glBufferData", (target: GLenum, size: GLsizeiptr, data: *const c_void, usage: GLenum));
 gl_passthrough!(mocktail_rust_gl_buffer_sub_data, "glBufferSubData", (target: GLenum, offset: GLintptr, size: GLsizeiptr, data: *const c_void));
 gl_passthrough!(mocktail_rust_gl_clear, "glClear", (mask: GLbitfield));
 gl_passthrough!(mocktail_rust_gl_compile_shader, "glCompileShader", (shader: GLuint));
 gl_passthrough!(mocktail_rust_gl_compressed_tex_image_2d, "glCompressedTexImage2D", (target: GLenum, level: GLint, internalformat: GLenum, width: GLsizei, height: GLsizei, border: GLint, image_size: GLsizei, data: *const c_void));
 gl_passthrough!(mocktail_rust_gl_compressed_tex_sub_image_2d, "glCompressedTexSubImage2D", (target: GLenum, level: GLint, xoffset: GLint, yoffset: GLint, width: GLsizei, height: GLsizei, format: GLenum, image_size: GLsizei, data: *const c_void));
 gl_passthrough!(mocktail_rust_gl_copy_tex_sub_image_2d, "glCopyTexSubImage2D", (target: GLenum, level: GLint, xoffset: GLint, yoffset: GLint, x: GLint, y: GLint, width: GLsizei, height: GLsizei));
-gl_passthrough!(mocktail_rust_gl_disable_vertex_attrib_array, "glDisableVertexAttribArray", (index: GLuint));
-gl_passthrough!(mocktail_rust_gl_enable_vertex_attrib_array, "glEnableVertexAttribArray", (index: GLuint));
 gl_passthrough!(mocktail_rust_gl_finish, "glFinish", ());
 gl_passthrough!(mocktail_rust_gl_flush, "glFlush", ());
 gl_passthrough!(mocktail_rust_gl_framebuffer_renderbuffer, "glFramebufferRenderbuffer", (target: GLenum, attachment: GLenum, renderbuffertarget: GLenum, renderbuffer: GLuint));
@@ -2316,7 +2519,6 @@ gl_passthrough!(mocktail_rust_gl_framebuffer_texture_2d, "glFramebufferTexture2D
 gl_passthrough!(mocktail_rust_gl_generate_mipmap, "glGenerateMipmap", (target: GLenum));
 gl_passthrough!(mocktail_rust_gl_get_program_binary, "glGetProgramBinary", (program: GLuint, buf_size: GLsizei, length: *mut GLsizei, binary_format: *mut GLenum, binary: *mut c_void));
 gl_passthrough!(mocktail_rust_gl_link_program, "glLinkProgram", (program: GLuint));
-gl_passthrough!(mocktail_rust_gl_polygon_offset, "glPolygonOffset", (factor: GLfloat, units: GLfloat));
 gl_passthrough!(mocktail_rust_gl_program_binary, "glProgramBinary", (program: GLuint, binary_format: GLenum, binary: *const c_void, length: GLsizei));
 gl_passthrough!(mocktail_rust_gl_release_shader_compiler, "glReleaseShaderCompiler", ());
 gl_passthrough!(mocktail_rust_gl_renderbuffer_storage, "glRenderbufferStorage", (target: GLenum, internalformat: GLenum, width: GLsizei, height: GLsizei));

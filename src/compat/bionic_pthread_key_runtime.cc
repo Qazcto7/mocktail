@@ -92,13 +92,21 @@ class RuntimeState {
       return nullptr;
     }
 
+    KeyValue& value = thread_data->values[index];
+    // Fast path: an unset (or null) thread-local value can never yield a
+    // non-null pointer even if the key was concurrently deleted/reused, so
+    // avoid reading shared slot metadata or dirtying the TLS cache line.
+    if (value.value == nullptr) {
+      return nullptr;
+    }
+
     const uint64_t sequence =
         slots_[index].sequence.load(std::memory_order_acquire);
-    KeyValue& value = thread_data->values[index];
     if (IsInUse(sequence) && value.sequence == sequence) {
       return value.value;
     }
     value.value = nullptr;
+    value.sequence = 0;
     return nullptr;
   }
 
@@ -126,12 +134,14 @@ class RuntimeState {
     for (int round = 0; round < kBionicDestructorIterations; ++round) {
       int called_destructors = 0;
       for (size_t index = 0; index < slots_.size(); ++index) {
+        KeyValue& thread_value = thread_data->values[index];
+        if (thread_value.value == nullptr || thread_value.sequence == 0) {
+          continue;
+        }
         const KeySlot& slot = slots_[index];
         const uint64_t sequence =
             slot.sequence.load(std::memory_order_acquire);
-        KeyValue& thread_value = thread_data->values[index];
-        if (!IsInUse(sequence) || thread_value.sequence != sequence ||
-            thread_value.value == nullptr) {
+        if (!IsInUse(sequence) || thread_value.sequence != sequence) {
           continue;
         }
         const BionicPthreadKeyDestructor destructor =
@@ -178,11 +188,18 @@ class RuntimeState {
 };
 
 // The process-global Bionic ABI runtime intentionally outlives TLS destructors
-// so host thread teardown cannot observe a destroyed registry. Eager creation
-// also removes a C++ guard-variable check from every getspecific hot-path call.
-RuntimeState* const g_runtime_state = new RuntimeState();
+// so host thread teardown cannot observe a destroyed registry. Static union
+// storage removes both heap pointer chasing and C++ guard-variable checks on
+// every getspecific hot-path call.
+union EternalRuntimeState {
+  RuntimeState state;
+  EternalRuntimeState() noexcept : state() {}
+  ~EternalRuntimeState() {}
+};
 
-RuntimeState& State() noexcept { return *g_runtime_state; }
+EternalRuntimeState g_runtime_state;
+
+inline RuntimeState& State() noexcept { return g_runtime_state.state; }
 
 // Keep the read-mostly storage trivially destructible. A non-trivial TLS
 // object makes GCC emit a guard check and a possible __cxa_thread_atexit call

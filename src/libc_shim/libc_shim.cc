@@ -1,9 +1,11 @@
 #include "libc_shim/libc_shim.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cerrno>
 #include <cstdarg>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -11,9 +13,10 @@
 #include <filesystem>
 #include <iostream>
 #include <limits.h>
+#include <memory>
 #include <mutex>
-#include <shared_mutex>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <unistd.h>
 #include <vector>
@@ -22,9 +25,73 @@ namespace libc_shim {
 
 namespace {
 
-std::shared_mutex g_path_mappings_mutex;
+// Writer serialization for path mapping mutations. Readers use a lock-free
+// immutable snapshot guarded by per-thread cache-line-padded reader counters.
+std::mutex g_path_mappings_mutex;
 std::unordered_map<std::string, std::string> g_path_mappings;
 std::vector<std::string> g_ca_bundle_aliases;
+
+struct PathMappingSnapshot {
+  struct Bucket {
+    std::uint32_t start = 0;
+    std::uint32_t count = 0;
+    bool has_short_prefix = false;
+    std::array<std::uint64_t, 4> bloom256{};
+  };
+
+  struct Entry {
+    std::uint32_t prefix_offset = 0;
+    std::uint32_t prefix_len = 0;
+    std::uint32_t host_offset = 0;
+    std::uint32_t host_len = 0;
+    std::uint8_t first_byte = 0;
+  };
+
+  std::array<Bucket, 256> buckets{};
+  std::vector<Entry> entries;
+  std::string arena;
+  bool has_empty_prefix = false;
+  std::uint32_t empty_host_offset = 0;
+  std::uint32_t empty_host_len = 0;
+};
+
+struct alignas(64) ReaderShard {
+  std::atomic<std::uint64_t> active{0};
+};
+
+constexpr std::size_t kReaderShardCount = 64;
+std::array<ReaderShard, kReaderShardCount> g_reader_shards{};
+std::atomic<std::uint32_t> g_next_reader_shard{0};
+std::atomic<PathMappingSnapshot*> g_path_snapshot{nullptr};
+
+std::uint32_t CurrentReaderShardIndex() noexcept {
+  static thread_local const std::uint32_t shard_index =
+      g_next_reader_shard.fetch_add(1, std::memory_order_relaxed) &
+      static_cast<std::uint32_t>(kReaderShardCount - 1U);
+  return shard_index;
+}
+
+class SnapshotReadGuard {
+ public:
+  SnapshotReadGuard() noexcept
+      : shard_(&g_reader_shards[CurrentReaderShardIndex()]) {
+    shard_->active.fetch_add(1, std::memory_order_seq_cst);
+    snapshot_ = g_path_snapshot.load(std::memory_order_seq_cst);
+  }
+
+  ~SnapshotReadGuard() {
+    shard_->active.fetch_sub(1, std::memory_order_release);
+  }
+
+  SnapshotReadGuard(const SnapshotReadGuard&) = delete;
+  SnapshotReadGuard& operator=(const SnapshotReadGuard&) = delete;
+
+  const PathMappingSnapshot* get() const noexcept { return snapshot_; }
+
+ private:
+  ReaderShard* shard_;
+  const PathMappingSnapshot* snapshot_;
+};
 
 bool g_installed = false;
 std::atomic<GuestAllocator> g_guest_allocator{nullptr};
@@ -76,34 +143,247 @@ std::string DefaultDataRoot() {
   return RuntimeRoot() + "/data";
 }
 
-bool PrefixMatchesPath(std::string_view path, std::string_view prefix) {
-  if (path.size() < prefix.size()) {
-    return false;
-  }
-  if (path.compare(0, prefix.size(), prefix) != 0) {
-    return false;
-  }
-  return path.size() == prefix.size() || path[prefix.size()] == '/';
+struct PathStats {
+  std::atomic<std::uint64_t> calls{0};
+  std::atomic<std::uint64_t> fast_skipped{0};
+  std::atomic<std::uint64_t> hits{0};
+  std::atomic<std::uint64_t> misses{0};
+  std::atomic<std::uint64_t> stack_hits{0};
+  std::atomic<std::uint64_t> heap_fallbacks{0};
+};
+
+PathStats g_path_stats{};
+
+void PrintPathStats() {
+  const std::uint64_t calls = g_path_stats.calls.load(std::memory_order_relaxed);
+  const std::uint64_t fast_skipped =
+      g_path_stats.fast_skipped.load(std::memory_order_relaxed);
+  const std::uint64_t hits = g_path_stats.hits.load(std::memory_order_relaxed);
+  const std::uint64_t misses =
+      g_path_stats.misses.load(std::memory_order_relaxed);
+  const std::uint64_t stack_hits =
+      g_path_stats.stack_hits.load(std::memory_order_relaxed);
+  const std::uint64_t heap_fallbacks =
+      g_path_stats.heap_fallbacks.load(std::memory_order_relaxed);
+  std::fprintf(stderr,
+               "  [libc_shim] path_calls=%llu fast_skipped=%llu hits=%llu "
+               "misses=%llu stack=%llu heap=%llu\n",
+               static_cast<unsigned long long>(calls),
+               static_cast<unsigned long long>(fast_skipped),
+               static_cast<unsigned long long>(hits),
+               static_cast<unsigned long long>(misses),
+               static_cast<unsigned long long>(stack_hits),
+               static_cast<unsigned long long>(heap_fallbacks));
 }
 
-bool TranslatePathLocked(std::string_view android_path,
-                         std::string* translated) {
-  const std::string* best_android_prefix = nullptr;
-  const std::string* best_host_prefix = nullptr;
+bool PathStatsEnabled() {
+  static const bool enabled =
+      IsEnabled("MOCKTAIL_PATH_TRACE_STATS") || IsEnabled("MOCKTAIL_PATH_STATS");
+  return enabled;
+}
+
+inline std::uint32_t BloomHash256(std::uint8_t b1, std::uint8_t b2) noexcept {
+  return ((static_cast<std::uint32_t>(b1) * 131U) ^ b2) & 255U;
+}
+
+std::unique_ptr<PathMappingSnapshot> BuildSnapshotLocked() {
+  if (g_path_mappings.empty()) {
+    return nullptr;
+  }
+  auto snapshot = std::make_unique<PathMappingSnapshot>();
+  std::size_t arena_bytes = 0;
   for (const auto& [android_prefix, host_prefix] : g_path_mappings) {
-    if (PrefixMatchesPath(android_path, android_prefix) &&
-        (best_android_prefix == nullptr ||
-         android_prefix.size() > best_android_prefix->size())) {
-      best_android_prefix = &android_prefix;
-      best_host_prefix = &host_prefix;
+    arena_bytes += android_prefix.size() + host_prefix.size();
+  }
+  snapshot->arena.reserve(arena_bytes);
+  snapshot->entries.reserve(g_path_mappings.size());
+
+  for (const auto& [android_prefix, host_prefix] : g_path_mappings) {
+    const std::uint32_t host_offset =
+        static_cast<std::uint32_t>(snapshot->arena.size());
+    snapshot->arena.append(host_prefix);
+    const std::uint32_t host_len = static_cast<std::uint32_t>(host_prefix.size());
+
+    if (android_prefix.empty()) {
+      snapshot->has_empty_prefix = true;
+      snapshot->empty_host_offset = host_offset;
+      snapshot->empty_host_len = host_len;
+      continue;
+    }
+
+    const std::uint32_t prefix_offset =
+        static_cast<std::uint32_t>(snapshot->arena.size());
+    snapshot->arena.append(android_prefix);
+    snapshot->entries.push_back(PathMappingSnapshot::Entry{
+        prefix_offset,
+        static_cast<std::uint32_t>(android_prefix.size()),
+        host_offset,
+        host_len,
+        static_cast<std::uint8_t>(android_prefix[0]),
+    });
+  }
+
+  // Group entries by first byte and sort longest prefix first within each bucket
+  // so the first match found is guaranteed to be the longest matching prefix.
+  std::sort(snapshot->entries.begin(), snapshot->entries.end(),
+            [](const PathMappingSnapshot::Entry& a,
+               const PathMappingSnapshot::Entry& b) {
+              if (a.first_byte != b.first_byte) {
+                return a.first_byte < b.first_byte;
+              }
+              if (a.prefix_len != b.prefix_len) {
+                return a.prefix_len > b.prefix_len;
+              }
+              return a.prefix_offset < b.prefix_offset;
+            });
+
+  const char* const arena = snapshot->arena.data();
+  const std::uint32_t total = static_cast<std::uint32_t>(snapshot->entries.size());
+  for (std::uint32_t i = 0; i < total; ++i) {
+    const PathMappingSnapshot::Entry& entry = snapshot->entries[i];
+    PathMappingSnapshot::Bucket& bucket = snapshot->buckets[entry.first_byte];
+    if (bucket.count == 0) {
+      bucket.start = i;
+    }
+    ++bucket.count;
+    if (entry.prefix_len < 3U) {
+      bucket.has_short_prefix = true;
+    } else {
+      const std::uint8_t b1 =
+          static_cast<std::uint8_t>(arena[entry.prefix_offset + 1]);
+      const std::uint8_t b2 =
+          static_cast<std::uint8_t>(arena[entry.prefix_offset + 2]);
+      const std::uint32_t h = BloomHash256(b1, b2);
+      bucket.bloom256[h >> 6] |= (std::uint64_t{1} << (h & 63U));
     }
   }
-  if (best_android_prefix != nullptr && best_host_prefix != nullptr) {
-    translated->assign(*best_host_prefix);
-    translated->append(android_path.substr(best_android_prefix->size()));
-    return true;
+  return snapshot;
+}
+
+void PublishSnapshotLocked() {
+  std::unique_ptr<PathMappingSnapshot> next = BuildSnapshotLocked();
+  PathMappingSnapshot* old =
+      g_path_snapshot.exchange(next.release(), std::memory_order_seq_cst);
+  if (old != nullptr) {
+    for (ReaderShard& shard : g_reader_shards) {
+      int spins = 0;
+      while (shard.active.load(std::memory_order_seq_cst) != 0) {
+        if (++spins >= 64) {
+          std::this_thread::yield();
+          spins = 0;
+        }
+      }
+    }
+    delete old;
   }
-  return false;
+}
+
+struct MatchedPrefix {
+  const char* host_prefix = nullptr;
+  std::uint32_t host_len = 0;
+  std::uint32_t matched_prefix_len = 0;
+};
+
+inline MatchedPrefix MatchSnapshot(const PathMappingSnapshot* snap,
+                                   const char* path, std::size_t known_len,
+                                   bool len_is_known,
+                                   std::size_t* out_path_len) noexcept {
+  const bool stats = PathStatsEnabled();
+  if (stats) {
+    g_path_stats.calls.fetch_add(1, std::memory_order_relaxed);
+  }
+  if (snap == nullptr) {
+    if (stats) {
+      g_path_stats.fast_skipped.fetch_add(1, std::memory_order_relaxed);
+    }
+    return {};
+  }
+  if (path[0] == '\0') {
+    if (!snap->has_empty_prefix) {
+      if (stats) {
+        g_path_stats.fast_skipped.fetch_add(1, std::memory_order_relaxed);
+      }
+      return {};
+    }
+    *out_path_len = 0;
+    if (stats) {
+      g_path_stats.hits.fetch_add(1, std::memory_order_relaxed);
+    }
+    return {snap->arena.data() + snap->empty_host_offset, snap->empty_host_len,
+            0};
+  }
+
+  const std::uint8_t c0 = static_cast<std::uint8_t>(path[0]);
+  const PathMappingSnapshot::Bucket& bucket = snap->buckets[c0];
+  if (bucket.count == 0) {
+    if (snap->has_empty_prefix && c0 == '/') {
+      *out_path_len = len_is_known ? known_len : std::strlen(path);
+      if (stats) {
+        g_path_stats.hits.fetch_add(1, std::memory_order_relaxed);
+      }
+      return {snap->arena.data() + snap->empty_host_offset,
+              snap->empty_host_len, 0};
+    }
+    if (stats) {
+      g_path_stats.fast_skipped.fetch_add(1, std::memory_order_relaxed);
+    }
+    return {};
+  }
+
+  if (!bucket.has_short_prefix) {
+    const std::uint8_t b1 = static_cast<std::uint8_t>(path[1]);
+    const std::uint8_t b2 = b1 != 0 ? static_cast<std::uint8_t>(path[2]) : 0;
+    const bool reject =
+        (b1 == 0 || b2 == 0) ||
+        (((bucket.bloom256[BloomHash256(b1, b2) >> 6] >>
+           (BloomHash256(b1, b2) & 63U)) &
+          1U) == 0U);
+    if (reject) {
+      if (snap->has_empty_prefix && c0 == '/') {
+        *out_path_len = len_is_known ? known_len : std::strlen(path);
+        if (stats) {
+          g_path_stats.hits.fetch_add(1, std::memory_order_relaxed);
+        }
+        return {snap->arena.data() + snap->empty_host_offset,
+                snap->empty_host_len, 0};
+      }
+      if (stats) {
+        g_path_stats.fast_skipped.fetch_add(1, std::memory_order_relaxed);
+      }
+      return {};
+    }
+  }
+
+  const std::size_t path_len = len_is_known ? known_len : std::strlen(path);
+  *out_path_len = path_len;
+  const char* const arena = snap->arena.data();
+  const PathMappingSnapshot::Entry* const entries =
+      snap->entries.data() + bucket.start;
+  for (std::uint32_t i = 0; i < bucket.count; ++i) {
+    const PathMappingSnapshot::Entry& entry = entries[i];
+    if (path_len < entry.prefix_len) {
+      continue;
+    }
+    if (std::memcmp(path, arena + entry.prefix_offset, entry.prefix_len) == 0 &&
+        (path_len == entry.prefix_len || path[entry.prefix_len] == '/')) {
+      if (stats) {
+        g_path_stats.hits.fetch_add(1, std::memory_order_relaxed);
+      }
+      return {arena + entry.host_offset, entry.host_len, entry.prefix_len};
+    }
+  }
+
+  if (snap->has_empty_prefix && c0 == '/') {
+    if (stats) {
+      g_path_stats.hits.fetch_add(1, std::memory_order_relaxed);
+    }
+    return {snap->arena.data() + snap->empty_host_offset, snap->empty_host_len,
+            0};
+  }
+  if (stats) {
+    g_path_stats.misses.fetch_add(1, std::memory_order_relaxed);
+  }
+  return {};
 }
 
 bool ValidateHostCaBundle(const char* path, std::string* canonical_path) {
@@ -226,7 +506,7 @@ HostCaBundleResolution ResolveHostCaBundle() {
 
 HostCaBundleResolution ConfigureHostCaBundlePathMappings() {
   {
-    std::unique_lock<std::shared_mutex> lock(g_path_mappings_mutex);
+    std::lock_guard<std::mutex> lock(g_path_mappings_mutex);
     for (const auto& alias : g_ca_bundle_aliases) g_path_mappings.erase(alias);
     g_ca_bundle_aliases.assign(kAndroidCaBundlePaths.begin(),
                                kAndroidCaBundlePaths.end());
@@ -238,15 +518,17 @@ HostCaBundleResolution ConfigureHostCaBundlePathMappings() {
         g_ca_bundle_aliases.push_back(
             (root.parent_path() / "ssl/cacert.pem").string());
     }
+    PublishSnapshotLocked();
   }
 
   HostCaBundleResolution resolution = ResolveHostCaBundle();
   if (!resolution.ok()) {
     return resolution;
   }
-  std::unique_lock<std::shared_mutex> lock(g_path_mappings_mutex);
+  std::lock_guard<std::mutex> lock(g_path_mappings_mutex);
   for (const auto& alias : g_ca_bundle_aliases)
     g_path_mappings[alias] = resolution.host_path;
+  PublishSnapshotLocked();
   return resolution;
 }
 
@@ -325,7 +607,7 @@ void Install() {
 
   std::size_t mapping_count = 0;
   {
-    std::shared_lock<std::shared_mutex> lock(g_path_mappings_mutex);
+    std::lock_guard<std::mutex> lock(g_path_mappings_mutex);
     mapping_count = g_path_mappings.size();
   }
   std::cout << "  [libc_shim] Path shims installed ("
@@ -333,39 +615,79 @@ void Install() {
 }
 
 std::string TranslatePath(const std::string& android_path) {
-  std::string translated;
-  std::shared_lock<std::shared_mutex> lock(g_path_mappings_mutex);
-  if (TranslatePathLocked(android_path, &translated)) {
-    return translated;
+  SnapshotReadGuard guard;
+  std::size_t path_len = 0;
+  const MatchedPrefix match = MatchSnapshot(
+      guard.get(), android_path.c_str(), android_path.size(), true, &path_len);
+  if (match.host_prefix == nullptr) {
+    return android_path;
   }
-  return android_path;
+  std::string translated;
+  const std::size_t suffix_len = path_len - match.matched_prefix_len;
+  translated.reserve(match.host_len + suffix_len);
+  translated.append(match.host_prefix, match.host_len);
+  translated.append(android_path.data() + match.matched_prefix_len, suffix_len);
+  return translated;
 }
 
 void RegisterPathMapping(const std::string& android_prefix,
                          const std::string& host_prefix) {
-  std::unique_lock<std::shared_mutex> lock(g_path_mappings_mutex);
+  std::lock_guard<std::mutex> lock(g_path_mappings_mutex);
   g_path_mappings[android_prefix] = host_prefix;
+  PublishSnapshotLocked();
 }
 
 void ClearPathMappings() {
-  std::unique_lock<std::shared_mutex> lock(g_path_mappings_mutex);
+  std::lock_guard<std::mutex> lock(g_path_mappings_mutex);
   g_path_mappings.clear();
   g_ca_bundle_aliases.clear();
+  PublishSnapshotLocked();
+}
+
+void DumpPathStats() {
+  if (PathStatsEnabled()) {
+    PrintPathStats();
+  }
 }
 
 }  // namespace libc_shim
 
 namespace {
 
-const char* HostPath(const char* path, std::string* storage) {
+const char* HostPath(const char* path, char* scratch, std::size_t scratch_size,
+                     std::string* overflow) {
   if (path == nullptr) {
     return nullptr;
   }
-  std::shared_lock<std::shared_mutex> lock(libc_shim::g_path_mappings_mutex);
-  if (!libc_shim::TranslatePathLocked(path, storage)) {
+  libc_shim::SnapshotReadGuard guard;
+  std::size_t path_len = 0;
+  const libc_shim::MatchedPrefix match =
+      libc_shim::MatchSnapshot(guard.get(), path, 0, false, &path_len);
+  if (match.host_prefix == nullptr) {
     return path;
   }
-  return storage->c_str();
+  const std::size_t suffix_len = path_len - match.matched_prefix_len;
+  const std::size_t total_len = match.host_len + suffix_len;
+  if (total_len + 1U <= scratch_size) {
+    std::memcpy(scratch, match.host_prefix, match.host_len);
+    std::memcpy(scratch + match.host_len, path + match.matched_prefix_len,
+                suffix_len);
+    scratch[total_len] = '\0';
+    if (libc_shim::PathStatsEnabled()) {
+      libc_shim::g_path_stats.stack_hits.fetch_add(1,
+                                                   std::memory_order_relaxed);
+    }
+    return scratch;
+  }
+  overflow->resize(total_len);
+  std::memcpy(overflow->data(), match.host_prefix, match.host_len);
+  std::memcpy(overflow->data() + match.host_len,
+              path + match.matched_prefix_len, suffix_len);
+  if (libc_shim::PathStatsEnabled()) {
+    libc_shim::g_path_stats.heap_fallbacks.fetch_add(
+        1, std::memory_order_relaxed);
+  }
+  return overflow->c_str();
 }
 
 bool PathTraceEnabled() {
@@ -405,8 +727,9 @@ void TracePathCallPtr(const char* name, const char* path,
 }  // namespace
 
 extern "C" int mocktail_open(const char* path, int flags, ...) {
-  std::string translated;
-  const char* host_path = HostPath(path, &translated);
+  char scratch[PATH_MAX];
+  std::string overflow;
+  const char* host_path = HostPath(path, scratch, sizeof(scratch), &overflow);
   int result = -1;
   if ((flags & O_CREAT) != 0) {
     va_list args;
@@ -422,8 +745,9 @@ extern "C" int mocktail_open(const char* path, int flags, ...) {
 }
 
 extern "C" int mocktail___open_2(const char* path, int flags) {
-  std::string translated;
-  const char* host_path = HostPath(path, &translated);
+  char scratch[PATH_MAX];
+  std::string overflow;
+  const char* host_path = HostPath(path, scratch, sizeof(scratch), &overflow);
   int result = -1;
   if ((flags & O_CREAT) != 0) {
     result = ::open(host_path, flags, 0600);
@@ -435,77 +759,92 @@ extern "C" int mocktail___open_2(const char* path, int flags) {
 }
 
 extern "C" FILE* mocktail_fopen(const char* path, const char* mode) {
-  std::string translated;
-  const char* host_path = HostPath(path, &translated);
+  char scratch[PATH_MAX];
+  std::string overflow;
+  const char* host_path = HostPath(path, scratch, sizeof(scratch), &overflow);
   FILE* result = ::fopen(host_path, mode);
   TracePathCallPtr("fopen", path, host_path, result);
   return result;
 }
 
 extern "C" int mocktail_access(const char* path, int mode) {
-  std::string translated;
-  const char* host_path = HostPath(path, &translated);
+  char scratch[PATH_MAX];
+  std::string overflow;
+  const char* host_path = HostPath(path, scratch, sizeof(scratch), &overflow);
   int result = ::access(host_path, mode);
   TracePathCall("access", path, host_path, result);
   return result;
 }
 
 extern "C" int mocktail_stat(const char* path, struct stat* statbuf) {
-  std::string translated;
-  const char* host_path = HostPath(path, &translated);
+  char scratch[PATH_MAX];
+  std::string overflow;
+  const char* host_path = HostPath(path, scratch, sizeof(scratch), &overflow);
   int result = ::stat(host_path, statbuf);
   TracePathCall("stat", path, host_path, result);
   return result;
 }
 
 extern "C" int mocktail_lstat(const char* path, struct stat* statbuf) {
-  std::string translated;
-  const char* host_path = HostPath(path, &translated);
+  char scratch[PATH_MAX];
+  std::string overflow;
+  const char* host_path = HostPath(path, scratch, sizeof(scratch), &overflow);
   int result = ::lstat(host_path, statbuf);
   TracePathCall("lstat", path, host_path, result);
   return result;
 }
 
 extern "C" int mocktail_statvfs(const char* path, struct statvfs* statbuf) {
-  std::string translated;
-  return ::statvfs(HostPath(path, &translated), statbuf);
+  char scratch[PATH_MAX];
+  std::string overflow;
+  return ::statvfs(HostPath(path, scratch, sizeof(scratch), &overflow),
+                   statbuf);
 }
 
 extern "C" int mocktail_statfs(const char* path, struct statfs* statbuf) {
-  std::string translated;
-  return ::statfs(HostPath(path, &translated), statbuf);
+  char scratch[PATH_MAX];
+  std::string overflow;
+  return ::statfs(HostPath(path, scratch, sizeof(scratch), &overflow), statbuf);
 }
 
 extern "C" int mocktail_mkdir(const char* path, mode_t mode) {
-  std::string translated;
-  return ::mkdir(HostPath(path, &translated), mode);
+  char scratch[PATH_MAX];
+  std::string overflow;
+  return ::mkdir(HostPath(path, scratch, sizeof(scratch), &overflow), mode);
 }
 
 extern "C" DIR* mocktail_opendir(const char* path) {
-  std::string translated;
-  return ::opendir(HostPath(path, &translated));
+  char scratch[PATH_MAX];
+  std::string overflow;
+  return ::opendir(HostPath(path, scratch, sizeof(scratch), &overflow));
 }
 
 extern "C" int mocktail_rename(const char* old_path, const char* new_path) {
-  std::string translated_old;
-  std::string translated_new;
-  return ::rename(HostPath(old_path, &translated_old),
-                  HostPath(new_path, &translated_new));
+  char scratch_old[PATH_MAX];
+  std::string overflow_old;
+  char scratch_new[PATH_MAX];
+  std::string overflow_new;
+  return ::rename(
+      HostPath(old_path, scratch_old, sizeof(scratch_old), &overflow_old),
+      HostPath(new_path, scratch_new, sizeof(scratch_new), &overflow_new));
 }
 
 extern "C" int mocktail_unlink(const char* path) {
-  std::string translated;
-  return ::unlink(HostPath(path, &translated));
+  char scratch[PATH_MAX];
+  std::string overflow;
+  return ::unlink(HostPath(path, scratch, sizeof(scratch), &overflow));
 }
 
 extern "C" int mocktail_rmdir(const char* path) {
-  std::string translated;
-  return ::rmdir(HostPath(path, &translated));
+  char scratch[PATH_MAX];
+  std::string overflow;
+  return ::rmdir(HostPath(path, scratch, sizeof(scratch), &overflow));
 }
 
 extern "C" char* mocktail_realpath(const char* path, char* resolved_path) {
-  std::string translated;
-  const char* host_path = HostPath(path, &translated);
+  char scratch[PATH_MAX];
+  std::string overflow;
+  const char* host_path = HostPath(path, scratch, sizeof(scratch), &overflow);
   if (resolved_path != nullptr) {
     return ::realpath(host_path, resolved_path);
   }
@@ -530,8 +869,10 @@ extern "C" char* mocktail_realpath(const char* path, char* resolved_path) {
 
 extern "C" ssize_t mocktail_readlink(const char* path, char* buf,
                                       size_t bufsiz) {
-  std::string translated;
-  return ::readlink(HostPath(path, &translated), buf, bufsiz);
+  char scratch[PATH_MAX];
+  std::string overflow;
+  return ::readlink(HostPath(path, scratch, sizeof(scratch), &overflow), buf,
+                    bufsiz);
 }
 
 extern "C" ssize_t mocktail___readlink_chk(const char* path, char* buf,
