@@ -21,6 +21,12 @@ using FullscreenStateSyncCallback = bool (*)(void* context, bool fullscreen);
 // Configures persistent geometry and fullscreen state before Init().
 Status ConfigureWindowStatePersistence(const std::filesystem::path& path);
 
+// Installs async-signal-safe handlers for SIGINT, SIGTERM, and SIGHUP so
+// signal exits unwind through the normal shutdown/save path.
+void InstallTerminationSignalHandlers();
+bool TerminationSignalRequested();
+int RequestedTerminationSignal();
+
 bool Init(int width, int height, const char* title);
 
 // Returns false after the user requests quit.

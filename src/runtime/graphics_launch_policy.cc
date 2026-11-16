@@ -32,15 +32,16 @@ constexpr int32_t kTargetIsAarch64 = 1;
 constexpr int32_t kTargetIsAarch64 = 0;
 #endif
 
-struct HostGpus {
-  bool intel = false;
-  bool intel_haswell = false;
-  bool nvidia = false;
-  bool amd = false;
-};
-
 bool IsHaswellOrIvyBridgeIntel(unsigned int device_id) {
   return mocktail_rust_graphics_is_haswell_intel(device_id) != 0;
+}
+
+bool IsLegacyIntel(unsigned int device_id) {
+  return mocktail_rust_graphics_is_legacy_intel(device_id) != 0;
+}
+
+bool IsLegacyNvidia(unsigned int device_id) {
+  return mocktail_rust_graphics_is_legacy_nvidia(device_id) != 0;
 }
 
 bool SetValue(const char* name, const std::string& value, std::string* error) {
@@ -85,33 +86,40 @@ bool ParsePciVendor(const std::string& raw, unsigned int* vendor) {
   return true;
 }
 
-HostGpus DetectHostGpus() {
-  HostGpus gpus;
+HostGpuCapabilities DetectHostGpuCapabilities() {
+  HostGpuCapabilities gpus;
   for (int index = 0; index < 16; ++index) {
-    const std::string path = "/sys/class/drm/card" + std::to_string(index) +
-                             "/device/vendor";
-    std::ifstream input(path);
+    const std::string base = "/sys/class/drm/card" + std::to_string(index) +
+                             "/device";
+    std::ifstream input(base + "/vendor");
     std::string raw;
     unsigned int vendor = 0;
     if (!(input >> raw) || !ParsePciVendor(raw, &vendor)) {
       continue;
     }
-    if (vendor == 0x8086) {
-      gpus.intel = true;
-      const std::string dev_path = "/sys/class/drm/card" + std::to_string(index) +
-                                   "/device/device";
-      std::ifstream dev_input(dev_path);
+    unsigned int device_id = 0;
+    bool has_device_id = false;
+    {
+      std::ifstream dev_input(base + "/device");
       std::string dev_raw;
-      unsigned int device_id = 0;
-      if ((dev_input >> dev_raw) && ParsePciVendor(dev_raw, &device_id)) {
-        if (IsHaswellOrIvyBridgeIntel(device_id)) {
-          gpus.intel_haswell = true;
-        }
+      has_device_id = (dev_input >> dev_raw) &&
+                      ParsePciVendor(dev_raw, &device_id);
+    }
+    if (vendor == 0x8086) {
+      if (has_device_id &&
+          (IsHaswellOrIvyBridgeIntel(device_id) || IsLegacyIntel(device_id))) {
+        gpus.has_legacy_intel = true;
+      } else {
+        gpus.has_modern_intel = true;
       }
     } else if (vendor == 0x10de) {
-      gpus.nvidia = true;
-    } else if (vendor == 0x1002) {
-      gpus.amd = true;
+      if (has_device_id && IsLegacyNvidia(device_id)) {
+        gpus.has_legacy_nvidia = true;
+      } else {
+        gpus.has_modern_nvidia = true;
+      }
+    } else if (vendor == 0x1002 || vendor == 0x1022) {
+      gpus.has_amd = true;
     }
   }
   return gpus;
@@ -128,10 +136,10 @@ std::string FindIcdFile(const char* filename_needle) {
   return SelectVulkanIcdManifest(directories, filename_needle);
 }
 
-std::string SelectHardwareIcd(const HostGpus& gpus) {
+std::string SelectHardwareIcd(const HostGpuCapabilities& gpus) {
   const bool prefer_discrete = !EnvIsOff("DRI_PRIME") &&
                                !EnvIsOff("__NV_PRIME_RENDER_OFFLOAD");
-  if (prefer_discrete && gpus.nvidia) {
+  if (prefer_discrete && gpus.has_any_nvidia()) {
     std::string nvidia = FindIcdFile("nvidia_icd");
     if (nvidia.empty()) {
       nvidia = FindIcdFile("nouveau_icd");
@@ -140,14 +148,14 @@ std::string SelectHardwareIcd(const HostGpus& gpus) {
       return nvidia;
     }
   }
-  if (prefer_discrete && gpus.amd) {
+  if (prefer_discrete && gpus.has_amd) {
     const std::string amd = FindIcdFile("radeon_icd");
     if (!amd.empty()) {
       return amd;
     }
   }
-  if (gpus.intel) {
-    if (gpus.intel_haswell) {
+  if (gpus.has_any_intel()) {
+    if (gpus.has_legacy_intel) {
       std::string hasvk = FindIcdFile("intel_hasvk_icd");
       if (!hasvk.empty()) {
         return hasvk;
@@ -159,14 +167,14 @@ std::string SelectHardwareIcd(const HostGpus& gpus) {
     }
     return intel;
   }
-  if (gpus.nvidia) {
+  if (gpus.has_any_nvidia()) {
     std::string nvidia = FindIcdFile("nvidia_icd");
     if (nvidia.empty()) {
       nvidia = FindIcdFile("nouveau_icd");
     }
     return nvidia;
   }
-  if (gpus.amd) {
+  if (gpus.has_amd) {
     return FindIcdFile("radeon_icd");
   }
   return {};
@@ -191,7 +199,7 @@ const char* AnvSysMemLimitPercent() {
              : "50";
 }
 
-bool ApplyVulkanIcdPolicy(const HostGpus& gpus, std::string* error) {
+bool ApplyVulkanIcdPolicy(const HostGpuCapabilities& gpus, std::string* error) {
   // Drop software/emulation ICDs even when the user already pinned a driver
   // list. Old loaders ignore this variable.
   if (!SetDefault("VK_LOADER_DRIVERS_DISABLE",
@@ -259,6 +267,66 @@ std::string SelectVulkanIcdManifest(
   return {};
 }
 
+HostCpuCapabilities DetectHostCpuCapabilities() {
+  HostCpuCapabilities capabilities;
+  std::ifstream input("/proc/cpuinfo");
+  if (!input) {
+    return capabilities;
+  }
+  std::string content((std::istreambuf_iterator<char>(input)),
+                      std::istreambuf_iterator<char>());
+  capabilities.legacy_cpu =
+      mocktail_rust_graphics_is_legacy_cpu(content.c_str()) != 0;
+  std::size_t line_start = 0;
+  while (line_start < content.size()) {
+    const std::size_t line_end = content.find('\n', line_start);
+    const std::string_view line(
+        content.data() + line_start,
+        (line_end == std::string::npos ? content.size() : line_end) - line_start);
+    if (line.rfind("vendor_id", 0) == 0) {
+      const std::size_t colon = line.find(':');
+      if (colon != std::string_view::npos) {
+        std::string_view v = line.substr(colon + 1);
+        while (!v.empty() && (v.front() == ' ' || v.front() == '\t')) {
+          v.remove_prefix(1);
+        }
+        while (!v.empty() && (v.back() == ' ' || v.back() == '\t' || v.back() == '\r')) {
+          v.remove_suffix(1);
+        }
+        capabilities.vendor_id = std::string(v);
+        break;
+      }
+    }
+    if (line_end == std::string::npos) {
+      break;
+    }
+    line_start = line_end + 1;
+  }
+  return capabilities;
+}
+
+GraphicsBackend ResolveEffectiveGraphicsBackend(
+    GraphicsBackend requested,
+    const HostCpuCapabilities& cpu,
+    const HostGpuCapabilities& gpus) {
+  if (requested != GraphicsBackend::kAuto) {
+    return requested;
+  }
+  const int prefer_opengl = mocktail_rust_graphics_should_auto_prefer_opengl(
+      cpu.legacy_cpu ? 1 : 0, gpus.has_legacy_gpu() ? 1 : 0,
+      gpus.has_modern_vulkan_gpu() ? 1 : 0);
+  return prefer_opengl != 0 ? GraphicsBackend::kSystem
+                            : GraphicsBackend::kVulkan;
+}
+
+GraphicsBackend ResolveEffectiveGraphicsBackend(GraphicsBackend requested) {
+  if (requested != GraphicsBackend::kAuto) {
+    return requested;
+  }
+  return ResolveEffectiveGraphicsBackend(requested, DetectHostCpuCapabilities(),
+                                         DetectHostGpuCapabilities());
+}
+
 bool ApplyGraphicsLaunchPolicy(const RuntimeConfig& config,
                                std::string* error) {
   if (!RuntimeConfig::IsValidPresentMode(config.present_mode())) {
@@ -277,24 +345,43 @@ bool ApplyGraphicsLaunchPolicy(const RuntimeConfig& config,
     return false;
   }
 
-  const bool direct_vulkan =
-      config.graphics_backend() == GraphicsBackend::kVulkan;
-  if (!SetValue("MOCKTAIL_GRAPHICS_BACKEND",
-                config.graphics_backend_name(), error) ||
+  const HostCpuCapabilities cpu = DetectHostCpuCapabilities();
+  const HostGpuCapabilities gpus = DetectHostGpuCapabilities();
+  const GraphicsBackend effective_backend = ResolveEffectiveGraphicsBackend(
+      config.graphics_backend(), cpu, gpus);
+  const std::string resolved_backend_name =
+      config.graphics_backend() == GraphicsBackend::kAuto
+          ? (effective_backend == GraphicsBackend::kSystem ? "opengl"
+                                                           : "direct-vulkan")
+          : config.graphics_backend_name();
+
+  const bool direct_vulkan = effective_backend == GraphicsBackend::kVulkan;
+  const bool strict_opengl =
+      IsStrictOpenGlName(resolved_backend_name) ||
+      (config.graphics_backend() == GraphicsBackend::kAuto &&
+       effective_backend == GraphicsBackend::kSystem);
+  if (config.graphics_backend() == GraphicsBackend::kVulkan &&
+      (cpu.legacy_cpu ||
+       (gpus.has_legacy_gpu() && !gpus.has_modern_vulkan_gpu()))) {
+    std::fprintf(
+        stderr,
+        "  [runtime] warning: direct-vulkan explicitly configured on legacy "
+        "CPU/GPU; set graphics.backend=auto or opengl if Vulkan crashes\n");
+  }
+  if (!SetValue("MOCKTAIL_GRAPHICS_BACKEND", resolved_backend_name, error) ||
       !SetValue("MOCKTAIL_PRELOAD_VULKAN_SHIM",
                 direct_vulkan ? "1" : "0", error) ||
       !SetDefault("MOCKTAIL_REQUIRE_REAL_GRAPHICS", "1", error)) {
     return false;
   }
 
-  if (IsStrictOpenGlName(config.graphics_backend_name()) &&
+  if (strict_opengl &&
       (!SetValue("MOCKTAIL_DISABLE_AUTO_ANGLE_FALLBACK", "1", error) ||
        !SetValue("MOCKTAIL_SOFTWARE_WINDOW_FALLBACK", "0", error))) {
     return false;
   }
 
   if (direct_vulkan) {
-    const HostGpus gpus = DetectHostGpus();
     if (!SetDefault("MOCKTAIL_CLIENT_SETTINGS_OVERRIDES_JSON",
                     kVulkanClientSettingsOverrides, error) ||
         !SetDefault("ANV_SYS_MEM_LIMIT", AnvSysMemLimitPercent(), error) ||
@@ -311,7 +398,7 @@ bool ApplyGraphicsLaunchPolicy(const RuntimeConfig& config,
     }
     // Low FRM only on Intel-only machines. Hybrid NVIDIA/AMD laptops should
     // keep the desktop quality default on the discrete GPU.
-    if (gpus.intel && !gpus.nvidia && !gpus.amd &&
+    if (gpus.has_any_intel() && !gpus.has_any_nvidia() && !gpus.has_amd &&
         !SetDefault("MOCKTAIL_GRAPHICS_QUALITY", "1", error)) {
       return false;
     }

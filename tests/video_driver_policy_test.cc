@@ -2,6 +2,10 @@
 
 #include <SDL3/SDL.h>
 #include <gtest/gtest.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#include <csignal>
 
 #include <cstdlib>
 #include <cstring>
@@ -317,6 +321,38 @@ TEST_F(AngleWindowInitializationTest, RealAngleContextBindsOnRenderThread) {
   EXPECT_TRUE(released) << error;
   EXPECT_NE(renderer.find("ANGLE"), std::string::npos) << renderer;
   EXPECT_NE(renderer.find("Vulkan"), std::string::npos) << renderer;
+}
+
+TEST(WindowTerminationSignalTest, RequestsGracefulExitOnFirstSignalAndStopsOnSecond) {
+  const pid_t child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    if (std::signal(SIGTERM, SIG_DFL) == SIG_ERR) _exit(10);
+    InstallTerminationSignalHandlers();
+    if (TerminationSignalRequested()) _exit(11);
+    if (std::raise(SIGTERM) != 0) _exit(12);
+    if (!TerminationSignalRequested()) _exit(13);
+    if (RequestedTerminationSignal() != SIGTERM) _exit(14);
+    if (PumpEvents()) _exit(15);
+    _exit(0);
+  }
+  int status = 0;
+  ASSERT_EQ(waitpid(child, &status, 0), child);
+  ASSERT_TRUE(WIFEXITED(status));
+  EXPECT_EQ(WEXITSTATUS(status), 0);
+
+  const pid_t second = fork();
+  ASSERT_GE(second, 0);
+  if (second == 0) {
+    if (std::signal(SIGINT, SIG_DFL) == SIG_ERR) _exit(20);
+    InstallTerminationSignalHandlers();
+    (void)std::raise(SIGINT);
+    (void)std::raise(SIGINT);
+    _exit(21);
+  }
+  ASSERT_EQ(waitpid(second, &status, 0), second);
+  ASSERT_TRUE(WIFEXITED(status));
+  EXPECT_EQ(WEXITSTATUS(status), 128 + SIGINT);
 }
 
 }  // namespace

@@ -2320,6 +2320,17 @@ void mocktail_rust_vulkan_etc2_copy_from_mapped(
 
 int32_t mocktail_rust_graphics_is_haswell_intel(uint32_t device_id);
 
+int32_t mocktail_rust_graphics_is_legacy_intel(uint32_t device_id);
+
+int32_t mocktail_rust_graphics_is_legacy_nvidia(uint32_t device_id);
+
+int32_t mocktail_rust_graphics_is_legacy_cpu(const char* cpuinfo_content);
+
+int32_t mocktail_rust_graphics_should_auto_prefer_opengl(
+    int32_t legacy_cpu,
+    int32_t has_legacy_gpu,
+    int32_t has_modern_vulkan_gpu);
+
 int32_t mocktail_rust_graphics_parse_pci_hex(
     const char* raw,
     uint32_t* out_val);

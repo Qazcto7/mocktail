@@ -11129,7 +11129,7 @@ Options:
   --roblox-lib <path>      Development override for a specific {} libroblox.so
   --headless               Run without creating an SDL window
   --windowed               Force windowed startup (default)
-  --graphics <backend>     direct-vulkan | opengl | system | angle-vulkan (default: direct-vulkan)
+  --graphics <backend>     auto | direct-vulkan | opengl | system | angle-vulkan (default: auto)
   --allow-unverified-build Run a known but unverified Build-ID profile
   --force-run-latest       Download and run the provider latest once without approval; it is not activated
   --launch-uri <uri>       Join from a roblox: or roblox-player: website link
@@ -13691,6 +13691,170 @@ pub extern "C" fn mocktail_rust_graphics_is_haswell_intel(device_id: u32) -> i32
         || (0x0c00..=0x0c2f).contains(&device_id)
         || (0x0d00..=0x0d2f).contains(&device_id);
     if matched { 1 } else { 0 }
+}
+
+pub(crate) fn is_legacy_intel_gpu_id(device_id: u32) -> bool {
+    mocktail_rust_graphics_is_haswell_intel(device_id) != 0
+        || (0x0040..=0x012f).contains(&device_id)
+        || (0x0f30..=0x0f3f).contains(&device_id)
+        || (0x1600..=0x163f).contains(&device_id)
+        || (0x22b0..=0x22b3).contains(&device_id)
+        || (0x29a0..=0x2e9f).contains(&device_id)
+}
+
+pub(crate) fn is_legacy_nvidia_gpu_id(device_id: u32) -> bool {
+    device_id > 0 && device_id < 0x1300
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_graphics_should_auto_prefer_opengl(
+    legacy_cpu: i32,
+    has_legacy_gpu: i32,
+    has_modern_vulkan_gpu: i32,
+) -> i32 {
+    if legacy_cpu != 0 || (has_legacy_gpu != 0 && has_modern_vulkan_gpu == 0) {
+        1
+    } else {
+        0
+    }
+}
+
+#[cfg(any(test, feature = "updater"))]
+pub(crate) fn resolve_auto_graphics_backend_from_hardware(
+    cpuinfo: &str,
+    gpus: &[(u32, u32)],
+) -> &'static str {
+    let legacy_cpu = if is_legacy_cpu_info_str(cpuinfo) { 1 } else { 0 };
+    let mut has_legacy_gpu = 0;
+    let mut has_modern_vulkan_gpu = 0;
+    for &(vendor_id, device_id) in gpus {
+        match vendor_id {
+            0x8086 => {
+                if is_legacy_intel_gpu_id(device_id) {
+                    has_legacy_gpu = 1;
+                } else {
+                    has_modern_vulkan_gpu = 1;
+                }
+            }
+            0x10de => {
+                if is_legacy_nvidia_gpu_id(device_id) {
+                    has_legacy_gpu = 1;
+                } else {
+                    has_modern_vulkan_gpu = 1;
+                }
+            }
+            0x1002 | 0x1022 => {
+                has_modern_vulkan_gpu = 1;
+            }
+            _ => {}
+        }
+    }
+    if mocktail_rust_graphics_should_auto_prefer_opengl(
+        legacy_cpu,
+        has_legacy_gpu,
+        has_modern_vulkan_gpu,
+    ) != 0
+    {
+        "opengl"
+    } else {
+        "direct-vulkan"
+    }
+}
+
+#[cfg(any(test, feature = "updater"))]
+pub(crate) fn resolve_host_auto_graphics_backend_str() -> &'static str {
+    let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
+    let mut gpus = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("/sys/class/drm") {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if !name_str.starts_with("card") || name_str.contains('-') {
+                continue;
+            }
+            let dev_dir = entry.path().join("device");
+            let Ok(v_raw) = std::fs::read_to_string(dev_dir.join("vendor")) else {
+                continue;
+            };
+            let Ok(d_raw) = std::fs::read_to_string(dev_dir.join("device")) else {
+                continue;
+            };
+            let parse_hex = |raw: &str| -> Option<u32> {
+                let t = raw.trim();
+                let h = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")).unwrap_or(t);
+                u32::from_str_radix(h, 16).ok().filter(|&v| v <= 0xffff)
+            };
+            if let (Some(v), Some(d)) = (parse_hex(&v_raw), parse_hex(&d_raw)) {
+                gpus.push((v, d));
+            }
+        }
+    }
+    resolve_auto_graphics_backend_from_hardware(&cpuinfo, &gpus)
+}
+
+pub(crate) fn is_legacy_cpu_info_str(cpuinfo: &str) -> bool {
+    let mut vendor: Option<&str> = None;
+    let mut family: Option<u32> = None;
+    let mut model: Option<u32> = None;
+
+    for raw_line in cpuinfo.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            if vendor.is_some() || family.is_some() || model.is_some() {
+                break;
+            }
+            continue;
+        }
+        let Some((k, v)) = line.split_once(':') else {
+            continue;
+        };
+        let key = k.trim();
+        let val = v.trim();
+        match key {
+            "vendor_id" => vendor = Some(val),
+            "cpu family" => family = val.parse::<u32>().ok(),
+            "model" => model = val.parse::<u32>().ok(),
+            _ => {}
+        }
+    }
+
+    match (vendor, family, model) {
+        (Some("GenuineIntel"), Some(fam), m_opt) => {
+            if fam < 6 || fam == 15 {
+                return true;
+            }
+            if fam == 6 {
+                if let Some(m) = m_opt {
+                    // Family 6 models before Skylake (0x4e/0x5e), plus Broadwell-EP/DE (0x4f, 0x56) and legacy Atoms.
+                    return m < 0x4e || matches!(m, 0x4f | 0x56 | 0x5a | 0x5d);
+                }
+            }
+            false
+        }
+        (Some("AuthenticAMD"), Some(fam), _) => fam < 0x17,
+        _ => false,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_graphics_is_legacy_intel(device_id: u32) -> i32 {
+    if is_legacy_intel_gpu_id(device_id) { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_graphics_is_legacy_nvidia(device_id: u32) -> i32 {
+    if is_legacy_nvidia_gpu_id(device_id) { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_graphics_is_legacy_cpu(cpuinfo_content: *const c_char) -> i32 {
+    if cpuinfo_content.is_null() {
+        return 0;
+    }
+    let Ok(s) = (unsafe { CStr::from_ptr(cpuinfo_content) }).to_str() else {
+        return 0;
+    };
+    if is_legacy_cpu_info_str(s) { 1 } else { 0 }
 }
 
 #[no_mangle]
@@ -18880,6 +19044,53 @@ integrations:
     fn test_section111_graphics_launch_policy() {
         assert_eq!(mocktail_rust_graphics_is_haswell_intel(0x0412), 1);
         assert_eq!(mocktail_rust_graphics_is_haswell_intel(0x5916), 0);
+        assert_eq!(mocktail_rust_graphics_is_legacy_intel(0x0a16), 1);
+        assert_eq!(mocktail_rust_graphics_is_legacy_intel(0x1616), 1);
+        assert_eq!(mocktail_rust_graphics_is_legacy_intel(0x1916), 0);
+        assert_eq!(mocktail_rust_graphics_is_legacy_nvidia(0x1292), 1);
+        assert_eq!(mocktail_rust_graphics_is_legacy_nvidia(0x1380), 0);
+
+        let haswell_cpu = CString::new(
+            "processor\t: 0\nvendor_id\t: GenuineIntel\ncpu family\t: 6\nmodel\t\t: 69\n",
+        )
+        .unwrap();
+        let skylake_cpu = CString::new(
+            "processor\t: 0\nvendor_id\t: GenuineIntel\ncpu family\t: 6\nmodel\t\t: 94\n",
+        )
+        .unwrap();
+        let bulldozer_cpu = CString::new(
+            "processor\t: 0\nvendor_id\t: AuthenticAMD\ncpu family\t: 21\nmodel\t\t: 2\n",
+        )
+        .unwrap();
+        let zen_cpu = CString::new(
+            "processor\t: 0\nvendor_id\t: AuthenticAMD\ncpu family\t: 23\nmodel\t\t: 113\n",
+        )
+        .unwrap();
+        assert_eq!(mocktail_rust_graphics_is_legacy_cpu(haswell_cpu.as_ptr()), 1);
+        assert_eq!(mocktail_rust_graphics_is_legacy_cpu(skylake_cpu.as_ptr()), 0);
+        assert_eq!(mocktail_rust_graphics_is_legacy_cpu(bulldozer_cpu.as_ptr()), 1);
+        assert_eq!(mocktail_rust_graphics_is_legacy_cpu(zen_cpu.as_ptr()), 0);
+        assert_eq!(
+            resolve_auto_graphics_backend_from_hardware(
+                haswell_cpu.to_str().unwrap(),
+                &[(0x8086, 0x0a16), (0x10de, 0x1292)],
+            ),
+            "opengl"
+        );
+        assert_eq!(
+            resolve_auto_graphics_backend_from_hardware(
+                skylake_cpu.to_str().unwrap(),
+                &[(0x8086, 0x1912), (0x10de, 0x1380)],
+            ),
+            "direct-vulkan"
+        );
+        assert_eq!(
+            resolve_auto_graphics_backend_from_hardware(
+                zen_cpu.to_str().unwrap(),
+                &[(0x10de, 0x1292)],
+            ),
+            "opengl"
+        );
 
         let mut parsed = 0u32;
         let ok = CString::new("0x8086\n").unwrap();

@@ -22,7 +22,7 @@ use crate::update_coordinator::{
 };
 use crate::{
     host_guest_abi, load_compatibility_catalog_file, parse_android_manifest_bytes,
-    zip_read_entry_bytes,
+    resolve_host_auto_graphics_backend_str, zip_read_entry_bytes,
 };
 
 const K_MAXIMUM_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
@@ -282,9 +282,10 @@ fn parse_update_request(
     graphics_backend_env: Option<&str>,
     progress_fd: i32,
 ) -> Result<UpdateRequestData, (i32, String)> {
-    let backend_name = graphics_backend_env
-        .filter(|s| !s.is_empty())
-        .unwrap_or("direct-vulkan");
+    let backend_name = match graphics_backend_env.filter(|s| !s.is_empty()) {
+        Some("auto") | None => resolve_host_auto_graphics_backend_str(),
+        Some(explicit) => explicit,
+    };
     let Some(canary_graphics_backend) = canary_backend_parse_str(backend_name) else {
         return Err((
             2,

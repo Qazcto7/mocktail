@@ -176,8 +176,8 @@ class RuntimeConfig {
   bool headless_ = false;
   bool use_libsecret_ = false;
   std::filesystem::path roblox_library_path_ = "rbx_bin/libroblox.so";
-  GraphicsBackend graphics_backend_ = GraphicsBackend::kVulkan;
-  std::string graphics_backend_name_ = "direct-vulkan";
+  GraphicsBackend graphics_backend_ = GraphicsBackend::kAuto;
+  std::string graphics_backend_name_ = "auto";
   WindowConfig window_;
   std::string theme_mode_ = "roblox";
   InputCapabilityConfig input_capabilities_;

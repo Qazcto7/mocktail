@@ -99,7 +99,7 @@ TEST(RuntimeConfigBootstrapTest, CreatesCompletePrivateFirstRunFile) {
       LoadRuntimeConfig(MapEnvironment(), file);
   ASSERT_TRUE(loaded) << loaded.error;
   EXPECT_TRUE(loaded.file_loaded);
-  EXPECT_EQ(loaded.config.graphics_backend(), GraphicsBackend::kVulkan);
+  EXPECT_EQ(loaded.config.graphics_backend(), GraphicsBackend::kAuto);
   EXPECT_EQ(loaded.config.theme_mode(), "roblox");
   EXPECT_FALSE(loaded.config.use_libsecret());
   EXPECT_EQ(loaded.config.frame_rate().mode, FrameRateLimitMode::kUnmanaged);
@@ -136,8 +136,8 @@ TEST(RuntimeConfigBootstrapTest,
            "# String (default: roblox): use Roblox's saved account theme. "
            "Supported\n  # overrides: dark, light, or system (follow the "
            "desktop color scheme).\n  theme: roblox",
-           "# Recommended values: direct-vulkan, opengl, system, "
-           "angle-vulkan.\n  backend: direct-vulkan",
+           "# Recommended values: auto, direct-vulkan, opengl, system, "
+           "angle-vulkan.\n  backend: auto",
            "# DFIntTaskSchedulerTargetFps without a whitelist.\n  "
            "# frame_rate_limit: -1",
            "# Optional presentation synchronization override: auto, on, or "
@@ -262,7 +262,7 @@ TEST(RuntimeConfigFileTest, UsesDefaultsWhenFileDoesNotExist) {
 
   ASSERT_TRUE(loaded) << loaded.error;
   EXPECT_FALSE(loaded.file_loaded);
-  EXPECT_EQ(loaded.config.graphics_backend(), GraphicsBackend::kVulkan);
+  EXPECT_EQ(loaded.config.graphics_backend(), GraphicsBackend::kAuto);
   EXPECT_EQ(loaded.config.theme_mode(), "roblox");
   EXPECT_FALSE(loaded.config.use_libsecret());
   EXPECT_EQ(loaded.config.roblox_library_path(), "rbx_bin/libroblox.so");

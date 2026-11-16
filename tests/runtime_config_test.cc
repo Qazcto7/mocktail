@@ -38,8 +38,8 @@ TEST(RuntimeConfigTest, UsesSupportedDefaults) {
 
   EXPECT_FALSE(config.headless());
   EXPECT_EQ(config.roblox_library_path(), "rbx_bin/libroblox.so");
-  EXPECT_EQ(config.graphics_backend(), GraphicsBackend::kVulkan);
-  EXPECT_EQ(config.graphics_backend_name(), "direct-vulkan");
+  EXPECT_EQ(config.graphics_backend(), GraphicsBackend::kAuto);
+  EXPECT_EQ(config.graphics_backend_name(), "auto");
   EXPECT_EQ(config.window().width, 1280);
   EXPECT_EQ(config.window().height, 720);
   EXPECT_EQ(config.window().title, "Roblox");

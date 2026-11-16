@@ -140,7 +140,11 @@ int RunGraphicsPolicyProbe(const char* backend) {
   std::string error;
   if (!ApplyGraphicsLaunchPolicy(config, &error)) return 22;
 
-  const bool open_gl = backend != nullptr && std::string(backend) == "opengl";
+  const GraphicsBackend resolved_expected =
+      backend != nullptr
+          ? config.graphics_backend()
+          : ResolveEffectiveGraphicsBackend(GraphicsBackend::kAuto);
+  const bool open_gl = resolved_expected == GraphicsBackend::kSystem;
   const char* resolved = getenv("MOCKTAIL_GRAPHICS_BACKEND");
   const char* preload = getenv("MOCKTAIL_PRELOAD_VULKAN_SHIM");
   if (resolved == nullptr || preload == nullptr ||
@@ -209,8 +213,40 @@ void ExpectGraphicsPolicyProbe(const char* backend) {
   EXPECT_EQ(WEXITSTATUS(status), 0);
 }
 
-TEST(GraphicsLaunchPolicyTest, DefaultsToDirectVulkanAfterConfigResolution) {
+TEST(GraphicsLaunchPolicyTest, DefaultsToAutoResolvedBackendAfterConfigResolution) {
   ExpectGraphicsPolicyProbe(nullptr);
+}
+
+TEST(GraphicsLaunchPolicyTest, AutoSelectsOpenGlOnLegacyHardwareAndVulkanOnModern) {
+  HostCpuCapabilities haswell_cpu;
+  haswell_cpu.vendor_id = "GenuineIntel";
+  haswell_cpu.legacy_cpu = true;
+  HostGpuCapabilities legacy_hybrid_gpus;
+  legacy_hybrid_gpus.has_legacy_intel = true;
+  legacy_hybrid_gpus.has_legacy_nvidia = true;
+  EXPECT_EQ(ResolveEffectiveGraphicsBackend(GraphicsBackend::kAuto, haswell_cpu,
+                                            legacy_hybrid_gpus),
+            GraphicsBackend::kSystem);
+
+  HostCpuCapabilities modern_cpu;
+  modern_cpu.vendor_id = "GenuineIntel";
+  modern_cpu.legacy_cpu = false;
+  HostGpuCapabilities modern_gpus;
+  modern_gpus.has_modern_nvidia = true;
+  EXPECT_EQ(ResolveEffectiveGraphicsBackend(GraphicsBackend::kAuto, modern_cpu,
+                                            modern_gpus),
+            GraphicsBackend::kVulkan);
+
+  HostGpuCapabilities kepler_only;
+  kepler_only.has_legacy_nvidia = true;
+  EXPECT_EQ(ResolveEffectiveGraphicsBackend(GraphicsBackend::kAuto, modern_cpu,
+                                            kepler_only),
+            GraphicsBackend::kSystem);
+
+  // Explicit direct-vulkan remains preserved even on legacy hardware.
+  EXPECT_EQ(ResolveEffectiveGraphicsBackend(GraphicsBackend::kVulkan, haswell_cpu,
+                                            legacy_hybrid_gpus),
+            GraphicsBackend::kVulkan);
 }
 
 TEST(GraphicsLaunchPolicyTest, MakesOpenGlStrictAndVulkanIndependent) {

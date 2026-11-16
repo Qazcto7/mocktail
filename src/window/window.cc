@@ -4,11 +4,13 @@
 #include <SDL3/SDL_video.h>
 #include <SDL3/SDL_vulkan.h>
 #include <dlfcn.h>
+#include <signal.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -43,6 +45,43 @@
 
 namespace mocktail {
 namespace window {
+
+namespace {
+
+volatile sig_atomic_t g_termination_signal = 0;
+volatile sig_atomic_t g_termination_signal_count = 0;
+
+void HandleTerminationSignal(int signal_number) {
+  g_termination_signal = signal_number;
+  const sig_atomic_t count = g_termination_signal_count + 1;
+  g_termination_signal_count = count;
+  if (count >= 2) {
+    _exit(128 + signal_number);
+  }
+}
+
+}  // namespace
+
+void InstallTerminationSignalHandlers() {
+  for (int signal_number : {SIGINT, SIGTERM, SIGHUP}) {
+    struct sigaction previous{};
+    if (sigaction(signal_number, nullptr, &previous) != 0 ||
+        previous.sa_handler != SIG_DFL) {
+      continue;
+    }
+    struct sigaction action{};
+    action.sa_handler = HandleTerminationSignal;
+    action.sa_flags = 0;
+    sigemptyset(&action.sa_mask);
+    (void)sigaction(signal_number, &action, nullptr);
+  }
+}
+
+bool TerminationSignalRequested() { return g_termination_signal != 0; }
+
+int RequestedTerminationSignal() {
+  return static_cast<int>(g_termination_signal);
+}
 
 // Local EGL declarations avoid conflicts with the stub headers.
 
@@ -2286,6 +2325,10 @@ void MaybeReportVulkanPresentStall() {
 }
 
 bool PumpEvents() {
+  if (g_termination_signal != 0) {
+    g_state.quit_requested = true;
+    return false;
+  }
   MaybeSynchronizeRestoredFullscreenState();
   MaybeApplyRobloxFullscreenMenuRequest();
   MaybeApplyAndroidFullscreenRequest();

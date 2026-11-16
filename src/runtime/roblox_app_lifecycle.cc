@@ -1,5 +1,7 @@
 #include "runtime/roblox_app_lifecycle.h"
 
+#include <unistd.h>
+
 #include <utility>
 
 #include "mocktail/mocktail_rust.h"
@@ -17,6 +19,9 @@ constexpr char kBackgroundModeSymbol[] =
 constexpr char kDestroyAppSymbol[] =
     "Java_com_roblox_engine_jni_NativeGLInterface_"
     "nativeAppBridgeV2DestroyApp";
+constexpr char kCallMessagesFromMainThreadSymbol[] =
+    "Java_com_roblox_engine_jni_NativeGLInterface_"
+    "nativeCallMessagesFromMainThread";
 constexpr char kShutdownContext[] = "ASMA.stop";
 
 template <typename Function>
@@ -53,6 +58,9 @@ ResolveRobloxAppLifecycleSymbols(const RobloxSymbolLookup &lookup) {
   ResolveRequired(lookup, kDestroyAppSymbol,
                   &resolution.symbols_.app_bridge_v2_destroy_app,
                   &resolution.missing_required_symbols_);
+  resolution.symbols_.call_messages_from_main_thread =
+      reinterpret_cast<NativeCallMessagesFromMainThreadFn>(
+          lookup.Find(kCallMessagesFromMainThreadSymbol));
   resolution.status_ =
       resolution.missing_required_symbols_.empty()
           ? RobloxAppLifecycleResolutionStatus::kReady
@@ -102,10 +110,32 @@ RobloxAppShutdownResult RobloxAppLifecycle::Shutdown(JNIEnv *env,
             "Roblox app shutdown is already in progress"};
   }
 
+  auto pump_main_thread = [env, native_gl_class](
+                              NativeCallMessagesFromMainThreadFn pump,
+                              int passes, unsigned int interval_us) {
+    if (pump == nullptr) {
+      return;
+    }
+    for (int pass = 0; pass < passes; ++pass) {
+      if (pass > 0 && interval_us > 0) {
+        ::usleep(interval_us);
+      }
+      pump(env, native_gl_class);
+      if (env->functions != nullptr && env->functions->ExceptionCheck != nullptr &&
+          env->ExceptionCheck() == JNI_TRUE &&
+          env->functions->ExceptionClear != nullptr) {
+        env->ExceptionClear();
+        break;
+      }
+    }
+  };
+
   symbols_.app_bridge_v2_pause_app(env, native_gl_class);
+  pump_main_thread(symbols_.call_messages_from_main_thread, 2, 5000U);
   symbols_.set_task_scheduler_background_mode(env, native_gl_class, JNI_TRUE,
                                               context);
   symbols_.app_bridge_v2_destroy_app(env, native_gl_class);
+  pump_main_thread(symbols_.call_messages_from_main_thread, 8, 25000U);
   env->DeleteLocalRef(context);
   state_.store(State::kStopped, std::memory_order_release);
   return {RobloxAppShutdownStatus::kStopped,

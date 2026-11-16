@@ -162,7 +162,8 @@ bool RobloxGameSessionSymbols::complete() const {
 
 RobloxAppLifecycleSymbols RobloxGameSessionSymbols::app_lifecycle_symbols()
     const {
-  return {pause_app, set_task_scheduler_background_mode, destroy_app};
+  return {pause_app, set_task_scheduler_background_mode, destroy_app,
+          call_messages_from_main_thread};
 }
 
 RobloxGameSessionResolution ResolveRobloxGameSessionSymbols(

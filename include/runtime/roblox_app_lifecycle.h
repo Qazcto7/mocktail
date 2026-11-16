@@ -17,11 +17,15 @@ using SetTaskSchedulerBackgroundModeFn = void (*)(JNIEnv *env, jclass clazz,
                                                   jboolean enabled,
                                                   jstring context);
 using NativeAppBridgeV2DestroyAppFn = void (*)(JNIEnv *env, jclass clazz);
+using NativeCallMessagesFromMainThreadFn = void (*)(JNIEnv *env, jclass clazz);
 
 struct RobloxAppLifecycleSymbols {
   NativeAppBridgeV2PauseAppFn app_bridge_v2_pause_app = nullptr;
   SetTaskSchedulerBackgroundModeFn set_task_scheduler_background_mode = nullptr;
   NativeAppBridgeV2DestroyAppFn app_bridge_v2_destroy_app = nullptr;
+  // Optional: pumped after PauseApp/DestroyApp so queued main-thread work
+  // (including GlobalBasicSettings_13.xml flush) finishes before exit.
+  NativeCallMessagesFromMainThreadFn call_messages_from_main_thread = nullptr;
 
   bool complete() const;
 };

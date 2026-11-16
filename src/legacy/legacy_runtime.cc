@@ -6909,6 +6909,7 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
     uint64_t fps_engine_ns = 0;
     uint64_t fps_launch_ns = 0;
     uint64_t fps_pace_sleep_ns = 0;
+    mocktail::window::InstallTerminationSignalHandlers();
     while (true) {
       const uint64_t fps_tick_start_ns = fps_trace ? MonotonicNanos() : 0;
       const bool keep_window_open = mocktail::window::PumpEvents();
@@ -7111,6 +7112,7 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
       mocktail::window::Shutdown();
     }
   } else {
+    mocktail::window::InstallTerminationSignalHandlers();
     int keepalive_ms = GetEnvInt("MOCKTAIL_KEEPALIVE_MS", 0);
     if (keepalive_ms > 0) {
       std::cout << "  [main] headless keepalive: " << keepalive_ms << " ms\n"
@@ -7119,7 +7121,8 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
           IsEnabled("MOCKTAIL_HEADLESS_KEEPALIVE_PUMP")) {
         int waited_ms = 0;
         constexpr int kHeadlessKeepalivePumpIntervalMs = 10;
-        while (waited_ms < keepalive_ms) {
+        while (waited_ms < keepalive_ms &&
+               !mocktail::window::TerminationSignalRequested()) {
           RunPendingMainThreadTaskSchedulerForeground();
           PumpRobloxMainThreadMessagesOnce();
           const int chunk_ms = std::min(kHeadlessKeepalivePumpIntervalMs,
@@ -7127,13 +7130,13 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
           usleep(static_cast<useconds_t>(chunk_ms) * 1000);
           waited_ms += chunk_ms;
         }
-      } else {
+      } else if (!mocktail::window::TerminationSignalRequested()) {
         usleep(static_cast<useconds_t>(keepalive_ms) * 1000);
       }
       std::cout << "  [main] headless keepalive returned\n" << std::flush;
     } else if (IsEnabled("MOCKTAIL_KEEPALIVE")) {
       std::cout << "  [main] headless keepalive: forever\n" << std::flush;
-      while (true) {
+      while (!mocktail::window::TerminationSignalRequested()) {
         pause();
       }
     }

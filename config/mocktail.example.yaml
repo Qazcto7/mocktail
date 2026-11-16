@@ -40,10 +40,10 @@ appearance:
   theme: roblox
 
 graphics:
-  # String (default: direct-vulkan): graphics backend. Use opengl on hardware
-  # without a working Vulkan driver; OpenGL ES 3.0 or newer is required.
-  # Recommended values: direct-vulkan, opengl, system, angle-vulkan.
-  backend: direct-vulkan
+  # String (default: auto): graphics backend. `auto` selects `direct-vulkan`
+  # on modern hardware and `opengl` (OpenGL ES 3.0+) on legacy CPUs/GPUs.
+  # Recommended values: auto, direct-vulkan, opengl, system, angle-vulkan.
+  backend: auto
   # Optional string or integer: Mocktail frame-rate override. Leave commented
   # (or use -1) to let Roblox Basic Settings own the cap. Supported overrides:
   # display, unlimited, or any positive integer; fixed values are forwarded to

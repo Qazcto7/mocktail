@@ -27,11 +27,17 @@ struct Probe {
   std::string reason;
   jboolean background_enabled = JNI_FALSE;
   bool fail_string_allocation = false;
+  int pump_count = 0;
 };
 
 Probe *g_probe = nullptr;
 
 void Pause(JNIEnv *, jclass) { g_probe->calls.emplace_back("pause"); }
+
+void Pump(JNIEnv *, jclass) {
+  g_probe->calls.emplace_back("pump");
+  ++g_probe->pump_count;
+}
 
 void Background(JNIEnv *env, jclass, jboolean enabled, jstring context) {
   g_probe->calls.emplace_back("background");
@@ -193,6 +199,25 @@ TEST_F(RobloxAppLifecycleTest, IncompleteSymbolsNeverInvokeNativeCode) {
 
   EXPECT_EQ(result.status, RobloxAppShutdownStatus::kMissingRequiredSymbols);
   EXPECT_TRUE(probe_.calls.empty());
+}
+
+TEST_F(RobloxAppLifecycleTest, ShutdownPumpsMainThreadMessagesWhenAvailable) {
+  auto symbols_map = CompleteSymbolMap();
+  symbols_map.emplace(
+      "Java_com_roblox_engine_jni_NativeGLInterface_"
+      "nativeCallMessagesFromMainThread",
+      reinterpret_cast<void *>(Pump));
+  const RobloxAppLifecycleResolution resolution =
+      ResolveRobloxAppLifecycleSymbols(RobloxSymbolLookup(Lookup, &symbols_map));
+  ASSERT_TRUE(resolution.ok());
+  ASSERT_NE(resolution.symbols()->call_messages_from_main_thread, nullptr);
+
+  RobloxAppLifecycle lifecycle(*resolution.symbols());
+  const RobloxAppShutdownResult result = lifecycle.Shutdown(&jni_.env, clazz_);
+  EXPECT_TRUE(result.ok());
+  EXPECT_GT(probe_.pump_count, 0);
+  EXPECT_EQ(probe_.calls.front(), "pause");
+  EXPECT_EQ(probe_.calls.back(), "pump");
 }
 
 } // namespace

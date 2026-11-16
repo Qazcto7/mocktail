@@ -14,6 +14,7 @@ with tempfile.TemporaryDirectory(prefix="mocktail_updater_launch_") as directory
         ("system", [], "system"),
         ("system", ["--graphics", "opengl"], "opengl"),
         ("direct-vulkan", [], "direct-vulkan"),
+        ("auto", ["--graphics", "direct-vulkan"], "direct-vulkan"),
     ]):
         case = root / str(index)
         config = case / "config"

@@ -530,9 +530,13 @@ int main(int argc, char* argv[]) {
     session_log = mocktail::runtime::SessionLog::Start(
         environment, paths, process_started_at);
     if (session_log) {
-      std::cout << session_log.Header(
-                       environment, paths,
-                       runtime_config.config.graphics_backend_name())
+      const char* resolved_env = std::getenv("MOCKTAIL_GRAPHICS_BACKEND");
+      const std::string_view header_backend =
+          resolved_env != nullptr && resolved_env[0] != '\0'
+              ? std::string_view(resolved_env)
+              : std::string_view(
+                    runtime_config.config.graphics_backend_name());
+      std::cout << session_log.Header(environment, paths, header_backend)
                 << std::flush;
     } else if (session_log.attempted()) {
       std::cerr << "  [session] automatic logging unavailable: "
@@ -603,13 +607,26 @@ int main(int argc, char* argv[]) {
     }
   }
   if (command_line.options.mode == mocktail::runtime::CommandMode::kRun) {
-    std::cout << "  [runtime] graphics backend="
-              << runtime_config.config.graphics_backend_name()
-              << (runtime_config.config.graphics_backend() ==
-                          mocktail::runtime::GraphicsBackend::kSystem
-                      ? " (EGL/OpenGL ES)"
-                      : "")
-              << '\n';
+    const char* resolved_env = std::getenv("MOCKTAIL_GRAPHICS_BACKEND");
+    const std::string_view resolved_name =
+        resolved_env != nullptr && resolved_env[0] != '\0'
+            ? std::string_view(resolved_env)
+            : std::string_view(runtime_config.config.graphics_backend_name());
+    if (runtime_config.config.graphics_backend() ==
+        mocktail::runtime::GraphicsBackend::kAuto) {
+      std::cout << "  [runtime] graphics backend=auto -> " << resolved_name
+                << (resolved_name == "opengl"
+                        ? " (EGL/OpenGL ES; legacy hardware detected)"
+                        : "")
+                << '\n';
+    } else {
+      std::cout << "  [runtime] graphics backend=" << resolved_name
+                << (runtime_config.config.graphics_backend() ==
+                            mocktail::runtime::GraphicsBackend::kSystem
+                        ? " (EGL/OpenGL ES)"
+                        : "")
+                << '\n';
+    }
   }
 
   // Register before starting helper processes or loading the Android payload.
@@ -685,7 +702,11 @@ int main(int argc, char* argv[]) {
   mocktail::runtime::BackgroundPayloadUpdate background_update;
   if (command_line.options.mode == mocktail::runtime::CommandMode::kRun &&
       uses_managed_payload) {
-    if (setenv("MOCKTAIL_GRAPHICS_BACKEND",
+    const char* active_graphics_backend =
+        std::getenv("MOCKTAIL_GRAPHICS_BACKEND");
+    if ((active_graphics_backend == nullptr ||
+         active_graphics_backend[0] == '\0') &&
+        setenv("MOCKTAIL_GRAPHICS_BACKEND",
                runtime_config.config.graphics_backend_name().c_str(), 1) != 0) {
       std::cerr << "[FATAL] Cannot configure the Roblox update graphics backend\n";
       return EXIT_FAILURE;
@@ -845,6 +866,12 @@ int main(int argc, char* argv[]) {
   if (!mocktail::runtime::ExportRuntimeConfigEnvironment(runtime_config.config,
                                                          &command_line_error)) {
     std::cerr << command_line_error << '\n';
+    return EXIT_FAILURE;
+  }
+  if (command_line.options.mode == mocktail::runtime::CommandMode::kRun &&
+      !mocktail::runtime::ApplyGraphicsLaunchPolicy(runtime_config.config,
+                                                     &command_line_error)) {
+    std::cerr << "[FATAL] " << command_line_error << '\n';
     return EXIT_FAILURE;
   }
   if (command_line.options.mode == mocktail::runtime::CommandMode::kRun &&
