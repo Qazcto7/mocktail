@@ -19,6 +19,7 @@
 #include "compat/bionic_pthread_create_runtime.h"
 #include "compat/guest_abi.h"
 #include "compat/http_client_spin_guard.h"
+#include "mocktail/mocktail_rust.h"
 #include "window/window.h"
 
 volatile uintptr_t g_mocktail_abort_libroblox_base = 0;
@@ -360,18 +361,6 @@ uint16_t* mocktail_bionic_mutex_state(pthread_mutex_t* mutex) {
   return reinterpret_cast<uint16_t*>(mutex);
 }
 
-int32_t* mocktail_bionic_mutex_owner(pthread_mutex_t* mutex) {
-  return reinterpret_cast<int32_t*>(reinterpret_cast<char*>(mutex) + 4);
-}
-
-pid_t mocktail_bionic_tid() {
-  thread_local pid_t tid = 0;
-  if (__builtin_expect(tid == 0, 0)) {
-    tid = ::gettid();
-  }
-  return tid;
-}
-
 void mocktail_initialize_bionic_mutex_storage(pthread_mutex_t* guest_mutex,
                                               int type) {
   std::memset(guest_mutex, 0, kBionicMutexSize);
@@ -381,186 +370,12 @@ void mocktail_initialize_bionic_mutex_storage(pthread_mutex_t* guest_mutex,
                    __ATOMIC_RELAXED);
 }
 
-int mocktail_bionic_futex(uint32_t* addr, int op, uint32_t val,
-                          const timespec* timeout, uint32_t bitset);
-
-int mocktail_bionic_mutex_futex(pthread_mutex_t* mutex, int wait_op,
-                                uint16_t expected, bool shared) {
-  uint32_t* word = reinterpret_cast<uint32_t*>(mutex);
-  const int op = shared ? wait_op : (wait_op | FUTEX_PRIVATE_FLAG);
-  return mocktail_bionic_futex(word, op, expected, nullptr, 0);
-}
-
-int mocktail_bionic_normal_mutex_trylock(uint16_t* state, uint16_t shared) {
-  const uint16_t unlocked = static_cast<uint16_t>(shared | kBionicMutexUnlocked);
-  const uint16_t locked =
-      static_cast<uint16_t>(shared | kBionicMutexLockedUncontended);
-  uint16_t old_state = unlocked;
-  if (__atomic_compare_exchange_n(state, &old_state, locked, false,
-                                  __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
-    return 0;
-  }
-  return EBUSY;
-}
-
-int mocktail_bionic_normal_mutex_lock(pthread_mutex_t* mutex, uint16_t shared) {
-  uint16_t* state = mocktail_bionic_mutex_state(mutex);
-  if (mocktail_bionic_normal_mutex_trylock(state, shared) == 0) {
-    return 0;
-  }
-  // Park on the guest word. Do not CAS-spin: this host has four threads and
-  // a spinning locker steals a worker/render core.
-  const uint16_t unlocked = static_cast<uint16_t>(shared | kBionicMutexUnlocked);
-  const uint16_t contended =
-      static_cast<uint16_t>(shared | kBionicMutexLockedContended);
-  for (;;) {
-    const uint16_t old_state =
-        __atomic_exchange_n(state, contended, __ATOMIC_ACQUIRE);
-    if (old_state == unlocked) {
-      return 0;
-    }
-    (void)mocktail_bionic_mutex_futex(mutex, FUTEX_WAIT, contended,
-                                      shared != 0);
-  }
-}
-
-void mocktail_bionic_normal_mutex_unlock(pthread_mutex_t* mutex,
-                                         uint16_t shared) {
-  uint16_t* state = mocktail_bionic_mutex_state(mutex);
-  const uint16_t unlocked = static_cast<uint16_t>(shared | kBionicMutexUnlocked);
-  const uint16_t contended =
-      static_cast<uint16_t>(shared | kBionicMutexLockedContended);
-  const uint16_t old_state =
-      __atomic_exchange_n(state, unlocked, __ATOMIC_RELEASE);
-  if (old_state == contended) {
-    (void)mocktail_bionic_mutex_futex(mutex, FUTEX_WAKE, 1, shared != 0);
-  }
-}
-
-int mocktail_bionic_recursive_increment(uint16_t* state, uint16_t old_state) {
-  if ((old_state & kBionicMutexCounterMask) == kBionicMutexCounterMask) {
-    return EAGAIN;
-  }
-  __atomic_fetch_add(state, kBionicMutexCounterOne, __ATOMIC_RELAXED);
-  return 0;
-}
-
-int mocktail_bionic_owned_mutex_lock(pthread_mutex_t* mutex, uint16_t old_state) {
-  uint16_t* state = mocktail_bionic_mutex_state(mutex);
-  int32_t* owner = mocktail_bionic_mutex_owner(mutex);
-  const uint16_t mtype =
-      static_cast<uint16_t>(old_state & kBionicMutexTypeFieldMask);
-  const uint16_t shared =
-      static_cast<uint16_t>(old_state & kBionicMutexSharedMask);
-  const pid_t tid = mocktail_bionic_tid();
-  if (tid == __atomic_load_n(owner, __ATOMIC_RELAXED)) {
-    if (mtype == kBionicMutexTypeBitsErrorCheck) {
-      return EDEADLK;
-    }
-    return mocktail_bionic_recursive_increment(state, old_state);
-  }
-
-  const uint16_t unlocked =
-      static_cast<uint16_t>(mtype | shared | kBionicMutexUnlocked);
-  const uint16_t locked_uncontended =
-      static_cast<uint16_t>(mtype | shared | kBionicMutexLockedUncontended);
-  const uint16_t locked_contended =
-      static_cast<uint16_t>(mtype | shared | kBionicMutexLockedContended);
-
-  if (old_state == unlocked) {
-    if (__atomic_compare_exchange_n(state, &old_state, locked_uncontended,
-                                    false, __ATOMIC_ACQUIRE,
-                                    __ATOMIC_RELAXED)) {
-      __atomic_store_n(owner, tid, __ATOMIC_RELAXED);
-      return 0;
-    }
-  }
-
-  for (;;) {
-    if (old_state == unlocked) {
-      if (__atomic_compare_exchange_n(state, &old_state, locked_contended, true,
-                                      __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
-        __atomic_store_n(owner, tid, __ATOMIC_RELAXED);
-        return 0;
-      }
-      continue;
-    }
-    if ((old_state & kBionicMutexStateMask) == kBionicMutexLockedUncontended) {
-      const uint16_t contended =
-          static_cast<uint16_t>(old_state ^ (kBionicMutexLockedContended ^
-                                             kBionicMutexLockedUncontended));
-      if (!__atomic_compare_exchange_n(state, &old_state, contended, true,
-                                       __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
-        continue;
-      }
-      old_state = contended;
-    }
-    (void)mocktail_bionic_mutex_futex(mutex, FUTEX_WAIT, old_state,
-                                      shared != 0);
-    old_state = __atomic_load_n(state, __ATOMIC_RELAXED);
-  }
-}
-
-int mocktail_bionic_owned_mutex_trylock(pthread_mutex_t* mutex,
-                                        uint16_t old_state) {
-  uint16_t* state = mocktail_bionic_mutex_state(mutex);
-  int32_t* owner = mocktail_bionic_mutex_owner(mutex);
-  const uint16_t mtype =
-      static_cast<uint16_t>(old_state & kBionicMutexTypeFieldMask);
-  const pid_t tid = mocktail_bionic_tid();
-  if (tid == __atomic_load_n(owner, __ATOMIC_RELAXED)) {
-    if (mtype == kBionicMutexTypeBitsErrorCheck) {
-      return EBUSY;
-    }
-    return mocktail_bionic_recursive_increment(state, old_state);
-  }
-  const uint16_t shared =
-      static_cast<uint16_t>(old_state & kBionicMutexSharedMask);
-  const uint16_t unlocked =
-      static_cast<uint16_t>(mtype | shared | kBionicMutexUnlocked);
-  const uint16_t locked =
-      static_cast<uint16_t>(mtype | shared | kBionicMutexLockedUncontended);
-  old_state = unlocked;
-  if (__atomic_compare_exchange_n(state, &old_state, locked, false,
-                                  __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
-    __atomic_store_n(owner, tid, __ATOMIC_RELAXED);
-    return 0;
-  }
-  return EBUSY;
-}
-
-int mocktail_bionic_owned_mutex_unlock(pthread_mutex_t* mutex,
-                                       uint16_t old_state) {
-  uint16_t* state = mocktail_bionic_mutex_state(mutex);
-  int32_t* owner = mocktail_bionic_mutex_owner(mutex);
-  const uint16_t mtype =
-      static_cast<uint16_t>(old_state & kBionicMutexTypeFieldMask);
-  const uint16_t shared =
-      static_cast<uint16_t>(old_state & kBionicMutexSharedMask);
-  if (mocktail_bionic_tid() != __atomic_load_n(owner, __ATOMIC_RELAXED)) {
-    return EPERM;
-  }
-  if ((old_state & kBionicMutexCounterMask) != 0) {
-    __atomic_fetch_sub(state, kBionicMutexCounterOne, __ATOMIC_RELAXED);
-    return 0;
-  }
-  __atomic_store_n(owner, 0, __ATOMIC_RELAXED);
-  const uint16_t unlocked =
-      static_cast<uint16_t>(mtype | shared | kBionicMutexUnlocked);
-  old_state = __atomic_exchange_n(state, unlocked, __ATOMIC_RELEASE);
-  if ((old_state & kBionicMutexStateMask) == kBionicMutexLockedContended) {
-    (void)mocktail_bionic_mutex_futex(mutex, FUTEX_WAKE, 1, shared != 0);
-  }
-  return 0;
-}
-
 // Bionic condvars are a generation counter + futex on the guest object.
 // libroblox inlines that path (syscall(SYS_futex) on the cond word) while
 // also importing pthread_cond_*. A separate host pthread_cond_t cannot
 // wake the inlined waiters, so wait/signal must use the guest word.
 constexpr uint32_t kBionicCondSharedMask = 0x1;
 constexpr uint32_t kBionicCondClockMask = 0x2;
-constexpr uint32_t kBionicCondCounterStep = 0x4;
 constexpr uint32_t kBionicCondFlagsMask =
     kBionicCondSharedMask | kBionicCondClockMask;
 constexpr uint32_t kBionicCondDestroyedState = 0xdeadc04d;
@@ -586,66 +401,6 @@ int mocktail_bionic_futex(uint32_t* addr, int op, uint32_t val,
                           const timespec* timeout, uint32_t bitset) {
   return static_cast<int>(
       ::syscall(SYS_futex, addr, op, val, timeout, nullptr, bitset));
-}
-
-int mocktail_bionic_cond_pulse(pthread_cond_t* cond, int waiters) {
-  uint32_t* state = mocktail_bionic_cond_state(cond);
-  const uint32_t previous =
-      __atomic_fetch_add(state, kBionicCondCounterStep, __ATOMIC_RELAXED);
-  const int op = (previous & kBionicCondSharedMask) != 0 ? FUTEX_WAKE
-                                                         : FUTEX_WAKE_PRIVATE;
-  (void)mocktail_bionic_futex(state, op, static_cast<uint32_t>(waiters),
-                              nullptr, 0);
-  return 0;
-}
-
-int mocktail_bionic_cond_timedwait(pthread_cond_t* cond, pthread_mutex_t* mutex,
-                                   bool use_realtime_clock,
-                                   const timespec* abstime) {
-  uint32_t* state = mocktail_bionic_cond_state(cond);
-  const uint32_t old_state = __atomic_load_n(state, __ATOMIC_RELAXED);
-  const int unlock_result = mocktail_pthread_mutex_unlock(mutex);
-  if (unlock_result != 0) {
-    return unlock_result;
-  }
-
-  const bool shared = (old_state & kBionicCondSharedMask) != 0;
-  int wait_result = 0;
-  for (;;) {
-    int op = 0;
-    uint32_t bitset = 0;
-    if (abstime == nullptr) {
-      op = shared ? FUTEX_WAIT : FUTEX_WAIT_PRIVATE;
-    } else {
-      op = shared ? FUTEX_WAIT_BITSET
-                  : (FUTEX_WAIT_BITSET | FUTEX_PRIVATE_FLAG);
-      if (use_realtime_clock) {
-        op |= FUTEX_CLOCK_REALTIME;
-      }
-      bitset = FUTEX_BITSET_MATCH_ANY;
-    }
-    const int rc =
-        mocktail_bionic_futex(state, op, old_state, abstime, bitset);
-    if (rc == 0 || errno == EAGAIN) {
-      wait_result = 0;
-      break;
-    }
-    if (errno == EINTR) {
-      continue;
-    }
-    if (errno == ETIMEDOUT) {
-      wait_result = ETIMEDOUT;
-      break;
-    }
-    wait_result = errno != 0 ? errno : EINVAL;
-    break;
-  }
-
-  const int lock_result = mocktail_pthread_mutex_lock(mutex);
-  if (lock_result != 0) {
-    return lock_result;
-  }
-  return wait_result;
 }
 
 int mocktail_pthread_condattr_init(pthread_condattr_t* attr) {
@@ -713,7 +468,7 @@ int mocktail_pthread_cond_signal(pthread_cond_t* cond) {
   if (cond == nullptr) {
     return EINVAL;
   }
-  return mocktail_bionic_cond_pulse(cond, 1);
+  return mocktail_rust_bionic_cond_pulse(cond, 1);
 }
 int mocktail_pthread_cond_broadcast(pthread_cond_t* cond) {
   if (mocktail_is_low_bionic_pointer(cond)) {
@@ -722,7 +477,7 @@ int mocktail_pthread_cond_broadcast(pthread_cond_t* cond) {
   if (cond == nullptr) {
     return EINVAL;
   }
-  return mocktail_bionic_cond_pulse(cond, INT_MAX);
+  return mocktail_rust_bionic_cond_pulse(cond, INT_MAX);
 }
 int mocktail_pthread_cond_wait(pthread_cond_t* cond, pthread_mutex_t* mutex) {
   if (mocktail_is_low_bionic_pointer(cond) ||
@@ -732,7 +487,7 @@ int mocktail_pthread_cond_wait(pthread_cond_t* cond, pthread_mutex_t* mutex) {
   if (cond == nullptr || mutex == nullptr) {
     return EINVAL;
   }
-  return mocktail_bionic_cond_timedwait(cond, mutex, false, nullptr);
+  return mocktail_rust_bionic_cond_timedwait(cond, mutex, false, nullptr);
 }
 int mocktail_pthread_cond_timedwait(pthread_cond_t* cond,
                                     pthread_mutex_t* mutex,
@@ -747,8 +502,8 @@ int mocktail_pthread_cond_timedwait(pthread_cond_t* cond,
   const uint32_t flags =
       __atomic_load_n(mocktail_bionic_cond_state(cond), __ATOMIC_RELAXED);
   const bool use_realtime_clock = (flags & kBionicCondClockMask) == 0;
-  return mocktail_bionic_cond_timedwait(cond, mutex, use_realtime_clock,
-                                        abstime);
+  return mocktail_rust_bionic_cond_timedwait(cond, mutex, use_realtime_clock,
+                                             abstime);
 }
 
 int mocktail_pthread_mutexattr_init(MocktailBionicMutexAttr* attr) {
@@ -818,74 +573,13 @@ int mocktail_pthread_mutex_destroy(pthread_mutex_t* mutex) {
   return EBUSY;
 }
 int mocktail_pthread_mutex_lock(pthread_mutex_t* mutex) {
-  if (mocktail_is_low_bionic_pointer(mutex)) {
-    return 0;
-  }
-  if (mutex == nullptr) {
-    return EINVAL;
-  }
-  uint16_t* state = mocktail_bionic_mutex_state(mutex);
-  const uint16_t old_state = __atomic_load_n(state, __ATOMIC_RELAXED);
-  if (old_state == kBionicMutexDestroyedState) {
-    return EBUSY;
-  }
-  const uint16_t mtype =
-      static_cast<uint16_t>(old_state & kBionicMutexTypeFieldMask);
-  if (mtype == kBionicMutexTypeBitsPi) {
-    return EINVAL;
-  }
-  if (mtype == kBionicMutexTypeBitsNormal) {
-    return mocktail_bionic_normal_mutex_lock(
-        mutex, static_cast<uint16_t>(old_state & kBionicMutexSharedMask));
-  }
-  return mocktail_bionic_owned_mutex_lock(mutex, old_state);
+  return mocktail_rust_bionic_mutex_lock(mutex);
 }
 int mocktail_pthread_mutex_trylock(pthread_mutex_t* mutex) {
-  if (mocktail_is_low_bionic_pointer(mutex)) {
-    return 0;
-  }
-  if (mutex == nullptr) {
-    return EINVAL;
-  }
-  uint16_t* state = mocktail_bionic_mutex_state(mutex);
-  const uint16_t old_state = __atomic_load_n(state, __ATOMIC_RELAXED);
-  if (old_state == kBionicMutexDestroyedState) {
-    return EBUSY;
-  }
-  const uint16_t mtype =
-      static_cast<uint16_t>(old_state & kBionicMutexTypeFieldMask);
-  if (mtype == kBionicMutexTypeBitsPi) {
-    return EINVAL;
-  }
-  if (mtype == kBionicMutexTypeBitsNormal) {
-    return mocktail_bionic_normal_mutex_trylock(
-        state, static_cast<uint16_t>(old_state & kBionicMutexSharedMask));
-  }
-  return mocktail_bionic_owned_mutex_trylock(mutex, old_state);
+  return mocktail_rust_bionic_mutex_trylock(mutex);
 }
 int mocktail_pthread_mutex_unlock(pthread_mutex_t* mutex) {
-  if (mocktail_is_low_bionic_pointer(mutex)) {
-    return 0;
-  }
-  if (mutex == nullptr) {
-    return 0;
-  }
-  uint16_t* state = mocktail_bionic_mutex_state(mutex);
-  const uint16_t old_state = __atomic_load_n(state, __ATOMIC_RELAXED);
-  if (old_state == kBionicMutexDestroyedState) {
-    return EBUSY;
-  }
-  const uint16_t mtype =
-      static_cast<uint16_t>(old_state & kBionicMutexTypeFieldMask);
-  int unlock_result = 0;
-  if (mtype == kBionicMutexTypeBitsPi) {
-    unlock_result = EINVAL;
-  } else if (mtype == kBionicMutexTypeBitsNormal) {
-    mocktail_bionic_normal_mutex_unlock(
-        mutex, static_cast<uint16_t>(old_state & kBionicMutexSharedMask));
-  } else {
-    unlock_result = mocktail_bionic_owned_mutex_unlock(mutex, old_state);
-  }
+  const int unlock_result = mocktail_rust_bionic_mutex_unlock(mutex);
   if (unlock_result == 0) {
     mocktail::compat::ApplyHttpClientSpinGuardFast();
   }

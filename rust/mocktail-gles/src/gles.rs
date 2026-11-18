@@ -98,7 +98,10 @@ const MAX_CACHED_SSBO_SLOTS: usize = 4;
 const MAX_CACHED_VERTEX_ATTRIBS: usize = 16;
 const MAX_CACHED_UNIFORM1I_SLOTS: usize = 64;
 const MAX_CACHED_UNIFORM1F_SLOTS: usize = 64;
+const MAX_CACHED_UNIFORM2F_SLOTS: usize = 64;
+const MAX_CACHED_UNIFORM3F_SLOTS: usize = 64;
 const MAX_CACHED_UNIFORM4F_SLOTS: usize = 64;
+const MAX_CACHED_UNIFORM_MAT4_SLOTS: usize = 32;
 const MAX_CACHED_TEX_PARAM_SLOTS: usize = 64;
 const MAX_CACHED_UNIFORM_LOC_ENTRIES: usize = 512;
 
@@ -127,10 +130,31 @@ struct CachedUniform1f {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CachedUniform2f {
+    program: GLuint,
+    location: GLint,
+    bits: [u32; 2],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CachedUniform3f {
+    program: GLuint,
+    location: GLint,
+    bits: [u32; 3],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CachedUniform4f {
     program: GLuint,
     location: GLint,
     bits: [u32; 4],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CachedUniformMat4 {
+    program: GLuint,
+    location: GLint,
+    bits: [u32; 16],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -242,8 +266,14 @@ pub struct GlStateCache {
     uniform1i_cursor: usize,
     uniform1f_slots: [Option<CachedUniform1f>; MAX_CACHED_UNIFORM1F_SLOTS],
     uniform1f_cursor: usize,
+    uniform2f_slots: [Option<CachedUniform2f>; MAX_CACHED_UNIFORM2F_SLOTS],
+    uniform2f_cursor: usize,
+    uniform3f_slots: [Option<CachedUniform3f>; MAX_CACHED_UNIFORM3F_SLOTS],
+    uniform3f_cursor: usize,
     uniform4f_slots: [Option<CachedUniform4f>; MAX_CACHED_UNIFORM4F_SLOTS],
     uniform4f_cursor: usize,
+    uniform_mat4_slots: [Option<CachedUniformMat4>; MAX_CACHED_UNIFORM_MAT4_SLOTS],
+    uniform_mat4_cursor: usize,
     tex_param_slots: [Option<CachedTexParam>; MAX_CACHED_TEX_PARAM_SLOTS],
     tex_param_cursor: usize,
     uniform_locs: HashMap<GLuint, HashMap<String, GLint>>,
@@ -301,8 +331,14 @@ impl Default for GlStateCache {
             uniform1i_cursor: 0,
             uniform1f_slots: [None; MAX_CACHED_UNIFORM1F_SLOTS],
             uniform1f_cursor: 0,
+            uniform2f_slots: [None; MAX_CACHED_UNIFORM2F_SLOTS],
+            uniform2f_cursor: 0,
+            uniform3f_slots: [None; MAX_CACHED_UNIFORM3F_SLOTS],
+            uniform3f_cursor: 0,
             uniform4f_slots: [None; MAX_CACHED_UNIFORM4F_SLOTS],
             uniform4f_cursor: 0,
+            uniform_mat4_slots: [None; MAX_CACHED_UNIFORM_MAT4_SLOTS],
+            uniform_mat4_cursor: 0,
             tex_param_slots: [None; MAX_CACHED_TEX_PARAM_SLOTS],
             tex_param_cursor: 0,
             uniform_locs: HashMap::new(),
@@ -807,7 +843,28 @@ impl GlStateCache {
                 }
             }
         }
+        for slot in self.uniform2f_slots.iter_mut() {
+            if let Some(entry) = *slot {
+                if entry.program == id {
+                    *slot = None;
+                }
+            }
+        }
+        for slot in self.uniform3f_slots.iter_mut() {
+            if let Some(entry) = *slot {
+                if entry.program == id {
+                    *slot = None;
+                }
+            }
+        }
         for slot in self.uniform4f_slots.iter_mut() {
+            if let Some(entry) = *slot {
+                if entry.program == id {
+                    *slot = None;
+                }
+            }
+        }
+        for slot in self.uniform_mat4_slots.iter_mut() {
             if let Some(entry) = *slot {
                 if entry.program == id {
                     *slot = None;
@@ -983,6 +1040,116 @@ impl GlStateCache {
             bits,
         });
         self.uniform4f_cursor = (self.uniform4f_cursor + 1) % MAX_CACHED_UNIFORM4F_SLOTS;
+        true
+    }
+
+    pub fn should_set_uniform2f(&mut self, location: GLint, v0: GLfloat, v1: GLfloat) -> bool {
+        let Some(program) = self.program else {
+            return true;
+        };
+        if program == 0 || location < 0 {
+            return true;
+        }
+        let bits = [v0.to_bits(), v1.to_bits()];
+        for slot in self.uniform2f_slots.iter_mut() {
+            if let Some(entry) = slot {
+                if entry.program == program && entry.location == location {
+                    if entry.bits == bits {
+                        return false;
+                    }
+                    entry.bits = bits;
+                    return true;
+                }
+            }
+        }
+        self.uniform2f_slots[self.uniform2f_cursor] = Some(CachedUniform2f {
+            program,
+            location,
+            bits,
+        });
+        self.uniform2f_cursor = (self.uniform2f_cursor + 1) % MAX_CACHED_UNIFORM2F_SLOTS;
+        true
+    }
+
+    pub fn should_set_uniform3f(
+        &mut self,
+        location: GLint,
+        v0: GLfloat,
+        v1: GLfloat,
+        v2: GLfloat,
+    ) -> bool {
+        let Some(program) = self.program else {
+            return true;
+        };
+        if program == 0 || location < 0 {
+            return true;
+        }
+        let bits = [v0.to_bits(), v1.to_bits(), v2.to_bits()];
+        for slot in self.uniform3f_slots.iter_mut() {
+            if let Some(entry) = slot {
+                if entry.program == program && entry.location == location {
+                    if entry.bits == bits {
+                        return false;
+                    }
+                    entry.bits = bits;
+                    return true;
+                }
+            }
+        }
+        self.uniform3f_slots[self.uniform3f_cursor] = Some(CachedUniform3f {
+            program,
+            location,
+            bits,
+        });
+        self.uniform3f_cursor = (self.uniform3f_cursor + 1) % MAX_CACHED_UNIFORM3F_SLOTS;
+        true
+    }
+
+    pub fn should_set_uniform_matrix4fv(
+        &mut self,
+        location: GLint,
+        count: GLsizei,
+        transpose: GLboolean,
+        value: *const GLfloat,
+    ) -> bool {
+        let Some(program) = self.program else {
+            return true;
+        };
+        if program == 0 || location < 0 || value.is_null() {
+            return true;
+        }
+        if count != 1 || transpose != 0 {
+            for slot in self.uniform_mat4_slots.iter_mut() {
+                if let Some(entry) = *slot {
+                    if entry.program == program && entry.location == location {
+                        *slot = None;
+                    }
+                }
+            }
+            return true;
+        }
+        let floats = unsafe { std::slice::from_raw_parts(value, 16) };
+        let mut bits = [0u32; 16];
+        for (dst, &src) in bits.iter_mut().zip(floats.iter()) {
+            *dst = src.to_bits();
+        }
+        for slot in self.uniform_mat4_slots.iter_mut() {
+            if let Some(entry) = slot {
+                if entry.program == program && entry.location == location {
+                    if entry.bits == bits {
+                        return false;
+                    }
+                    entry.bits = bits;
+                    return true;
+                }
+            }
+        }
+        self.uniform_mat4_slots[self.uniform_mat4_cursor] = Some(CachedUniformMat4 {
+            program,
+            location,
+            bits,
+        });
+        self.uniform_mat4_cursor = (self.uniform_mat4_cursor + 1) % MAX_CACHED_UNIFORM_MAT4_SLOTS;
         true
     }
 
@@ -1546,7 +1713,10 @@ pub extern "C" fn mocktail_gles_lookup_proc(procname: *const c_char) -> *mut c_v
         "glTexSubImage2D" => mocktail_rust_gl_tex_sub_image_2d as *mut c_void,
         "glUniform1f" => mocktail_rust_gl_uniform1f as *mut c_void,
         "glUniform1i" => mocktail_rust_gl_uniform1i as *mut c_void,
+        "glUniform2f" => mocktail_rust_gl_uniform2f as *mut c_void,
+        "glUniform3f" => mocktail_rust_gl_uniform3f as *mut c_void,
         "glUniform4f" => mocktail_rust_gl_uniform4f as *mut c_void,
+        "glUniformMatrix4fv" => mocktail_rust_gl_uniform_matrix4fv as *mut c_void,
         "glUseProgram" => mocktail_rust_gl_use_program as *mut c_void,
         "glVertexAttribDivisor" => mocktail_rust_gl_vertex_attrib_divisor as *mut c_void,
         "glVertexAttribPointer" => mocktail_rust_gl_vertex_attrib_pointer as *mut c_void,
@@ -3104,6 +3274,65 @@ pub extern "C" fn mocktail_rust_gl_uniform4f(
                 unsafe extern "C" fn(GLint, GLfloat, GLfloat, GLfloat, GLfloat)
             ) {
                 unsafe { f(location, v0, v1, v2, v3) };
+            }
+        }
+        return;
+    }
+    let _ = stub_require();
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_gl_uniform2f(location: GLint, v0: GLfloat, v1: GLfloat) {
+    if host_active() {
+        if with_cache_check(|c| c.should_set_uniform2f(location, v0, v1)) {
+            if let Some(f) = host_gl!(FN, "glUniform2f", unsafe extern "C" fn(GLint, GLfloat, GLfloat))
+            {
+                unsafe { f(location, v0, v1) };
+            }
+        }
+        return;
+    }
+    let _ = stub_require();
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_gl_uniform3f(
+    location: GLint,
+    v0: GLfloat,
+    v1: GLfloat,
+    v2: GLfloat,
+) {
+    if host_active() {
+        if with_cache_check(|c| c.should_set_uniform3f(location, v0, v1, v2)) {
+            if let Some(f) = host_gl!(
+                FN,
+                "glUniform3f",
+                unsafe extern "C" fn(GLint, GLfloat, GLfloat, GLfloat)
+            ) {
+                unsafe { f(location, v0, v1, v2) };
+            }
+        }
+        return;
+    }
+    let _ = stub_require();
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_gl_uniform_matrix4fv(
+    location: GLint,
+    count: GLsizei,
+    transpose: GLboolean,
+    value: *const GLfloat,
+) {
+    if host_active() {
+        if with_cache_check(|c| c.should_set_uniform_matrix4fv(location, count, transpose, value))
+        {
+            if let Some(f) = host_gl!(
+                FN,
+                "glUniformMatrix4fv",
+                unsafe extern "C" fn(GLint, GLsizei, GLboolean, *const GLfloat)
+            ) {
+                unsafe { f(location, count, transpose, value) };
             }
         }
         return;

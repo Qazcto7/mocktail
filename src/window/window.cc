@@ -2372,6 +2372,8 @@ bool PumpEvents() {
   }
   platform::PlatformEvent pending_motion{};
   bool has_pending_motion = false;
+  platform::PlatformEvent pending_wheel{};
+  bool has_pending_wheel = false;
 
   auto flush_motion = [&]() {
     if (has_pending_motion) {
@@ -2380,6 +2382,17 @@ bool PumpEvents() {
       pending_motion = {};
     }
   };
+  auto flush_wheel = [&]() {
+    if (has_pending_wheel) {
+      g_platform_event_observer.Notify(pending_wheel);
+      has_pending_wheel = false;
+      pending_wheel = {};
+    }
+  };
+
+  const SDL_WindowID main_window_id = SDL_GetWindowID(g_state.sdl_window);
+  bool relative_mouse_mode =
+      SDL_GetWindowRelativeMouseMode(g_state.sdl_window);
 
   SDL_Event event;
   SDL_PumpEvents();
@@ -2388,13 +2401,15 @@ bool PumpEvents() {
     if (event.type != SDL_EVENT_MOUSE_MOTION) {
       flush_motion();
     }
+    if (event.type != SDL_EVENT_MOUSE_WHEEL) {
+      flush_wheel();
+    }
     if (SdlEventTraceEnabled()) {
       fprintf(stderr, "  [window] SDL event type=%u\n", event.type);
     }
     const bool is_window_event = event.type >= SDL_EVENT_WINDOW_FIRST &&
                                  event.type <= SDL_EVENT_WINDOW_LAST;
-    if (is_window_event &&
-        event.window.windowID != SDL_GetWindowID(g_state.sdl_window)) {
+    if (is_window_event && event.window.windowID != main_window_id) {
       continue;
     }
     if (event.type == SDL_EVENT_QUIT) {
@@ -2426,6 +2441,10 @@ bool PumpEvents() {
             g_text_input_owner != nullptr && g_text_input_owner->active())) {
       fprintf(stderr, "  [input] failed to restore pointer after focus gain\n");
     }
+    if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST ||
+        event.type == SDL_EVENT_WINDOW_FOCUS_GAINED) {
+      relative_mouse_mode = SDL_GetWindowRelativeMouseMode(g_state.sdl_window);
+    }
     if (event.type == SDL_EVENT_WINDOW_MINIMIZED) {
       g_window_minimized.store(true, std::memory_order_release);
     } else if (event.type == SDL_EVENT_WINDOW_RESTORED) {
@@ -2450,11 +2469,18 @@ bool PumpEvents() {
 
     const bool fullscreen_shortcut = HandleFullscreenShortcut(event);
     platform::PlatformEvent platform_event;
-    const bool converted =
-        platform::ConvertSdlEvent(
-            g_state.sdl_window, event, &platform_event,
-            SDL_GetWindowRelativeMouseMode(g_state.sdl_window));
-    if (is_window_event && g_window_surface_lifecycle.active()) {
+    const bool converted = platform::ConvertSdlEvent(
+        g_state.sdl_window, event, &platform_event, relative_mouse_mode);
+    const bool surface_relevant_window_event =
+        geometry_changed || fullscreen_changed ||
+        event.type == SDL_EVENT_WINDOW_SHOWN ||
+        event.type == SDL_EVENT_WINDOW_HIDDEN ||
+        event.type == SDL_EVENT_WINDOW_EXPOSED ||
+        event.type == SDL_EVENT_WINDOW_MINIMIZED ||
+        event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED ||
+        event.type == SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED ||
+        event.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED;
+    if (surface_relevant_window_event && g_window_surface_lifecycle.active()) {
       int pixel_width = 0;
       int pixel_height = 0;
       SDL_GetWindowSizeInPixels(g_state.sdl_window, &pixel_width,
@@ -2533,6 +2559,28 @@ bool PumpEvents() {
             has_pending_motion = true;
           }
         }
+      } else if (event.type == SDL_EVENT_MOUSE_WHEEL) {
+        if (!has_pending_wheel) {
+          pending_wheel = platform_event;
+          has_pending_wheel = true;
+        } else {
+          auto* cur =
+              std::get_if<platform::MouseWheelEvent>(&pending_wheel.payload);
+          const auto* nxt =
+              std::get_if<platform::MouseWheelEvent>(&platform_event.payload);
+          if (cur != nullptr && nxt != nullptr &&
+              cur->relative_mode == nxt->relative_mode) {
+            cur->delta_x += nxt->delta_x;
+            cur->delta_y += nxt->delta_y;
+            cur->mouse_x = nxt->mouse_x;
+            cur->mouse_y = nxt->mouse_y;
+            pending_wheel.timestamp_ns = platform_event.timestamp_ns;
+          } else {
+            flush_wheel();
+            pending_wheel = platform_event;
+            has_pending_wheel = true;
+          }
+        }
       } else {
         g_platform_event_observer.Notify(platform_event);
       }
@@ -2541,26 +2589,31 @@ bool PumpEvents() {
         !event.key.repeat &&
         (event.key.scancode == SDL_SCANCODE_LSHIFT ||
          event.key.scancode == SDL_SCANCODE_RSHIFT) &&
-        g_pointer_capture_owner != nullptr &&
-        !g_pointer_capture_owner->OnShiftKeyPressed(
-            g_text_input_owner != nullptr && g_text_input_owner->active())) {
-      fprintf(stderr,
-              "  [input] SDL shift-lock pointer capture update failed\n");
+        g_pointer_capture_owner != nullptr) {
+      if (!g_pointer_capture_owner->OnShiftKeyPressed(
+              g_text_input_owner != nullptr && g_text_input_owner->active())) {
+        fprintf(stderr,
+                "  [input] SDL shift-lock pointer capture update failed\n");
+      }
+      relative_mouse_mode = SDL_GetWindowRelativeMouseMode(g_state.sdl_window);
     }
     if ((event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
          event.type == SDL_EVENT_MOUSE_BUTTON_UP) &&
         event.button.button == SDL_BUTTON_RIGHT &&
-        event.button.windowID == SDL_GetWindowID(g_state.sdl_window) &&
-        g_pointer_capture_owner != nullptr &&
-        !g_pointer_capture_owner->OnRightButton(
-            event.button.down,
-            g_text_input_owner != nullptr && g_text_input_owner->active(),
-            PointerPosition{event.button.x, event.button.y})) {
-      fprintf(stderr,
-              "  [input] SDL right-button pointer capture update failed\n");
+        event.button.windowID == main_window_id &&
+        g_pointer_capture_owner != nullptr) {
+      if (!g_pointer_capture_owner->OnRightButton(
+              event.button.down,
+              g_text_input_owner != nullptr && g_text_input_owner->active(),
+              PointerPosition{event.button.x, event.button.y})) {
+        fprintf(stderr,
+                "  [input] SDL right-button pointer capture update failed\n");
+      }
+      relative_mouse_mode = SDL_GetWindowRelativeMouseMode(g_state.sdl_window);
     }
   }
   flush_motion();
+  flush_wheel();
   MaybePersistWindowState();
   MaybeRecoverVulkanSurface();
   MaybeReportVulkanPresentStall();

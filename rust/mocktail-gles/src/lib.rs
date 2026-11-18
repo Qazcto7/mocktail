@@ -338,5 +338,28 @@ mod tests {
         assert!(!cache.should_bind_sampler(0, 9));
         cache.on_delete_samplers(&[9]);
         assert!(cache.should_bind_sampler(0, 9));
+
+        // Phase 5: Uniform2f, Uniform3f, and UniformMatrix4fv deduplication & invalidation.
+        assert!(cache.should_set_uniform2f(3, 1920.0, 1080.0));
+        assert!(!cache.should_set_uniform2f(3, 1920.0, 1080.0));
+        assert!(cache.should_set_uniform2f(3, 1280.0, 720.0));
+
+        assert!(cache.should_set_uniform3f(4, 1.0, 0.25, 0.5));
+        assert!(!cache.should_set_uniform3f(4, 1.0, 0.25, 0.5));
+        assert!(cache.should_set_uniform3f(4, 0.0, 0.25, 0.5));
+
+        let mat_a: [f32; 16] = [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
+        let mut mat_b = mat_a;
+        mat_b[12] = 10.0;
+        assert!(cache.should_set_uniform_matrix4fv(5, 1, 0, mat_a.as_ptr()));
+        assert!(!cache.should_set_uniform_matrix4fv(5, 1, 0, mat_a.as_ptr()));
+        assert!(cache.should_set_uniform_matrix4fv(5, 1, 0, mat_b.as_ptr()));
+        assert!(!cache.should_set_uniform_matrix4fv(5, 1, 0, mat_b.as_ptr()));
+        cache.on_program_relinked(77);
+        assert!(cache.should_set_uniform2f(3, 1280.0, 720.0));
+        assert!(cache.should_set_uniform3f(4, 0.0, 0.25, 0.5));
+        assert!(cache.should_set_uniform_matrix4fv(5, 1, 0, mat_b.as_ptr()));
     }
 }

@@ -9,6 +9,7 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <shared_mutex>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -92,7 +93,7 @@ extern const abi::PlayTable kPlayTable;
 extern const abi::VolumeTable kVolumeTable;
 extern const abi::AndroidConfigurationTable kConfigurationTable;
 
-std::mutex g_active_objects_mutex;
+std::shared_mutex g_active_objects_mutex;
 std::unordered_set<RuntimeObject*> g_active_objects;
 
 struct RuntimeObject {
@@ -102,12 +103,12 @@ struct RuntimeObject {
     play_handle = PlayHandle{&kPlayTable, this};
     volume_handle = VolumeHandle{&kVolumeTable, this};
     configuration_handle = ConfigurationHandle{&kConfigurationTable, this};
-    std::lock_guard<std::mutex> lock(g_active_objects_mutex);
+    std::lock_guard<std::shared_mutex> lock(g_active_objects_mutex);
     g_active_objects.insert(this);
   }
 
   ~RuntimeObject() {
-    std::lock_guard<std::mutex> lock(g_active_objects_mutex);
+    std::lock_guard<std::shared_mutex> lock(g_active_objects_mutex);
     g_active_objects.erase(this);
   }
 
@@ -140,7 +141,7 @@ struct RuntimeObject {
   VolumeHandle volume_handle;
   ConfigurationHandle configuration_handle;
   mutable std::mutex mutex;
-  abi::Uint32 state = abi::kObjectStateUnrealized;
+  std::atomic<abi::Uint32> state{abi::kObjectStateUnrealized};
   abi::ObjectCallback object_callback = nullptr;
   void* object_callback_context = nullptr;
   abi::Int32 priority = 0;
@@ -154,7 +155,7 @@ struct RuntimeObject {
   bool expose_queue = false;
   bool expose_volume = false;
   bool expose_configuration = false;
-  abi::Uint32 play_state = abi::kPlayStateStopped;
+  std::atomic<abi::Uint32> play_state{abi::kPlayStateStopped};
   abi::Millibel volume_level = kMaxVolumeLevel;
   abi::Boolean muted = abi::kBooleanFalse;
   abi::Int32 stream_type = abi::kAndroidStreamMedia;
@@ -170,7 +171,7 @@ RuntimeObject* ResolveActiveObject(RuntimeObject* object) {
   if (object == nullptr || object->magic != kRuntimeObjectMagic) {
     return nullptr;
   }
-  std::lock_guard<std::mutex> lock(g_active_objects_mutex);
+  std::shared_lock<std::shared_mutex> lock(g_active_objects_mutex);
   return g_active_objects.find(object) != g_active_objects.end() ? object : nullptr;
 }
 
@@ -244,8 +245,8 @@ abi::Result ToOpenSlResult(const Status& status) {
 }
 
 bool IsObjectRealized(RuntimeObject* object) {
-  std::lock_guard<std::mutex> lock(object->mutex);
-  return object->state == abi::kObjectStateRealized;
+  return object->state.load(std::memory_order_acquire) ==
+         abi::kObjectStateRealized;
 }
 
 abi::Result ValidateInterfaceArray(abi::Uint32 count,
@@ -473,7 +474,7 @@ abi::Result ObjectRealize(abi::Object self, abi::Boolean async) {
                  PcmFormatName(object->pcm_spec.format),
                  static_cast<unsigned>(object->queue_capacity));
   }
-  object->state = abi::kObjectStateRealized;
+  object->state.store(abi::kObjectStateRealized, std::memory_order_release);
   return abi::kResultSuccess;
 }
 
@@ -490,8 +491,7 @@ abi::Result ObjectGetState(abi::Object self, abi::Uint32* state) {
   if (object == nullptr || state == nullptr) {
     return abi::kResultParameterInvalid;
   }
-  std::lock_guard<std::mutex> lock(object->mutex);
-  *state = object->state;
+  *state = object->state.load(std::memory_order_acquire);
   return abi::kResultSuccess;
 }
 
@@ -566,7 +566,7 @@ void ObjectDestroy(abi::Object self) {
   }
   RuntimeObject* object = nullptr;
   {
-    std::lock_guard<std::mutex> lock(g_active_objects_mutex);
+    std::lock_guard<std::shared_mutex> lock(g_active_objects_mutex);
     const auto* handle = reinterpret_cast<const ObjectHandle*>(self);
     object = handle->object;
     if (object == nullptr ||
@@ -946,7 +946,7 @@ abi::Result PlaySetState(abi::Play self, abi::Uint32 state) {
   if (!status.ok()) {
     return ToOpenSlResult(status);
   }
-  player->play_state = state;
+  player->play_state.store(state, std::memory_order_release);
   return abi::kResultSuccess;
 }
 
@@ -956,8 +956,7 @@ abi::Result PlayGetState(abi::Play self, abi::Uint32* state) {
       player->kind != RuntimeObjectKind::kPlayer) {
     return abi::kResultParameterInvalid;
   }
-  std::lock_guard<std::mutex> lock(player->mutex);
-  *state = player->play_state;
+  *state = player->play_state.load(std::memory_order_acquire);
   return abi::kResultSuccess;
 }
 

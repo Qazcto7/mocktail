@@ -100,7 +100,7 @@ struct DecodeBandQueue {
   std::atomic<std::size_t> next{0};
   std::mutex mutex;
   std::condition_variable completed;
-  unsigned workers = 0;
+  std::atomic<unsigned> workers{0};
 
   void Run() {
     for (;;) {
@@ -150,15 +150,19 @@ class DecodeWorkerPool {
     }
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      queue->workers = helpers;
+      queue->workers.store(helpers, std::memory_order_release);
       for (unsigned index = 0; index < helpers; ++index) {
         pending_.push_back(queue);
       }
     }
     ready_.notify_all();
     queue->Run();
-    std::unique_lock<std::mutex> lock(queue->mutex);
-    queue->completed.wait(lock, [queue] { return queue->workers == 0; });
+    if (queue->workers.load(std::memory_order_acquire) != 0) {
+      std::unique_lock<std::mutex> lock(queue->mutex);
+      queue->completed.wait(lock, [queue] {
+        return queue->workers.load(std::memory_order_acquire) == 0;
+      });
+    }
   }
 
  private:
@@ -180,8 +184,8 @@ class DecodeWorkerPool {
         pending_.pop_front();
       }
       queue->Run();
-      std::lock_guard<std::mutex> lock(queue->mutex);
-      if (--queue->workers == 0) {
+      if (queue->workers.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        std::lock_guard<std::mutex> lock(queue->mutex);
         queue->completed.notify_one();
       }
     }

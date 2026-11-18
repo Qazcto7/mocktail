@@ -4,7 +4,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::{c_char, c_int, c_long, c_uint, c_ulong, c_void, CStr};
 use std::fs;
-use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 // ============================================================================
@@ -27,6 +27,8 @@ pub struct CpuRuntimeStats {
     pub rwlock_wakes: AtomicU64,
     pub rwlock_wakes_skipped: AtomicU64,
     pub sem_ops: AtomicU64,
+    pub mutex_ops: AtomicU64,
+    pub cond_ops: AtomicU64,
 }
 
 static STATS: CpuRuntimeStats = CpuRuntimeStats::new();
@@ -48,6 +50,8 @@ impl CpuRuntimeStats {
             rwlock_wakes: AtomicU64::new(0),
             rwlock_wakes_skipped: AtomicU64::new(0),
             sem_ops: AtomicU64::new(0),
+            mutex_ops: AtomicU64::new(0),
+            cond_ops: AtomicU64::new(0),
         }
     }
 }
@@ -657,7 +661,7 @@ pub extern "C" fn mocktail_cpu_dump_stats() {
     }
     let topo = host_topology();
     eprintln!(
-        "  [cpu] policy={} topology={} allowed={} physical={} p_cores={} e_cores={} llc_clusters={} named={} roles(crit={} worker={} io={} audio={}) affinity_applied={} nice_applied={} sched_yields={} nanosleeps={} futex_waits={} rwlock_ops={} rwlock_wakes={} rwlock_wakes_skipped={} sem_ops={}",
+        "  [cpu] policy={} topology={} allowed={} physical={} p_cores={} e_cores={} llc_clusters={} named={} roles(crit={} worker={} io={} audio={}) affinity_applied={} nice_applied={} sched_yields={} nanosleeps={} futex_waits={} rwlock_ops={} rwlock_wakes={} rwlock_wakes_skipped={} sem_ops={} mutex_ops={} cond_ops={}",
         if cpu_policy_enabled() { "on" } else { "off" },
         topo.kind.as_str(),
         topo.allowed_logical.len(),
@@ -679,6 +683,8 @@ pub extern "C" fn mocktail_cpu_dump_stats() {
         STATS.rwlock_wakes.load(Ordering::Relaxed),
         STATS.rwlock_wakes_skipped.load(Ordering::Relaxed),
         STATS.sem_ops.load(Ordering::Relaxed),
+        STATS.mutex_ops.load(Ordering::Relaxed),
+        STATS.cond_ops.load(Ordering::Relaxed),
     );
 }
 
@@ -744,6 +750,469 @@ fn futex_wake_private(addr: *const c_void, count: c_int) {
 
 #[cfg(not(target_os = "linux"))]
 fn futex_wake_private(_addr: *const c_void, _count: c_int) {}
+
+#[cfg(target_os = "linux")]
+fn futex_syscall(
+    addr: *const c_void,
+    op: c_int,
+    val: u32,
+    timeout: *const libc::timespec,
+    bitset: u32,
+) -> c_int {
+    unsafe {
+        libc::syscall(
+            libc::SYS_futex,
+            addr,
+            op,
+            val,
+            timeout,
+            std::ptr::null::<c_void>(),
+            bitset,
+        ) as c_int
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn futex_syscall(
+    _addr: *const c_void,
+    _op: c_int,
+    _val: u32,
+    _timeout: *const libc::timespec,
+    _bitset: u32,
+) -> c_int {
+    -1
+}
+
+// ============================================================================
+// Bionic Mutex & Condvar Runtime (LP64 Guest Word Layout + Adaptive Spin)
+// ============================================================================
+
+const BIONIC_MUTEX_DESTROYED_STATE: u16 = 0xffff;
+const BIONIC_MUTEX_TYPE_SHIFT: u16 = 14;
+const BIONIC_MUTEX_TYPE_FIELD_MASK: u16 = 0x3 << BIONIC_MUTEX_TYPE_SHIFT;
+const BIONIC_MUTEX_SHARED_MASK: u16 = 1u16 << 13;
+const BIONIC_MUTEX_STATE_MASK: u16 = 0x3;
+const BIONIC_MUTEX_UNLOCKED: u16 = 0;
+const BIONIC_MUTEX_LOCKED_UNCONTENDED: u16 = 1;
+const BIONIC_MUTEX_LOCKED_CONTENDED: u16 = 2;
+const BIONIC_MUTEX_COUNTER_MASK: u16 = 0x1ffc;
+const BIONIC_MUTEX_COUNTER_ONE: u16 = 1u16 << 2;
+const BIONIC_MUTEX_TYPE_NORMAL: u16 = 0;
+const BIONIC_MUTEX_TYPE_ERRORCHECK: u16 = 2u16 << BIONIC_MUTEX_TYPE_SHIFT;
+const BIONIC_MUTEX_TYPE_PI: u16 = BIONIC_MUTEX_TYPE_FIELD_MASK;
+
+const BIONIC_COND_SHARED_MASK: u32 = 0x1;
+const BIONIC_COND_COUNTER_STEP: u32 = 0x4;
+
+const UAPI_FUTEX_WAIT: c_int = 0;
+const UAPI_FUTEX_WAKE: c_int = 1;
+const UAPI_FUTEX_WAIT_BITSET: c_int = 9;
+const UAPI_FUTEX_PRIVATE_FLAG: c_int = 128;
+const UAPI_FUTEX_CLOCK_REALTIME: c_int = 256;
+const UAPI_FUTEX_BITSET_MATCH_ANY: u32 = 0xffff_ffff;
+
+#[inline]
+fn adaptive_mutex_spin_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| host_topology().allowed_logical.len() > 4)
+}
+
+#[inline]
+unsafe fn bionic_mutex_state(mutex: *mut c_void) -> &'static AtomicU16 {
+    &*(mutex as *const AtomicU16)
+}
+
+#[inline]
+unsafe fn bionic_mutex_word(mutex: *mut c_void) -> &'static AtomicU32 {
+    &*(mutex as *const AtomicU32)
+}
+
+#[inline]
+unsafe fn bionic_mutex_owner(mutex: *mut c_void) -> &'static AtomicI32 {
+    &*((mutex as *const u8).add(4) as *const AtomicI32)
+}
+
+#[inline]
+unsafe fn bionic_cond_state(cond: *mut c_void) -> &'static AtomicU32 {
+    &*(cond as *const AtomicU32)
+}
+
+fn mutex_futex_wait(mutex: *mut c_void, expected_state: u16, shared: bool) {
+    let word = unsafe { bionic_mutex_word(mutex) }.load(Ordering::Relaxed);
+    if (word & 0xffff) as u16 != expected_state {
+        return;
+    }
+    if stats_enabled() {
+        STATS.futex_waits.fetch_add(1, Ordering::Relaxed);
+    }
+    let op = if shared {
+        UAPI_FUTEX_WAIT
+    } else {
+        UAPI_FUTEX_WAIT | UAPI_FUTEX_PRIVATE_FLAG
+    };
+    let _ = futex_syscall(mutex, op, word, std::ptr::null(), 0);
+}
+
+fn mutex_futex_wake(mutex: *mut c_void, shared: bool) {
+    let op = if shared {
+        UAPI_FUTEX_WAKE
+    } else {
+        UAPI_FUTEX_WAKE | UAPI_FUTEX_PRIVATE_FLAG
+    };
+    let _ = futex_syscall(mutex, op, 1, std::ptr::null(), 0);
+}
+
+#[inline]
+fn normal_mutex_trylock(state: &AtomicU16, shared: u16) -> c_int {
+    let unlocked = shared | BIONIC_MUTEX_UNLOCKED;
+    let locked = shared | BIONIC_MUTEX_LOCKED_UNCONTENDED;
+    if state
+        .compare_exchange(unlocked, locked, Ordering::Acquire, Ordering::Relaxed)
+        .is_ok()
+    {
+        0
+    } else {
+        libc::EBUSY
+    }
+}
+
+fn normal_mutex_lock(mutex: *mut c_void, shared: u16) -> c_int {
+    let state = unsafe { bionic_mutex_state(mutex) };
+    if normal_mutex_trylock(state, shared) == 0 {
+        return 0;
+    }
+    if adaptive_mutex_spin_enabled() {
+        for _ in 0..32 {
+            if (state.load(Ordering::Relaxed) & BIONIC_MUTEX_STATE_MASK) == BIONIC_MUTEX_UNLOCKED
+                && normal_mutex_trylock(state, shared) == 0
+            {
+                return 0;
+            }
+            std::hint::spin_loop();
+        }
+    }
+    let unlocked = shared | BIONIC_MUTEX_UNLOCKED;
+    let contended = shared | BIONIC_MUTEX_LOCKED_CONTENDED;
+    loop {
+        if state.swap(contended, Ordering::Acquire) == unlocked {
+            return 0;
+        }
+        mutex_futex_wait(mutex, contended, shared != 0);
+    }
+}
+
+fn normal_mutex_unlock(mutex: *mut c_void, shared: u16) {
+    let state = unsafe { bionic_mutex_state(mutex) };
+    let unlocked = shared | BIONIC_MUTEX_UNLOCKED;
+    let contended = shared | BIONIC_MUTEX_LOCKED_CONTENDED;
+    if state.swap(unlocked, Ordering::Release) == contended {
+        mutex_futex_wake(mutex, shared != 0);
+    }
+}
+
+fn recursive_increment(state: &AtomicU16, old_state: u16) -> c_int {
+    if (old_state & BIONIC_MUTEX_COUNTER_MASK) == BIONIC_MUTEX_COUNTER_MASK {
+        return libc::EAGAIN;
+    }
+    state.fetch_add(BIONIC_MUTEX_COUNTER_ONE, Ordering::Relaxed);
+    0
+}
+
+fn owned_mutex_lock(mutex: *mut c_void, mut old_state: u16) -> c_int {
+    let state = unsafe { bionic_mutex_state(mutex) };
+    let owner = unsafe { bionic_mutex_owner(mutex) };
+    let mtype = old_state & BIONIC_MUTEX_TYPE_FIELD_MASK;
+    let shared = old_state & BIONIC_MUTEX_SHARED_MASK;
+    let tid = current_tid();
+
+    if tid == owner.load(Ordering::Relaxed) {
+        if mtype == BIONIC_MUTEX_TYPE_ERRORCHECK {
+            return libc::EDEADLK;
+        }
+        return recursive_increment(state, old_state);
+    }
+
+    let unlocked = mtype | shared | BIONIC_MUTEX_UNLOCKED;
+    let locked_uncontended = mtype | shared | BIONIC_MUTEX_LOCKED_UNCONTENDED;
+    let locked_contended = mtype | shared | BIONIC_MUTEX_LOCKED_CONTENDED;
+
+    if old_state == unlocked
+        && state
+            .compare_exchange(
+                unlocked,
+                locked_uncontended,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+    {
+        owner.store(tid, Ordering::Relaxed);
+        return 0;
+    }
+
+    if adaptive_mutex_spin_enabled() {
+        for _ in 0..32 {
+            if state.load(Ordering::Relaxed) == unlocked
+                && state
+                    .compare_exchange(
+                        unlocked,
+                        locked_uncontended,
+                        Ordering::Acquire,
+                        Ordering::Relaxed,
+                    )
+                    .is_ok()
+            {
+                owner.store(tid, Ordering::Relaxed);
+                return 0;
+            }
+            std::hint::spin_loop();
+        }
+        old_state = state.load(Ordering::Relaxed);
+    }
+
+    loop {
+        if old_state == unlocked {
+            match state.compare_exchange_weak(
+                unlocked,
+                locked_contended,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    owner.store(tid, Ordering::Relaxed);
+                    return 0;
+                }
+                Err(actual) => {
+                    old_state = actual;
+                    continue;
+                }
+            }
+        }
+        if (old_state & BIONIC_MUTEX_STATE_MASK) == BIONIC_MUTEX_LOCKED_UNCONTENDED {
+            let contended =
+                old_state ^ (BIONIC_MUTEX_LOCKED_CONTENDED ^ BIONIC_MUTEX_LOCKED_UNCONTENDED);
+            if let Err(actual) = state.compare_exchange_weak(
+                old_state,
+                contended,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                old_state = actual;
+                continue;
+            }
+            old_state = contended;
+        }
+        mutex_futex_wait(mutex, old_state, shared != 0);
+        old_state = state.load(Ordering::Relaxed);
+    }
+}
+
+fn owned_mutex_trylock(mutex: *mut c_void, old_state: u16) -> c_int {
+    let state = unsafe { bionic_mutex_state(mutex) };
+    let owner = unsafe { bionic_mutex_owner(mutex) };
+    let mtype = old_state & BIONIC_MUTEX_TYPE_FIELD_MASK;
+    let tid = current_tid();
+
+    if tid == owner.load(Ordering::Relaxed) {
+        if mtype == BIONIC_MUTEX_TYPE_ERRORCHECK {
+            return libc::EBUSY;
+        }
+        return recursive_increment(state, old_state);
+    }
+    let shared = old_state & BIONIC_MUTEX_SHARED_MASK;
+    let unlocked = mtype | shared | BIONIC_MUTEX_UNLOCKED;
+    let locked = mtype | shared | BIONIC_MUTEX_LOCKED_UNCONTENDED;
+    if state
+        .compare_exchange(unlocked, locked, Ordering::Acquire, Ordering::Relaxed)
+        .is_ok()
+    {
+        owner.store(tid, Ordering::Relaxed);
+        0
+    } else {
+        libc::EBUSY
+    }
+}
+
+fn owned_mutex_unlock(mutex: *mut c_void, old_state: u16) -> c_int {
+    let state = unsafe { bionic_mutex_state(mutex) };
+    let owner = unsafe { bionic_mutex_owner(mutex) };
+    let mtype = old_state & BIONIC_MUTEX_TYPE_FIELD_MASK;
+    let shared = old_state & BIONIC_MUTEX_SHARED_MASK;
+
+    if current_tid() != owner.load(Ordering::Relaxed) {
+        return libc::EPERM;
+    }
+    if (old_state & BIONIC_MUTEX_COUNTER_MASK) != 0 {
+        state.fetch_sub(BIONIC_MUTEX_COUNTER_ONE, Ordering::Relaxed);
+        return 0;
+    }
+    owner.store(0, Ordering::Relaxed);
+    let unlocked = mtype | shared | BIONIC_MUTEX_UNLOCKED;
+    let prev = state.swap(unlocked, Ordering::Release);
+    if (prev & BIONIC_MUTEX_STATE_MASK) == BIONIC_MUTEX_LOCKED_CONTENDED {
+        mutex_futex_wake(mutex, shared != 0);
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_bionic_mutex_lock(mutex: *mut c_void) -> c_int {
+    if invalid_guest_ptr(mutex) {
+        return if mutex.is_null() { libc::EINVAL } else { 0 };
+    }
+    if stats_enabled() {
+        STATS.mutex_ops.fetch_add(1, Ordering::Relaxed);
+    }
+    let old_state = unsafe { bionic_mutex_state(mutex) }.load(Ordering::Relaxed);
+    if old_state == BIONIC_MUTEX_DESTROYED_STATE {
+        return libc::EBUSY;
+    }
+    let mtype = old_state & BIONIC_MUTEX_TYPE_FIELD_MASK;
+    if mtype == BIONIC_MUTEX_TYPE_PI {
+        return libc::EINVAL;
+    }
+    if mtype == BIONIC_MUTEX_TYPE_NORMAL {
+        normal_mutex_lock(mutex, old_state & BIONIC_MUTEX_SHARED_MASK)
+    } else {
+        owned_mutex_lock(mutex, old_state)
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_bionic_mutex_trylock(mutex: *mut c_void) -> c_int {
+    if invalid_guest_ptr(mutex) {
+        return if mutex.is_null() { libc::EINVAL } else { 0 };
+    }
+    if stats_enabled() {
+        STATS.mutex_ops.fetch_add(1, Ordering::Relaxed);
+    }
+    let state = unsafe { bionic_mutex_state(mutex) };
+    let old_state = state.load(Ordering::Relaxed);
+    if old_state == BIONIC_MUTEX_DESTROYED_STATE {
+        return libc::EBUSY;
+    }
+    let mtype = old_state & BIONIC_MUTEX_TYPE_FIELD_MASK;
+    if mtype == BIONIC_MUTEX_TYPE_PI {
+        return libc::EINVAL;
+    }
+    if mtype == BIONIC_MUTEX_TYPE_NORMAL {
+        normal_mutex_trylock(state, old_state & BIONIC_MUTEX_SHARED_MASK)
+    } else {
+        owned_mutex_trylock(mutex, old_state)
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_bionic_mutex_unlock(mutex: *mut c_void) -> c_int {
+    if invalid_guest_ptr(mutex) {
+        return 0;
+    }
+    let old_state = unsafe { bionic_mutex_state(mutex) }.load(Ordering::Relaxed);
+    if old_state == BIONIC_MUTEX_DESTROYED_STATE {
+        return libc::EBUSY;
+    }
+    let mtype = old_state & BIONIC_MUTEX_TYPE_FIELD_MASK;
+    if mtype == BIONIC_MUTEX_TYPE_PI {
+        return libc::EINVAL;
+    }
+    if mtype == BIONIC_MUTEX_TYPE_NORMAL {
+        normal_mutex_unlock(mutex, old_state & BIONIC_MUTEX_SHARED_MASK);
+        0
+    } else {
+        owned_mutex_unlock(mutex, old_state)
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_bionic_cond_pulse(cond: *mut c_void, waiters: c_int) -> c_int {
+    if invalid_guest_ptr(cond) {
+        return if cond.is_null() { libc::EINVAL } else { 0 };
+    }
+    if stats_enabled() {
+        STATS.cond_ops.fetch_add(1, Ordering::Relaxed);
+    }
+    let state = unsafe { bionic_cond_state(cond) };
+    let prev = state.fetch_add(BIONIC_COND_COUNTER_STEP, Ordering::Relaxed);
+    let op = if (prev & BIONIC_COND_SHARED_MASK) != 0 {
+        UAPI_FUTEX_WAKE
+    } else {
+        UAPI_FUTEX_WAKE | UAPI_FUTEX_PRIVATE_FLAG
+    };
+    let _ = futex_syscall(cond, op, waiters as u32, std::ptr::null(), 0);
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_bionic_cond_timedwait(
+    cond: *mut c_void,
+    mutex: *mut c_void,
+    use_realtime_clock: bool,
+    abstime: *const libc::timespec,
+) -> c_int {
+    if invalid_guest_ptr(cond) || invalid_guest_ptr(mutex) {
+        return if cond.is_null() || mutex.is_null() {
+            libc::EINVAL
+        } else if !abstime.is_null() {
+            libc::ETIMEDOUT
+        } else {
+            0
+        };
+    }
+    if stats_enabled() {
+        STATS.cond_ops.fetch_add(1, Ordering::Relaxed);
+    }
+    let state = unsafe { bionic_cond_state(cond) };
+    let old_state = state.load(Ordering::Relaxed);
+    let unlock_rc = mocktail_rust_bionic_mutex_unlock(mutex);
+    if unlock_rc != 0 {
+        return unlock_rc;
+    }
+    let shared = (old_state & BIONIC_COND_SHARED_MASK) != 0;
+    let wait_rc;
+    loop {
+        let (op, bitset) = if abstime.is_null() {
+            let op = if shared {
+                UAPI_FUTEX_WAIT
+            } else {
+                UAPI_FUTEX_WAIT | UAPI_FUTEX_PRIVATE_FLAG
+            };
+            (op, 0u32)
+        } else {
+            let mut op = if shared {
+                UAPI_FUTEX_WAIT_BITSET
+            } else {
+                UAPI_FUTEX_WAIT_BITSET | UAPI_FUTEX_PRIVATE_FLAG
+            };
+            if use_realtime_clock {
+                op |= UAPI_FUTEX_CLOCK_REALTIME;
+            }
+            (op, UAPI_FUTEX_BITSET_MATCH_ANY)
+        };
+        if stats_enabled() {
+            STATS.futex_waits.fetch_add(1, Ordering::Relaxed);
+        }
+        let rc = futex_syscall(cond, op, old_state, abstime, bitset);
+        let err = unsafe { last_errno() };
+        if rc == 0 || err == libc::EAGAIN {
+            wait_rc = 0;
+            break;
+        }
+        if err == libc::EINTR {
+            continue;
+        }
+        if err == libc::ETIMEDOUT {
+            wait_rc = libc::ETIMEDOUT;
+            break;
+        }
+        wait_rc = if err != 0 { err } else { libc::EINVAL };
+        break;
+    }
+    let lock_rc = mocktail_rust_bionic_mutex_lock(mutex);
+    if lock_rc != 0 {
+        return lock_rc;
+    }
+    wait_rc
+}
 
 fn current_tid() -> i32 {
     thread_local! {
@@ -1343,6 +1812,23 @@ mod tests {
             assert_eq!(mocktail_bionic_sem_wait(&mut sem), 0);
             assert_eq!(mocktail_bionic_sem_post(&mut sem), 0);
             assert_eq!(mocktail_bionic_sem_destroy(&mut sem), 0);
+
+            // Bionic normal & recursive mutex + condvar roundtrip in Rust.
+            let mut mtx: [u8; 40] = [0; 40];
+            assert_eq!(mocktail_rust_bionic_mutex_lock(mtx.as_mut_ptr().cast()), 0);
+            assert_eq!(mocktail_rust_bionic_mutex_trylock(mtx.as_mut_ptr().cast()), libc::EBUSY);
+            assert_eq!(mocktail_rust_bionic_mutex_unlock(mtx.as_mut_ptr().cast()), 0);
+
+            let mut rec: [u8; 40] = [0; 40];
+            let state_word = &*(rec.as_ptr() as *const AtomicU16);
+            state_word.store(1u16 << BIONIC_MUTEX_TYPE_SHIFT, Ordering::Relaxed);
+            assert_eq!(mocktail_rust_bionic_mutex_lock(rec.as_mut_ptr().cast()), 0);
+            assert_eq!(mocktail_rust_bionic_mutex_lock(rec.as_mut_ptr().cast()), 0);
+            assert_eq!(mocktail_rust_bionic_mutex_unlock(rec.as_mut_ptr().cast()), 0);
+            assert_eq!(mocktail_rust_bionic_mutex_unlock(rec.as_mut_ptr().cast()), 0);
+
+            let mut cond: [u32; 12] = [0; 12];
+            assert_eq!(mocktail_rust_bionic_cond_pulse(cond.as_mut_ptr().cast(), 1), 0);
         }
     }
 }

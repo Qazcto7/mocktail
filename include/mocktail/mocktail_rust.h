@@ -4948,6 +4948,14 @@ bool mocktail_rust_audio_ring_pop(
 void mocktail_rust_audio_ring_clear(
     const struct MocktailRustAudioCallbackRing* ring);
 
+int mocktail_rust_bionic_mutex_lock(void* mutex);
+int mocktail_rust_bionic_mutex_trylock(void* mutex);
+int mocktail_rust_bionic_mutex_unlock(void* mutex);
+int mocktail_rust_bionic_cond_pulse(void* cond, int waiters);
+int mocktail_rust_bionic_cond_timedwait(void* cond, void* mutex,
+                                        bool use_realtime_clock,
+                                        const struct timespec* abstime);
+
 #ifdef __cplusplus
 }
 #endif
