@@ -82,6 +82,13 @@ TEST(VideoDriverPolicyTest, KeepsWaylandWhenXwaylandIsUnavailable) {
   EXPECT_EQ(ResolveVideoDriverChoice(input), VideoDriverChoice::kWayland);
 }
 
+TEST(VideoDriverPolicyTest, KeepsWaylandForModernNvidiaWithExplicitSync) {
+  VideoDriverPolicyInput input = NvidiaWaylandDirectVulkan();
+  input.nvidia_supports_wayland_explicit_sync = true;
+
+  EXPECT_EQ(ResolveVideoDriverChoice(input), VideoDriverChoice::kWayland);
+}
+
 TEST(VideoDriverPolicyTest, UsesSdlDefaultWhenWaylandPreferenceIsDisabled) {
   VideoDriverPolicyInput input;
   input.prefer_wayland = false;

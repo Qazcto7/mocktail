@@ -627,8 +627,43 @@ pub extern "C" fn mocktail_rust_performance_merge_overrides(
     if (multithreaded_rendering || throughput_mode) && !latency_mode {
         let workers_str = render_worker_count.to_string();
         let occlusion_str = (render_worker_count / 2).max(1).to_string();
+        let asset_threads_str = (render_worker_count / 2).clamp(2, 6).to_string();
+        let cache_read_threads = if render_worker_count >= 4 { "2" } else { "1" };
+        let ram_mb = crate::graphics_launch::probe_total_ram_mb();
+        let tex_budget_mb = match ram_mb {
+            0 => "128",
+            1..=4096 => "96",
+            4097..=8192 => "160",
+            8193..=16384 => "320",
+            _ => "512",
+        };
+        let mesh_cache_mb = match ram_mb {
+            0 => "64",
+            1..=4096 => "48",
+            4097..=8192 => "96",
+            8193..=16384 => "160",
+            _ => "256",
+        };
+        let luau_gc_max_kb = match ram_mb {
+            0 => "262144",
+            1..=4096 => "196608",
+            4097..=8192 => "262144",
+            8193..=16384 => "393216",
+            _ => "524288",
+        };
         let quality = slice_to_str(graphics_quality_ptr, graphics_quality_len).unwrap_or("");
-        let mip_bias = if quality == "1" { "2" } else { "1" };
+        let low_end_lod = if quality == "1" || (ram_mb > 0 && ram_mb <= 6144) {
+            "True"
+        } else {
+            "False"
+        };
+        let mip_bias = if quality == "1" {
+            "2"
+        } else if quality == "2" || ram_mb <= 8192 {
+            "1"
+        } else {
+            "0"
+        };
 
         let rendering_settings: [(&str, &str); 61] = [
             ("FIntSmoothClusterTaskQueueMaxParallelTasks", workers_str.as_str()),
@@ -637,13 +672,13 @@ pub extern "C" fn mocktail_rust_performance_merge_overrides(
             ("FFlagGcInParallelWithRenderPrepare3", "True"),
             ("FIntRenderTextureMipBias", mip_bias),
             ("FFlagSimRuntimeContentTranscodeBlockingCall", "False"),
-            ("FFlagRenderEnableLowEndLOD", "True"),
+            ("FFlagRenderEnableLowEndLOD", low_end_lod),
             ("FIntTerrainArraySliceSize", "4"),
             ("FFlagRenderFixParticlesCulling", "True"),
             ("FFlagLuauIncrementalGC", "True"),
             ("FIntLuauGcStepMultiplier", "100"),
             ("FIntLuauGcGoalRatio", "200"),
-            ("FIntAssetProviderThreads", "2"),
+            ("FIntAssetProviderThreads", asset_threads_str.as_str()),
             ("FFlagUITextureCompressionDesktop", "True"),
             ("FFlagTCTextureCompressionDesktop", "True"),
             ("FFlagUITextureUncompressed", "False"),
@@ -653,12 +688,12 @@ pub extern "C" fn mocktail_rust_performance_merge_overrides(
             ("FFlagMeshLOD", "True"),
             ("FFlagMeshLodApplyGeomMeshOptimizer", "False"),
             ("FFlagAdaptiveMeshCacheSizeForAndroid", "True"),
-            ("FIntDefaultMeshCacheSizeMB", "64"),
+            ("FIntDefaultMeshCacheSizeMB", mesh_cache_mb),
             ("FIntRenderMeshOrphanBudgetMB", "8"),
             ("FIntTerrainGpuMeshMemoryTargetMib", "32"),
             ("FIntAvatarMeshMemoryMax", "33554432"),
             ("FIntSmoothTerrainPhysicsCacheSize", "32"),
-            ("FIntRenderTextureTotalBudgetMB", "128"),
+            ("FIntRenderTextureTotalBudgetMB", tex_budget_mb),
             ("FIntRenderTextureOrphanBudgetMB", "8"),
             ("FFlagDebugTerrainVTCompressedTextures", "True"),
             ("FFlagStreamingObserverMemoryOptimization", "True"),
@@ -674,7 +709,7 @@ pub extern "C" fn mocktail_rust_performance_merge_overrides(
             ("FIntTextureCompositorLowResFactor", "2"),
             ("FIntTextureCompositorMeshCache", "16"),
             ("FFlagContentProviderMmapAssets", "True"),
-            ("FIntAssetProviderAssetCacheReadThreadCount", "1"),
+            ("FIntAssetProviderAssetCacheReadThreadCount", cache_read_threads),
             ("FIntAssetProviderAssetCacheWriteThreadCount", "1"),
             ("FIntInitialAudioAssetCacheSize", "32"),
             ("FIntAvatarTextureMemoryMax", "33554432"),
@@ -685,7 +720,7 @@ pub extern "C" fn mocktail_rust_performance_merge_overrides(
             ("FIntLuauGcStepMul", "300"),
             ("FIntLuauGcGoalCore", "120"),
             ("FIntLuauGcStartupWorkingSetMb", "64"),
-            ("FIntLuaGcMaxKb", "262144"),
+            ("FIntLuaGcMaxKb", luau_gc_max_kb),
             ("FIntTaskSchedulerMaxTempArenaSizeBytes", "16777216"),
             ("FFlagLocalStorageArenaOptimization", "True"),
             ("FIntProjectedMaxBytesUsedForSoundsMB", "32"),

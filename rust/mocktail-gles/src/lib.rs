@@ -318,5 +318,25 @@ mod tests {
         cache.on_delete_textures(&[30]);
         assert!(cache.should_bind_texture(GL_TEXTURE_2D, 30));
         assert!(cache.should_set_tex_parameteri(GL_TEXTURE_2D, 0x2801, 0x2601));
+
+        // Phase 4: Uniform1f, Uniform4f (-0.0 bit-exact), and BindSampler/DeleteSamplers.
+        assert!(cache.should_use_program(77));
+        assert!(cache.should_set_uniform1f(1, 0.5));
+        assert!(!cache.should_set_uniform1f(1, 0.5));
+        assert!(cache.should_set_uniform1f(1, -0.0));
+        assert!(!cache.should_set_uniform1f(1, -0.0));
+        assert!(cache.should_set_uniform1f(1, 0.0));
+
+        assert!(cache.should_set_uniform4f(2, 1.0, 0.5, 0.25, 1.0));
+        assert!(!cache.should_set_uniform4f(2, 1.0, 0.5, 0.25, 1.0));
+        assert!(cache.should_set_uniform4f(2, 1.0, 0.5, 0.25, 0.0));
+        cache.on_program_relinked(77);
+        assert!(cache.should_set_uniform1f(1, 0.0));
+        assert!(cache.should_set_uniform4f(2, 1.0, 0.5, 0.25, 0.0));
+
+        assert!(cache.should_bind_sampler(0, 9));
+        assert!(!cache.should_bind_sampler(0, 9));
+        cache.on_delete_samplers(&[9]);
+        assert!(cache.should_bind_sampler(0, 9));
     }
 }

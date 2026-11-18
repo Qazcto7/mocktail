@@ -258,11 +258,16 @@ void ConfigureHostDriverEnvironment() {
   };
   // Bypass X11 compositor redirection to eliminate presentation latency on X11/XWayland.
   set_if_unset("SDL_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR", "1");
+  // Expand shader disk caches across Mesa (OpenGL/Vulkan) and NVIDIA so compiled
+  // shaders stay cached across sessions on all GPU vendors.
+  set_if_unset("MESA_SHADER_CACHE_MAX_SIZE", "2G");
+  set_if_unset("MESA_GLSL_CACHE_MAX_SIZE", "2G");
   // Allow Adaptive Sync / Variable Refresh Rate (G-Sync/FreeSync) where supported.
   set_if_unset("__GL_VRR_ALLOWED", "1");
-  // Expand shader disk cache to 2GB so compiled Vulkan/GL shaders are preserved across runs.
+  // Expand NVIDIA shader disk cache to 2GB.
   set_if_unset("__GL_SHADER_DISK_CACHE", "1");
   set_if_unset("__GL_SHADER_DISK_CACHE_SIZE", "2147483648");
+  set_if_unset("__GL_SHADER_DISK_CACHE_SKIP_CLEANUP", "1");
   // Avoid busy-spin vblank waits on NVIDIA Linux driver.
   set_if_unset("__GL_YIELD", "USLEEP");
   set_if_unset("__GL_THREADED_OPTIMIZATIONS", "1");

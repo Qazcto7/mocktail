@@ -521,6 +521,9 @@ VideoDriverChoice ResolveConfiguredVideoDriverChoice() {
   input.has_x11_display = GetEnvNonEmpty("DISPLAY") != nullptr;
   input.uses_direct_vulkan = ShouldUseNativeVulkanBackend();
   input.has_nvidia_kernel_driver = HasNvidiaKernelDriver();
+  input.nvidia_supports_wayland_explicit_sync =
+      input.has_nvidia_kernel_driver &&
+      mocktail_rust_graphics_nvidia_supports_wayland_explicit_sync() != 0;
   return ResolveVideoDriverChoice(input);
 }
 

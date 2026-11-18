@@ -22,15 +22,26 @@ struct HostGpuCapabilities {
   bool has_legacy_nvidia = false;
   bool has_modern_nvidia = false;
   bool has_amd = false;
+  bool has_amd_legacy_radeon = false;
+  bool has_soc_vulkan = false;
+  bool has_soc_gles_only = false;
+  bool has_discrete_gpu = false;
+  bool has_integrated_gpu = false;
+  bool has_hw_vulkan_icd = false;
+  bool has_virtual_gpu = false;
+  bool host_verified_no_hw_icd = false;
+  unsigned nvidia_driver_major = 0;
+  unsigned long long total_ram_mb = 0;
 
   bool has_legacy_gpu() const {
-    return has_legacy_intel || has_legacy_nvidia;
+    return has_legacy_intel || has_legacy_nvidia || has_amd_legacy_radeon;
   }
   bool has_modern_vulkan_gpu() const {
-    return has_modern_intel || has_modern_nvidia || has_amd;
+    return has_modern_intel || has_modern_nvidia || has_amd || has_soc_vulkan;
   }
   bool has_any_intel() const { return has_legacy_intel || has_modern_intel; }
   bool has_any_nvidia() const { return has_legacy_nvidia || has_modern_nvidia; }
+  bool has_any_amd() const { return has_amd || has_amd_legacy_radeon; }
 };
 
 HostCpuCapabilities DetectHostCpuCapabilities();

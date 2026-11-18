@@ -119,6 +119,42 @@ pub extern "C" fn mocktail_rust_vulkan_etc2_small_texture_upscale(value: *const 
 }
 
 #[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn copy_from_mapped_avx2(mut dst: *mut u8, mut src: *const u8, mut size: usize) {
+    use std::arch::x86_64::{__m256i, _mm256_storeu_si256, _mm256_stream_load_si256};
+    while size != 0 && ((src as usize) & 31) != 0 {
+        *dst = *src;
+        dst = dst.add(1);
+        src = src.add(1);
+        size -= 1;
+    }
+    let mut in_ptr = src as *const __m256i;
+    while size >= 128 {
+        let a = _mm256_stream_load_si256(in_ptr);
+        let b = _mm256_stream_load_si256(in_ptr.add(1));
+        let c = _mm256_stream_load_si256(in_ptr.add(2));
+        let d = _mm256_stream_load_si256(in_ptr.add(3));
+        _mm256_storeu_si256(dst as *mut __m256i, a);
+        _mm256_storeu_si256(dst.add(32) as *mut __m256i, b);
+        _mm256_storeu_si256(dst.add(64) as *mut __m256i, c);
+        _mm256_storeu_si256(dst.add(96) as *mut __m256i, d);
+        in_ptr = in_ptr.add(4);
+        dst = dst.add(128);
+        size -= 128;
+    }
+    while size >= 32 {
+        let a = _mm256_stream_load_si256(in_ptr);
+        _mm256_storeu_si256(dst as *mut __m256i, a);
+        in_ptr = in_ptr.add(1);
+        dst = dst.add(32);
+        size -= 32;
+    }
+    if size > 0 {
+        std::ptr::copy_nonoverlapping(in_ptr as *const u8, dst, size);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse4.1")]
 unsafe fn copy_from_mapped_sse41(mut dst: *mut u8, mut src: *const u8, mut size: usize) {
     use std::arch::x86_64::{__m128i, _mm_storeu_si128, _mm_stream_load_si128};
@@ -147,25 +183,63 @@ unsafe fn copy_from_mapped_sse41(mut dst: *mut u8, mut src: *const u8, mut size:
     }
 }
 
+#[cfg(target_arch = "aarch64")]
+unsafe fn copy_from_mapped_neon(mut dst: *mut u8, mut src: *const u8, mut size: usize) {
+    use std::arch::aarch64::{vld1q_u8, vst1q_u8};
+    while size >= 64 {
+        let a = vld1q_u8(src);
+        let b = vld1q_u8(src.add(16));
+        let c = vld1q_u8(src.add(32));
+        let d = vld1q_u8(src.add(48));
+        vst1q_u8(dst, a);
+        vst1q_u8(dst.add(16), b);
+        vst1q_u8(dst.add(32), c);
+        vst1q_u8(dst.add(48), d);
+        src = src.add(64);
+        dst = dst.add(64);
+        size -= 64;
+    }
+    if size > 0 {
+        std::ptr::copy_nonoverlapping(src, dst, size);
+    }
+}
+
+unsafe fn copy_from_mapped_scalar(dst: *mut u8, src: *const u8, size: usize) {
+    std::ptr::copy_nonoverlapping(src, dst, size);
+}
+
 #[no_mangle]
 pub extern "C" fn mocktail_rust_vulkan_etc2_copy_from_mapped(
     destination: *mut u8,
     source: *const u8,
     size: usize,
 ) {
+    use std::sync::OnceLock;
+    type CopyFn = unsafe fn(*mut u8, *const u8, usize);
+    static DISPATCH: OnceLock<CopyFn> = OnceLock::new();
+
     if destination.is_null() || source.is_null() || size == 0 || destination as *const u8 == source
     {
         return;
     }
-    #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("sse4.1") {
-        unsafe {
-            copy_from_mapped_sse41(destination, source, size);
+    let copy_fn = *DISPATCH.get_or_init(|| {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if std::arch::is_x86_feature_detected!("avx2") {
+                return copy_from_mapped_avx2;
+            }
+            if std::arch::is_x86_feature_detected!("sse4.1") {
+                return copy_from_mapped_sse41;
+            }
         }
-        return;
-    }
+        #[cfg(target_arch = "aarch64")]
+        {
+            return copy_from_mapped_neon;
+        }
+        copy_from_mapped_scalar
+    });
     unsafe {
-        std::ptr::copy_nonoverlapping(source, destination, size);
+        copy_fn(destination, source, size);
     }
 }
 

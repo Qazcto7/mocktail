@@ -32,6 +32,8 @@ pub use discord_rpc::*;
 pub(crate) mod elf_reader;
 pub mod external_launch_broker;
 pub use external_launch_broker::*;
+pub mod graphics_launch;
+pub use graphics_launch::*;
 pub mod host_abi_deriver;
 pub use host_abi_deriver::*;
 pub mod http_download;

@@ -97,6 +97,8 @@ const MAX_CACHED_UBO_SLOTS: usize = 16;
 const MAX_CACHED_SSBO_SLOTS: usize = 4;
 const MAX_CACHED_VERTEX_ATTRIBS: usize = 16;
 const MAX_CACHED_UNIFORM1I_SLOTS: usize = 64;
+const MAX_CACHED_UNIFORM1F_SLOTS: usize = 64;
+const MAX_CACHED_UNIFORM4F_SLOTS: usize = 64;
 const MAX_CACHED_TEX_PARAM_SLOTS: usize = 64;
 const MAX_CACHED_UNIFORM_LOC_ENTRIES: usize = 512;
 
@@ -115,6 +117,20 @@ struct CachedUniform1i {
     program: GLuint,
     location: GLint,
     value: GLint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CachedUniform1f {
+    program: GLuint,
+    location: GLint,
+    bits: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CachedUniform4f {
+    program: GLuint,
+    location: GLint,
+    bits: [u32; 4],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,8 +237,13 @@ pub struct GlStateCache {
     pub attrib_divisors: [Option<GLuint>; MAX_CACHED_VERTEX_ATTRIBS],
     pub cap_known: u32,
     pub cap_enabled: u32,
+    pub samplers: [Option<GLuint>; MAX_TEX_UNITS],
     uniform1i_slots: [Option<CachedUniform1i>; MAX_CACHED_UNIFORM1I_SLOTS],
     uniform1i_cursor: usize,
+    uniform1f_slots: [Option<CachedUniform1f>; MAX_CACHED_UNIFORM1F_SLOTS],
+    uniform1f_cursor: usize,
+    uniform4f_slots: [Option<CachedUniform4f>; MAX_CACHED_UNIFORM4F_SLOTS],
+    uniform4f_cursor: usize,
     tex_param_slots: [Option<CachedTexParam>; MAX_CACHED_TEX_PARAM_SLOTS],
     tex_param_cursor: usize,
     uniform_locs: HashMap<GLuint, HashMap<String, GLint>>,
@@ -275,8 +296,13 @@ impl Default for GlStateCache {
             attrib_divisors: [None; MAX_CACHED_VERTEX_ATTRIBS],
             cap_known: 0,
             cap_enabled: 0,
+            samplers: [None; MAX_TEX_UNITS],
             uniform1i_slots: [None; MAX_CACHED_UNIFORM1I_SLOTS],
             uniform1i_cursor: 0,
+            uniform1f_slots: [None; MAX_CACHED_UNIFORM1F_SLOTS],
+            uniform1f_cursor: 0,
+            uniform4f_slots: [None; MAX_CACHED_UNIFORM4F_SLOTS],
+            uniform4f_cursor: 0,
             tex_param_slots: [None; MAX_CACHED_TEX_PARAM_SLOTS],
             tex_param_cursor: 0,
             uniform_locs: HashMap::new(),
@@ -774,8 +800,47 @@ impl GlStateCache {
                 }
             }
         }
+        for slot in self.uniform1f_slots.iter_mut() {
+            if let Some(entry) = *slot {
+                if entry.program == id {
+                    *slot = None;
+                }
+            }
+        }
+        for slot in self.uniform4f_slots.iter_mut() {
+            if let Some(entry) = *slot {
+                if entry.program == id {
+                    *slot = None;
+                }
+            }
+        }
         if let Some(removed) = self.uniform_locs.remove(&id) {
             self.uniform_loc_entries = self.uniform_loc_entries.saturating_sub(removed.len());
+        }
+    }
+
+    pub fn should_bind_sampler(&mut self, unit: GLuint, sampler: GLuint) -> bool {
+        let idx = unit as usize;
+        if idx >= MAX_TEX_UNITS {
+            return true;
+        }
+        if self.samplers[idx] == Some(sampler) {
+            return false;
+        }
+        self.samplers[idx] = Some(sampler);
+        true
+    }
+
+    pub fn on_delete_samplers(&mut self, ids: &[GLuint]) {
+        for &id in ids {
+            if id == 0 {
+                continue;
+            }
+            for slot in self.samplers.iter_mut() {
+                if *slot == Some(id) {
+                    *slot = None;
+                }
+            }
         }
     }
 
@@ -855,6 +920,69 @@ impl GlStateCache {
             value: v0,
         });
         self.uniform1i_cursor = (self.uniform1i_cursor + 1) % MAX_CACHED_UNIFORM1I_SLOTS;
+        true
+    }
+
+    pub fn should_set_uniform1f(&mut self, location: GLint, v0: GLfloat) -> bool {
+        let Some(program) = self.program else {
+            return true;
+        };
+        if program == 0 || location < 0 {
+            return true;
+        }
+        let bits = v0.to_bits();
+        for slot in self.uniform1f_slots.iter_mut() {
+            if let Some(entry) = slot {
+                if entry.program == program && entry.location == location {
+                    if entry.bits == bits {
+                        return false;
+                    }
+                    entry.bits = bits;
+                    return true;
+                }
+            }
+        }
+        self.uniform1f_slots[self.uniform1f_cursor] = Some(CachedUniform1f {
+            program,
+            location,
+            bits,
+        });
+        self.uniform1f_cursor = (self.uniform1f_cursor + 1) % MAX_CACHED_UNIFORM1F_SLOTS;
+        true
+    }
+
+    pub fn should_set_uniform4f(
+        &mut self,
+        location: GLint,
+        v0: GLfloat,
+        v1: GLfloat,
+        v2: GLfloat,
+        v3: GLfloat,
+    ) -> bool {
+        let Some(program) = self.program else {
+            return true;
+        };
+        if program == 0 || location < 0 {
+            return true;
+        }
+        let bits = [v0.to_bits(), v1.to_bits(), v2.to_bits(), v3.to_bits()];
+        for slot in self.uniform4f_slots.iter_mut() {
+            if let Some(entry) = slot {
+                if entry.program == program && entry.location == location {
+                    if entry.bits == bits {
+                        return false;
+                    }
+                    entry.bits = bits;
+                    return true;
+                }
+            }
+        }
+        self.uniform4f_slots[self.uniform4f_cursor] = Some(CachedUniform4f {
+            program,
+            location,
+            bits,
+        });
+        self.uniform4f_cursor = (self.uniform4f_cursor + 1) % MAX_CACHED_UNIFORM4F_SLOTS;
         true
     }
 
@@ -1319,6 +1447,7 @@ pub extern "C" fn mocktail_gles_lookup_proc(procname: *const c_char) -> *mut c_v
         "glBindBufferRange" => mocktail_rust_gl_bind_buffer_range as *mut c_void,
         "glBindFramebuffer" => mocktail_rust_gl_bind_framebuffer as *mut c_void,
         "glBindRenderbuffer" => mocktail_rust_gl_bind_renderbuffer as *mut c_void,
+        "glBindSampler" => mocktail_rust_gl_bind_sampler as *mut c_void,
         "glBindTexture" => mocktail_rust_gl_bind_texture as *mut c_void,
         "glBindVertexArray" | "glBindVertexArrayOES" => {
             mocktail_rust_gl_bind_vertex_array as *mut c_void
@@ -1346,6 +1475,7 @@ pub extern "C" fn mocktail_gles_lookup_proc(procname: *const c_char) -> *mut c_v
         "glDeleteFramebuffers" => mocktail_rust_gl_delete_framebuffers as *mut c_void,
         "glDeleteProgram" => mocktail_rust_gl_delete_program as *mut c_void,
         "glDeleteRenderbuffers" => mocktail_rust_gl_delete_renderbuffers as *mut c_void,
+        "glDeleteSamplers" => mocktail_rust_gl_delete_samplers as *mut c_void,
         "glDeleteShader" => mocktail_rust_gl_delete_shader as *mut c_void,
         "glDeleteSync" => mocktail_rust_gl_delete_sync as *mut c_void,
         "glDeleteTextures" => mocktail_rust_gl_delete_textures as *mut c_void,
@@ -1414,7 +1544,9 @@ pub extern "C" fn mocktail_gles_lookup_proc(procname: *const c_char) -> *mut c_v
         "glTexParameterfv" => mocktail_rust_gl_tex_parameterfv as *mut c_void,
         "glTexParameteri" => mocktail_rust_gl_tex_parameteri as *mut c_void,
         "glTexSubImage2D" => mocktail_rust_gl_tex_sub_image_2d as *mut c_void,
+        "glUniform1f" => mocktail_rust_gl_uniform1f as *mut c_void,
         "glUniform1i" => mocktail_rust_gl_uniform1i as *mut c_void,
+        "glUniform4f" => mocktail_rust_gl_uniform4f as *mut c_void,
         "glUseProgram" => mocktail_rust_gl_use_program as *mut c_void,
         "glVertexAttribDivisor" => mocktail_rust_gl_vertex_attrib_divisor as *mut c_void,
         "glVertexAttribPointer" => mocktail_rust_gl_vertex_attrib_pointer as *mut c_void,
@@ -2939,6 +3071,74 @@ pub extern "C" fn mocktail_rust_gl_uniform1i(location: GLint, v0: GLint) {
             }
         }
         return;
+    }
+    let _ = stub_require();
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_gl_uniform1f(location: GLint, v0: GLfloat) {
+    if host_active() {
+        if with_cache_check(|c| c.should_set_uniform1f(location, v0)) {
+            if let Some(f) = host_gl!(FN, "glUniform1f", unsafe extern "C" fn(GLint, GLfloat)) {
+                unsafe { f(location, v0) };
+            }
+        }
+        return;
+    }
+    let _ = stub_require();
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_gl_uniform4f(
+    location: GLint,
+    v0: GLfloat,
+    v1: GLfloat,
+    v2: GLfloat,
+    v3: GLfloat,
+) {
+    if host_active() {
+        if with_cache_check(|c| c.should_set_uniform4f(location, v0, v1, v2, v3)) {
+            if let Some(f) = host_gl!(
+                FN,
+                "glUniform4f",
+                unsafe extern "C" fn(GLint, GLfloat, GLfloat, GLfloat, GLfloat)
+            ) {
+                unsafe { f(location, v0, v1, v2, v3) };
+            }
+        }
+        return;
+    }
+    let _ = stub_require();
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_gl_bind_sampler(unit: GLuint, sampler: GLuint) {
+    if host_active() {
+        if with_cache_check(|c| c.should_bind_sampler(unit, sampler)) {
+            if let Some(f) = host_gl!(FN, "glBindSampler", unsafe extern "C" fn(GLuint, GLuint)) {
+                unsafe { f(unit, sampler) };
+            }
+        }
+        return;
+    }
+    let _ = stub_require();
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_gl_delete_samplers(n: GLsizei, samplers: *const GLuint) {
+    if n > 0 && !samplers.is_null() {
+        let slice = unsafe { std::slice::from_raw_parts(samplers, n as usize) };
+        sync_tls_cache(|c| c.on_delete_samplers(slice));
+    }
+    if host_active() {
+        if let Some(f) = host_gl!(
+            FN,
+            "glDeleteSamplers",
+            unsafe extern "C" fn(GLsizei, *const GLuint)
+        ) {
+            unsafe { f(n, samplers) };
+            return;
+        }
     }
     let _ = stub_require();
 }

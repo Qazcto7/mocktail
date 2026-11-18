@@ -204,6 +204,7 @@ void DecodeEtcJobs(EtcDecodeJob* jobs, std::size_t count,
   }
   DecodeBandQueue queue;
   std::vector<DecodeBand>& bands = queue.bands;
+  bands.reserve(count * 4);
   std::uint64_t total_blocks = 0;
   for (std::size_t index = 0; index < count; ++index) {
     EtcDecodeJob& job = jobs[index];

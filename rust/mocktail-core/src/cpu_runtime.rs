@@ -1141,6 +1141,11 @@ pub extern "C" fn mocktail_bionic_sem_post(semaphore: *mut libc::sem_t) -> c_int
 // Bionic Sysconf & Prctl Runtime
 // ============================================================================
 
+fn cached_page_size() -> c_long {
+    static PAGE_SIZE: OnceLock<c_long> = OnceLock::new();
+    *PAGE_SIZE.get_or_init(|| unsafe { libc::sysconf(libc::_SC_PAGESIZE) })
+}
+
 #[no_mangle]
 pub extern "C" fn mocktail_bionic_sysconf(name: c_int) -> c_long {
     let mut standard_sc: i32 = 0;
@@ -1154,12 +1159,14 @@ pub extern "C" fn mocktail_bionic_sysconf(name: c_int) -> c_long {
         return fixed_val as c_long;
     }
     if kind == 0 {
+        if name == 0x0027 || name == 0x0028 {
+            return cached_page_size();
+        }
         let host_name = match name {
             0x0000 => libc::_SC_ARG_MAX,
             0x0005 => libc::_SC_CHILD_MAX,
             0x000b => libc::_SC_OPEN_MAX,
             0x0026 => libc::_SC_IOV_MAX,
-            0x0027 | 0x0028 => libc::_SC_PAGESIZE,
             0x0060 => libc::_SC_NPROCESSORS_CONF,
             0x0061 => libc::_SC_NPROCESSORS_ONLN,
             0x0062 => libc::_SC_PHYS_PAGES,
@@ -1188,7 +1195,7 @@ fn is_page_aligned_range(addr: c_ulong, length: c_ulong) -> bool {
     if addr == 0 || length == 0 || addr.checked_add(length).is_none() {
         return false;
     }
-    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    let page_size = cached_page_size();
     if page_size <= 0 {
         return false;
     }

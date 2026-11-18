@@ -2357,6 +2357,50 @@ int32_t mocktail_rust_graphics_select_egl_vendor_manifest(
 
 int32_t mocktail_rust_graphics_is_radv_icd_list(const char* manifests);
 
+typedef struct MocktailHostGpuProbe {
+  int32_t has_legacy_intel;
+  int32_t has_modern_intel;
+  int32_t has_legacy_nvidia;
+  int32_t has_modern_nvidia;
+  int32_t has_amd;
+  int32_t has_amd_legacy_radeon;
+  int32_t has_soc_vulkan;
+  int32_t has_soc_gles_only;
+  int32_t has_discrete_gpu;
+  int32_t has_integrated_gpu;
+  int32_t has_hw_vulkan_icd;
+  int32_t has_virtual_gpu;
+  uint32_t nvidia_driver_major;
+  uint64_t total_ram_mb;
+} MocktailHostGpuProbe;
+
+int32_t mocktail_rust_graphics_probe_host_caps(
+    MocktailHostGpuProbe* out_probe);
+
+uint64_t mocktail_rust_graphics_total_ram_mb(void);
+
+uint32_t mocktail_rust_graphics_nvidia_driver_major(void);
+
+int32_t mocktail_rust_graphics_nvidia_supports_wayland_explicit_sync(void);
+
+int32_t mocktail_rust_graphics_select_universal_icd_manifest(
+    const char* dirs_nl,
+    const MocktailHostGpuProbe* probe,
+    int32_t target_is_aarch64,
+    char* out_buf,
+    size_t out_cap);
+
+int32_t mocktail_rust_graphics_select_universal_egl_manifest(
+    const char* dirs_nl,
+    int32_t prefer_nvidia,
+    char* out_buf,
+    size_t out_cap);
+
+const char* mocktail_rust_graphics_default_quality(
+    const MocktailHostGpuProbe* probe);
+
+int32_t mocktail_rust_graphics_needs_mesa_etc2_driconf(const char* manifests);
+
 // ============================================================================
 // 112. Graphics Backend Selection Policy
 // ============================================================================

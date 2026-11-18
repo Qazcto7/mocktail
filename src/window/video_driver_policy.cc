@@ -10,13 +10,16 @@ namespace window {
 
 VideoDriverChoice ResolveVideoDriverChoice(
     const VideoDriverPolicyInput& input) {
+  const bool nvidia_needs_x11_workaround =
+      input.has_nvidia_kernel_driver &&
+      !input.nvidia_supports_wayland_explicit_sync;
   const int choice = mocktail_rust_video_driver_resolve(
       input.has_explicit_sdl_driver ? 1 : 0,
       input.force_wayland ? 1 : 0,
       input.force_x11 ? 1 : 0,
       input.has_x11_display ? 1 : 0,
       input.uses_direct_vulkan ? 1 : 0,
-      input.has_nvidia_kernel_driver ? 1 : 0,
+      nvidia_needs_x11_workaround ? 1 : 0,
       input.has_wayland_session ? 1 : 0,
       input.prefer_wayland ? 1 : 0);
   switch (choice) {

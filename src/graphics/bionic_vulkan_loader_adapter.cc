@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -178,7 +179,7 @@ struct AdapterState {
     VkCommandPool command_pool = VK_NULL_HANDLE;
   };
 
-  std::mutex mutex;
+  std::shared_mutex mutex;
   mocktail::graphics::SdlVulkanWsi host_wsi;
   mocktail::graphics::AndroidVulkanWsiAdapter android_wsi;
   PFN_vkGetInstanceProcAddr host_get_instance_proc_addr = nullptr;
@@ -222,7 +223,7 @@ Function ResolveProcessFunction(const char* name) {
 
 bool EnsureInitialized() {
   AdapterState& state = State();
-  std::lock_guard<std::mutex> lock(state.mutex);
+  std::lock_guard<std::shared_mutex> lock(state.mutex);
   if (state.initialized) {
     return true;
   }
@@ -342,9 +343,14 @@ struct ThreadDeviceDispatchCache {
 static thread_local ThreadDeviceDispatchCache t_device_cache;
 
 struct ThreadCommandBufferDispatchCache {
-  uint64_t generation = 0;
-  VkCommandBuffer command_buffer = VK_NULL_HANDLE;
-  AdapterState::DeviceDispatch dispatch{};
+  static constexpr std::size_t kSlots = 8;
+  struct Entry {
+    uint64_t generation = 0;
+    VkCommandBuffer command_buffer = VK_NULL_HANDLE;
+    AdapterState::DeviceDispatch dispatch{};
+  };
+  Entry entries[kSlots]{};
+  std::size_t next_slot = 0;
 };
 static thread_local ThreadCommandBufferDispatchCache t_command_buffer_cache;
 
@@ -363,7 +369,7 @@ const AdapterState::DeviceDispatch& HostDispatchForQueue(VkQueue queue) {
     return t_queue_cache.dispatch;
   }
   AdapterState& state = State();
-  std::lock_guard<std::mutex> lock(state.mutex);
+  std::shared_lock<std::shared_mutex> lock(state.mutex);
   const auto binding =
       std::find_if(state.queue_bindings.begin(), state.queue_bindings.end(),
                    [queue](const AdapterState::QueueBinding& candidate) {
@@ -395,7 +401,7 @@ const AdapterState::DeviceDispatch& HostDispatchForDevice(VkDevice device) {
     return t_device_cache.dispatch;
   }
   AdapterState& state = State();
-  std::lock_guard<std::mutex> lock(state.mutex);
+  std::shared_lock<std::shared_mutex> lock(state.mutex);
   const auto dispatch = std::find_if(
       state.device_dispatches.begin(), state.device_dispatches.end(),
       [device](const AdapterState::DeviceDispatch& candidate) {
@@ -413,15 +419,15 @@ const AdapterState::DeviceDispatch& HostDispatchForDevice(VkDevice device) {
 const AdapterState::DeviceDispatch& HostDispatchForCommandBuffer(
     VkCommandBuffer command_buffer) {
   const uint64_t gen = g_dispatch_generation.load(std::memory_order_acquire);
-  if (__builtin_expect(command_buffer != VK_NULL_HANDLE &&
-                           t_command_buffer_cache.command_buffer ==
-                               command_buffer &&
-                           t_command_buffer_cache.generation == gen,
-                       1)) {
-    return t_command_buffer_cache.dispatch;
+  if (__builtin_expect(command_buffer != VK_NULL_HANDLE, 1)) {
+    for (auto& entry : t_command_buffer_cache.entries) {
+      if (entry.command_buffer == command_buffer && entry.generation == gen) {
+        return entry.dispatch;
+      }
+    }
   }
   AdapterState& state = State();
-  std::lock_guard<std::mutex> lock(state.mutex);
+  std::shared_lock<std::shared_mutex> lock(state.mutex);
   const auto binding = state.command_buffer_bindings.find(command_buffer);
   if (binding == state.command_buffer_bindings.end()) {
     return kEmptyDeviceDispatch;
@@ -433,10 +439,14 @@ const AdapterState::DeviceDispatch& HostDispatchForCommandBuffer(
         return candidate.device == device;
       });
   if (dispatch != state.device_dispatches.end()) {
-    t_command_buffer_cache.generation = gen;
-    t_command_buffer_cache.command_buffer = command_buffer;
-    t_command_buffer_cache.dispatch = *dispatch;
-    return t_command_buffer_cache.dispatch;
+    auto& slot = t_command_buffer_cache.entries[t_command_buffer_cache.next_slot];
+    t_command_buffer_cache.next_slot =
+        (t_command_buffer_cache.next_slot + 1) %
+        ThreadCommandBufferDispatchCache::kSlots;
+    slot.generation = gen;
+    slot.command_buffer = command_buffer;
+    slot.dispatch = *dispatch;
+    return slot.dispatch;
   }
   return kEmptyDeviceDispatch;
 }
@@ -499,7 +509,7 @@ void RegisterHostDeviceDispatch(VkDevice device,
       get_device_proc_addr(device, "vkResetCommandBuffer"));
 
   AdapterState& state = State();
-  std::lock_guard<std::mutex> lock(state.mutex);
+  std::lock_guard<std::shared_mutex> lock(state.mutex);
   const auto existing = std::find_if(
       state.device_dispatches.begin(), state.device_dispatches.end(),
       [device](const AdapterState::DeviceDispatch& candidate) {
@@ -518,7 +528,7 @@ void RegisterHostQueueBinding(VkDevice device, VkQueue queue) {
     return;
   }
   AdapterState& state = State();
-  std::lock_guard<std::mutex> lock(state.mutex);
+  std::lock_guard<std::shared_mutex> lock(state.mutex);
   const auto existing =
       std::find_if(state.queue_bindings.begin(), state.queue_bindings.end(),
                    [queue](const AdapterState::QueueBinding& candidate) {
@@ -539,7 +549,7 @@ void RegisterHostCommandBuffers(VkDevice device, VkCommandPool command_pool,
     return;
   }
   AdapterState& state = State();
-  std::lock_guard<std::mutex> lock(state.mutex);
+  std::lock_guard<std::shared_mutex> lock(state.mutex);
   bool rebound_existing = false;
   for (std::uint32_t index = 0; index < command_buffer_count; ++index) {
     const VkCommandBuffer command_buffer = command_buffers[index];
@@ -570,7 +580,7 @@ void RemoveHostCommandBuffers(VkDevice device, VkCommandPool command_pool,
     return;
   }
   AdapterState& state = State();
-  std::lock_guard<std::mutex> lock(state.mutex);
+  std::lock_guard<std::shared_mutex> lock(state.mutex);
   bool removed = false;
   for (std::uint32_t index = 0; index < command_buffer_count; ++index) {
     const auto it = state.command_buffer_bindings.find(command_buffers[index]);
@@ -589,7 +599,7 @@ void RemoveHostCommandBuffers(VkDevice device, VkCommandPool command_pool,
 void RemoveHostCommandPoolBindings(VkDevice device,
                                    VkCommandPool command_pool) {
   AdapterState& state = State();
-  std::lock_guard<std::mutex> lock(state.mutex);
+  std::lock_guard<std::shared_mutex> lock(state.mutex);
   bool removed = false;
   for (auto it = state.command_buffer_bindings.begin();
        it != state.command_buffer_bindings.end();) {
@@ -608,7 +618,7 @@ void RemoveHostCommandPoolBindings(VkDevice device,
 
 void RemoveHostDeviceDispatch(VkDevice device) {
   AdapterState& state = State();
-  std::lock_guard<std::mutex> lock(state.mutex);
+  std::lock_guard<std::shared_mutex> lock(state.mutex);
   state.queue_bindings.erase(
       std::remove_if(state.queue_bindings.begin(), state.queue_bindings.end(),
                      [device](const AdapterState::QueueBinding& binding) {
@@ -1157,7 +1167,7 @@ Function HostPhysicalDeviceProc(const char* name, const char* alias) {
   VkInstance instance = VK_NULL_HANDLE;
   {
     AdapterState& state = State();
-    std::lock_guard<std::mutex> lock(state.mutex);
+    std::lock_guard<std::shared_mutex> lock(state.mutex);
     instance = state.latest_instance;
   }
   PFN_vkVoidFunction proc = HostInstanceProc(instance, name);
@@ -1178,7 +1188,7 @@ void ReleaseEtc2PoolCommandBuffers(VkDevice device,
   std::vector<VkCommandBuffer> command_buffers;
   {
     AdapterState& state = State();
-    std::lock_guard<std::mutex> lock(state.mutex);
+    std::lock_guard<std::shared_mutex> lock(state.mutex);
     for (const auto& [command_buffer, binding] : state.command_buffer_bindings) {
       if (binding.device == device && binding.command_pool == command_pool) {
         command_buffers.push_back(command_buffer);
@@ -1304,7 +1314,7 @@ vkCreateInstance(const VkInstanceCreateInfo* create_info,
   const VkResult result = host_create(&host_info, allocator, instance);
   if (result == VK_SUCCESS) {
     AdapterState& state = State();
-    std::lock_guard<std::mutex> lock(state.mutex);
+    std::lock_guard<std::shared_mutex> lock(state.mutex);
     state.instances.push_back(*instance);
     state.active_instance_count = state.instances.size();
     state.latest_instance = *instance;
@@ -1336,7 +1346,7 @@ vkDestroyInstance(VkInstance instance, const VkAllocationCallbacks* allocator) {
     host_destroy(instance, allocator);
   }
   AdapterState& state = State();
-  std::lock_guard<std::mutex> lock(state.mutex);
+  std::lock_guard<std::shared_mutex> lock(state.mutex);
   auto& maintenance = state.surface_maintenance_instances;
   maintenance.erase(std::remove(maintenance.begin(), maintenance.end(), instance),
                       maintenance.end());
@@ -1439,7 +1449,7 @@ vkGetInstanceProcAddr(VkInstance instance, const char* name) {
       std::strcmp(name, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR") == 0) {
     const PFN_vkVoidFunction host = HostInstanceProc(instance, name);
     AdapterState& state = State();
-    std::lock_guard<std::mutex> lock(state.mutex);
+    std::lock_guard<std::shared_mutex> lock(state.mutex);
     state.host_surface_capabilities =
         reinterpret_cast<PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR>(host);
     return host != nullptr ? reinterpret_cast<PFN_vkVoidFunction>(
@@ -1450,7 +1460,7 @@ vkGetInstanceProcAddr(VkInstance instance, const char* name) {
       std::strcmp(name, "vkGetPhysicalDeviceSurfacePresentModesKHR") == 0) {
     const PFN_vkVoidFunction host = HostInstanceProc(instance, name);
     AdapterState& state = State();
-    std::lock_guard<std::mutex> lock(state.mutex);
+    std::lock_guard<std::shared_mutex> lock(state.mutex);
     state.host_surface_present_modes =
         reinterpret_cast<PFN_vkGetPhysicalDeviceSurfacePresentModesKHR>(host);
     return host != nullptr ? reinterpret_cast<PFN_vkVoidFunction>(
@@ -1504,7 +1514,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(
   PFN_vkGetDeviceProcAddr host_get_device_proc_addr = nullptr;
   {
     AdapterState& state = State();
-    std::lock_guard<std::mutex> lock(state.mutex);
+    std::lock_guard<std::shared_mutex> lock(state.mutex);
     instance = state.latest_instance;
     surface_maintenance =
         std::find(state.surface_maintenance_instances.begin(),
@@ -2185,7 +2195,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
   VkInstance instance = VK_NULL_HANDLE;
   {
     AdapterState& state = State();
-    std::lock_guard<std::mutex> lock(state.mutex);
+    std::lock_guard<std::shared_mutex> lock(state.mutex);
     host_capabilities = state.host_surface_capabilities;
     instance = state.latest_instance;
   }
@@ -2196,7 +2206,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
                              "vkGetPhysicalDeviceSurfaceCapabilitiesKHR"));
     if (host_capabilities != nullptr) {
       AdapterState& state = State();
-      std::lock_guard<std::mutex> lock(state.mutex);
+      std::lock_guard<std::shared_mutex> lock(state.mutex);
       if (state.host_surface_capabilities == nullptr) {
         state.host_surface_capabilities = host_capabilities;
       }
@@ -2229,7 +2239,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
       capabilities->minImageExtent.height, capabilities->maxImageExtent.height);
 
   AdapterState& state = State();
-  std::lock_guard<std::mutex> lock(state.mutex);
+  std::lock_guard<std::shared_mutex> lock(state.mutex);
   if (!state.extent_translation_logged) {
     state.extent_translation_logged = true;
     std::fprintf(
@@ -2249,7 +2259,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfacePresentModesKHR(
   VkInstance instance = VK_NULL_HANDLE;
   {
     AdapterState& state = State();
-    std::lock_guard<std::mutex> lock(state.mutex);
+    std::lock_guard<std::shared_mutex> lock(state.mutex);
     host_query = state.host_surface_present_modes;
     instance = state.latest_instance;
   }
@@ -2260,7 +2270,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfacePresentModesKHR(
                              "vkGetPhysicalDeviceSurfacePresentModesKHR"));
     if (host_query != nullptr) {
       AdapterState& state = State();
-      std::lock_guard<std::mutex> lock(state.mutex);
+      std::lock_guard<std::shared_mutex> lock(state.mutex);
       if (state.host_surface_present_modes == nullptr) {
         state.host_surface_present_modes = host_query;
       }
@@ -2288,7 +2298,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfacePresentModesKHR(
       mocktail::graphics::FilterPresentModes(policy, host_modes);
   {
     AdapterState& state = State();
-    std::lock_guard<std::mutex> lock(state.mutex);
+    std::lock_guard<std::shared_mutex> lock(state.mutex);
     if (!state.present_policy_logged) {
       state.present_policy_logged = true;
       std::fprintf(stderr, "  [vulkan] present policy=%s modes=%zu\n",

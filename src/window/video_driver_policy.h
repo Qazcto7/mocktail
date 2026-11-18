@@ -24,6 +24,7 @@ struct VideoDriverPolicyInput {
   bool has_x11_display = false;
   bool uses_direct_vulkan = false;
   bool has_nvidia_kernel_driver = false;
+  bool nvidia_supports_wayland_explicit_sync = false;
 };
 
 // Resolves the SDL video backend before SDL_Init. An explicit SDL driver is

@@ -341,6 +341,31 @@ TEST(GraphicsLaunchPolicyTest, LeavesOtherDriversAndBackendsAlone) {
                    nullptr, "opengl");
 }
 
+TEST(GraphicsLaunchPolicyTest, ResolvesUniversalSocAndLegacyAmdCapabilities) {
+  HostCpuCapabilities modern_cpu;
+  HostGpuCapabilities soc_vulkan_gpus;
+  soc_vulkan_gpus.has_soc_vulkan = true;
+  soc_vulkan_gpus.has_integrated_gpu = true;
+  soc_vulkan_gpus.has_hw_vulkan_icd = true;
+  EXPECT_EQ(ResolveEffectiveGraphicsBackend(GraphicsBackend::kAuto, modern_cpu,
+                                            soc_vulkan_gpus),
+            GraphicsBackend::kVulkan);
+
+  HostGpuCapabilities soc_gles_only_gpus;
+  soc_gles_only_gpus.has_soc_gles_only = true;
+  soc_gles_only_gpus.has_integrated_gpu = true;
+  EXPECT_EQ(ResolveEffectiveGraphicsBackend(GraphicsBackend::kAuto, modern_cpu,
+                                            soc_gles_only_gpus),
+            GraphicsBackend::kSystem);
+
+  HostGpuCapabilities legacy_radeon_gpus;
+  legacy_radeon_gpus.has_amd_legacy_radeon = true;
+  legacy_radeon_gpus.has_discrete_gpu = true;
+  EXPECT_EQ(ResolveEffectiveGraphicsBackend(GraphicsBackend::kAuto, modern_cpu,
+                                            legacy_radeon_gpus),
+            GraphicsBackend::kSystem);
+}
+
 }  // namespace
 }  // namespace runtime
 }  // namespace mocktail
