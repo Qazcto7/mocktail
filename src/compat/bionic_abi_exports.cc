@@ -320,24 +320,10 @@ constexpr size_t kBionicMutexSize = 40;
 constexpr uint16_t kBionicMutexDestroyedState = 0xffff;
 constexpr uint16_t kBionicMutexTypeShift = 14;
 constexpr uint16_t kBionicMutexTypeMask = 0x3;
-constexpr uint16_t kBionicMutexSharedMask = 1u << 13;
 constexpr uint16_t kBionicMutexStateMask = 0x3;
 constexpr uint16_t kBionicMutexUnlocked = 0;
-constexpr uint16_t kBionicMutexLockedUncontended = 1;
-constexpr uint16_t kBionicMutexLockedContended = 2;
-constexpr uint16_t kBionicMutexCounterMask = 0x1ffcu;
-constexpr uint16_t kBionicMutexCounterOne = 1u << 2;
-constexpr uint16_t kBionicMutexTypeFieldMask =
-    kBionicMutexTypeMask << kBionicMutexTypeShift;
-constexpr uint16_t kBionicMutexTypeBitsNormal = 0;
-constexpr uint16_t kBionicMutexTypeBitsRecursive =
-    1u << kBionicMutexTypeShift;
-constexpr uint16_t kBionicMutexTypeBitsErrorCheck =
-    2u << kBionicMutexTypeShift;
-constexpr uint16_t kBionicMutexTypeBitsPi = kBionicMutexTypeFieldMask;
 constexpr int64_t kBionicMutexAttrTypeMask = 0x0f;
 constexpr int kBionicMutexNormal = 0;
-constexpr int kBionicMutexRecursive = 1;
 constexpr int kBionicMutexErrorCheck = 2;
 static_assert(sizeof(pthread_mutex_t) >= kBionicMutexSize);
 

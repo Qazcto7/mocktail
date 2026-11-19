@@ -724,7 +724,8 @@ bool VulkanTextOverlayCompositor::RegisterDevice(
   // libplacebo queue ranges always start at queue index zero. Restrict it to
   // that one queue so it cannot submit through an application queue that the
   // adapter did not explicitly synchronize with.
-  import_params.queue_graphics = {graphics_queue_family, 1};
+  import_params.queue_graphics.index = graphics_queue_family;
+  import_params.queue_graphics.count = 1;
   import_params.features = &pl_vulkan_required_features;
   import_params.lock_queue = &Impl::LockQueue;
   import_params.unlock_queue = &Impl::UnlockQueue;

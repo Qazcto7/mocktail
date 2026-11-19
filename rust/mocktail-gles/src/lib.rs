@@ -361,5 +361,21 @@ mod tests {
         assert!(cache.should_set_uniform2f(3, 1280.0, 720.0));
         assert!(cache.should_set_uniform3f(4, 0.0, 0.25, 0.5));
         assert!(cache.should_set_uniform_matrix4fv(5, 1, 0, mat_b.as_ptr()));
+
+        // Vector uniform aliasing & array invalidation safety.
+        let v4_same = [1.0f32, 0.5, 0.25, 0.0];
+        assert!(cache.should_set_uniform4fv(2, 1, v4_same.as_ptr()));
+        assert!(!cache.should_set_uniform4f(2, 1.0, 0.5, 0.25, 0.0));
+        let v4_array = [0.0f32; 8];
+        assert!(cache.should_set_uniform4fv(2, 2, v4_array.as_ptr()));
+        // Array write invalidated cached vec4 slots for this program.
+        assert!(cache.should_set_uniform4f(2, 1.0, 0.5, 0.25, 0.0));
+
+        let mat_pair = [0.0f32; 32];
+        assert!(cache.should_set_uniform_matrix4fv(5, 1, 0, mat_a.as_ptr()));
+        assert!(cache.should_set_uniform_matrix4fv(6, 1, 0, mat_b.as_ptr()));
+        // Writing count=2 at loc 5 invalidates loc 6 too so it cannot remain stale.
+        assert!(cache.should_set_uniform_matrix4fv(5, 2, 0, mat_pair.as_ptr()));
+        assert!(cache.should_set_uniform_matrix4fv(6, 1, 0, mat_b.as_ptr()));
     }
 }

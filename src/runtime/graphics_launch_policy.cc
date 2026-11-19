@@ -38,18 +38,6 @@ constexpr int32_t kTargetIsAarch64 = 1;
 constexpr int32_t kTargetIsAarch64 = 0;
 #endif
 
-bool IsHaswellOrIvyBridgeIntel(unsigned int device_id) {
-  return mocktail_rust_graphics_is_haswell_intel(device_id) != 0;
-}
-
-bool IsLegacyIntel(unsigned int device_id) {
-  return mocktail_rust_graphics_is_legacy_intel(device_id) != 0;
-}
-
-bool IsLegacyNvidia(unsigned int device_id) {
-  return mocktail_rust_graphics_is_legacy_nvidia(device_id) != 0;
-}
-
 bool SetValue(const char* name, const std::string& value, std::string* error) {
   if (setenv(name, value.c_str(), 1) == 0) {
     return true;
@@ -84,18 +72,6 @@ bool EnvIsOff(const char* name) {
   return value != nullptr &&
          (std::strcmp(value, "0") == 0 || std::strcmp(value, "off") == 0 ||
           std::strcmp(value, "igpu") == 0);
-}
-
-bool ParsePciVendor(const std::string& raw, unsigned int* vendor) {
-  if (vendor == nullptr || raw.empty()) {
-    return false;
-  }
-  uint32_t parsed = 0;
-  if (mocktail_rust_graphics_parse_pci_hex(raw.c_str(), &parsed) == 0) {
-    return false;
-  }
-  *vendor = parsed;
-  return true;
 }
 
 MocktailHostGpuProbe ToRustProbe(const HostGpuCapabilities& gpus) {
@@ -136,44 +112,6 @@ HostGpuCapabilities DetectHostGpuCapabilities() {
     gpus.nvidia_driver_major = probe.nvidia_driver_major;
     gpus.total_ram_mb = probe.total_ram_mb;
     gpus.host_verified_no_hw_icd = (probe.has_hw_vulkan_icd == 0);
-    return gpus;
-  }
-  for (int index = 0; index < 16; ++index) {
-    const std::string base = "/sys/class/drm/card" + std::to_string(index) +
-                             "/device";
-    std::ifstream input(base + "/vendor");
-    std::string raw;
-    unsigned int vendor = 0;
-    if (!(input >> raw) || !ParsePciVendor(raw, &vendor)) {
-      continue;
-    }
-    unsigned int device_id = 0;
-    bool has_device_id = false;
-    {
-      std::ifstream dev_input(base + "/device");
-      std::string dev_raw;
-      has_device_id = (dev_input >> dev_raw) &&
-                      ParsePciVendor(dev_raw, &device_id);
-    }
-    if (vendor == 0x8086) {
-      if (has_device_id &&
-          (IsHaswellOrIvyBridgeIntel(device_id) || IsLegacyIntel(device_id))) {
-        gpus.has_legacy_intel = true;
-      } else {
-        gpus.has_modern_intel = true;
-      }
-      gpus.has_integrated_gpu = true;
-    } else if (vendor == 0x10de) {
-      if (has_device_id && IsLegacyNvidia(device_id)) {
-        gpus.has_legacy_nvidia = true;
-      } else {
-        gpus.has_modern_nvidia = true;
-      }
-      gpus.has_discrete_gpu = true;
-    } else if (vendor == 0x1002 || vendor == 0x1022) {
-      gpus.has_amd = true;
-      gpus.has_discrete_gpu = true;
-    }
   }
   return gpus;
 }
@@ -195,13 +133,8 @@ std::string SelectHardwareIcd(const HostGpuCapabilities& gpus) {
     probe.has_legacy_nvidia = 0;
   }
   char selected[4096];
-#if defined(__aarch64__)
-  constexpr int kTargetAarch64 = 1;
-#else
-  constexpr int kTargetAarch64 = 0;
-#endif
   if (mocktail_rust_graphics_select_universal_icd_manifest(
-          dirs_nl.c_str(), &probe, kTargetAarch64, selected,
+          dirs_nl.c_str(), &probe, kTargetIsAarch64, selected,
           sizeof(selected)) == 0) {
     return std::string(selected);
   }

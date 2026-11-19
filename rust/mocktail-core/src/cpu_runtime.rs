@@ -710,6 +710,22 @@ unsafe fn last_errno() -> c_int {
     libc::EINVAL
 }
 
+struct ErrnoGuard(c_int);
+
+impl ErrnoGuard {
+    #[inline]
+    fn new() -> Self {
+        Self(unsafe { last_errno() })
+    }
+}
+
+impl Drop for ErrnoGuard {
+    #[inline]
+    fn drop(&mut self) {
+        unsafe { set_errno(self.0) };
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn futex_wait_private(addr: *const c_void, expected: i32) -> c_int {
     if stats_enabled() {
@@ -842,6 +858,7 @@ fn mutex_futex_wait(mutex: *mut c_void, expected_state: u16, shared: bool) {
     if (word & 0xffff) as u16 != expected_state {
         return;
     }
+    let _errno_guard = ErrnoGuard::new();
     if stats_enabled() {
         STATS.futex_waits.fetch_add(1, Ordering::Relaxed);
     }
@@ -854,6 +871,7 @@ fn mutex_futex_wait(mutex: *mut c_void, expected_state: u16, shared: bool) {
 }
 
 fn mutex_futex_wake(mutex: *mut c_void, shared: bool) {
+    let _errno_guard = ErrnoGuard::new();
     let op = if shared {
         UAPI_FUTEX_WAKE
     } else {
@@ -936,18 +954,21 @@ fn owned_mutex_lock(mutex: *mut c_void, mut old_state: u16) -> c_int {
     let locked_uncontended = mtype | shared | BIONIC_MUTEX_LOCKED_UNCONTENDED;
     let locked_contended = mtype | shared | BIONIC_MUTEX_LOCKED_CONTENDED;
 
-    if old_state == unlocked
-        && state
-            .compare_exchange(
-                unlocked,
-                locked_uncontended,
-                Ordering::Acquire,
-                Ordering::Relaxed,
-            )
-            .is_ok()
-    {
-        owner.store(tid, Ordering::Relaxed);
-        return 0;
+    if old_state == unlocked {
+        match state.compare_exchange(
+            unlocked,
+            locked_uncontended,
+            Ordering::Acquire,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => {
+                owner.store(tid, Ordering::Relaxed);
+                return 0;
+            }
+            Err(actual) => {
+                old_state = actual;
+            }
+        }
     }
 
     if adaptive_mutex_spin_enabled() {
@@ -1138,6 +1159,7 @@ pub extern "C" fn mocktail_rust_bionic_cond_pulse(cond: *mut c_void, waiters: c_
     } else {
         UAPI_FUTEX_WAKE | UAPI_FUTEX_PRIVATE_FLAG
     };
+    let _errno_guard = ErrnoGuard::new();
     let _ = futex_syscall(cond, op, waiters as u32, std::ptr::null(), 0);
     0
 }
@@ -1167,6 +1189,7 @@ pub extern "C" fn mocktail_rust_bionic_cond_timedwait(
     if unlock_rc != 0 {
         return unlock_rc;
     }
+    let _errno_guard = ErrnoGuard::new();
     let shared = (old_state & BIONIC_COND_SHARED_MASK) != 0;
     let wait_rc;
     loop {
@@ -1829,6 +1852,22 @@ mod tests {
 
             let mut cond: [u32; 12] = [0; 12];
             assert_eq!(mocktail_rust_bionic_cond_pulse(cond.as_mut_ptr().cast(), 1), 0);
+
+            // POSIX cond_timedwait must return ETIMEDOUT without clobbering thread errno.
+            set_errno(libc::ENOENT);
+            assert_eq!(mocktail_rust_bionic_mutex_lock(mtx.as_mut_ptr().cast()), 0);
+            let expired = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+            assert_eq!(
+                mocktail_rust_bionic_cond_timedwait(
+                    cond.as_mut_ptr().cast(),
+                    mtx.as_mut_ptr().cast(),
+                    false,
+                    &expired,
+                ),
+                libc::ETIMEDOUT
+            );
+            assert_eq!(last_errno(), libc::ENOENT);
+            assert_eq!(mocktail_rust_bionic_mutex_unlock(mtx.as_mut_ptr().cast()), 0);
         }
     }
 }

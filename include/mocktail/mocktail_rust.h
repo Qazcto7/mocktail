@@ -2377,10 +2377,6 @@ typedef struct MocktailHostGpuProbe {
 int32_t mocktail_rust_graphics_probe_host_caps(
     MocktailHostGpuProbe* out_probe);
 
-uint64_t mocktail_rust_graphics_total_ram_mb(void);
-
-uint32_t mocktail_rust_graphics_nvidia_driver_major(void);
-
 int32_t mocktail_rust_graphics_nvidia_supports_wayland_explicit_sync(void);
 
 int32_t mocktail_rust_graphics_select_universal_icd_manifest(
@@ -4895,8 +4891,6 @@ int32_t mocktail_rust_memory_poll_and_trim(uint64_t limit_bytes);
 int32_t mocktail_rust_memory_consume_engine_low_memory(void);
 
 void mocktail_rust_memory_note_engine_low_memory_invoked(void);
-
-void mocktail_rust_memory_disable_engine_low_memory(void);
 
 void mocktail_rust_memory_notify_background(bool is_background);
 

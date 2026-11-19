@@ -1121,7 +1121,7 @@ impl GlStateCache {
         if count != 1 || transpose != 0 {
             for slot in self.uniform_mat4_slots.iter_mut() {
                 if let Some(entry) = *slot {
-                    if entry.program == program && entry.location == location {
+                    if entry.program == program {
                         *slot = None;
                     }
                 }
@@ -1150,6 +1150,124 @@ impl GlStateCache {
             bits,
         });
         self.uniform_mat4_cursor = (self.uniform_mat4_cursor + 1) % MAX_CACHED_UNIFORM_MAT4_SLOTS;
+        true
+    }
+
+    pub fn should_set_uniform1iv(
+        &mut self,
+        location: GLint,
+        count: GLsizei,
+        value: *const GLint,
+    ) -> bool {
+        if count == 1 && !value.is_null() {
+            return self.should_set_uniform1i(location, unsafe { *value });
+        }
+        if count > 1 {
+            if let Some(program) = self.program {
+                for slot in self.uniform1i_slots.iter_mut() {
+                    if let Some(entry) = *slot {
+                        if entry.program == program {
+                            *slot = None;
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    pub fn should_set_uniform1fv(
+        &mut self,
+        location: GLint,
+        count: GLsizei,
+        value: *const GLfloat,
+    ) -> bool {
+        if count == 1 && !value.is_null() {
+            return self.should_set_uniform1f(location, unsafe { *value });
+        }
+        if count > 1 {
+            if let Some(program) = self.program {
+                for slot in self.uniform1f_slots.iter_mut() {
+                    if let Some(entry) = *slot {
+                        if entry.program == program {
+                            *slot = None;
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    pub fn should_set_uniform2fv(
+        &mut self,
+        location: GLint,
+        count: GLsizei,
+        value: *const GLfloat,
+    ) -> bool {
+        if count == 1 && !value.is_null() {
+            let v = unsafe { std::slice::from_raw_parts(value, 2) };
+            return self.should_set_uniform2f(location, v[0], v[1]);
+        }
+        if count > 1 {
+            if let Some(program) = self.program {
+                for slot in self.uniform2f_slots.iter_mut() {
+                    if let Some(entry) = *slot {
+                        if entry.program == program {
+                            *slot = None;
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    pub fn should_set_uniform3fv(
+        &mut self,
+        location: GLint,
+        count: GLsizei,
+        value: *const GLfloat,
+    ) -> bool {
+        if count == 1 && !value.is_null() {
+            let v = unsafe { std::slice::from_raw_parts(value, 3) };
+            return self.should_set_uniform3f(location, v[0], v[1], v[2]);
+        }
+        if count > 1 {
+            if let Some(program) = self.program {
+                for slot in self.uniform3f_slots.iter_mut() {
+                    if let Some(entry) = *slot {
+                        if entry.program == program {
+                            *slot = None;
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    pub fn should_set_uniform4fv(
+        &mut self,
+        location: GLint,
+        count: GLsizei,
+        value: *const GLfloat,
+    ) -> bool {
+        if count == 1 && !value.is_null() {
+            let v = unsafe { std::slice::from_raw_parts(value, 4) };
+            return self.should_set_uniform4f(location, v[0], v[1], v[2], v[3]);
+        }
+        if count > 1 {
+            if let Some(program) = self.program {
+                for slot in self.uniform4f_slots.iter_mut() {
+                    if let Some(entry) = *slot {
+                        if entry.program == program {
+                            *slot = None;
+                        }
+                    }
+                }
+            }
+        }
         true
     }
 
@@ -1535,12 +1653,12 @@ pub extern "C" fn mocktail_gles_on_frame_present() {
 
 #[no_mangle]
 pub extern "C" fn mocktail_gles_on_make_current(ctx: usize) {
-    if ctx != 0 && !TRIM_CALLBACK_REGISTERED.swap(true, Ordering::AcqRel) {
+    if ctx != 0 && !TRIM_CALLBACK_REGISTERED.load(Ordering::Acquire) {
         let reg = unsafe { dlsym_default(b"mocktail_rust_memory_register_trim_callback\0") };
-        if !reg.is_null() {
-            let register_fn: unsafe extern "C" fn(extern "C" fn(i32)) =
+        if !reg.is_null() && !TRIM_CALLBACK_REGISTERED.swap(true, Ordering::AcqRel) {
+            let register_fn: unsafe extern "C" fn(extern "C" fn(i32)) -> i32 =
                 unsafe { std::mem::transmute(reg) };
-            unsafe { register_fn(mocktail_gles_request_trim) };
+            let _ = unsafe { register_fn(mocktail_gles_request_trim) };
         }
     }
     TLS_GL.with(|cell| {
@@ -1712,10 +1830,15 @@ pub extern "C" fn mocktail_gles_lookup_proc(procname: *const c_char) -> *mut c_v
         "glTexParameteri" => mocktail_rust_gl_tex_parameteri as *mut c_void,
         "glTexSubImage2D" => mocktail_rust_gl_tex_sub_image_2d as *mut c_void,
         "glUniform1f" => mocktail_rust_gl_uniform1f as *mut c_void,
+        "glUniform1fv" => mocktail_rust_gl_uniform1fv as *mut c_void,
         "glUniform1i" => mocktail_rust_gl_uniform1i as *mut c_void,
+        "glUniform1iv" => mocktail_rust_gl_uniform1iv as *mut c_void,
         "glUniform2f" => mocktail_rust_gl_uniform2f as *mut c_void,
+        "glUniform2fv" => mocktail_rust_gl_uniform2fv as *mut c_void,
         "glUniform3f" => mocktail_rust_gl_uniform3f as *mut c_void,
+        "glUniform3fv" => mocktail_rust_gl_uniform3fv as *mut c_void,
         "glUniform4f" => mocktail_rust_gl_uniform4f as *mut c_void,
+        "glUniform4fv" => mocktail_rust_gl_uniform4fv as *mut c_void,
         "glUniformMatrix4fv" => mocktail_rust_gl_uniform_matrix4fv as *mut c_void,
         "glUseProgram" => mocktail_rust_gl_use_program as *mut c_void,
         "glVertexAttribDivisor" => mocktail_rust_gl_vertex_attrib_divisor as *mut c_void,
@@ -3333,6 +3456,111 @@ pub extern "C" fn mocktail_rust_gl_uniform_matrix4fv(
                 unsafe extern "C" fn(GLint, GLsizei, GLboolean, *const GLfloat)
             ) {
                 unsafe { f(location, count, transpose, value) };
+            }
+        }
+        return;
+    }
+    let _ = stub_require();
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_gl_uniform1iv(
+    location: GLint,
+    count: GLsizei,
+    value: *const GLint,
+) {
+    if host_active() {
+        if with_cache_check(|c| c.should_set_uniform1iv(location, count, value)) {
+            if let Some(f) = host_gl!(
+                FN,
+                "glUniform1iv",
+                unsafe extern "C" fn(GLint, GLsizei, *const GLint)
+            ) {
+                unsafe { f(location, count, value) };
+            }
+        }
+        return;
+    }
+    let _ = stub_require();
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_gl_uniform1fv(
+    location: GLint,
+    count: GLsizei,
+    value: *const GLfloat,
+) {
+    if host_active() {
+        if with_cache_check(|c| c.should_set_uniform1fv(location, count, value)) {
+            if let Some(f) = host_gl!(
+                FN,
+                "glUniform1fv",
+                unsafe extern "C" fn(GLint, GLsizei, *const GLfloat)
+            ) {
+                unsafe { f(location, count, value) };
+            }
+        }
+        return;
+    }
+    let _ = stub_require();
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_gl_uniform2fv(
+    location: GLint,
+    count: GLsizei,
+    value: *const GLfloat,
+) {
+    if host_active() {
+        if with_cache_check(|c| c.should_set_uniform2fv(location, count, value)) {
+            if let Some(f) = host_gl!(
+                FN,
+                "glUniform2fv",
+                unsafe extern "C" fn(GLint, GLsizei, *const GLfloat)
+            ) {
+                unsafe { f(location, count, value) };
+            }
+        }
+        return;
+    }
+    let _ = stub_require();
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_gl_uniform3fv(
+    location: GLint,
+    count: GLsizei,
+    value: *const GLfloat,
+) {
+    if host_active() {
+        if with_cache_check(|c| c.should_set_uniform3fv(location, count, value)) {
+            if let Some(f) = host_gl!(
+                FN,
+                "glUniform3fv",
+                unsafe extern "C" fn(GLint, GLsizei, *const GLfloat)
+            ) {
+                unsafe { f(location, count, value) };
+            }
+        }
+        return;
+    }
+    let _ = stub_require();
+}
+
+#[no_mangle]
+pub extern "C" fn mocktail_rust_gl_uniform4fv(
+    location: GLint,
+    count: GLsizei,
+    value: *const GLfloat,
+) {
+    if host_active() {
+        if with_cache_check(|c| c.should_set_uniform4fv(location, count, value)) {
+            if let Some(f) = host_gl!(
+                FN,
+                "glUniform4fv",
+                unsafe extern "C" fn(GLint, GLsizei, *const GLfloat)
+            ) {
+                unsafe { f(location, count, value) };
             }
         }
         return;

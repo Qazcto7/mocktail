@@ -1,12 +1,10 @@
 #include "runtime/memory_limit.h"
 #include "mocktail/mocktail_rust.h"
 
-#include <fcntl.h>
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
 
-#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstdio>
@@ -18,8 +16,10 @@ namespace mocktail {
 namespace runtime {
 namespace {
 
-constexpr int kWatchdogPollMilliseconds = 100;
-constexpr int kPressurePollIntervalTicks = 10;  // 10 * 100ms = 1s
+constexpr int kHardCapPollMilliseconds = 100;
+constexpr int kHardCapPressurePollTicks = 10;    // 10 * 100ms = 1s
+constexpr int kAdaptivePollMilliseconds = 250;
+constexpr int kAdaptivePressurePollTicks = 4;    // 4 * 250ms = 1s
 
 // Keep the callback registration symbol linked into executables that use the
 // watchdog so dynamically loaded stubs can register via dlsym(RTLD_DEFAULT).
@@ -137,11 +137,16 @@ void* MemoryLimitWatchdog::ThreadEntry(void* context) {
 }
 
 void MemoryLimitWatchdog::Run() {
-  const timespec interval = {
-      0, static_cast<long>(kWatchdogPollMilliseconds) * 1000L * 1000L};
+  const bool enforce_hard_cap = limit_bytes_ > 0;
+  const int poll_ms =
+      enforce_hard_cap ? kHardCapPollMilliseconds : kAdaptivePollMilliseconds;
+  const int pressure_poll_ticks = enforce_hard_cap
+                                      ? kHardCapPressurePollTicks
+                                      : kAdaptivePressurePollTicks;
+  const timespec interval = {0, static_cast<long>(poll_ms) * 1000L * 1000L};
   int ticks = 0;
   while (!stop_requested_.load(std::memory_order_acquire)) {
-    if (limit_bytes_ > 0) {
+    if (enforce_hard_cap) {
       const ProcessMemoryUsage usage = ReadCurrentProcessMemory();
       if (usage.valid &&
           mocktail_rust_memory_limit_exceeded(usage.resident_bytes,
@@ -161,7 +166,7 @@ void MemoryLimitWatchdog::Run() {
       }
     }
 
-    if ((ticks % kPressurePollIntervalTicks) == 0) {
+    if ((ticks % pressure_poll_ticks) == 0) {
       (void)mocktail_rust_memory_poll_and_trim(limit_bytes_);
     }
     ++ticks;

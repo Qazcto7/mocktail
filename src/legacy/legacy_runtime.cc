@@ -1042,6 +1042,8 @@ void PumpPendingLowMemoryTrimOnce(uint64_t main_loop_ticks) {
   if (env == nullptr) {
     return;
   }
+  std::cerr << "  [memory] critical pressure: invoking "
+               "nativeAppBridgeV2OnLowMemory\n";
   on_low_memory(env, g_native_gl_class_for_main_thread);
   mocktail_rust_memory_note_engine_low_memory_invoked();
 }

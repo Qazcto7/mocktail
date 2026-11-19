@@ -3,9 +3,8 @@
 
 use std::collections::HashSet;
 use std::env;
-use std::ffi::{c_char, CStr, CString};
+use std::ffi::{c_char, CStr};
 use std::fs;
-use std::os::raw::c_int;
 use std::path::{Path, PathBuf};
 use std::ptr;
 
@@ -561,16 +560,6 @@ pub extern "C" fn mocktail_rust_graphics_probe_host_caps(
 }
 
 #[no_mangle]
-pub extern "C" fn mocktail_rust_graphics_total_ram_mb() -> u64 {
-    probe_total_ram_mb()
-}
-
-#[no_mangle]
-pub extern "C" fn mocktail_rust_graphics_nvidia_driver_major() -> u32 {
-    probe_nvidia_driver_major()
-}
-
-#[no_mangle]
 pub extern "C" fn mocktail_rust_graphics_nvidia_supports_wayland_explicit_sync() -> i32 {
     if let Ok(override_val) = env::var("MOCKTAIL_NVIDIA_WAYLAND_VK") {
         let trimmed = override_val.trim();
@@ -684,16 +673,10 @@ pub extern "C" fn mocktail_rust_graphics_needs_mesa_etc2_driconf(
     }
 }
 
-// Keep unused CString import check clean if expanded later
-#[allow(dead_code)]
-fn _keep_types_used() -> Option<c_int> {
-    let _ = CString::new("ok").ok();
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::CString;
     use std::os::unix::fs::symlink;
     use std::time::{SystemTime, UNIX_EPOCH};
 

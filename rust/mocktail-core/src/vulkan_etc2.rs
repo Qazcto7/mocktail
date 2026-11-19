@@ -204,6 +204,7 @@ unsafe fn copy_from_mapped_neon(mut dst: *mut u8, mut src: *const u8, mut size: 
     }
 }
 
+#[cfg(not(target_arch = "aarch64"))]
 unsafe fn copy_from_mapped_scalar(dst: *mut u8, src: *const u8, size: usize) {
     std::ptr::copy_nonoverlapping(src, dst, size);
 }
@@ -234,9 +235,12 @@ pub extern "C" fn mocktail_rust_vulkan_etc2_copy_from_mapped(
         }
         #[cfg(target_arch = "aarch64")]
         {
-            return copy_from_mapped_neon;
+            copy_from_mapped_neon
         }
-        copy_from_mapped_scalar
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            copy_from_mapped_scalar
+        }
     });
     unsafe {
         copy_fn(destination, source, size);

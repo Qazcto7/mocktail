@@ -62,7 +62,7 @@ impl Default for PressureDecision {
 pub struct PressureEvaluator {
     pub initialized: bool,
     pub init_ms: u64,
-    pub peak_committed_bytes: u64,
+    pub high_water_committed_bytes: u64,
     pub last_trimmed_committed_bytes: u64,
     pub last_host_trim_ms: u64,
     pub last_cache_trim_ms: u64,
@@ -92,7 +92,7 @@ impl PressureEvaluator {
         if !self.initialized {
             self.initialized = true;
             self.init_ms = now_ms;
-            self.peak_committed_bytes = committed_bytes;
+            self.high_water_committed_bytes = committed_bytes;
             self.last_trimmed_committed_bytes = committed_bytes;
             self.last_host_trim_ms = now_ms;
             self.last_cache_trim_ms = now_ms;
@@ -101,46 +101,48 @@ impl PressureEvaluator {
             return PressureDecision::default();
         }
 
-        if committed_bytes > self.peak_committed_bytes {
-            self.peak_committed_bytes = committed_bytes;
+        if committed_bytes > self.high_water_committed_bytes {
+            self.high_water_committed_bytes = committed_bytes;
         }
 
         let mut level = PressureLevel::None;
 
         // 1) Configured hard/soft budget guard (percentage of user limit_bytes).
         if limit_bytes > 0 {
-            if committed_bytes >= limit_bytes.saturating_mul(90) / 100 {
+            if committed_bytes >= limit_bytes.saturating_mul(92) / 100 {
                 level = level.max(PressureLevel::Critical);
-            } else if committed_bytes >= limit_bytes.saturating_mul(78) / 100 {
+            } else if committed_bytes >= limit_bytes.saturating_mul(80) / 100 {
                 level = level.max(PressureLevel::Low);
-            } else if committed_bytes >= limit_bytes.saturating_mul(65) / 100 {
+            } else if committed_bytes >= limit_bytes.saturating_mul(68) / 100 {
                 level = level.max(PressureLevel::Moderate);
             }
         }
 
         // 2) Universal host physical RAM headroom & footprint checks.
+        //    Critical strictly indicates imminent system OOM across any RAM size.
         if let Some(info) = meminfo {
             if info.total_bytes > 0 {
                 let avail_pct = info.available_bytes.saturating_mul(100) / info.total_bytes;
                 let rss_pct = committed_bytes.saturating_mul(100) / info.total_bytes;
 
-                if info.available_bytes < 384 * MIB || avail_pct < 10 || rss_pct >= 72 {
+                if info.available_bytes < 256 * MIB || avail_pct < 6 || rss_pct >= 80 {
                     level = level.max(PressureLevel::Critical);
-                } else if info.available_bytes < 768 * MIB || avail_pct < 18 || rss_pct >= 52 {
+                } else if info.available_bytes < 640 * MIB || avail_pct < 14 || rss_pct >= 58 {
                     level = level.max(PressureLevel::Low);
-                } else if info.available_bytes < 1280 * MIB || avail_pct < 28 || rss_pct >= 35 {
+                } else if info.available_bytes < 1152 * MIB || avail_pct < 24 || rss_pct >= 38 {
                     level = level.max(PressureLevel::Moderate);
                 }
             }
         }
 
         // 3) Universal spike & post-exit release heuristics (works even on high-RAM hosts).
+        //    Growth spikes only trigger safe host/cache trimming (Low), never engine teardown.
         if committed_bytes >= 512 * MIB
             && committed_bytes >= self.last_trimmed_committed_bytes.saturating_add(256 * MIB)
         {
             level = level.max(PressureLevel::Low);
-        } else if committed_bytes.saturating_add(64 * MIB) <= self.peak_committed_bytes
-            && now_ms.saturating_sub(self.last_host_trim_ms) >= 10_000
+        } else if committed_bytes.saturating_add(64 * MIB) <= self.high_water_committed_bytes
+            && now_ms.saturating_sub(self.last_host_trim_ms) >= 15_000
         {
             // When RSS recedes (e.g. leaving an experience), nudge glibc arenas back to OS.
             level = level.max(PressureLevel::Moderate);
@@ -157,14 +159,14 @@ impl PressureEvaluator {
         let escalated = level > self.last_level && now_ms.saturating_sub(self.last_host_trim_ms) >= 1_000;
         let mut actions = 0u32;
 
-        // Periodic light host heap return even when pressure is Moderate/None above 384 MiB.
+        // Periodic light host heap return even when pressure is Moderate/None above 512 MiB.
         let host_cooldown_ms = match level {
-            PressureLevel::Critical => 2_000,
-            PressureLevel::Low => 5_000,
-            PressureLevel::Moderate => 10_000,
+            PressureLevel::Critical => 3_000,
+            PressureLevel::Low => 8_000,
+            PressureLevel::Moderate => 15_000,
             PressureLevel::None => {
-                if committed_bytes >= 384 * MIB {
-                    20_000
+                if committed_bytes >= 512 * MIB {
+                    45_000
                 } else {
                     u64::MAX
                 }
@@ -185,9 +187,9 @@ impl PressureEvaluator {
 
         if level >= PressureLevel::Low {
             let cache_cooldown_ms = if level == PressureLevel::Critical {
-                3_000
+                4_000
             } else {
-                8_000
+                12_000
             };
             let cache_due = !self.has_cache_trimmed
                 || escalated
@@ -197,16 +199,15 @@ impl PressureEvaluator {
                 self.has_cache_trimmed = true;
                 self.last_cache_trim_ms = now_ms;
             }
+        }
 
-            let engine_cooldown_ms = if level == PressureLevel::Critical {
-                8_000
-            } else {
-                20_000
-            };
+        // Roblox's nativeAppBridgeV2OnLowMemory unloads/destroys the LuaApp rather than
+        // performing a gentle GC, so reserve ACTION_ENGINE_LOW_MEMORY strictly for true
+        // imminent-OOM Critical pressure after startup warmup, with a 60s cooldown.
+        if level == PressureLevel::Critical && now_ms.saturating_sub(self.init_ms) >= 15_000 {
             let engine_due = !self.has_engine_trimmed
-                || escalated
-                || now_ms.saturating_sub(self.last_engine_low_mem_ms) >= engine_cooldown_ms;
-            if trigger_force || engine_due {
+                || now_ms.saturating_sub(self.last_engine_low_mem_ms) >= 60_000;
+            if engine_due {
                 actions |= ACTION_ENGINE_LOW_MEMORY;
                 self.has_engine_trimmed = true;
                 self.last_engine_low_mem_ms = now_ms;
@@ -215,7 +216,10 @@ impl PressureEvaluator {
 
         self.last_level = level;
         if actions != 0 {
-            self.peak_committed_bytes = self.peak_committed_bytes.min(committed_bytes.saturating_add(32 * MIB)).max(committed_bytes);
+            self.high_water_committed_bytes = self
+                .high_water_committed_bytes
+                .min(committed_bytes.saturating_add(32 * MIB))
+                .max(committed_bytes);
         }
 
         PressureDecision { level, actions }
@@ -322,7 +326,9 @@ fn trim_enabled() -> bool {
 
 fn low_mem_callback_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled("MOCKTAIL_LOW_MEMORY_CALLBACK", true))
+    // Opt-in only: Roblox's nativeAppBridgeV2OnLowMemory destroys/unloads the LuaApp,
+    // which can race with active engine state and crash mid-session.
+    *ENABLED.get_or_init(|| env_flag_enabled("MOCKTAIL_LOW_MEMORY_CALLBACK", false))
 }
 
 fn stats_enabled() -> bool {
@@ -378,7 +384,6 @@ static EVALUATOR: OnceLock<Mutex<PressureEvaluator>> = OnceLock::new();
 static TRIM_CALLBACKS: OnceLock<Mutex<[Option<MocktailRustMemoryTrimFn>; MAX_TRIM_CALLBACKS]>> =
     OnceLock::new();
 static PENDING_ENGINE_LOW_MEMORY: AtomicBool = AtomicBool::new(false);
-static ENGINE_LOW_MEMORY_DISABLED: AtomicBool = AtomicBool::new(false);
 static WINDOW_IN_BACKGROUND: AtomicBool = AtomicBool::new(false);
 
 fn evaluator() -> &'static Mutex<PressureEvaluator> {
@@ -526,10 +531,7 @@ pub extern "C" fn mocktail_rust_memory_poll_and_trim(limit_bytes: u64) -> c_int 
         }
     }
 
-    if (decision.actions & ACTION_ENGINE_LOW_MEMORY) != 0
-        && low_mem_callback_enabled()
-        && !ENGINE_LOW_MEMORY_DISABLED.load(Ordering::Acquire)
-    {
+    if (decision.actions & ACTION_ENGINE_LOW_MEMORY) != 0 && low_mem_callback_enabled() {
         if !PENDING_ENGINE_LOW_MEMORY.swap(true, Ordering::AcqRel) {
             STATS.engine_low_mem_queued.fetch_add(1, Ordering::Relaxed);
         }
@@ -540,9 +542,7 @@ pub extern "C" fn mocktail_rust_memory_poll_and_trim(limit_bytes: u64) -> c_int 
 
 #[no_mangle]
 pub extern "C" fn mocktail_rust_memory_consume_engine_low_memory() -> c_int {
-    if ENGINE_LOW_MEMORY_DISABLED.load(Ordering::Relaxed)
-        || !PENDING_ENGINE_LOW_MEMORY.load(Ordering::Relaxed)
-    {
+    if !PENDING_ENGINE_LOW_MEMORY.load(Ordering::Relaxed) {
         return 0;
     }
     if PENDING_ENGINE_LOW_MEMORY.swap(false, Ordering::AcqRel) {
@@ -555,12 +555,6 @@ pub extern "C" fn mocktail_rust_memory_consume_engine_low_memory() -> c_int {
 #[no_mangle]
 pub extern "C" fn mocktail_rust_memory_note_engine_low_memory_invoked() {
     STATS.engine_low_mem_invoked.fetch_add(1, Ordering::Relaxed);
-}
-
-#[no_mangle]
-pub extern "C" fn mocktail_rust_memory_disable_engine_low_memory() {
-    ENGINE_LOW_MEMORY_DISABLED.store(true, Ordering::Release);
-    PENDING_ENGINE_LOW_MEMORY.store(false, Ordering::Release);
 }
 
 #[no_mangle]
@@ -598,7 +592,11 @@ pub extern "C" fn mocktail_rust_memory_dump_stats() {
     let mut rss = 0u64;
     let mut swap = 0u64;
     let _ = crate::mocktail_rust_read_self_memory(&mut rss, &mut swap);
-    let last_rss = rss.max(STATS.last_rss_bytes.load(Ordering::Relaxed));
+    let last_rss = if rss > 0 {
+        rss
+    } else {
+        STATS.last_rss_bytes.load(Ordering::Relaxed)
+    };
     let avail = read_host_meminfo()
         .map(|i| i.available_bytes)
         .unwrap_or_else(|| STATS.last_avail_bytes.load(Ordering::Relaxed));
@@ -606,11 +604,7 @@ pub extern "C" fn mocktail_rust_memory_dump_stats() {
     eprintln!(
         "  [memory] trim={} low_mem_cb={} peak_rss={}MiB last_rss={}MiB host_avail={}MiB polls={} pressure(mod={} low={} crit={}) malloc_trims={} cache_trims={} bg_trims={} engine_low_mem(queued={} invoked={}) reclaimed={}KiB",
         if trim_enabled() { "on" } else { "off" },
-        if low_mem_callback_enabled() && !ENGINE_LOW_MEMORY_DISABLED.load(Ordering::Relaxed) {
-            "on"
-        } else {
-            "off"
-        },
+        if low_mem_callback_enabled() { "on" } else { "off" },
         STATS.peak_rss_bytes.load(Ordering::Relaxed) / MIB,
         last_rss / MIB,
         avail / MIB,
@@ -673,21 +667,23 @@ Cached:           500000 kB
         assert_eq!(d0.level, PressureLevel::None);
         assert_eq!(d0.actions, 0);
 
-        // Large memory spike (+300 MiB over baseline above 512 MiB) triggers Low trim + engine signal.
+        // Large memory spike (+320 MiB over baseline above 512 MiB) triggers safe Low
+        // host+cache trim ONLY — must NOT trigger destructive ACTION_ENGINE_LOW_MEMORY!
         let d1 = eval.evaluate(2_000, 620 * MIB, Some(host_8g), 0, false);
         assert_eq!(d1.level, PressureLevel::Low);
         assert_ne!(d1.actions & ACTION_HOST_HEAP_TRIM, 0);
         assert_ne!(d1.actions & ACTION_CACHE_TRIM, 0);
-        assert_ne!(d1.actions & ACTION_ENGINE_LOW_MEMORY, 0);
+        assert_eq!(d1.actions & ACTION_ENGINE_LOW_MEMORY, 0);
 
         // Immediate follow-up inside cooldown stays suppressed cleanly.
         let d2 = eval.evaluate(2_500, 630 * MIB, Some(host_8g), 0, false);
         assert_eq!(d2.actions, 0);
 
-        // Host low available RAM (< 10%) escalates to Critical on any hardware size.
+        // Host imminent OOM (< 6% available RAM) escalates to Critical on any hardware size.
+        // Inside 15s startup warmup, engine teardown is still suppressed while safe trims run.
         let tight_host = HostMemInfo {
             total_bytes: 16 * 1024 * MIB,
-            available_bytes: 1_200 * MIB, // ~7.3%
+            available_bytes: 700 * MIB, // ~4.3%
             swap_total_bytes: 0,
             swap_free_bytes: 0,
         };
@@ -695,7 +691,21 @@ Cached:           500000 kB
         assert_eq!(d3.level, PressureLevel::Critical);
         assert_ne!(d3.actions & ACTION_HOST_HEAP_TRIM, 0);
         assert_ne!(d3.actions & ACTION_CACHE_TRIM, 0);
-        assert_ne!(d3.actions & ACTION_ENGINE_LOW_MEMORY, 0);
+        assert_eq!(d3.actions & ACTION_ENGINE_LOW_MEMORY, 0);
+
+        // After 15s warmup, sustained Critical pressure schedules engine low-memory once,
+        // then enforces a 60s cooldown.
+        let d4 = eval.evaluate(20_000, 2_048 * MIB, Some(tight_host), 0, false);
+        assert_eq!(d4.level, PressureLevel::Critical);
+        assert_ne!(d4.actions & ACTION_ENGINE_LOW_MEMORY, 0);
+
+        let d5 = eval.evaluate(50_000, 2_048 * MIB, Some(tight_host), 0, false);
+        assert_eq!(d5.level, PressureLevel::Critical);
+        assert_eq!(d5.actions & ACTION_ENGINE_LOW_MEMORY, 0);
+
+        let d6 = eval.evaluate(85_000, 2_048 * MIB, Some(tight_host), 0, false);
+        assert_eq!(d6.level, PressureLevel::Critical);
+        assert_ne!(d6.actions & ACTION_ENGINE_LOW_MEMORY, 0);
     }
 
     #[test]
@@ -709,11 +719,44 @@ Cached:           500000 kB
         };
         let limit = 1_000 * MIB;
 
-        assert_eq!(eval.evaluate(1_000, 400 * MIB, Some(roomy_host), limit, false).level, PressureLevel::None);
-        // 80% of 1000 MiB -> Low, schedules host+cache+engine trim before 100% hard kill!
-        let d = eval.evaluate(2_000, 800 * MIB, Some(roomy_host), limit, false);
+        assert_eq!(
+            eval.evaluate(1_000, 400 * MIB, Some(roomy_host), limit, false)
+                .level,
+            PressureLevel::None
+        );
+        // 82% of 1000 MiB -> Low, schedules safe host+cache trim without LuaApp teardown.
+        let d_low = eval.evaluate(2_000, 820 * MIB, Some(roomy_host), limit, false);
+        assert_eq!(d_low.level, PressureLevel::Low);
+        assert_ne!(d_low.actions & ACTION_HOST_HEAP_TRIM, 0);
+        assert_ne!(d_low.actions & ACTION_CACHE_TRIM, 0);
+        assert_eq!(d_low.actions & ACTION_ENGINE_LOW_MEMORY, 0);
+
+        // 94% of 1000 MiB after warmup -> Critical, escalates to engine low-memory signal.
+        let d_crit = eval.evaluate(20_000, 940 * MIB, Some(roomy_host), limit, false);
+        assert_eq!(d_crit.level, PressureLevel::Critical);
+        assert_ne!(d_crit.actions & ACTION_ENGINE_LOW_MEMORY, 0);
+    }
+
+    #[test]
+    fn force_trim_runs_safe_trims_without_engine_low_memory_teardown() {
+        let mut eval = PressureEvaluator::default();
+        let roomy_host = HostMemInfo {
+            total_bytes: 16 * 1024 * MIB,
+            available_bytes: 12 * 1024 * MIB,
+            swap_total_bytes: 0,
+            swap_free_bytes: 0,
+        };
+        assert_eq!(eval.evaluate(1_000, 200 * MIB, Some(roomy_host), 0, true).actions, 0);
+        let d = eval.evaluate(3_000, 210 * MIB, Some(roomy_host), 0, true);
         assert_eq!(d.level, PressureLevel::Low);
-        assert_ne!(d.actions & ACTION_ENGINE_LOW_MEMORY, 0);
+        assert_ne!(d.actions & ACTION_HOST_HEAP_TRIM, 0);
+        assert_ne!(d.actions & ACTION_CACHE_TRIM, 0);
+        assert_eq!(d.actions & ACTION_ENGINE_LOW_MEMORY, 0);
+    }
+
+    #[test]
+    fn low_memory_callback_defaults_to_disabled() {
+        assert!(!env_flag_enabled("MOCKTAIL_TEST_UNSET_LOW_MEM_FLAG", false));
     }
 
     static TEST_TRIM_CALLS: AtomicU64 = AtomicU64::new(0);
